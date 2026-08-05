@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hivenet-router-logo-dark.png">
-  <img alt="Hivenet Router" src="docs/images/hivenet-router-logo-light.png" width="420">
+  <img alt="Hivenet Router" src="docs/images/hivenet-router-logo-light.svg" width="420">
 </picture>
 
 **One OpenAI-compatible endpoint in front of a fleet of vLLM · Ollama · SGLang · llama.cpp · Infinity backends — with health-, load-, and latency-aware routing.**
