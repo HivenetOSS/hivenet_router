@@ -20,7 +20,7 @@ require (
 
 	// gRPC is the RPC framework used for the router ↔ agent control plane
 	// (heartbeats, authentication exchange, model registration).
-	google.golang.org/grpc v1.82.1
+	google.golang.org/grpc v1.83.0
 
 	// protobuf runtime for marshalling/unmarshalling the .proto message types
 	// defined under proto/ (auth.proto, p2p.proto).
