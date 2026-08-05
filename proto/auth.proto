@@ -1,0 +1,57 @@
+syntax = "proto3";
+package hivenet_router;
+option go_package = "hivenet_router/proto";
+
+service AuthService {
+    rpc Authenticate(AuthRequest) returns (AuthResponse);
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+message AuthRequest {
+    string credentials = 1;        // JWT token
+    AgentMetadata metadata = 2;
+}
+
+message AgentMetadata {
+    string model = 1;
+    int32 capacity = 2;
+    string version = 3;
+    string region = 4;
+    repeated string tags = 5;
+    string engine = 6;
+    string organization = 7;
+    string machine = 8;
+    bool   hide_llm = 9;           // when true, exclude this agent from /v1/models
+    string llm_pretty_name = 10;   // human-readable display name (e.g. "xLAM 8B")
+    string llm_info = 11;          // short description (e.g. "A small model useful for FC")
+    string capability = 12;        // "llm" (default), "embedding", or "reranker"
+    string gpu_model  = 13;        // hardware identifier set by operator (e.g. "RTX4090", "RTX5090")
+}
+
+message AuthResponse {
+    bool success = 1;
+    string message = 2;
+    string session_token = 3;
+    LibP2PInfo libp2p_info = 4;
+    RouterConfig config = 5;
+}
+
+message LibP2PInfo {
+    string peer_id = 1;
+    repeated string addresses = 2;
+    string protocol = 3;
+}
+
+message RouterConfig {
+    int32 heartbeat_interval = 1;
+    int32 request_timeout    = 2;
+    int32 max_request_size   = 3;
+    int32 session_ttl        = 4; // seconds; 0 means use agent default (1h)
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    bool healthy = 1;
+    string status = 2;
+}

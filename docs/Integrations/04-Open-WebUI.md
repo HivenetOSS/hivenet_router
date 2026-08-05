@@ -1,0 +1,264 @@
+# Using Open WebUI with Hivenet Router
+
+This guide shows how to point [Open WebUI](https://github.com/open-webui/open-webui) at a Hivenet Router router so anyone with a browser can chat with your fleet — no terminal, no developer setup. Open WebUI is a self-hosted, multi-user web chat interface (similar in shape to a hosted ChatGPT-style UI) that talks to any OpenAI-compatible endpoint, so the integration uses `/v1/chat/completions` and works against the router as shipped.
+
+> **Snapshot date — last verified 2026-06-09** (against Open WebUI **v0.9.6**, released 2026-06-01).
+> No time-bound caveats apply today. Items in [Known limitations](#known-limitations) are tagged *time-bound* when relevant.
+
+## What you get
+
+- A ChatGPT-style web UI at `http://<your-host>:3000` that anyone with the URL (and an account, if enabled) can use to chat with your models.
+- Multi-user accounts, admin approvals, role-based access — built into the app.
+- Per-chat model picker auto-populated from the router's `/v1/models`.
+- Built-in features like prompt library, RAG/document chat, model presets — all running locally against your router; no data leaves your network.
+- Different audience from the coding agents: non-developers, ops, data folks, anyone who wants a web chat against the fleet.
+
+## Prerequisites
+
+- A reachable Hivenet Router router with at least one `llm` agent registered.
+- A Hivenet Router API key.
+- **Docker** (the supported install path). Anything that runs Linux containers — Docker Desktop, Podman with the `docker` shim, a Docker Swarm or k8s cluster — works.
+
+---
+
+## Step 1 — Run Open WebUI
+
+The whole setup is a single `docker run`. Replace `<api-key>` with your Hivenet Router key; everything else can stay as-is.
+
+```bash
+docker run -d \
+  --name open-webui \
+  --restart always \
+  -p 3000:8080 \
+  -e OPENAI_API_BASE_URL='https://<router-host>/v1' \
+  -e OPENAI_API_KEY='<api-key>' \
+  -e ENABLE_OLLAMA_API=False \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:v0.9.6
+```
+
+Then open `http://localhost:3000` (or the host's IP at port `3000` if running on a server). The first account to register **automatically becomes the admin**; subsequent signups default to `pending` and need admin approval. Tighten this in **Admin Panel → Settings → General** after you've onboarded yourself.
+
+### What each piece does
+
+- **`-p 3000:8080`** — Open WebUI listens on **8080** inside the container; this exposes it as `3000` on the host. Change the host side (`-p 8000:8080`) if 3000 is busy.
+- **`OPENAI_API_BASE_URL`** — your router with `/v1` on the end and **no trailing slash**. Open WebUI appends `/chat/completions`, `/models`, etc. itself.
+- **`OPENAI_API_KEY`** — sent as `Authorization: Bearer <key>` on every request, which is what the router accepts.
+- **`ENABLE_OLLAMA_API=False`** — Open WebUI looks for Ollama on `localhost:11434` by default and floods the logs when it can't find it. Off unless you actually have Ollama nearby.
+- **`-v open-webui:/app/backend/data`** — the named Docker volume that persists chats, user accounts, settings, prompt library, RAG vectors, and the `.webui_secret_key`. **Do not skip this** — without it every restart wipes everything.
+
+### Image tag — pinned vs `:main`
+
+| Tag | What it gives you | Use when |
+|---|---|---|
+| `:v0.9.6` (or any semver) | Pinned, won't change under you | **Recommended for any persistent deployment** |
+| `:main` | Tracks the head of `main` — may include breaking changes without warning | Quick experiments only |
+| `:latest` | **Does not exist** on the official `ghcr.io/open-webui/open-webui` registry | Never |
+
+Pin a version, bump deliberately. Open WebUI does **not** self-update from inside the container; updating is an explicit `docker pull && docker rm && docker run`.
+
+### Quick single-user test (no signup)
+
+If you just want to try chat once and don't want to deal with the admin signup flow, add `-e WEBUI_AUTH=False`:
+
+```bash
+docker run -d \
+  --name open-webui-test \
+  --rm -p 3000:8080 \
+  -e OPENAI_API_BASE_URL='https://<router-host>/v1' \
+  -e OPENAI_API_KEY='<api-key>' \
+  -e ENABLE_OLLAMA_API=False \
+  -e WEBUI_AUTH=False \
+  -v open-webui-test:/app/backend/data \
+  ghcr.io/open-webui/open-webui:v0.9.6
+```
+
+Then go to `http://localhost:3000` and chat straight away. **One important gotcha:** you cannot flip `WEBUI_AUTH` from `True` to `False` on a volume that already has users (see [issue #9896](https://github.com/open-webui/open-webui/issues/9896)). Use a fresh volume for the no-auth quick test, and a different volume for the "real" multi-user deployment.
+
+---
+
+## Step 2 — Pin the model IDs in the connection (recommended)
+
+By default, Open WebUI calls `GET <base_url>/models` on every chat-page load and merges the result into the picker live. In v0.9.x that path has a **silent-failure mode** where the picker stays empty ("No models available — Connect to an AI provider to start chatting") even when the upstream call succeeds and the admin Models page lists everything — see [Troubleshooting](#troubleshooting) below for the symptoms.
+
+The reliable fix — and what [Open WebUI's own docs recommend for OpenAI-compatible providers](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/) — is to **pin the model IDs in the connection settings**. Open WebUI then builds the picker list directly from this field and skips the live-merge code path entirely:
+
+1. Go to **Admin Panel → Settings → Connections**.
+2. Click the **gear icon** next to your router's connection (`https://<router-host>/v1`).
+3. In the **Model IDs** field, type each model id you want exposed and press `+`:
+   ```
+   Qwen/Qwen3.6-27B
+   Qwen/Qwen3.6-35B-A3B
+   ```
+   (Add any others your router serves — `BAAI/bge-m3`, `BAAI/bge-reranker-large`, `openai/gpt-oss-20b`, etc. Use whatever names appear under `curl /v1/models`. Names are case- and slash-sensitive.)
+4. **Save**, then reload the chat page.
+
+The picker should now show the models. As a bonus, this setup is also:
+
+- **Faster** — no live HTTP fetch on every picker render.
+- **More explicit** — you control which router models are exposed to users (handy if your fleet includes embedding/reranker agents you don't want surfaced as chat options).
+- **Resilient** — picker no longer depends on the router being reachable from inside the container at picker-open time.
+
+> If you'd prefer auto-discovery, you can leave the Model IDs field empty. It works in many setups and the live merge is what Open WebUI does by default — just know that when it fails, it fails silently, and pinning the IDs is the canonical recovery.
+
+---
+
+## Step 3 — Tame the background calls (optional but recommended)
+
+Open WebUI fires extra `/v1/chat/completions` requests in the background for **title generation**, **tag generation**, **follow-up suggestions**, and **autocomplete**, against the *same* router and *same* model as your chat. That's fine functionally — there is no hosted-provider fallback, so nothing leaks — but it means every chat fires 2-4× as many requests as you might expect, and each one counts against the same token budget.
+
+Two ways to control this:
+
+- **Disable specific features in the UI:** **Admin Panel → Settings → Interface** has toggles for each (Title Generation, Tag Generation, Follow-Up, Autocomplete).
+- **Set a dedicated "task model"** so the heavy chat model isn't used for tiny summaries:
+  - `TASK_MODEL_EXTERNAL=<model-id>` — a (preferably smaller) model on your router used for title/tag/follow-up generation when the chat is on an OpenAI-compatible model.
+  - `ENABLE_TAGS_GENERATION=False` — turns off the tag-generation calls entirely.
+
+For a starter deployment, leaving the defaults on is fine. Revisit if you see more `/v1/chat/completions` requests in the router audit log than you expect.
+
+---
+
+## Step 4 — Verifying without Open WebUI
+
+Before chasing a UI issue, confirm the router path Open WebUI uses:
+
+```bash
+# Model discovery — Open WebUI hits this on startup and on every refresh
+curl -s https://<router-host>/v1/models \
+  -H "Authorization: Bearer <api-key>" | jq .
+
+# Chat — what every message you send becomes
+curl -sS https://<router-host>/v1/chat/completions \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3.6-27B",
+    "stream": true,
+    "messages": [{"role":"user","content":"say hi"}],
+    "max_tokens": 32,
+    "stream_options": {"include_usage": true}
+  }'
+```
+
+If both succeed, Open WebUI will work. If the chat curl 401s, the `OPENAI_API_KEY` you passed to the container is wrong. If the models curl is empty, you're talking to a router with no agents registered for that model.
+
+---
+
+## Operational notes
+
+### Lifecycle: reboots, suspend, manual stops
+
+The `--restart always` flag in the `docker run` command from [Step 1](#step-1--run-open-webui) handles most of "when will it be running":
+
+| Event | What happens | Manual action required? |
+|---|---|---|
+| Suspend / close laptop lid | Docker pauses with the OS; on wake, container is still running | None — `http://localhost:3000` works immediately |
+| Reboot or power cycle | Docker daemon starts on boot (auto-enabled on Ubuntu via systemd); `--restart always` brings the container back | None |
+| `docker stop open-webui` | Container stops. `--restart always` will bring it back at the **next** daemon restart (e.g. on reboot), but not before | `docker start open-webui` to bring it back without rebooting |
+| `docker rm open-webui` | Container is deleted, but the named volume — and therefore your data — survives | Re-run the `docker run …` from Step 1 with the same `-v open-webui:…` flag |
+
+Useful day-to-day commands:
+
+```bash
+docker ps | grep open-webui        # is it running? (active containers only)
+docker ps -a | grep open-webui     # any state (running, stopped, exited)
+docker logs --tail 50 open-webui   # recent logs (e.g. after a reboot)
+docker restart open-webui          # stop + start in one shot
+```
+
+On Linux, confirm Docker itself comes back on boot (it does by default on Ubuntu):
+
+```bash
+sudo systemctl is-enabled docker   # expect: enabled
+```
+
+If you ever see `disabled`, run `sudo systemctl enable docker` to fix it. On Docker Desktop (macOS / Windows), the equivalent setting is "Start Docker Desktop when you log in" in Docker Desktop → Settings.
+
+> `--restart always` vs `--restart unless-stopped`: the Step 1 command uses `always`, which means even a `docker stop` is reversed by the next daemon restart. If you'd prefer manual stops to be respected across reboots, swap the flag to `unless-stopped` — re-run the `docker stop && docker rm && docker run` cycle with the new flag.
+
+### Persistent data lives in the volume
+
+Everything stateful — your admin account, chat history, the Model IDs pinned in [Step 2](#step-2--pin-the-model-ids-in-the-connection-recommended), the prompt library, RAG vectors, the `.webui_secret_key` — is in `/app/backend/data` inside the container, mounted from the `open-webui` named volume. It is independent of the container itself: even if you `docker rm` the container, the next `docker run` against the same volume picks up exactly where you left off. Inspect or back up the volume any time:
+
+```bash
+docker volume ls | grep open-webui
+docker volume inspect open-webui            # location on disk
+docker run --rm -v open-webui:/data -v "$PWD":/backup alpine \
+  tar czf /backup/open-webui.tgz /data      # one-shot backup tarball
+```
+
+Take a backup tarball **before upgrading the image** — Open WebUI occasionally introduces DB migrations that are one-way.
+
+### Upgrading the image
+
+Upgrades are explicit (the container does not self-update):
+
+```bash
+docker pull ghcr.io/open-webui/open-webui:<new-version>
+docker stop open-webui && docker rm open-webui
+docker run -d --name open-webui --restart always \
+  -p 3000:8080 \
+  -e OPENAI_API_BASE_URL='https://<router-host>/v1' \
+  -e OPENAI_API_KEY='<api-key>' \
+  -e ENABLE_OLLAMA_API=False \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:<new-version>
+```
+
+Same `-v open-webui:…` flag = same data carries over.
+
+### Multi-user behaviour
+
+- First signup → admin. Subsequent signups → `pending`, need admin approval (this is **the default**).
+- Admin can change `DEFAULT_USER_ROLE` to `user` for auto-approval, or `ENABLE_SIGNUP=False` to lock things down after onboarding the team.
+- **Every user shares your one Hivenet Router API key**, so they all draw from the same per-key RPM and daily token budget configured in [auth.yaml](../Security%20%26%20Auth/03-auth.yaml-Reference.md#token-budget-enforcement). If you need per-person quotas, run a separate Open WebUI instance per team with a separate key, or use Open WebUI's built-in per-user quota features and let the router enforce a generous shared cap.
+
+### What Open WebUI never sends (relevant to your router)
+
+- **No** `HTTP-Referer` / `X-Title` headers (those are added only when the URL contains `openrouter.ai`).
+- **No** `X-OpenWebUI-User-*` user-identity headers by default (`ENABLE_FORWARD_USER_INFO_HEADERS=False`); enable explicitly if you want each user's email/role in the router's audit logs.
+- **No** calls to `/v1/audio/*`, `/v1/images/*`, or `/v1/embeddings` unless you explicitly enable STT/TTS/image-gen/RAG-with-OpenAI-embeddings — so the router won't see surprise 404s in its logs from a vanilla install.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Chat picker says **"No models available — Connect to an AI provider to start chatting"** despite the Admin → Settings → Models page showing your models | Open WebUI's `/api/models` live-merge code path silently dropped the upstream result. Reaches the router fine (`docker logs open-webui` shows `/openai/models/0 HTTP/1.1" 200`), but the picker still ends up empty. Known v0.9.x failure mode — see issues [#16358](https://github.com/open-webui/open-webui/issues/16358), [#23060](https://github.com/open-webui/open-webui/issues/23060) | **Pin the model IDs in the connection** (Step 2 above): Admin → Settings → Connections → gear icon → **Model IDs** → add each id → Save → reload. This skips the live-merge entirely. Verified working as of Open WebUI v0.9.6, 2026-06-09 |
+| `401 POST /v1/chat/completions` in router logs | `OPENAI_API_KEY` not set, or has a typo | `docker inspect open-webui --format '{{range .Config.Env}}{{println .}}{{end}}' \| grep OPENAI_API_KEY` to verify |
+| Model picker empty | Router's `/v1/models` returned nothing, or it timed out | Confirm with the verification curl in Step 4; bump `AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST` if slow |
+| Logs flooded with Ollama connection errors | `ENABLE_OLLAMA_API=False` not set (default is `True`) | Restart with the env var; it silences the localhost:11434 probe |
+| First page shows signup form even though you set `WEBUI_AUTH=False` | The volume already had users from a previous run | Stop, remove the volume (`docker volume rm open-webui`), restart with a fresh volume — `WEBUI_AUTH` cannot be toggled off on an existing user database |
+| Many more requests in router audit log than chat messages sent | Title / tag / follow-up auto-generation firing on every chat | Disable in **Admin Panel → Settings → Interface**, or set `TASK_MODEL_EXTERNAL` to a cheaper model |
+| `400` from router on requests for a model whose name starts with `o` | Open WebUI auto-detects "o-series" models by name and rewrites `max_tokens` → `max_completion_tokens` and `system` → `developer` role | Rename the model to something that doesn't start with `o`, or expose it through a different alias |
+| Container is unreachable | Port mapping or firewall | `docker logs open-webui` for startup errors; check the host port |
+
+### Reading the right logs
+
+- **Open WebUI**: `docker logs -f open-webui` — startup, login attempts, request errors.
+- **Router**: `docker logs gpt-router 2>&1 | grep -iE "chat/completions|policy|no eligible"` — same as for the coding-agent integrations.
+- **Backend (vLLM)**: `docker logs vllm-<model> 2>&1 | tail -40` — request validation errors live here.
+
+---
+
+## Known limitations
+
+- **Live model-list merge can silently fail** *(time-bound: observed on Open WebUI v0.9.6 as of 2026-06-09; tracked in issues [#16358](https://github.com/open-webui/open-webui/issues/16358) and [#23060](https://github.com/open-webui/open-webui/issues/23060) among others)*. The chat picker's `/api/models` route refetches `/v1/models` upstream on every render and merges with the DB; in some configurations the merge returns an empty list while the admin Models page is full. The workaround — and what Open WebUI's own docs recommend — is to **pin Model IDs in the connection** (covered in [Step 2](#step-2--pin-the-model-ids-in-the-connection-recommended)). Re-test this with later releases.
+- **Shared API key for all users.** Open WebUI authenticates users itself but uses *one* Hivenet Router key for all upstream calls. Per-user quotas are an Open WebUI feature, not a router feature — the router only sees one tenant. If you need per-person accounting in the router's audit log, run multiple instances with multiple keys.
+- **Background chat completions for titles, tags, and follow-ups** hit the same model as the chat by default. Multiplier on token usage. Configurable but on by default — see [Step 3](#step-3--tame-the-background-calls-optional-but-recommended).
+- **Backend 4xx responses currently bench the agent** via the router's `prev_failures` gate (router behaviour, not Open-WebUI-specific). A misconfigured request can transiently take all agents serving a model offline. Durable fix is a router-side change to distinguish backend 4xx from agent failures.
+- **`WEBUI_AUTH=False` is fragile.** You cannot toggle auth back off once any account has signed up. Treat the `WEBUI_AUTH=False` mode as a fresh-install-only quick test (see issue [#9896](https://github.com/open-webui/open-webui/issues/9896)).
+- **Image is not self-updating.** Upgrades are explicit. Pin a version, watch the release notes, take a volume backup before bumping.
+
+---
+
+## See also
+
+- [Integrations Overview](00-Overview.md) — when to use Open WebUI vs Claude Code / OpenCode / pi / an SDK.
+- [Inference Endpoints](../API%20Reference/01-Chat-Completions.md) — `/v1/chat/completions` reference and the allowlisted passthrough.
+- [auth.yaml Reference](../Security%20%26%20Auth/03-auth.yaml-Reference.md) — API keys, quotas, token budget enforcement.
+- [Open WebUI docs — Quick Start](https://docs.openwebui.com/getting-started/quick-start/) — upstream installation guide.
+- [Open WebUI docs — OpenAI-compatible provider](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/) — upstream reference for the env vars used here.
+- [Open WebUI docs — Env-var reference](https://docs.openwebui.com/reference/env-configuration/) — full list of `WEBUI_*`, `OPENAI_*`, `TASK_MODEL_*`, and friends.
+- [Open WebUI docs — Updating / image tags](https://docs.openwebui.com/getting-started/updating/) — upgrade flow and Watchtower caveats.

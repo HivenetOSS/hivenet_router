@@ -1,0 +1,125 @@
+# Embeddings
+
+Generate vector embeddings via any agent started with `--capability embedding`.
+
+## Endpoint
+
+```
+POST /v1/embeddings
+```
+
+## Requirements
+
+- Agent running with `--capability embedding` (Infinity, vLLM, SGLang, llama.cpp, or Custom)
+
+## Request
+
+### Headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | ✅ | `application/json` |
+| `Authorization` | ❌ | `Bearer <api-key>` |
+
+### Body
+
+```json
+{
+  "model": "string",
+  "input": "string | array<string>"
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model` | string | ✅ | Embedding model name |
+| `input` | string\|array | ✅ | Text to embed (single or batch) |
+
+## Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [-0.029, 0.027, -0.049, ...],
+      "index": 0
+    }
+  ],
+  "model": "BAAI/bge-m3",
+  "usage": {
+    "prompt_tokens": 43,
+    "total_tokens": 43
+  },
+  "id": "infinity-55b80c1a-c2c9-4531-a22a-243f76b4b781",
+  "created": 1776870356
+}
+```
+
+## Examples
+
+### Single Input
+
+```bash
+curl -X POST http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "BAAI/bge-m3",
+    "input": "The quick brown fox jumps over the lazy dog"
+  }'
+```
+
+### Batch Input
+
+```bash
+curl -X POST http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "BAAI/bge-m3",
+    "input": [
+      "Document one text here",
+      "Document two text here",
+      "Document three text here"
+    ]
+  }'
+```
+
+### Python
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080",
+    api_key="sk-hivenet-..."
+)
+
+response = client.embeddings.create(
+    model="BAAI/bge-m3",
+    input="The quick brown fox"
+)
+
+embedding = response.data[0].embedding
+print(f"Dimension: {len(embedding)}")
+```
+
+### Batch Python
+
+```python
+response = client.embeddings.create(
+    model="BAAI/bge-m3",
+    input=["Text one", "Text two", "Text three"]
+)
+
+for i, emb in enumerate(response.data):
+    print(f"Embedding {i}: {len(emb.embedding)} dimensions")
+```
+
+## See Also
+
+- [Chat Completions](01-Chat-Completions.md) - LLM inference
+- [Reranking](03-Reranking.md) - Reranking endpoint
+- [Infinity Agent](../Deployment/04-Agent-Deployment/05-Infinity.md) - Recommended embedding backend

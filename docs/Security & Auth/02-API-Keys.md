@@ -1,0 +1,272 @@
+# API Keys
+
+API keys authenticate client requests to the Router. Keys are SHA-256 hashed and stored in `auth.yaml`.
+
+## Key Generation
+
+### Generate a New Key
+
+```bash
+./bin/hivenet-router keygen
+```
+
+Output:
+```
+Key (give this to your client — shown once, never stored):
+  sk-hivenet-3x7K9mN2pQ5rT8vW1yZ4bC6dF0gH...
+
+Paste this under `keys:` in your auth.yaml:
+    - key_hash: "e3b0c44298fc1c149afbf4c8996fb924..."
+      key_preview: "sk-...KJ4"
+      metadata:
+        name: "my-tenant key"
+        owner: "my-tenant"
+        description: ""
+        created_at: "22-04-2026"
+        # expires_at: "01-01-2027"   # optional DD-MM-YYYY
+      # models: []   # empty = access to all models
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+```
+
+To associate a key with a specific tenant name:
+
+```bash
+./bin/hivenet-router keygen --tenant acme-corp
+```
+
+### Key Format
+
+- **Prefix:** `sk-hivenet-`
+- **Body:** 256-bit entropy in base58
+- **Preview stored in auth.yaml:** last 4 characters, formatted as `sk-...XXXX`
+
+## Key Components
+
+| Component | Purpose | Where It Lives |
+|-----------|---------|----------------|
+| **Raw key** | Sent by client in `Authorization: Bearer` | Client configuration (env var, config file) |
+| **Hash** | SHA-256 of raw key | `auth.yaml` (stored permanently) |
+| **Preview** | Last 4 characters for identification | `auth.yaml` metadata, logs (never the full key) |
+
+**Important:** The raw key is shown **once** during generation. If lost, generate a new key.
+
+## Configuring auth.yaml
+
+Create or edit `auth.yaml`:
+
+```yaml
+api:
+  mode: "api-key"  # Options: "none", "api-key"
+  keys:
+    - key_hash: "e3b0c44298fc1c149afbf4c8996fb924..."
+      key_preview: "sk-...KJ4"
+      metadata:
+        name: "Production API"
+        owner: "acme-corp"
+        description: "Main production key"
+        created_at: "22-04-2026"
+        # expires_at: "01-01-2027"  # optional, format DD-MM-YYYY
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+        - "mistral-7b"
+      quota:
+        requests_per_minute: 1000
+        tokens_per_day: 1000000
+    - key_hash: "a1b2c3d4..."
+      key_preview: "sk-...abc"
+      metadata:
+        name: "Dev API"
+        owner: "acme-corp"
+        description: "Development key"
+        created_at: "22-04-2026"
+      models: []       # Empty = unrestricted
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 100000
+
+admin:
+  mode: "api-key"
+  # Admin keys are NOT stored here — set HIVENET_ROUTER_ADMIN_API_KEYS env var
+```
+
+### Field Descriptions
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `key_hash` | ✅ | SHA-256 hash of raw key (hex-encoded) |
+| `key_preview` | ✅ | Last 4 chars for identification (e.g. `sk-...KJ4`) |
+| `metadata.name` | ✅ | Human-readable name |
+| `metadata.owner` | ✅ | Tenant ID (used in audit logs and Prometheus labels) |
+| `metadata.description` | ❌ | Free-text note |
+| `metadata.created_at` | ❌ | Creation date (DD-MM-YYYY) |
+| `metadata.expires_at` | ❌ | Expiry date (DD-MM-YYYY); key rejected after this date |
+| `models` | ❌ | Whitelist (empty = unrestricted) |
+| `quota.requests_per_minute` | ❌ | RPM limit (0 = unlimited) |
+| `quota.tokens_per_day` | ❌ | Daily token limit (0 = unlimited) |
+
+## Using API Keys
+
+### HTTP Requests
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-hivenet-3x7K9mN2..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-3.1-8B-Instruct", "messages": [...]}'
+```
+
+### Python Example
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-hivenet-3x7K9mN2..."
+)
+```
+
+## Model Restrictions
+
+Set `models` on a key entry to restrict which models it may access (empty = all models allowed). See [Model Restrictions](04-Model-Restrictions.md) for examples and multi-tenant patterns.
+
+## Quota Enforcement
+
+```yaml
+quota:
+  requests_per_minute: 1000
+  tokens_per_day: 1000000
+```
+
+**Status:**
+- RPM: ✅ Enforced
+- TPD: ✅ Enforced
+
+### Rate Limit Headers
+
+Responses include:
+
+```
+X-RateLimit-Remaining-Requests: 999
+X-RateLimit-Remaining-Tokens: 498523
+```
+
+## Admin Authentication
+
+Admin endpoints (`/admin/*`) use **separate** keys from a **different source**:
+
+```bash
+# Set one or more admin keys (comma-separated)
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-secret-key-1,admin-secret-key-2"
+```
+
+In requests:
+
+```bash
+curl -H "Authorization: Bearer admin-secret-key-1" http://localhost:8080/admin/health
+```
+
+Enable admin auth in `auth.yaml`:
+
+```yaml
+admin:
+  mode: "api-key"
+  # Keys come from HIVENET_ROUTER_ADMIN_API_KEYS — not stored here
+```
+
+## Hot Reload
+
+Changes to `auth.yaml` take effect immediately without a restart:
+
+```bash
+kill -HUP $(pgrep hivenet-router)
+```
+
+For the full rotation workflow (add-before-remove, staged migration, emergency revocation) see [Key Rotation](05-Key-Rotation.md).
+
+## Security Considerations
+
+- **Keys are hashed:** `auth.yaml` stores SHA-256, not raw keys
+- **256-bit entropy:** Rainbow tables infeasible
+- **Bearer token exclusion:** Keys never appear in audit logs
+- **Secure storage:** Store raw keys in secrets manager (Vault, AWS Secrets Manager)
+
+## Dynamic Key Mode
+
+In dynamic mode, API keys are managed entirely at runtime via the admin API instead of `auth.yaml`. This is designed for deployments where an external machines service is the source of truth for API keys.
+
+### Enabling Dynamic Mode
+
+Set the environment variable (no `auth.yaml` needed):
+
+```bash
+export HIVENET_ROUTER_AUTH_MODE=dynamic
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-key-1,admin-key-2"   # required
+```
+
+Or set `api.mode` in `auth.yaml` and start the router. `HIVENET_ROUTER_ADMIN_API_KEYS` is **required** in dynamic mode — the router auto-elevates `admin.mode` to `api-key` to protect the `/admin/api-keys/*` endpoints, and startup fails if no admin keys are provided. The router then starts with an empty key registry and logs:
+
+```
+Auth: dynamic API mode requires admin auth — elevating admin to api-key (set HIVENET_ROUTER_ADMIN_API_KEYS)
+Auth: dynamic key registry is empty, awaiting bootstrap from machines service
+```
+
+### Bootstrap Flow
+
+The machines service populates the key registry on router startup:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEYS" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "rev_00000001",
+    "keys": [
+      {
+        "id": "key-abc123",
+        "key_hash": "e3b0c44298fc1c149afbf4c8996fb924...",
+        "key_preview": "sk-...KJ4",
+        "owner": "acme-corp",
+        "name": "Acme Production Key",
+        "enabled": true,
+        "expires_at": "01-01-2027",
+        "allowed_models": ["meta-llama/Llama-3.1-8B-Instruct"],
+        "quota": {
+          "requests_per_minute": 1000,
+          "tokens_per_day": 1000000
+        }
+      }
+    ]
+  }' \
+  http://localhost:8080/admin/api-keys/replace
+```
+
+### Key Lifecycle
+
+| Operation | Endpoint | Version Check? |
+|-----------|----------|----------------|
+| Bootstrap / full sync | `POST /admin/api-keys/replace` | No (always accepted) |
+| Add / update single key | `PUT /admin/api-keys/:id` | Yes (409 on stale) |
+| Revoke key | `DELETE /admin/api-keys/:id` | Yes (409 on stale) |
+| Check registry state | `GET /admin/api-keys/version` | — |
+
+### Characteristics
+
+- **In-memory only:** Keys are lost on restart and rebuilt from the machines service
+- **No SIGHUP reload:** SIGHUP does not affect the dynamic key registry
+- **No `keygen` needed:** The machines service generates keys and pushes the hash + metadata
+- **Atomic replace:** `POST /admin/api-keys/replace` swaps the entire registry in one operation
+- **Version monotonicity:** Upsert/Delete reject stale versions (409 Conflict) to prevent overwrites
+
+### Reconciliation After Restart
+
+After the router restarts, the machines service detects the empty registry and re-pushes all keys via `POST /admin/api-keys/replace`. The `GET /admin/api-keys/version` endpoint can be polled to check the current state.
+
+## See Also
+
+- [Authentication Overview](01-Authentication-Overview.md) - Auth architecture
+- [auth.yaml Reference](03-auth.yaml-Reference.md) - Complete schema
+- [Key Rotation](05-Key-Rotation.md) - Detailed rotation workflow
+- [Audit Logging](../Observability/03-Audit-Logging.md) - Key usage tracking

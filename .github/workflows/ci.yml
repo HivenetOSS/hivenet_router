@@ -1,0 +1,118 @@
+name: CI
+
+# Runs on every PR and on pushes to main. The `test` job is the required
+# status check enforced by branch protection (see scripts/setup-branch-protection.sh).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # go-nvml (agent) and the -race detector both require cgo. ubuntu-latest ships gcc.
+  CGO_ENABLED: "1"
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test ./... -race -count=1
+
+  smoke:
+    # Binary-level end-to-end: builds the real router + agent binaries, wires
+    # them to a stub OpenAI backend, and drives an inference request through
+    # the router's HTTP API. Complements the in-process test/e2e suite by
+    # exercising the cmd/ flag surface and startup wiring the test bypasses.
+    name: e2e smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run smoke script
+        run: ./scripts/e2e-smoke.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Enforce gofmt formatting (uses the toolchain's own gofmt for an exact match).
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted. Run 'gofmt -w .':"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned for reproducible CI; bump intentionally (v2 matches .golangci.yml).
+          version: v2.12.2
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Scans dependencies against the Go vulnerability database and fails on any
+      # reachable vulnerability that is not explicitly allowlisted in the script.
+      - name: Run govulncheck
+        run: ./scripts/govulncheck.sh
+
+  license-check:
+    name: license-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fails if a dependency introduces a license incompatible with shipping
+      # Hivenet Router's static binaries under Apache 2.0 (GPL/LGPL/AGPL/unknown).
+      - name: Check dependency licenses
+        run: ./scripts/check-licenses.sh

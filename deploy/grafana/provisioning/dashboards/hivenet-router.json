@@ -1,0 +1,3222 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {
+    "list": []
+  },
+  "description": "Hivenet Router \u2014 routing table health and request metrics",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(hivenet_router_routing_agent_info, model)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Model",
+        "multi": false,
+        "name": "model",
+        "options": [],
+        "query": {
+          "query": "label_values(hivenet_router_routing_agent_info, model)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(hivenet_router_routing_agent_info, engine)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Engine",
+        "multi": false,
+        "name": "engine",
+        "options": [],
+        "query": {
+          "query": "label_values(hivenet_router_routing_agent_info, engine)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(hivenet_router_routing_agent_info, peer_id)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Peer ID",
+        "multi": false,
+        "name": "peer_id",
+        "options": [],
+        "query": {
+          "query": "label_values(hivenet_router_routing_agent_info, peer_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(hivenet_router_routing_agent_info, organization)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Organization",
+        "multi": false,
+        "name": "organization",
+        "options": [],
+        "query": {
+          "query": "label_values(hivenet_router_routing_agent_info, organization)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(hivenet_router_routing_agent_info, machine)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Machine",
+        "multi": false,
+        "name": "machine",
+        "options": [],
+        "query": {
+          "query": "label_values(hivenet_router_routing_agent_info, machine)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Registered Agents",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count(hivenet_router_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "agents",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Healthy Agents",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(hivenet_router_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "healthy",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 0 },
+      "id": 101,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "title": "Primary Routed",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(hivenet_router_policy_primary_routed_total{model=~\"$model\"}) or vector(0)",
+          "legendFormat": "primary",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 12, "y": 0 },
+      "id": 102,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "title": "Fallback Routed",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(hivenet_router_policy_fallback_routed_total{model=~\"$model\"}) or vector(0)",
+          "legendFormat": "fallback",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 0 },
+      "id": 103,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "title": "Exhausted → 503",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(hivenet_router_policy_exhausted_total{model=~\"$model\"}) or vector(0)",
+          "legendFormat": "exhausted",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "blue", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 0 },
+      "id": 104,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "title": "Provider Fallback",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(hivenet_router_policy_provider_fallback_total{model=~\"$model\"}) or vector(0)",
+          "legendFormat": "provider fallback",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peer_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "capacity"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IsHealthy"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "LastSeen"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AgentFailures"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BackendFailures"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Disconnections"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Organization"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Machine"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "id": 3,
+      "options": {
+        "showHeader": true
+      },
+      "title": "Agent Routing Table",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_routing_agent_last_seen_timestamp{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_model_backend_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_disconnections_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "F"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "peer_id",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "Value #A": true,
+              "model 1": true,
+              "region 1": true,
+              "engine 1": true,
+              "capacity 1": true,
+              "model 2": true,
+              "region 2": true,
+              "engine 2": true,
+              "capacity 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "model 3": true,
+              "region 3": true,
+              "engine 3": true,
+              "capacity 3": true,
+              "model 4": true,
+              "region 4": true,
+              "engine 4": true,
+              "capacity 4": true,
+              "Time 5": true,
+              "model 5": true,
+              "engine 5": true,
+              "organization 1": true,
+              "machine 1": true,
+              "organization 2": true,
+              "machine 2": true,
+              "machine 3": true,
+              "organization 3": true,
+              "machine 4": true,
+              "organization 4": true,
+              "machine 5": true,
+              "organization 5": true
+            },
+            "renameByName": {
+              "Value #B": "IsHealthy",
+              "Value #C": "LastSeen",
+              "Value #D": "AgentFailures",
+              "Value #E": "BackendFailures",
+              "Value #F": "Disconnections",
+              "organization": "Organization",
+              "machine": "Machine"
+            },
+            "indexByName": {
+              "model": 0,
+              "peer_id": 1,
+              "region": 2,
+              "engine": 3,
+              "capacity": 4,
+              "Organization": 5,
+              "Machine": 6,
+              "IsHealthy": 7,
+              "LastSeen": 8,
+              "AgentFailures": 9,
+              "BackendFailures": 10,
+              "Disconnections": 11
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 10,
+      "title": "Routing Table - Universal",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peer_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engine"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "SuccessRate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.9
+                    },
+                    {
+                      "color": "green",
+                      "value": 0.99
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CapacityUtil"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "SRTT_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RTTVAR_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "SuccessReqs"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FailedReqs"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Rejected"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "InputTokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OutputTokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 115
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 13,
+      "options": {
+        "showHeader": true
+      },
+      "title": "Routing Table - Universal",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_capacity_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_srtt_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_rttvar_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_requests_success_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "F",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_requests_failed_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "G",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_input_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "H",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_output_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "I",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_rejected_requests_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "J",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "peer_id",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "model 1": true,
+              "engine 1": true,
+              "model 2": true,
+              "engine 2": true,
+              "model 3": true,
+              "engine 3": true,
+              "model 4": true,
+              "engine 4": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true,
+              "engine 5": true,
+              "model 5": true,
+              "engine 6": true,
+              "model 6": true,
+              "engine 7": true,
+              "model 7": true,
+              "engine 8": true,
+              "model 8": true,
+              "engine 9": true,
+              "model 9": true,
+              "machine 1": true,
+              "organization 1": true,
+              "machine 2": true,
+              "organization 2": true,
+              "machine 3": true,
+              "organization 3": true,
+              "machine 4": true,
+              "organization 4": true,
+              "machine 5": true,
+              "organization 5": true,
+              "machine 6": true,
+              "organization 6": true,
+              "machine 7": true,
+              "organization 7": true,
+              "machine 8": true,
+              "organization 8": true,
+              "machine 9": true,
+              "organization 9": true
+            },
+            "renameByName": {
+              "Value #A": "SuccessRate",
+              "Value #B": "CapacityUtil",
+              "Value #C": "SRTT_ms",
+              "Value #D": "RTTVAR_ms",
+              "Value #F": "SuccessReqs",
+              "Value #G": "FailedReqs",
+              "Value #H": "InputTokens",
+              "Value #I": "OutputTokens",
+              "Value #J": "Rejected"
+            },
+            "indexByName": {
+              "peer_id": 0,
+              "model": 1,
+              "engine": 2,
+              "SuccessRate": 3,
+              "SuccessReqs": 4,
+              "FailedReqs": 5,
+              "Rejected": 6,
+              "CapacityUtil": 7,
+              "SRTT_ms": 8,
+              "RTTVAR_ms": 9,
+              "InputTokens": 10,
+              "OutputTokens": 11
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 20,
+      "title": "Routing Table - Hardware",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peer_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engine"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "region"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 70
+                    },
+                    {
+                      "color": "red",
+                      "value": 90
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MemUsed%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 75
+                    },
+                    {
+                      "color": "red",
+                      "value": 90
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MemAvailable"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MemTotal"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 21,
+      "options": {
+        "showHeader": true
+      },
+      "title": "Hardware - Node (CPU / Memory)",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_memory_used_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_memory_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "D"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "peer_id",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "model 1": true,
+              "model 2": true,
+              "model 3": true,
+              "engine 1": true,
+              "engine 2": true,
+              "engine 3": true,
+              "region 1": true,
+              "region 2": true,
+              "region 3": true,
+              "machine 1": true,
+              "organization 1": true,
+              "machine 2": true,
+              "organization 2": true,
+              "machine 3": true,
+              "organization 3": true
+            },
+            "renameByName": {
+              "Value #A": "CPU%",
+              "Value #B": "MemUsed%",
+              "Value #C": "MemAvailable",
+              "Value #D": "MemTotal"
+            },
+            "indexByName": {
+              "peer_id": 0,
+              "region": 1,
+              "model": 2,
+              "engine": 3,
+              "CPU%": 4,
+              "MemUsed%": 5,
+              "MemAvailable": 6,
+              "MemTotal": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peer_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engine"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "region"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gpu_index"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GPUUtil%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 70
+                    },
+                    {
+                      "color": "red",
+                      "value": 90
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "VRAMUsed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "VRAMFree"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "VRAMTotal"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "decbytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Temp_C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 75
+                    },
+                    {
+                      "color": "red",
+                      "value": 85
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Power_W"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "id": 22,
+      "options": {
+        "showHeader": true
+      },
+      "title": "Hardware - GPU",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_vram_free_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_vram_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "F"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "gpu_id",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "gpu_id": true,
+              "peer_id 1": true,
+              "peer_id 2": true,
+              "peer_id 3": true,
+              "peer_id 4": true,
+              "peer_id 5": true,
+              "model 1": true,
+              "model 2": true,
+              "model 3": true,
+              "model 4": true,
+              "model 5": true,
+              "engine 1": true,
+              "engine 2": true,
+              "engine 3": true,
+              "engine 4": true,
+              "engine 5": true,
+              "region 1": true,
+              "region 2": true,
+              "region 3": true,
+              "region 4": true,
+              "region 5": true,
+              "gpu_index 1": true,
+              "gpu_index 2": true,
+              "gpu_index 3": true,
+              "gpu_index 4": true,
+              "gpu_index 5": true,
+              "gpu_id 1": true,
+              "gpu_id 2": true,
+              "gpu_id 3": true,
+              "gpu_id 4": true,
+              "gpu_id 5": true,
+              "machine 1": true,
+              "organization 1": true,
+              "machine 2": true,
+              "organization 2": true,
+              "machine 3": true,
+              "organization 3": true,
+              "machine 4": true,
+              "organization 4": true,
+              "machine 5": true,
+              "organization 5": true
+            },
+            "renameByName": {
+              "Value #A": "GPUUtil%",
+              "Value #B": "VRAMUsed",
+              "Value #C": "VRAMFree",
+              "Value #D": "VRAMTotal",
+              "Value #E": "Temp_C",
+              "Value #F": "Power_W"
+            },
+            "indexByName": {
+              "peer_id": 0,
+              "region": 1,
+              "model": 2,
+              "engine": 3,
+              "gpu_index": 4,
+              "GPUUtil%": 5,
+              "VRAMUsed": 6,
+              "VRAMFree": 7,
+              "VRAMTotal": 8,
+              "Temp_C": 9,
+              "Power_W": 10
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 23,
+      "title": "Hardware - Trends",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "GPU Utilization (%)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "GPU VRAM Used",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "GPU Temperature (\u00b0C)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "GPU Power Draw (W)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "CPU Usage (%)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "id": 29,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Memory Available",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "id": 30,
+      "title": "Engine - Backend Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peer_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "engine"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KVCache"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.7
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.9
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Waiting"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Preemptions"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AvgTTFT"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AvgITL"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P90TTFT"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P90ITL"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PredTPS"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "displayName",
+                "value": "Pred t/s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PromptTPS"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "displayName",
+                "value": "Prompt t/s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "id": 31,
+      "options": {
+        "showHeader": true
+      },
+      "title": "Engine - Backend Metrics",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "J"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "peer_id",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "model 1": true,
+              "model 2": true,
+              "model 3": true,
+              "model 4": true,
+              "model 5": true,
+              "engine 1": true,
+              "engine 2": true,
+              "engine 3": true,
+              "engine 4": true,
+              "engine 5": true,
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true,
+              "model 6": true,
+              "model 7": true,
+              "model 8": true,
+              "model 9": true,
+              "engine 6": true,
+              "engine 7": true,
+              "engine 8": true,
+              "engine 9": true,
+              "machine 1": true,
+              "organization 1": true,
+              "machine 2": true,
+              "organization 2": true,
+              "machine 3": true,
+              "organization 3": true,
+              "machine 4": true,
+              "organization 4": true,
+              "machine 5": true,
+              "organization 5": true,
+              "machine 6": true,
+              "organization 6": true,
+              "machine 7": true,
+              "organization 7": true,
+              "machine 8": true,
+              "organization 8": true,
+              "machine 9": true,
+              "organization 9": true
+            },
+            "renameByName": {
+              "Value #A": "KVCache",
+              "Value #B": "Running",
+              "Value #C": "Waiting",
+              "Value #D": "Preemptions",
+              "Value #E": "AvgTTFT",
+              "Value #F": "AvgITL",
+              "Value #G": "P90TTFT",
+              "Value #H": "P90ITL",
+              "Value #I": "PredTPS",
+              "Value #J": "PromptTPS"
+            },
+            "indexByName": {
+              "peer_id": 0,
+              "model": 1,
+              "engine": 2,
+              "KVCache": 3,
+              "Running": 4,
+              "Waiting": 5,
+              "Preemptions": 6,
+              "AvgTTFT": 7,
+              "AvgITL": 8,
+              "P90TTFT": 9,
+              "P90ITL": 10,
+              "PredTPS": 11,
+              "PromptTPS": 12
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 32,
+      "title": "Engine - Trends",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "id": 33,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "KV Cache Utilization",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "{{peer_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "id": 34,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Running & Waiting Requests",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Running \u2014 {{peer_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Waiting \u2014 {{peer_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 91
+      },
+      "id": 35,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Preemptions Rate (/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(hivenet_router_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}[5m])",
+          "legendFormat": "{{peer_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 91
+      },
+      "id": 36,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Time to First Token (s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Avg TTFT \u2014 {{peer_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "P90 TTFT \u2014 {{peer_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "id": 37,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Inter-Token Latency (s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Avg ITL \u2014 {{peer_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "P90 ITL \u2014 {{peer_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "id": 38,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Token Throughput (t/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Pred t/s \u2014 {{peer_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hivenet_router_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "legendFormat": "Prompt t/s \u2014 {{peer_id}}",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "hivenet-router",
+    "router"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "title": "Hivenet Router",
+  "uid": "hivenet-router",
+  "version": 1
+}

@@ -1,0 +1,164 @@
+services:
+
+  # ── Router ──────────────────────────────────────────────────────────────────
+  router:
+    build: .
+    command:
+      - "--http-port"
+      - ":8888"
+      - "--grpc-port"
+      - ":8902"
+      - "--p2p-port"
+      - "8903"
+      - "--p2p-listen-addr"
+      - "0.0.0.0"
+      - "--disk-db-path"
+      - "/data/badger"
+      # Uncomment one of the blocks below to enable routing policies.
+      # By default the router uses least-loaded routing with no policy.
+      #
+      # Option A — single global policy file:
+      # - "--policy-file"
+      # - "/app/policies/_default.yaml"
+      #
+      # Option B — per-model policy directory (recommended):
+      # - "--policy-model-dir"
+      # - "/app/policies"
+      # Required on Hivecompute / any NAT or Docker environment.
+      # Replace with your actual external DNS host and P2P port.
+      # - "--p2p-announce-addr"
+      # - "/dns4/<your-host>/tcp/<p2p-external-port>"
+      #
+      # Authentication (optional — defaults to no auth if omitted):
+      # Copy deploy/auth/auth.api-key.yaml to deploy/auth/auth.yaml,
+      # fill in your key hashes, then uncomment the two lines below.
+      # - "--auth-config-file"
+      # - "/app/auth.yaml"
+      #
+      # Alternatively, for dynamic key management (keys pushed at runtime
+      # by the machines service via admin API), set the auth mode env var
+      # instead of using an auth.yaml file.
+    environment:
+      # JWT secret for agent authentication (required).
+      # Generate with: openssl rand -hex 32
+      - HIVENET_ROUTER_JWT_SECRET=changeme
+      # OpenTelemetry — traces are sent to the Tempo container via gRPC.
+      # Remove or leave empty to disable tracing.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=tempo:4317
+      # Admin API keys — required when auth.yaml sets admin.mode: api-key,
+      # and ALWAYS required when HIVENET_ROUTER_AUTH_MODE=dynamic (see below).
+      # Generate with: openssl rand -hex 32
+      # - HIVENET_ROUTER_ADMIN_API_KEYS=your-admin-key-here
+      # Admin auth fails closed: the router refuses to start with unauthenticated
+      # /admin/* endpoints unless this is set. This dev stack opts in for
+      # convenience — in production set HIVENET_ROUTER_ADMIN_API_KEYS above instead and
+      # remove this line.
+      - HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+      # Auth mode — controls how API keys are managed:
+      #   none      (default) — no authentication
+      #   api-key   — keys loaded from auth.yaml (requires --auth-config-file)
+      #   dynamic   — keys pushed at runtime via admin API by machines service.
+      #               Admin auth is mandatory in this mode: the router auto-
+      #               elevates admin.mode to api-key, so HIVENET_ROUTER_ADMIN_API_KEYS
+      #               above MUST be set or startup fails. This protects the
+      #               /admin/api-keys/* endpoints, which are the key-management
+      #               surface itself — leaving them public would defeat the point.
+      # - HIVENET_ROUTER_AUTH_MODE=dynamic
+      # Quota backend — controls where per-tenant token counters are stored.
+      #   memory  (default) — in-process only; counters reset on router restart.
+      #   badger            — persisted to /data/badger (badger_data volume);
+      #                       counters survive restarts. Recommended for production.
+      # - HIVENET_ROUTER_QUOTA_BACKEND=badger
+    ports:
+      - "8888:8888"   # HTTP API — clients / cURL
+      - "8902:8902"   # gRPC    — agent authentication
+      - "8903:8903"   # libp2p  — agent registration, heartbeat, inference
+      # Port 2112 (Prometheus metrics) is NOT published — Prometheus reaches it
+      # via the internal Docker network using the service name "router".
+    volumes:
+      - badger_data:/data/badger
+      - audit_logs:/var/log/hivenet-router       # audit JSONL — shared with Promtail
+      - ./policies:/app/policies:ro          # routing policy YAML (read-only)
+      # Uncomment when --auth-config-file is enabled above:
+      # - ./deploy/auth/auth.yaml:/app/auth.yaml:ro
+    labels:
+      # Stable discovery label for Promtail — works regardless of Compose project name.
+      app: hivenet-router
+    restart: unless-stopped
+
+  # ── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # Port 9090 is NOT published by default — Grafana reaches it via the internal
+    # Docker network using the service name "prometheus".
+    # Uncomment the block below to expose Prometheus externally (e.g. for KEDA or
+    # third-party tools). Ensure the port is firewalled or add auth before doing so.
+    # ports:
+    #   - "9090:9090"
+    depends_on:
+      - router
+    restart: unless-stopped
+
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"   # Dashboard UI — open in browser or access via SSH tunnel
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=changeme   # Change before exposing publicly
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+  # ── Tempo ─────────────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.7.1
+    command: -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - ./deploy/tempo/tempo-config.yml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    # Ports are NOT published — the router reaches Tempo via the internal
+    # Docker network. Uncomment to expose for external trace ingestion.
+    # ports:
+    #   - "4317:4317"   # OTLP gRPC
+    #   - "4318:4318"   # OTLP HTTP
+    #   - "3200:3200"   # Tempo HTTP API
+    restart: unless-stopped
+
+  # ── Loki ────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.0.0
+    volumes:
+      - ./deploy/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  # ── Promtail ────────────────────────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:3.0.0
+    volumes:
+      - ./deploy/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - audit_logs:/var/log/hivenet-router:ro    # audit JSONL — read-only from Promtail
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  badger_data:      # BadgerDB persistent storage (survives router restarts)
+  audit_logs:       # Audit JSONL file — shared between router (write) and Promtail (read)
+  prometheus_data:  # Prometheus TSDB (metric history)
+  grafana_data:     # Grafana state (dashboards, users, sessions)
+  loki_data:        # Loki storage (log chunks and index)
+  tempo_data:       # Tempo trace storage (WAL and blocks)

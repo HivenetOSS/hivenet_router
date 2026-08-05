@@ -1,0 +1,70 @@
+# auth.api-key.yaml — API key authentication reference
+#
+# This file is SAFE TO COMMIT — it contains only SHA-256 hashes and masked
+# previews, never plaintext keys.
+#
+# ── Each section is independent ─────────────────────────────────────────────
+# api.mode   controls /v1/* endpoints (client inference requests)
+# admin.mode controls /admin/* endpoints (health, policy, metrics)
+#
+# Valid combinations:
+#   api: none  + admin: none     → fully open (default when no file is provided)
+#   api: none  + admin: api-key  → open API, protected admin (internal/trusted network)
+#   api: api-key + admin: none   → clients need keys, admin is unrestricted
+#   api: api-key + admin: api-key → full production setup (recommended)
+#
+# ── Generating an API key ────────────────────────────────────────────────────
+# Run the keygen subcommand and paste the output into the keys list below:
+#
+#   docker run --rm hivenet-router:latest keygen --tenant <name>
+#
+# ── Generating an admin key ──────────────────────────────────────────────────
+# Admin keys are NOT stored here — supply via environment variable:
+#
+#   HIVENET_ROUTER_ADMIN_API_KEYS=<raw-key>          # single key
+#   HIVENET_ROUTER_ADMIN_API_KEYS=key1,key2,key3     # multiple keys
+#
+# Generate a secure key with:
+#   openssl rand -hex 32
+#
+# ── Usage ───────────────────────────────────────────────────────────────────
+# Pass this file to the router at startup:
+#   --auth-config-file /app/auth.yaml
+# Or via environment variable:
+#   HIVENET_ROUTER_AUTH_CONFIG=/app/auth.yaml
+
+# ── Example A: full production (both sections protected) ────────────────────
+
+api:
+  mode: "api-key"
+  keys:
+    # Replace with output from: keygen --tenant <name>
+    - key_hash: "replace-with-sha256-hex-from-keygen"
+      key_preview: "sk-...xxxx"
+      metadata:
+        name: "Hivenet Router key"
+        owner: "Hivenet Router"
+        description: ""
+        created_at: "18-03-2026"
+        # expires_at: "01-01-2028"   # optional DD-MM-YYYY
+      # models: []                   # empty = access to all models
+      # models:
+      #   - "meta-llama/Llama-3.1-8B-Instruct"
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+
+admin:
+  mode: "api-key"
+  # Admin keys come from HIVENET_ROUTER_ADMIN_API_KEYS (see header above).
+
+# ── Example B: protected admin only, open API ───────────────────────────────
+# Use this when /v1/* is on a trusted private network but /admin/* must be
+# restricted (e.g. the router is behind a VPN but the admin port is exposed).
+#
+# api:
+#   mode: "none"
+#
+# admin:
+#   mode: "api-key"
+#   # Set HIVENET_ROUTER_ADMIN_API_KEYS=<raw-key> in your environment.

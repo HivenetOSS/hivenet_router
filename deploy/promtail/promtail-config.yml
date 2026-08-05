@@ -1,0 +1,56 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+
+  # ── Application logs ────────────────────────────────────────────────────────
+  # Reads the router container's stdout via Docker socket.
+  # Audit JSON no longer appears here — audit writes to a dedicated file.
+  - job_name: hivenet-router-app
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          # Filter by Docker label — works regardless of Compose project name.
+          - name: label
+            values: ["app=hivenet-router"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+      - target_label: job
+        replacement: hivenet-router
+      - target_label: log_type
+        replacement: app
+
+  # ── Audit logs ──────────────────────────────────────────────────────────────
+  # Reads /var/log/hivenet-router/audit.jsonl from the shared audit_logs volume.
+  # All lines in this file are valid JSON audit entries, so no match stage needed.
+  - job_name: hivenet-router-audit
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: hivenet-router
+          log_type: audit
+          __path__: /var/log/hivenet-router/audit.jsonl
+    pipeline_stages:
+      - json:
+          expressions:
+            tenant_id: tenant_id
+            status_code: status_code
+            model: model
+            error_code: error_code
+            level: level
+      - labels:
+          tenant_id:
+          status_code:
+          model:
+          error_code:
+          level:
