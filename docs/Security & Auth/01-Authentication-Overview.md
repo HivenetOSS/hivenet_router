@@ -1,0 +1,181 @@
+# Authentication Overview
+
+Hivenet Router implements a dual authentication system: JWT tokens for agents and API keys for clients.
+
+## Authentication Flow
+
+![Hivenet Router Authentication Flow](../images/Auth.png)
+
+## Agent Authentication
+
+Agents authenticate via gRPC before joining the network.
+
+### Authentication Process
+
+1. **Agent generates a JWT token** signed with the shared HMAC-SHA256 secret
+2. **Agent connects** to the router gRPC port (default :50051) over TLS derived from the same secret
+3. **Agent sends `AuthRequest`** with the JWT token as credentials and its metadata
+4. **Router validates** the JWT signature and extracts the agent identity
+5. **Router creates a session token** and returns it along with the router's P2P address
+6. **Agent registers** via libp2p HTTP using the session token
+
+### JWT Configuration
+
+```bash
+# Generate shared JWT secret
+openssl rand -base64 32 > jwt_secret.txt
+
+# Router
+./bin/hivenet-router --jwt-secret-file jwt_secret.txt
+
+# Agent
+./bin/hivenet-agent --jwt-secret-file jwt_secret.txt --router-grpc localhost:50051
+```
+
+### Session Token
+
+- **Validity:** 1 hour (default; configure with `--session-ttl`, must be greater than 5m)
+- **Usage:** Bearer token for libp2p HTTP registration
+- **Renewal:** Agent re-authenticates before expiration
+
+## Client Authentication
+
+Clients authenticate using API keys created via the `keygen` workflow.
+
+### API Key Creation
+
+```bash
+# Generate API key
+./bin/hivenet-router keygen --tenant acme-corp
+
+# Output:
+# sk-hivenet-<base58 ~44 chars, e.g. sk-hivenet-3yHt7Kp2...>
+```
+
+### API Key Usage
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-hivenet-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Key Format
+
+- **Prefix:** `sk-hivenet-` (Hivenet Router secret key)
+- **Storage:** SHA-256 hashed in `auth.yaml`
+- **Matching:** Constant-time comparison to prevent timing attacks
+
+## Security Features
+
+### JWT Validation
+
+- **Algorithm:** HS256 (HMAC-SHA256)
+- **Scope:** Used only on the gRPC auth path (agent registration); not on the hot HTTP request path
+
+### API Key Security
+
+- **Hashing:** SHA-256 (hex-encoded); only the hash is stored, never the raw key
+- **Comparison:** Constant-time to prevent timing attacks
+- **Restrictions:** Per-key model access control
+- **Revocation:** Hot reload via SIGHUP (static mode) or admin API (dynamic mode)
+
+## Authentication Modes
+
+The router supports three authentication modes for `/v1/*` endpoints, controlled by `auth.yaml` or the `HIVENET_ROUTER_AUTH_MODE` environment variable:
+
+| Mode | Description | Key Source |
+|------|-------------|------------|
+| `none` | No authentication (default when no auth.yaml is configured) | — |
+| `api-key` | Keys loaded from `auth.yaml`, reloaded on SIGHUP | `auth.yaml` file on disk |
+| `dynamic` | Mutable in-memory registry, managed by machines service via admin API | Admin HTTP endpoints |
+
+### Setting the Mode
+
+**Via auth.yaml** (recommended when a config file is used):
+```yaml
+api:
+  mode: "api-key"  # or "none"
+```
+
+**Via environment variable** (when no auth.yaml is provided):
+```bash
+export HIVENET_ROUTER_AUTH_MODE=dynamic
+```
+
+When both are set, `auth.yaml` takes precedence for the api section.
+
+### Dynamic Mode Details
+
+In dynamic mode, the router starts with an empty key registry. The machines service bootstraps keys at runtime via `POST /admin/api-keys/replace`. All state is in-memory — no `auth.yaml` is needed, and SIGHUP does not affect the key registry.
+
+**Admin authentication is mandatory in dynamic mode.** Because the `/admin/api-keys/*` endpoints *are* the key-management surface, leaving them public would defeat the purpose. The router automatically elevates `admin.mode` to `api-key` and requires `HIVENET_ROUTER_ADMIN_API_KEYS` to be set; missing this env var fails startup. This auto-elevation is dynamic-mode only — static and `none` deployments are unchanged.
+
+See [API Keys — Dynamic Key Mode](02-API-Keys.md#dynamic-key-mode) and [Admin Endpoints — API Key Management](../API%20Reference/05-Admin-Endpoints.md#api-key-management) for full details.
+
+### Network Security
+
+- **gRPC:** TLS always enabled — certificate deterministically derived from the shared JWT secret via HKDF-SHA256 + Ed25519; no external PKI needed
+- **libp2p:** Noise encryption (built-in)
+- **HTTP:** TLS via reverse proxy (nginx, traefik) for production
+
+## Authentication Failure Handling
+
+### Invalid JWT
+
+```json
+{
+  "error": {
+    "code": "agent_auth_failed",
+    "message": "Agent authentication failed",
+    "details": {
+      "reason": "Invalid signature"
+    }
+  }
+}
+```
+
+### Invalid API Key
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Invalid API key",
+    "details": {
+      "key_prefix": "sk-hivenet-xxxx"
+    }
+  }
+}
+```
+
+### Model Access Denied
+
+```json
+{
+  "error": {
+    "code": "model_access_denied",
+    "message": "API key not authorized for model",
+    "details": {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "allowed_models": ["mistralai/Mistral-7B-Instruct-v0.3"]
+    }
+  }
+}
+```
+
+## Best Practices
+
+1. **Rotate secrets** - Periodically rotate JWT secrets and API keys
+2. **Least privilege** - Grant API keys only required model access
+3. **Monitor usage** - Track authentication failures and anomalies
+4. **Use TLS** - Encrypt all network traffic in production
+5. **Secure secrets** - Store secrets in vaults (HashiCorp Vault, AWS Secrets Manager)
+
+## See Also
+
+- [API Keys](02-API-Keys.md) - Key creation and management
+- [auth.yaml Reference](03-auth.yaml-Reference.md) - Complete configuration schema
+- [Model Restrictions](04-Model-Restrictions.md) - Access control configuration
+- [Key Rotation](05-Key-Rotation.md) - Rotation procedures

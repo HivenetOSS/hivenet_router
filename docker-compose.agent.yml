@@ -1,0 +1,57 @@
+services:
+
+  # ── Agent ────────────────────────────────────────────────────────────────────
+  # Runs the Hivenet Agent inside Docker and connects to a remote router.
+  #
+  # The agent only makes outbound connections (gRPC auth + libp2p). The router
+  # forwards inference over the connection the agent opens, so no inbound
+  # ports, public IP, or NAT configuration are needed on the agent host.
+  #
+  # Requirements before starting:
+  #   1. vLLM must be running on the host at --backend-url (default: port 8888)
+  #   2. Set ROUTER_GRPC and ROUTER_P2P to your router's addresses
+  #
+  # Start with:
+  #   docker compose -f docker-compose.agent.yml up
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    command:
+      - "--engine"
+      - "vllm"
+      - "--backend-url"
+      - "http://host.docker.internal:8888"      # vLLM running on the Docker host
+      - "--router-grpc"
+      - "${ROUTER_GRPC}"                         # e.g. my-router.example.com:50051
+      - "--router-p2p"
+      - "${ROUTER_P2P}"                          # e.g. /dns4/my-router.example.com/tcp/9000
+      - "--identity-path"
+      - "/app/data/agent_identity.key"           # persisted via volume
+      - "--capacity"
+      - "${AGENT_CAPACITY:-10}"
+      - "--region"
+      - "${AGENT_REGION:-EU-France}"
+      - "--machine"
+      - "${MACHINE:-Unknown}"
+    environment:
+      # JWT secret for agent authentication (required, must match the router's).
+      # Generate with: openssl rand -hex 32
+      # Interpolated from the host environment so it can be passed at launch:
+      #   HIVENET_ROUTER_JWT_SECRET=<secret> docker compose -f docker-compose.agent.yml up
+      - HIVENET_ROUTER_JWT_SECRET=${HIVENET_ROUTER_JWT_SECRET:-changeme}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      # Linux: lets the container reach the host
+    volumes:
+      - agent_data:/app/data                     # persists identity key across restarts
+    restart: unless-stopped
+
+volumes:
+  agent_data:   # Persists the libp2p identity key (stable peer ID across restarts)

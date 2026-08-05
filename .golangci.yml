@@ -1,0 +1,41 @@
+# golangci-lint v2 configuration.
+# Run locally with: golangci-lint run
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Adds to the default linter set (errcheck, govet, ineffassign,
+  # staticcheck, unused) rather than replacing it.
+  enable:
+    - errcheck
+    - goheader
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    # Every original .go file must start with the SPDX license header.
+    # Generated files (e.g. *.pb.go) are skipped automatically via the
+    # generated-file exclusion below. ANY_YEAR keeps existing headers valid
+    # as the calendar advances instead of pinning a single year.
+    goheader:
+      values:
+        regexp:
+          ANY_YEAR: 20\d{2}
+      template: |-
+        SPDX-License-Identifier: Apache-2.0
+        SPDX-FileCopyrightText: Copyright {{ ANY_YEAR }} Hive Computing Services SA
+  exclusions:
+    # Skip generated files (protobuf, etc.) — they carry their own headers.
+    generated: lax
+    rules:
+      # Ignoring the error from a cleanup/deferred Close() is intentional here.
+      - linters:
+          - errcheck
+        source: "\\.Close\\(\\)"
+      # Tests deliberately ignore setup/teardown errors for brevity.
+      - linters:
+          - errcheck
+        path: _test\.go

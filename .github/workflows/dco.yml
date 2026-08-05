@@ -1,0 +1,69 @@
+name: DCO
+
+# Verifies that every commit in a pull request is signed off under the
+# Developer Certificate of Origin (see the root DCO file and CONTRIBUTING.md).
+# Contributors add the trailer automatically with `git commit -s`.
+on:
+  pull_request:
+
+concurrency:
+  group: dco-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so we can walk every commit in the PR range.
+          fetch-depth: 0
+
+      - name: Check Signed-off-by on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          fail=0
+          # Iterate the commits introduced by this PR (base..head).
+          for sha in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
+            # Skip merge commits — they are created by GitHub, not the author.
+            if [ "$(git rev-list --parents -n1 "$sha" | wc -w)" -gt 2 ]; then
+              continue
+            fi
+            author="$(git show -s --format='%an <%ae>' "$sha")"
+            subject="$(git show -s --format='%s' "$sha")"
+            # Skip commits authored by GitHub Apps / bots (e.g. Dependabot).
+            # Bots do not — and cannot — add a DCO sign-off. Their commit email
+            # is the immutable "<id>+<app>[bot]@users.noreply.github.com" GitHub
+            # identity, which external contributors cannot forge on a PR.
+            case "$(git show -s --format='%ae' "$sha")" in
+              *"[bot]@users.noreply.github.com")
+                echo "Commit ${sha:0:8} (\"${subject}\") authored by bot ${author} — DCO skipped."
+                continue
+                ;;
+            esac
+            # A valid sign-off is a trailer matching the commit author.
+            if git show -s --format='%B' "$sha" \
+                 | grep -qiE "^Signed-off-by: .+ <.+@.+>"; then
+              if ! git show -s --format='%B' "$sha" \
+                   | grep -qiF "Signed-off-by: ${author}"; then
+                echo "::error::Commit ${sha:0:8} (\"${subject}\") is signed off, but not by its author ${author}."
+                fail=1
+              fi
+            else
+              echo "::error::Commit ${sha:0:8} (\"${subject}\") is missing a Signed-off-by line. Run: git commit --amend -s (or 'git rebase --signoff ${BASE_SHA:0:8}')."
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "One or more commits are not signed off. See CONTRIBUTING.md → Sign-off (DCO)."
+            exit 1
+          fi
+          echo "All commits are signed off. ✅"

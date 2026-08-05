@@ -1,0 +1,274 @@
+# Fallback Chains
+
+Configure ordered fallback steps for high availability when primary agents are unavailable.
+
+## When Fallback Triggers
+
+A step advances to the next fallback when any of the following occur:
+
+1. **Model not found** — No agents are registered for the requested model
+2. **All unhealthy** — Agents exist but all are unhealthy or have a failed backend
+3. **No candidates** — No agents pass the `match` filter
+4. **All excluded** — All filter-passing agents fail `exclude_if` gates
+5. **Capacity queue exhausted** — All healthy agents are full and the wait queue timed out or reached its depth limit
+6. **Max tries exhausted** — Forward failures reach `max_tries` for the current step
+
+## Fallback Chain Structure
+
+```yaml
+routing_policy:
+  match:
+    region: "EU-Primary"
+  strategy: "least-loaded"
+  max_tries: 3
+
+fallback_chain:
+  - name: "eu-secondary"
+    match:
+      region: "EU-Secondary"
+    strategy: "least-loaded"
+    max_tries: 2
+
+  - name: "any-region"
+    match: {}  # No filter
+    strategy: "least-loaded"
+    max_tries: 2
+
+# Last resort provider — top-level field, NOT a step in fallback_chain
+# Credentials: set HIVENET_ROUTER_OPENAI_API_KEY in environment
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+`fallback_provider` is a **top-level field** in the policy, not a step inside `fallback_chain`. It is invoked only after every `fallback_chain` step is exhausted.
+
+## Fallback Flow
+
+```
+Request
+  │
+  ▼
+Primary Policy (EU-Primary)
+  │ No candidates / max_tries exhausted
+  ▼
+Fallback Step 1: eu-secondary
+  │ No candidates / max_tries exhausted
+  ▼
+Fallback Step 2: any-region
+  │ No candidates / max_tries exhausted
+  ▼
+fallback_provider: openai
+  │
+  ▼
+Response or 503
+```
+
+## Step Configuration
+
+### Each Step Supports
+
+| Field | Description |
+|-------|-------------|
+| `name` | Step identifier (for metrics/logging) |
+| `match` | Static filter (same as primary) |
+| `exclude_if` | Dynamic gates (same as primary) |
+| `strategy` | Ranking algorithm |
+| `max_tries` | Slot attempts before next step |
+
+### Example: Graduated Fallback
+
+```yaml
+routing_policy:
+  match:
+    region: "EU"
+    tags: ["premium"]
+  exclude_if:
+    kv_cache_utilization: { gt: 0.85 }
+    gpu_temperature_c: { gt: 82 }
+  strategy: "least-loaded"
+  max_tries: 3
+
+fallback_chain:
+  # Step 1: Same region, relaxed GPU limits
+  - name: "eu-relaxed"
+    match:
+      region: "EU"
+    exclude_if:
+      kv_cache_utilization: { gt: 0.95 }  # Higher threshold
+      gpu_temperature_c: { gt: 85 }        # Higher threshold
+    strategy: "least-loaded"
+    max_tries: 2
+
+  # Step 2: Any region
+  - name: "any-region"
+    match: {}
+    exclude_if:
+      success_rate: { lt: 0.90 }  # Only success rate gate
+    strategy: "least-loaded"
+    max_tries: 2
+
+# Step 3: Provider fallback (set HIVENET_ROUTER_OPENAI_API_KEY in environment)
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+## Capacity Wait Queue
+
+Before escalating to the next fallback step, requests wait in a per-model queue (default depth 30). See [Routing Concepts — Capacity Wait Queue](01-Routing-Concepts.md#capacity-wait-queue) for details.
+
+## Fallback Metrics
+
+Track fallback usage:
+
+```promql
+# Fallback requests served by fallback_chain steps
+rate(hivenet_router_policy_fallback_routed_total[5m])
+
+# Requests served by fallback_provider
+rate(hivenet_router_policy_provider_fallback_total[5m])
+
+# All policy steps exhausted (client got 503)
+rate(hivenet_router_policy_exhausted_total[5m])
+
+# Fallback rate vs total
+rate(hivenet_router_policy_fallback_routed_total[5m]) /
+  rate(hivenet_router_routing_requests_routed_total[5m])
+```
+
+### View in Grafana
+
+The Hivenet Router dashboard includes fallback usage panels.
+
+## Fallback Examples
+
+### Geographic Fallback
+
+```yaml
+routing_policy:
+  match:
+    region: "EU-France"
+  strategy: "least-loaded"
+
+fallback_chain:
+  - name: "eu-germany"
+    match:
+      region: "EU-Germany"
+    strategy: "least-loaded"
+
+  - name: "us-east"
+    match:
+      region: "US-East"
+    strategy: "least-loaded"
+```
+
+### GPU Tier Fallback
+
+```yaml
+routing_policy:
+  match:
+    gpu_model: "NVIDIA H100"
+  strategy: "least-loaded"
+
+fallback_chain:
+  - name: "a100-tier"
+    match:
+      gpu_model: "NVIDIA A100"
+    strategy: "least-loaded"
+
+  - name: "a10-tier"
+    match:
+      gpu_model: "NVIDIA A10"
+    strategy: "least-loaded"
+```
+
+### Engine Fallback
+
+```yaml
+routing_policy:
+  match:
+    engine: "vllm"
+  strategy: "least-loaded"
+
+fallback_chain:
+  - name: "sglang"
+    match:
+      engine: "sglang"
+    strategy: "least-loaded"
+
+  - name: "ollama"
+    match:
+      engine: "ollama"
+    strategy: "least-loaded"
+```
+
+### Mixed Fallback
+
+```yaml
+routing_policy:
+  match:
+    region: "EU"
+    engine: "vllm"
+    tags: ["production"]
+  exclude_if:
+    kv_cache_utilization: { gt: 0.85 }
+  strategy: "least-loaded"
+  max_tries: 3
+
+fallback_chain:
+  - name: "eu-any-engine"
+    match:
+      region: "EU"
+    exclude_if:
+      success_rate: { lt: 0.95 }
+    strategy: "least-loaded"
+    max_tries: 2
+
+  - name: "any-region-vllm"
+    match:
+      engine: "vllm"
+    strategy: "least-loaded"
+    max_tries: 2
+
+# set HIVENET_ROUTER_OPENAI_API_KEY in environment
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+## Debugging Fallback
+
+### View Audit Logs
+
+```logql
+{job="router"} | json | error_code = "no_agents_available"
+```
+
+### Prometheus Queries
+
+```promql
+# Fallback steps triggered in the last hour
+increase(hivenet_router_policy_fallback_routed_total[1h])
+
+# Provider fallback triggered
+increase(hivenet_router_policy_provider_fallback_total[1h])
+
+# Policy exhausted (503 responses)
+increase(hivenet_router_policy_exhausted_total[1h])
+```
+
+## Best Practices
+
+1. **Ordered by preference** - Most preferred first
+2. **Graduated relaxation** - Relax filters progressively
+3. **Monitor fallback rate** - High fallback indicates capacity issues
+4. **Test fallback paths** - Verify each step works independently
+5. **Set appropriate max_tries** - Balance latency vs. reliability
+
+## See Also
+
+- [Routing Concepts](01-Routing-Concepts.md) - Pipeline overview
+- [Policy YAML Reference](02-Policy-YAML-Reference.md) - Complete schema
+- [Provider Fallback](04-Provider-Fallback.md) - Closed-source providers
+- [Prometheus Metrics](../Observability/01-Prometheus-Metrics.md) - Fallback metrics

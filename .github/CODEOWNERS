@@ -1,0 +1,8 @@
+# Code owners for Hivenet Router.
+#
+# Every PR automatically requests a review from the senior developer pool below.
+# Combined with the branch-protection rule "Require review from Code Owners"
+# (see scripts/setup-branch-protection.sh), at least one of them must approve
+# before a PR can be merged.
+
+*   @Hivenet-Igor @hivenet-mamoutou @hivenet-fabioferreira

@@ -1,0 +1,6 @@
+.git/
+bin/
+badger_disk/
+*.log
+*.tar.gz
+deploy/grafana/

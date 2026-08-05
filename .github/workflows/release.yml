@@ -1,0 +1,93 @@
+name: Release images
+
+# Stable releases are cut by publishing a GitHub Release with a vX.Y.Z tag
+# (Releases → Draft a new release → tag "v0.1.0" → Publish). That fires this
+# workflow, which builds and pushes the versioned images plus :latest.
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write      # required to sign the build-provenance attestation
+  attestations: write  # required to record the attestation on GitHub
+
+jobs:
+  build-push:
+    name: build & push (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `repo` is the published Docker Hub image name; `image` is the short
+          # cache-scope / job label.
+          - image: router
+            repo: hivenet-router
+            dockerfile: Dockerfile
+          - image: agent
+            repo: hivenet-agent
+            dockerfile: Dockerfile.agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.5.2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Tag v0.1.0 -> images :v0.1.0, :v0.1, and :latest (:latest skipped for
+      # pre-releases, e.g. a release marked "pre-release" in the GitHub UI).
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.repo }}
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.event.release.tag_name }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: true  # embed SLSA build provenance in the image
+          sbom: true        # embed a software bill of materials in the image
+
+      # A release should not ship with fixable CRITICAL/HIGH CVEs. If this
+      # fails, patch and cut a follow-up release.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.repo }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # Records a signed, verifiable link between this image digest and the
+      # exact workflow run + commit that built it (verify with `gh attestation`).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: false

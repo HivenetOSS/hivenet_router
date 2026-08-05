@@ -1,0 +1,30 @@
+# Security Policy
+
+## Reporting a vulnerability
+
+**Please do not report security vulnerabilities through public GitHub issues,
+discussions, or pull requests.**
+
+Instead, email **hivenetrouter@antimatter.com** with:
+
+- a description of the vulnerability and its impact,
+- the affected component (router / agent) and version or commit,
+- steps to reproduce (proof-of-concept, requests, or logs where possible).
+
+You can also use GitHub's private **"Report a vulnerability"** button under the
+repository's **Security** tab.
+
+## What to expect
+
+- We aim to acknowledge your report within **3 business days**.
+- We will investigate, keep you updated on progress, and coordinate a fix and a
+  disclosure timeline with you.
+- Please give us a reasonable window to release a fix before any public
+  disclosure. We're happy to credit you in the release notes unless you prefer
+  to remain anonymous.
+
+## Supported versions
+
+Hivenet Router is in active alpha development. Security fixes are applied to the
+`main` branch and included in the next tagged release; we generally support the
+**latest released version**. Older tags are not maintained.

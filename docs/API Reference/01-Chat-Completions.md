@@ -1,0 +1,285 @@
+# Inference Endpoints (Chat Completions & Messages)
+
+The router serves LLM inference through a single **allowlisted passthrough**: it
+authenticates the request, routes by the top-level `model` field to a healthy
+agent, and forwards the **original request bytes unchanged** to that agent's
+backend at the same path. There is no schema translation, so any request dialect
+the backend understands is supported.
+
+Two dialects are available today:
+
+| Dialect | Endpoint | Typical client |
+|---------|----------|----------------|
+| OpenAI Chat Completions | `POST /v1/chat/completions` | OpenAI SDKs, LangChain, … |
+| Anthropic Messages | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | Claude Code, Anthropic SDK |
+
+## How the Passthrough Works
+
+- **Authentication & quota.** Identical for every endpoint — `Bearer` API key,
+  per-key RPM and daily token budget.
+- **Routing.** The router reads only the top-level `model` field and selects an
+  agent via the routing policy; the rest of the body is forwarded untouched.
+- **Backend-native.** The selected agent relays the request to its backend at the
+  same path, so the backend must serve that path (vLLM serves both
+  `/v1/chat/completions` and `/v1/messages`).
+- **Streaming.** `text/event-stream` responses are flushed chunk-by-chunk end to
+  end, so tokens arrive progressively.
+- **Token budgeting.** The daily budget is reserved up front (estimated prompt
+  tokens + the requested `max_tokens`) and reconciled after the response — see
+  [Token Budget Enforcement](../Security%20%26%20Auth/03-auth.yaml-Reference.md#token-budget-enforcement).
+
+> **Security — the path allowlist.** Only an explicit allowlist of paths is
+> forwarded; every other path is rejected at the router edge (`404`) and never
+> reaches an agent. Today the allowlist is `/v1/chat/completions`, `/v1/messages`,
+> and `/v1/messages/count_tokens`. A path qualifies only if it carries a top-level
+> `model` field (so the router can pick an agent), is stateless (any agent can
+> serve it), and is inference or a read-only utility — never a control-plane route.
+> This deliberately keeps backend endpoints such as `/scale_elastic_ep`, `/load`,
+> `/metrics`, and `/v1/responses/{id}` unreachable through the router.
+
+---
+
+## OpenAI Chat Completions
+
+OpenAI-compatible chat completion endpoint for LLM inference.
+
+```
+POST /v1/chat/completions
+```
+
+### Headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | ✅ | `application/json` |
+| `Authorization` | ❌ | `Bearer <api-key>` (required if auth enabled) |
+| `X-Request-ID` | ❌ | Custom request ID for tracing |
+
+### Body
+
+```json
+{
+  "model": "string",
+  "messages": [
+    {
+      "role": "system|user|assistant",
+      "content": "string"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1024,
+  "top_p": 1.0,
+  "frequency_penalty": 0.0,
+  "presence_penalty": 0.0,
+  "stop": ["string"],
+  "stream": false
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `model` | string | ✅ | - | Model name (must be registered by an agent) |
+| `messages` | array | ✅ | - | Conversation messages |
+| `temperature` | float | ❌ | 0.7 | Sampling temperature (0-2) |
+| `max_tokens` | int | ❌ | ∞ | Maximum tokens to generate |
+| `top_p` | float | ❌ | 1.0 | Nucleus sampling (0-1) |
+| `frequency_penalty` | float | ❌ | 0.0 | Penalize frequent tokens (-2 to 2) |
+| `presence_penalty` | float | ❌ | 0.0 | Penalize repeated tokens (-2 to 2) |
+| `stop` | array | ❌ | [] | Stop sequences |
+| `stream` | bool | ❌ | false | Enable streaming (SSE) |
+
+### Messages Format
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant."
+    },
+    {
+      "role": "user",
+      "content": "What is the capital of France?"
+    },
+    {
+      "role": "assistant",
+      "content": "The capital of France is Paris."
+    },
+    {
+      "role": "user",
+      "content": "What is its population?"
+    }
+  ]
+}
+```
+
+**Supported roles:** `system`, `user`, `assistant`
+
+### Response — Non-Streaming
+
+```json
+{
+  "id": "chat-xxx",
+  "object": "chat.completion",
+  "created": 1713724800,
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The capital of France is Paris."
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 10,
+    "total_tokens": 25
+  }
+}
+```
+
+### Response — Streaming (SSE)
+
+Set `stream: true` in the request.
+
+```
+data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{"role":"assistant","content":"The"},"finish_reason":null}]}
+
+data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{"content":" capital"},"finish_reason":null}]}
+
+data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+### Examples
+
+```bash
+# Basic
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# Streaming
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "Tell me a joke."}],
+    "stream": true
+  }'
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080", api_key="sk-hivenet-...")
+
+response = client.chat.completions.create(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    messages=[
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "What is 2+2?"},
+    ],
+    temperature=0.7,
+    max_tokens=100,
+)
+print(response.choices[0].message.content)
+```
+
+---
+
+## Anthropic Messages
+
+Anthropic-compatible endpoint, so tools that speak the Anthropic Messages API —
+notably **Claude Code** — can run against models on the network.
+
+```
+POST /v1/messages
+```
+
+The request and response use Anthropic's dialect and are forwarded verbatim; the
+backend must natively serve `/v1/messages`.
+
+### Backend Requirement
+
+The selected agent's backend must serve `/v1/messages`. For vLLM, enable its
+Anthropic-compatible endpoint and set `--served-model-name` to the name clients
+will request:
+
+```bash
+vllm serve Qwen/Qwen3.6-27B --served-model-name Qwen/Qwen3.6-27B
+```
+
+If the backend does not implement `/v1/messages` it returns its own `404`, which
+propagates back to the client unchanged.
+
+### Using Claude Code
+
+Point Claude Code at the router and authenticate with a Hivenet Router API key:
+
+```bash
+export ANTHROPIC_BASE_URL="https://<router-host>"
+export ANTHROPIC_API_KEY="sk-..."                       # your Hivenet Router key
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"   # a model served on the network
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
+claude
+```
+
+The model names must match what an agent registers (and what the backend was
+started with via `--served-model-name`). Streaming arrives progressively.
+
+### Token Counting
+
+`POST /v1/messages/count_tokens` is allowlisted and routed like any other
+inference request. It takes the same body as `/v1/messages` and returns the input
+token count (`{"input_tokens": N}`) **without running the model** — Claude Code
+uses it to measure context size before sending. The backend must serve this route
+(vLLM does); if it doesn't, clients fall back to a local token estimate.
+
+### Example
+
+```bash
+curl -X POST https://<router-host>/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-..." \
+  -d '{
+    "model": "Qwen/Qwen3.6-27B",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Write a haiku about routing."}]
+  }'
+```
+
+---
+
+## Rate Limit Headers
+
+When API key auth is enabled, responses include remaining quota information:
+
+```
+X-RateLimit-Remaining-Requests: 999
+X-RateLimit-Remaining-Tokens: 499985
+```
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Remaining-Requests` | Remaining requests in the current minute (RPM quota) |
+| `X-RateLimit-Remaining-Tokens` | Remaining tokens in the current day (TPD quota) |
+
+Both headers return `0` when the respective quota is exhausted (HTTP 429).
+
+## See Also
+
+- [Integrations](../Integrations/00-Overview.md) - End-to-end setup guides for Claude Code, OpenCode, and other clients against this API
+- [Embeddings](02-Embeddings.md) - Embedding generation
+- [Reranking](03-Reranking.md) - Reranking endpoint
+- [Models List](04-Models-List.md) - Discover available models
+- [auth.yaml Reference](../Security%20%26%20Auth/03-auth.yaml-Reference.md) - Quotas & token budget enforcement
+- [Error Codes](../Reference/02-Error-Codes.md) - Complete error reference

@@ -1,0 +1,28 @@
+# Per-model policy for large Llama3 variants.
+# The "models:" field declares which model names this policy applies to.
+# One file can cover multiple models that share the same routing behaviour.
+
+models:
+  - "llama3:70b"
+  - "llama3:70b-instruct"
+
+routing_policy:
+
+  # Large models fill KV cache faster — use a relaxed threshold.
+  match:
+    engine: "vllm"
+
+  exclude_if:
+    kv_cache_utilization: { gt: 0.95 }
+    consecutive_failures:  { gte: 3 }
+    gpu_temperature_c:     { gt: 85 }
+
+  strategy: "least-loaded"
+  max_tries: 2
+
+fallback_chain:
+
+  - name: "global-any"
+    match: {}
+    strategy: "least-loaded"
+    max_tries: 1

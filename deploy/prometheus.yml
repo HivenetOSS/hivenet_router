@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "hivenet-router"
+    static_configs:
+      # "router" resolves to the router container via Docker's internal network.
+      # Port 2112 is the Prometheus metrics endpoint (MetricsPort in config.go).
+      - targets: ["router:2112"]

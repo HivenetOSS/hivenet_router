@@ -1,0 +1,110 @@
+name: Nightly images
+
+# Every merge into main (a merged PR is a push to main) rebuilds the nightly
+# images. Branch protection guarantees CI was green before the merge landed.
+#
+# workflow_dispatch additionally allows building any ref on demand, so a change
+# can be deployed to a downstream environment for verification before it is
+# merged. Such a build publishes only the immutable :nightly-<shortsha> tag —
+# the moving :nightly tag stays pinned to main (see the metadata step) so an
+# unmerged branch can never become what :nightly resolves to.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two publishes concurrently for the same ref.
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write      # required to sign the build-provenance attestation
+  attestations: write  # required to record the attestation on GitHub
+
+# Images publish to the OVH registry because that is where the consuming
+# clusters already authenticate (their pull secrets hold an OVH robot account).
+# Host and project are not secret — they appear verbatim in the consumers'
+# deployment manifests — so only the push credentials are.
+env:
+  REGISTRY: rbbbucym.gra7.container-registry.ovh.net
+  PROJECT: hivegpt
+
+jobs:
+  build-push:
+    name: build & push (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `repo` is the published image name; the short matrix label differs.
+          # Standardized to hivenet-router / hivenet-agent for the launch.
+          - image: router
+            repo: hivenet-router
+            dockerfile: Dockerfile
+          - image: agent
+            repo: hivenet-agent
+            dockerfile: Dockerfile.agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the OVH registry
+        uses: docker/login-action@v4.5.2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.OVH_REGISTRY_USERNAME }}
+          password: ${{ secrets.OVH_REGISTRY_PASSWORD }}
+
+      # Produces a moving :nightly tag plus an immutable :nightly-<shortsha> tag.
+      # The moving tag is gated on the default branch so a workflow_dispatch run
+      # against an unmerged ref publishes only its immutable sha tag.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}
+          tags: |
+            type=raw,value=nightly,enable={{is_default_branch}}
+            type=sha,prefix=nightly-,format=short
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: true  # embed SLSA build provenance in the image
+          sbom: true        # embed a software bill of materials in the image
+
+      # Fail the run (alerting us) if the freshly pushed image has fixable
+      # CRITICAL/HIGH CVEs. The image is already pushed, so treat a failure as
+      # a signal to patch and re-merge, not a publish rollback.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # Records a signed, verifiable link between this image digest and the
+      # exact workflow run + commit that built it (verify with `gh attestation`).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: false

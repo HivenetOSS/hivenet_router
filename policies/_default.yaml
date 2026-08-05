@@ -1,0 +1,40 @@
+routing_policy:
+
+  # ── Layer 1: static pool narrowing ────────────────────────────────────────
+  # Only vLLM agents in EU-France tagged "production" are candidates.
+  match:
+    region: "EU-France"
+    engine: "vllm"
+    tags: ["production"]
+
+  # ── Layer 2: dynamic safety gates ─────────────────────────────────────────
+  exclude_if:
+    kv_cache_utilization: { gt: 0.85 }
+    waiting_requests:     { gt: 20 }
+    capacity_utilization: { gt: 0.90 }
+    success_rate:         { lt: 0.95 }
+    gpu_temperature_c:    { gt: 80 }
+    consecutive_failures: { gte: 3 }
+
+  # ── Layer 3: ranking ───────────────────────────────────────────────────────
+  strategy: "least-loaded"
+  max_tries: 3
+
+
+fallback_chain:
+
+  - name: "eu-west"
+    match:
+      region: "EU-West"
+      engine: "vllm"
+    exclude_if:
+      kv_cache_utilization: { gt: 0.92 }
+      success_rate:         { lt: 0.90 }
+      consecutive_failures: { gte: 3 }
+    strategy: "least-loaded"
+    max_tries: 2
+
+  - name: "global-any"
+    match: {}
+    strategy: "least-loaded"
+    max_tries: 1
