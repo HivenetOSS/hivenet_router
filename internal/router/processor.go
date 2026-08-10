@@ -633,6 +633,13 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		deferCancel = false
 		pr, pw := io.Pipe()
 		meter := NewSSETokenMeter()
+		// Grow the occupancy reservation as undeclared output streams so the
+		// budget reflects live footprint (a no-op for a declared request, which
+		// reserved its max_tokens up front). Runs before pw.Close(), so all
+		// growth lands before the handler releases the reservation.
+		if pending.Reservation != nil {
+			meter.SetContentObserver(NewGrowthObserver(pending.Reservation))
+		}
 		go func() {
 			defer cancel()
 			defer pw.Close()

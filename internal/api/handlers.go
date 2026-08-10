@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"hivenet_router/internal/admission"
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
@@ -223,6 +224,11 @@ type Handlers struct {
 	// handler on /admin/registration-stream consumes. Nil-safe: the handler
 	// returns 501 when no feed is wired (e.g. tests).
 	registrationFeed RegistrationFeed
+
+	// admission enforces the per-model KV-occupancy admit budget before a request
+	// is queued. Nil disables the gate (e.g. tests, or when no policy declares a
+	// budget). Reservations it hands out are released on every request exit path.
+	admission *admission.Controller
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -246,6 +252,7 @@ func NewHandlers(
 	resetMetrics func() error,
 	healthyAgentCount func(model string) int,
 	registrationFeed RegistrationFeed,
+	admissionController *admission.Controller,
 ) *Handlers {
 	return &Handlers{
 		storage:              storage,
@@ -264,6 +271,7 @@ func NewHandlers(
 		resetMetrics:         resetMetrics,
 		healthyAgentCount:    healthyAgentCount,
 		registrationFeed:     registrationFeed,
+		admission:            admissionController,
 	}
 }
 
@@ -353,6 +361,14 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.enforceRequestCaps(c, &req) {
 		return
 	}
+	// Occupancy admit budget. The reservation is released on every exit path
+	// below via this single defer — success, error, timeout, disconnect, and the
+	// daily-budget reject that may follow — so a slot is never leaked.
+	reservation, admitted := h.enforceOccupancyBudget(c, &req)
+	if !admitted {
+		return
+	}
+	defer reservation.Release()
 
 	m.requestID = generateRequestID()
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
@@ -379,6 +395,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
 	pending.Path = path // forward to the backend's native endpoint at this path
+	if reservation != nil {
+		pending.Reservation = reservation // processor grows it as undeclared output streams
+	}
 
 	if !h.enqueueRequest(c, pending, m.requestID, req.Model) {
 		return
@@ -484,6 +503,55 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 	return true
 }
 
+// enforceOccupancyBudget applies the KV-occupancy admit budget: the request is
+// admitted only while the model's weighted in-flight token sum plus this
+// request's footprint stays within admit_fraction × admit_budget_tokens, and the
+// in-flight request count stays within max_inflight. The footprint is the input
+// estimate plus the declared max_tokens (reserved up front); an undeclared
+// request reserves only its input and grows as output streams. Over budget, it
+// parks briefly for capacity to free, then returns 429 concurrency_limit_exceeded
+// with Retry-After.
+//
+// It returns the reservation (which the caller MUST release exactly once on every
+// exit path) and whether the request was admitted. A nil reservation with ok=true
+// means the gate is inert for this model — nothing to release, nothing rejected.
+func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (*admission.Reservation, bool) {
+	if h.admission == nil || h.executor == nil {
+		return nil, true
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil || (pol.AdmitBudgetTokens <= 0 && pol.MaxInflight <= 0) {
+		return nil, true // no budget and no backstop declared — gate inert
+	}
+	declared := req.MaxCompletionTokens
+	if declared == 0 {
+		declared = req.MaxTokens
+	}
+	// Declared output is reserved up front; an undeclared request reserves only
+	// its input and grows live (grows=true), matching how the processor meters it.
+	footprint := estimatePromptTokens(req) + declared
+	res := h.admission.Admit(c.Request.Context(), req.Model, footprint, declared == 0, pol.AdmitBudgetTokens, pol.MaxInflight)
+	if res == nil {
+		c.Header("Retry-After", "1")
+		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
+			"server at capacity for this model, please retry", domain.SourceRouter)
+		return nil, false
+	}
+	return res, true
+}
+
+// estimatePromptTokens returns the input-token estimate used by both admission
+// gates: the text estimate, floored at a per-message overhead so a multimodal or
+// tool-only message (no estimable text) is still counted rather than measured as
+// zero.
+func estimatePromptTokens(req *domain.ChatRequest) int {
+	promptTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
+	if floor := len(req.Messages) * perMessageTokenOverhead; promptTokens < floor {
+		promptTokens = floor
+	}
+	return promptTokens
+}
+
 // effectiveAllowedModels returns the set of models the calling API key may use.
 // The set is derived in this precedence order:
 //
@@ -574,15 +642,10 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	if h.limiter == nil || m.tpd <= 0 {
 		return true
 	}
-	promptTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
-	// EstimateTokens only sees text content. A multimodal or tool-only message
-	// (e.g. an image with no text) yields an empty slice and estimates to 0, which
-	// would skip this whole check — including the worst-case max_tokens gate — and
-	// let the request bypass the budget. Floor at a per-message overhead so any
-	// non-empty conversation is always charged and always passes through the gate.
-	if floor := len(req.Messages) * perMessageTokenOverhead; promptTokens < floor {
-		promptTokens = floor
-	}
+	// EstimateTokens only sees text content; estimatePromptTokens floors a
+	// multimodal or tool-only message at a per-message overhead so it is charged
+	// (and passes through this gate) rather than bypassing it with a 0 estimate.
+	promptTokens := estimatePromptTokens(req)
 	if promptTokens == 0 {
 		return true // genuinely empty body — nothing to budget
 	}

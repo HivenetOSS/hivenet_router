@@ -25,6 +25,7 @@ const (
 	ErrCodeRateLimitExceeded     ErrorCode = "rate_limit_exceeded"
 	ErrCodeTokenLimitExceeded    ErrorCode = "token_limit_exceeded"
 	ErrCodeInputTooLong          ErrorCode = "input_too_long"
+	ErrCodeConcurrencyLimit      ErrorCode = "concurrency_limit_exceeded"
 )
 
 // ErrorSource identifies which layer produced the error.
@@ -87,7 +88,7 @@ func HTTPStatusFor(code ErrorCode) int {
 		return http.StatusBadGateway
 	case ErrCodeRequestTimeout:
 		return http.StatusGatewayTimeout
-	case ErrCodeRateLimitExceeded, ErrCodeTokenLimitExceeded:
+	case ErrCodeRateLimitExceeded, ErrCodeTokenLimitExceeded, ErrCodeConcurrencyLimit:
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError

@@ -79,6 +79,19 @@ type Config struct {
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
 	QueueDepth int
 
+	// AdmitFraction scales a model's KV token capacity into the occupancy admit
+	// budget: a request is admitted only while the weighted in-flight token sum
+	// stays within AdmitFraction × admit_budget_tokens. Below 1.0 it leaves head-
+	// room for token-estimate error; the default is deliberately conservative
+	// until the estimator improves. Range (0,1]; values outside are clamped to 1.
+	// Env: HIVENET_ROUTER_ADMIT_FRACTION
+	AdmitFraction float64
+
+	// AdmitParkTimeout bounds how long an over-budget request waits for occupancy
+	// to free before it is rejected with 429. 0 rejects immediately.
+	// Env: HIVENET_ROUTER_ADMIT_PARK_TIMEOUT (a Go duration, e.g. "250ms").
+	AdmitParkTimeout time.Duration
+
 	// Auth configuration file path.
 	// Path to auth.yaml; if empty both /v1/* and /admin/* default to mode: none.
 	// Env: HIVENET_ROUTER_AUTH_CONFIG
@@ -138,6 +151,8 @@ func DefaultConfig() *Config {
 		MaxTriesPerStep:        3,
 		QueueDepth:             30,
 		MaxRequestBytes:        10 << 20, // 10 MB
+		AdmitFraction:          0.85,     // conservative until the token estimator improves
+		AdmitParkTimeout:       250 * time.Millisecond,
 	}
 }
 
@@ -190,6 +205,16 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_QUEUE_DEPTH"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.QueueDepth = n
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMIT_FRACTION"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
+			cfg.AdmitFraction = f
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMIT_PARK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.AdmitParkTimeout = d
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_SESSION_TTL"); v != "" {

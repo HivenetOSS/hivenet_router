@@ -71,6 +71,23 @@ type PendingRequest struct {
 	// are guaranteed visible. Zero for non-streaming responses (audit uses resp.Usage).
 	StreamedPromptTokens     atomic.Int64
 	StreamedCompletionTokens atomic.Int64
+
+	// Reservation is the occupancy-budget reservation this request holds, or nil
+	// when the budget gate is inert for its model. The processor grows it as
+	// undeclared output streams; the handler releases it exactly once when the
+	// request finishes. Set by the handler before enqueue.
+	Reservation Reservation
+}
+
+// Reservation is the occupancy-budget slot a request holds for its lifetime.
+// The concrete implementation lives in internal/admission; this interface keeps
+// domain free of that dependency. All methods are safe on a nil receiver.
+type Reservation interface {
+	// Grow adds streamed output tokens for an undeclared request (a no-op for a
+	// declared one, so it may be called unconditionally per output chunk).
+	Grow(tokens int)
+	// Release returns the reservation to the budget; idempotent.
+	Release()
 }
 
 // NewPendingRequest creates a new pending request

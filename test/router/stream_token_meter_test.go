@@ -72,6 +72,60 @@ func TestMeter_PrefersExactUsage(t *testing.T) {
 	}
 }
 
+// TestMeter_ContentObserverFiresPerChunk verifies the growth hook: the content
+// observer is invoked with each delta as it is parsed, so the occupancy budget
+// can grow an undeclared request live rather than only at end-of-stream.
+func TestMeter_ContentObserverFiresPerChunk(t *testing.T) {
+	m := router.NewSSETokenMeter()
+	var deltas []string
+	m.SetContentObserver(func(d string) { deltas = append(deltas, d) })
+
+	chunks := []string{
+		`data: {"choices":[{"delta":{"content":"Hello"}}]}` + "\n\n",
+		`data: {"choices":[{"delta":{"content":" there"}}]}` + "\n\n",
+		`data: {"choices":[{"delta":{}}]}` + "\n\n", // no content → no callback
+		"data: [DONE]\n\n",
+	}
+	for _, c := range chunks {
+		if _, err := m.Write([]byte(c)); err != nil {
+			t.Fatalf("Write returned error: %v", err)
+		}
+	}
+
+	want := []string{"Hello", " there"}
+	if len(deltas) != len(want) {
+		t.Fatalf("observer must fire once per content delta; got %d calls %v, want %v", len(deltas), deltas, want)
+	}
+	for i := range want {
+		if deltas[i] != want[i] {
+			t.Errorf("delta %d = %q, want %q", i, deltas[i], want[i])
+		}
+	}
+}
+
+// countingReservation records the total tokens grown, for the growth-observer test.
+type countingReservation struct{ grown int }
+
+func (c *countingReservation) Grow(tokens int) { c.grown += tokens }
+func (c *countingReservation) Release()        {}
+
+// TestGrowthObserver_ChargesFloorOfCumulativeBytes verifies growth charges
+// floor(totalBytes/4) across many small deltas, not the sum of per-chunk floors
+// (which would round each tiny delta down to zero and badly under-count).
+func TestGrowthObserver_ChargesFloorOfCumulativeBytes(t *testing.T) {
+	res := &countingReservation{}
+	obs := router.NewGrowthObserver(res)
+
+	// 100 deltas of 3 bytes each = 300 bytes. Per-chunk floor(3/4)=0 would total 0;
+	// cumulative floor(300/4)=75.
+	for i := 0; i < 100; i++ {
+		obs("abc")
+	}
+	if res.grown != 75 {
+		t.Errorf("cumulative growth must be floor(300/4)=75, got %d", res.grown)
+	}
+}
+
 // TestMeter_HandlesSplitWrites verifies that an SSE event split across multiple
 // Write calls (as happens with TCP/stream chunking) is still parsed once the
 // terminating newline arrives.
