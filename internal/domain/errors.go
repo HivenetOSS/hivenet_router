@@ -24,6 +24,7 @@ const (
 	ErrCodeRequestTimeout        ErrorCode = "request_timeout"
 	ErrCodeRateLimitExceeded     ErrorCode = "rate_limit_exceeded"
 	ErrCodeTokenLimitExceeded    ErrorCode = "token_limit_exceeded"
+	ErrCodeInputTooLong          ErrorCode = "input_too_long"
 )
 
 // ErrorSource identifies which layer produced the error.
@@ -74,7 +75,8 @@ func HTTPStatusFor(code ErrorCode) int {
 		return http.StatusUnauthorized
 	case ErrCodeModelForbidden:
 		return http.StatusForbidden
-	case ErrCodeRequestInvalid, ErrCodeContextLengthExceeded, ErrCodeInvalidParameter:
+	case ErrCodeRequestInvalid, ErrCodeContextLengthExceeded, ErrCodeInvalidParameter,
+		ErrCodeInputTooLong:
 		return http.StatusBadRequest
 	case ErrCodeModelNotFound:
 		return http.StatusNotFound

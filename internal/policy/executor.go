@@ -193,6 +193,19 @@ func (e *Executor) GetPolicy() *Policy {
 	return e.state.Load().global
 }
 
+// EffectivePolicy returns the policy that governs a given model: the named
+// per-model policy when one claims the model, otherwise the global policy.
+// The global and per-model maps come from a single atomic load, so the result
+// is always internally consistent. Mirrors the resolution NewSession uses for
+// routing, exposed for admission gates that need a model's limits up front.
+func (e *Executor) EffectivePolicy(model string) *Policy {
+	s := e.state.Load()
+	if mp, ok := s.modelPolicies[model]; ok {
+		return mp
+	}
+	return s.global
+}
+
 // SetNamedPolicy atomically adds or replaces a named policy document and
 // rebuilds the model-keyed routing index from all named policies.
 // Returns an error if any model in p.Models is already claimed by a different
