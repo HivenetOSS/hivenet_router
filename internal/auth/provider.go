@@ -51,6 +51,16 @@ type QuotaLimits struct {
 	RequestsPerMinute int
 	TokensPerDay      int
 
+	// Serverless per-key caps; zero means unset. They apply only when the
+	// request lands on a serverless policy. InputTokensPerMinute and
+	// OutputTokensPerMinute are token-per-minute buckets. MaxOccupancyShare is
+	// the fraction of a replica's admit budget the key may hold in flight at once
+	// (0 < share <= 1); it comes from the key-level max_occupancy_share field,
+	// not the quota block.
+	InputTokensPerMinute  int
+	OutputTokensPerMinute int
+	MaxOccupancyShare     float64
+
 	// PerModel, when non-nil, replaces the flat fields above. Keys are model
 	// names as they appear in request bodies. A nil map is the legacy shape;
 	// an empty non-nil map is invalid and rejected at load.

@@ -19,6 +19,59 @@ type Policy struct {
 	RoutingPolicy    PolicyStep        `yaml:"routing_policy"   json:"routing_policy"`
 	FallbackChain    []FallbackStep    `yaml:"fallback_chain"   json:"fallback_chain,omitempty"`
 	FallbackProvider *FallbackProvider `yaml:"fallback_provider" json:"fallback_provider,omitempty"`
+
+	// Mode selects which admission limits apply to this policy's replicas:
+	//   - "reserved" (default): shared circuit-breaker limits only, no per-key
+	//     caps (one client rents the whole replica).
+	//   - "serverless": the same circuit breaker plus per-key caps for the keys
+	//     that share the replica.
+	// Empty is normalised to "reserved" by Validate.
+	Mode PolicyMode `yaml:"mode" json:"mode,omitempty"`
+
+	// Admission-control limits. Zero means "unset": the corresponding gate is
+	// inert until a value is provided, so these fields change no behaviour on
+	// their own.
+	//
+	// There is deliberately no output-token limit: the router never clamps
+	// max_tokens (the engine already bounds output via max_model_len). An
+	// unenforced number here would only invite someone to wire it as a clamp.
+
+	// MaxInputTokens rejects any single request whose prompt exceeds it.
+	MaxInputTokens int `yaml:"max_input_tokens" json:"max_input_tokens,omitempty"`
+	// ImagesMax rejects any single request carrying more images than this.
+	ImagesMax int `yaml:"images_max" json:"images_max,omitempty"`
+	// AdmitBudgetTokens caps the total KV-cache tokens in flight per replica.
+	AdmitBudgetTokens int `yaml:"admit_budget_tokens" json:"admit_budget_tokens,omitempty"`
+	// MaxInflight caps the number of concurrent in-flight requests per replica.
+	MaxInflight int `yaml:"max_inflight" json:"max_inflight,omitempty"`
+	// ShedIf holds front-door shed thresholds; only kv_cache_utilization and
+	// waiting_requests are accepted (see knownShedIfFields in loader.go).
+	ShedIf map[string]ThresholdRule `yaml:"shed_if" json:"shed_if,omitempty"`
+}
+
+// PolicyMode selects the admission-limit profile for a policy's replicas.
+type PolicyMode string
+
+const (
+	// ModeReserved applies shared circuit-breaker limits only, no per-key caps.
+	// It is the default when mode is omitted.
+	ModeReserved PolicyMode = "reserved"
+	// ModeServerless adds per-key caps for keys sharing the replica.
+	ModeServerless PolicyMode = "serverless"
+)
+
+// EffectiveMode resolves the empty-string default to ModeReserved so callers
+// never have to special-case the unset value.
+func (p *Policy) EffectiveMode() PolicyMode {
+	if p.Mode == "" {
+		return ModeReserved
+	}
+	return p.Mode
+}
+
+// IsServerless reports whether per-key caps apply to this policy's replicas.
+func (p *Policy) IsServerless() bool {
+	return p.EffectiveMode() == ModeServerless
 }
 
 // FallbackProvider configures a last-resort closed-source model provider.

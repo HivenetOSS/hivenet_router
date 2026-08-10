@@ -201,6 +201,10 @@ func New(cfg *config.Config) (*Router, error) {
 	executor.SetQueueMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
+	// effectiveGlobal / namedPolicies capture the policies actually in force so
+	// the admission invariants can be checked once auth keys are known.
+	effectiveGlobal := activePolicy
+	var namedPolicies map[string]*policy.Policy
 	var dirHashes map[string][32]byte
 	if cfg.PolicyModelDir != "" {
 		snap, err := policy.LoadDirSnapshot(cfg.PolicyModelDir)
@@ -213,10 +217,12 @@ func New(cfg *config.Config) (*Router, error) {
 				log.Warnf("Both --policy-file and _default.yaml in --policy-model-dir are set; _default.yaml takes precedence")
 			}
 			executor.SetPolicy(snap.Global)
+			effectiveGlobal = snap.Global
 			log.Infof("Global policy overridden by %s/_default.yaml", cfg.PolicyModelDir)
 		}
 		if len(snap.Named) > 0 {
 			executor.SetNamedPoliciesFromSnapshot(snap.Named)
+			namedPolicies = snap.Named
 			log.Infof("Loaded %d named policies from %s", len(snap.Named), cfg.PolicyModelDir)
 		}
 		dirHashes = snap.Hashes
@@ -227,6 +233,16 @@ func New(cfg *config.Config) (*Router, error) {
 	if err != nil {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
+	}
+
+	// Admission invariants that span the policy and auth configs (e.g. a
+	// serverless key's input bucket must cover one maximum-size prompt). Neither
+	// loader can check these alone, so they run here where both configs are in
+	// hand. Re-reads auth.yaml (small, already proven parseable above) for the
+	// raw key list.
+	if err := checkAdmissionConfig(cfg, effectiveGlobal, namedPolicies); err != nil {
+		store.Close() //nolint:errcheck
+		return nil, fmt.Errorf("admission config: %w", err)
 	}
 
 	// Build the rate limiter. When QuotaBackend is "badger", pass the storage
@@ -579,6 +595,26 @@ func (r *Router) validateProviderPolicy(p *policy.Policy) error {
 	return nil
 }
 
+// checkAdmissionAgainstKeys validates proposed policies against the API keys
+// currently on disk, so a reload cannot introduce a serverless key whose input
+// bucket no longer covers a model's context. A key-read error is logged and
+// treated as "cannot validate" (nil) so an unrelated auth.yaml problem does not
+// block a policy reload — that problem surfaces on the auth reload path instead.
+func (r *Router) checkAdmissionAgainstKeys(policies []*policy.Policy) error {
+	keys, err := admissionKeysFromConfig(r.cfg)
+	if err != nil {
+		log.Warnf("SIGHUP: could not read auth keys to validate policy admission invariants (%v) — skipping that check", err)
+		return nil
+	}
+	return ValidateAdmissionInvariants(policies, keys)
+}
+
+// currentAdmissionPolicies returns the policies currently in force (global plus
+// named) for cross-config re-validation on reload.
+func (r *Router) currentAdmissionPolicies() []*policy.Policy {
+	return gatherPolicies(r.executor.GetPolicy(), r.executor.GetNamedPolicies())
+}
+
 // watchPolicyReload listens for SIGHUP and reloads the policy file and/or
 // the policy model directory from disk without restarting the router.
 // Errors are logged and the previous policy stays active.
@@ -607,6 +643,9 @@ func (r *Router) watchPolicyReload() {
 				log.Errorf("SIGHUP: policy reload failed (%v) — keeping previous policy active", err)
 				r.metrics.PolicyReload("sighup", "error")
 			} else if err := r.validateProviderPolicy(p); err != nil {
+				log.Errorf("SIGHUP: policy reload rejected (%v) — keeping previous policy active", err)
+				r.metrics.PolicyReload("sighup", "error")
+			} else if err := r.checkAdmissionAgainstKeys([]*policy.Policy{p}); err != nil {
 				log.Errorf("SIGHUP: policy reload rejected (%v) — keeping previous policy active", err)
 				r.metrics.PolicyReload("sighup", "error")
 			} else {
@@ -674,6 +713,17 @@ func (r *Router) reloadAuthProviders() {
 		log.Info("SIGHUP: admin auth provider reloaded (dynamic API key registry preserved)")
 		return
 	}
+	// Re-check the cross-config invariants against the incoming keys before
+	// swapping, so a reload cannot introduce a serverless key whose input bucket
+	// no longer covers a model's context. Keep the previous providers on failure,
+	// mirroring how any other invalid auth reload is rejected.
+	if keys, err := admissionKeysFromConfig(r.cfg); err != nil {
+		log.Errorf("SIGHUP: auth config re-read for validation failed (%v) — keeping previous providers active", err)
+		return
+	} else if err := ValidateAdmissionInvariants(r.currentAdmissionPolicies(), keys); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
 	r.apiAuth.Swap(apiProv)
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
@@ -709,6 +759,20 @@ func (r *Router) reloadPolicyModelDir() {
 	}
 	if !changed {
 		log.Debug("SIGHUP: policy model dir unchanged — skipping reload")
+		return
+	}
+
+	// Reject the whole dir reload if the proposed effective policy set would
+	// break the cross-config invariants against the current keys — keep the
+	// previous policies rather than silently cap context. proposedGlobal falls
+	// back to the current global when _default.yaml is absent from the snapshot.
+	proposedGlobal := snap.Global
+	if proposedGlobal == nil {
+		proposedGlobal = r.executor.GetPolicy()
+	}
+	if err := r.checkAdmissionAgainstKeys(gatherPolicies(proposedGlobal, snap.Named)); err != nil {
+		log.Errorf("SIGHUP: policy model dir reload rejected (%v) — keeping previous policies active", err)
+		r.metrics.PolicyReload("sighup", "error")
 		return
 	}
 

@@ -59,10 +59,15 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		if err != nil {
 			return nil, fmt.Errorf("auth: key entry %d (%q): %w", i, e.KeyPreview, err)
 		}
-		quota, err := e.Quota.Validate(fmt.Sprintf("key entry %d (%q)", i, e.KeyPreview))
+		label := fmt.Sprintf("key entry %d (%q)", i, e.KeyPreview)
+		quota, err := e.Quota.Validate(label)
 		if err != nil {
 			return nil, err
 		}
+		if err := validateOccupancyShare(label, e.MaxOccupancyShare); err != nil {
+			return nil, err
+		}
+		quota.MaxOccupancyShare = e.MaxOccupancyShare
 		keys[e.KeyHash] = keyEntry{
 			result: AuthResult{
 				TenantID:      e.Metadata.Owner,
