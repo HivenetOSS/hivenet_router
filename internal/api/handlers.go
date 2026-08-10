@@ -350,6 +350,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.authorizeModel(c, req.Model) {
 		return
 	}
+	if !h.enforceRequestCaps(c, &req) {
+		return
+	}
 
 	m.requestID = generateRequestID()
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
@@ -435,6 +438,50 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 	}
 	writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+model, domain.SourceRouter)
 	return false
+}
+
+// enforceRequestCaps applies the per-request hard caps declared by the model's
+// policy: the estimated text prompt must fit max_input_tokens and the image
+// count must fit images_max. The two caps are complementary — the token cap
+// bounds text, the image cap bounds image payloads (an image's token cost is
+// invisible to the len/4 estimator, so counting images is how they are bounded;
+// a textless image request therefore passes the token cap by design and is held
+// only by images_max). Each caps the worst single request and returns a clean
+// 400 input_too_long; aggregate load safety is a separate concern handled at
+// admission, not here.
+//
+// The governing policy is resolved per model (named override, else the global
+// policy). A cap of zero is "unset" and disables that check, so the gate is a
+// no-op when both caps are zero, or when no policy/executor is configured
+// (tests). This gate never inspects or clamps max_tokens: the router applies no
+// output limit anywhere.
+func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) bool {
+	if h.executor == nil {
+		return true
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil {
+		return true
+	}
+	if pol.MaxInputTokens > 0 {
+		inputTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
+		if inputTokens > pol.MaxInputTokens {
+			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
+				fmt.Sprintf("input is %d tokens, over the model limit of %d", inputTokens, pol.MaxInputTokens),
+				domain.SourceRouter)
+			return false
+		}
+	}
+	if pol.ImagesMax > 0 {
+		images := domain.CountImages(req.Messages)
+		if images > pol.ImagesMax {
+			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
+				fmt.Sprintf("request carries %d images, over the model limit of %d", images, pol.ImagesMax),
+				domain.SourceRouter)
+			return false
+		}
+	}
+	return true
 }
 
 // effectiveAllowedModels returns the set of models the calling API key may use.

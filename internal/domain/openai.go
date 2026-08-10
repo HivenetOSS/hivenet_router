@@ -199,6 +199,23 @@ func GetMessageSlice(messages []ChatCompletionMessage) []string {
 	return result
 }
 
+// CountImages returns the number of image_url content parts across all messages.
+// Text-only messages (Content is a plain string) carry no images and contribute
+// zero. Used by the per-request image cap; audio and text parts are ignored.
+func CountImages(messages []ChatCompletionMessage) int {
+	count := 0
+	for _, message := range messages {
+		if parts, ok := message.Content.([]ContentPart); ok {
+			for _, part := range parts {
+				if part.Type == "image_url" {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
 func GetMessageTextContent(message ChatCompletionMessage) string {
 	var result string
 	switch content := message.Content.(type) {
