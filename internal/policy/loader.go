@@ -42,6 +42,15 @@ var knownExcludeIfFields = map[string]struct{}{
 	"cpu_usage_percent":     {},
 }
 
+// knownShedIfFields is the set of metrics accepted in a policy's shed_if block.
+// It is intentionally narrower than knownExcludeIfFields: front-door shedding
+// only makes sense on signals that read "the box is full now". A typo would
+// silently disable the shed gate, so unknown names are rejected at load.
+var knownShedIfFields = map[string]struct{}{
+	"kv_cache_utilization": {},
+	"waiting_requests":     {},
+}
+
 // knownStrategies is the set of strategy names that are currently implemented.
 // Add entries here as new strategies are written (see strategy.go).
 var knownStrategies = map[string]struct{}{
@@ -94,8 +103,13 @@ func LoadBytes(data []byte) (*Policy, error) {
 	return &p, nil
 }
 
-// Validate checks all policy steps for correctness and returns the first error found.
+// Validate checks all policy steps for correctness and returns the first error
+// found. It also normalises and validates the admission-control fields (mode,
+// per-request caps, shed_if), mutating p to fill in the mode default.
 func Validate(p *Policy) error {
+	if err := validateAdmissionGates(p); err != nil {
+		return err
+	}
 	if err := validateStep("routing_policy", p.RoutingPolicy); err != nil {
 		return err
 	}
@@ -280,11 +294,45 @@ func LoadDirSnapshot(dir string) (*DirSnapshot, error) {
 	return snap, nil
 }
 
-func validateThreshold(stepName, field string, rule ThresholdRule) error {
-	if _, ok := knownExcludeIfFields[field]; !ok {
-		return fmt.Errorf("policy: step %q: exclude_if.%s: unknown field — see ROUTING_POLICY.md for supported fields",
-			stepName, field)
+// validateAdmissionGates normalises the mode default and validates the
+// admission-control fields. It rejects an unknown mode, negative caps, and any
+// unknown or ill-formed shed_if entry. All caps are optional (zero = unset), so
+// a routing-only policy that sets none of them passes unchanged.
+func validateAdmissionGates(p *Policy) error {
+	if p.Mode == "" {
+		p.Mode = ModeReserved
 	}
+	if p.Mode != ModeReserved && p.Mode != ModeServerless {
+		return fmt.Errorf("policy: unknown mode %q — supported: reserved, serverless", p.Mode)
+	}
+	nonNeg := []struct {
+		name string
+		val  int
+	}{
+		{"max_input_tokens", p.MaxInputTokens},
+		{"images_max", p.ImagesMax},
+		{"admit_budget_tokens", p.AdmitBudgetTokens},
+		{"max_inflight", p.MaxInflight},
+	}
+	for _, f := range nonNeg {
+		if f.val < 0 {
+			return fmt.Errorf("policy: %s must be >= 0, got %d", f.name, f.val)
+		}
+	}
+	for field, rule := range p.ShedIf {
+		if _, ok := knownShedIfFields[field]; !ok {
+			return fmt.Errorf("policy: shed_if.%s: unknown field — supported: kv_cache_utilization, waiting_requests", field)
+		}
+		if n := operatorCount(rule); n != 1 {
+			return fmt.Errorf("policy: shed_if.%s: must specify exactly one operator (gt, lt, gte, lte), got %d", field, n)
+		}
+	}
+	return nil
+}
+
+// operatorCount returns how many of the four comparison operators are set on a
+// ThresholdRule. Exactly one is required.
+func operatorCount(rule ThresholdRule) int {
 	count := 0
 	if rule.GT != nil {
 		count++
@@ -298,6 +346,15 @@ func validateThreshold(stepName, field string, rule ThresholdRule) error {
 	if rule.LTE != nil {
 		count++
 	}
+	return count
+}
+
+func validateThreshold(stepName, field string, rule ThresholdRule) error {
+	if _, ok := knownExcludeIfFields[field]; !ok {
+		return fmt.Errorf("policy: step %q: exclude_if.%s: unknown field — see ROUTING_POLICY.md for supported fields",
+			stepName, field)
+	}
+	count := operatorCount(rule)
 	if count == 0 {
 		return fmt.Errorf("policy: step %q: exclude_if.%s: must specify exactly one operator (gt, lt, gte, lte)",
 			stepName, field)

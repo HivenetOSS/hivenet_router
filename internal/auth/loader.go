@@ -39,24 +39,40 @@ type PerModelQuotaConfig struct {
 //     AND tokens_per_day (partial entries are rejected at load — "forgot a
 //     field" must never silently mean "unlimited").
 type QuotaConfig struct {
-	RequestsPerMinute int                             `yaml:"requests_per_minute,omitempty" json:"requests_per_minute,omitempty"`
-	TokensPerDay      int                             `yaml:"tokens_per_day,omitempty"      json:"tokens_per_day,omitempty"`
-	PerModel          map[string]*PerModelQuotaConfig `yaml:"per_model,omitempty"           json:"per_model,omitempty"`
+	RequestsPerMinute int `yaml:"requests_per_minute,omitempty" json:"requests_per_minute,omitempty"`
+	TokensPerDay      int `yaml:"tokens_per_day,omitempty"      json:"tokens_per_day,omitempty"`
+
+	// Per-key input/output token-per-minute buckets. Like RequestsPerMinute and
+	// TokensPerDay they are flat-shape fields and may not be combined with
+	// per_model. Zero means unset. A key's input bucket must be able to hold one
+	// maximum-size prompt (see ValidateITPMCoversMaxInput) or it silently caps
+	// the usable context.
+	InputTokensPerMinute  int `yaml:"input_tokens_per_minute,omitempty"  json:"input_tokens_per_minute,omitempty"`
+	OutputTokensPerMinute int `yaml:"output_tokens_per_minute,omitempty" json:"output_tokens_per_minute,omitempty"`
+
+	PerModel map[string]*PerModelQuotaConfig `yaml:"per_model,omitempty" json:"per_model,omitempty"`
 }
 
 // Validate checks the quota block for shape consistency and converts it into
 // the runtime QuotaLimits. label is included in error messages so the operator
 // can locate the offending key.
 func (q QuotaConfig) Validate(label string) (QuotaLimits, error) {
+	if q.InputTokensPerMinute < 0 || q.OutputTokensPerMinute < 0 {
+		return QuotaLimits{}, fmt.Errorf(
+			"auth: %s: input_tokens_per_minute and output_tokens_per_minute must be >= 0", label)
+	}
 	if q.PerModel == nil {
 		return QuotaLimits{
-			RequestsPerMinute: q.RequestsPerMinute,
-			TokensPerDay:      q.TokensPerDay,
+			RequestsPerMinute:     q.RequestsPerMinute,
+			TokensPerDay:          q.TokensPerDay,
+			InputTokensPerMinute:  q.InputTokensPerMinute,
+			OutputTokensPerMinute: q.OutputTokensPerMinute,
 		}, nil
 	}
-	if q.RequestsPerMinute != 0 || q.TokensPerDay != 0 {
+	if q.RequestsPerMinute != 0 || q.TokensPerDay != 0 ||
+		q.InputTokensPerMinute != 0 || q.OutputTokensPerMinute != 0 {
 		return QuotaLimits{}, fmt.Errorf(
-			"auth: %s: quota.per_model is set together with the legacy flat fields (requests_per_minute / tokens_per_day) — use one shape, not both",
+			"auth: %s: quota.per_model is set together with the flat fields (requests_per_minute / tokens_per_day / input_tokens_per_minute / output_tokens_per_minute) — use one shape, not both",
 			label)
 	}
 	if len(q.PerModel) == 0 {
@@ -155,6 +171,37 @@ type APIKeyEntry struct {
 
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
+
+	// MaxOccupancyShare is the fraction of a serverless replica's admit budget
+	// this key may hold in flight at once. Valid range (0, 1]; 0 means unset. It
+	// sits at the key level, not in quota, because it is measured against the
+	// replica's admit_budget_tokens rather than a per-minute rate. Ignored on
+	// reserved replicas.
+	MaxOccupancyShare float64 `yaml:"max_occupancy_share,omitempty"`
+}
+
+// validateOccupancyShare bounds a key's max_occupancy_share to (0, 1]; 0 is
+// accepted as "unset". A share above 1 would let one key reserve more than the
+// whole replica, defeating the fairness the cap exists to provide.
+func validateOccupancyShare(label string, share float64) error {
+	if share < 0 || share > 1 {
+		return fmt.Errorf("auth: %s: max_occupancy_share must be in (0, 1] (0 means unset), got %v", label, share)
+	}
+	return nil
+}
+
+// ValidateITPMCoversMaxInput checks that a serverless key's input token bucket
+// can hold at least one maximum-size prompt. Input tokens are reserved up front,
+// so a bucket below max_input_tokens would silently cap the usable context. A
+// zero bucket (unset) or zero maxInputTokens is skipped. The check spans the
+// policy and key configs, so the caller runs it once both are loaded.
+func ValidateITPMCoversMaxInput(label string, inputTokensPerMinute, maxInputTokens int) error {
+	if inputTokensPerMinute > 0 && maxInputTokens > 0 && inputTokensPerMinute < maxInputTokens {
+		return fmt.Errorf(
+			"auth: %s: input_tokens_per_minute (%d) is below the policy max_input_tokens (%d) — the bucket cannot hold one maximum-size prompt and would silently cap context",
+			label, inputTokensPerMinute, maxInputTokens)
+	}
+	return nil
 }
 
 // AuthSectionConfig configures the /v1/* auth provider.
