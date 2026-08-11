@@ -1,761 +1,1019 @@
 ---
-title: "Admin Endpoints"
+title: "Admin endpoints"
+description: "Inspect router health, models, routing state, storage, policies, metrics, and dynamic API keys through protected operator endpoints."
+sidebarTitle: "Admin endpoints"
 ---
 
-Administrative APIs for monitoring and configuration.
+Use Mycoroute’s administration API to inspect and change operational state.
 
-## Authentication
+The admin API includes endpoints for:
 
-Admin endpoints use Bearer token authentication. Set one or more admin keys (comma-separated) in the `mycoroute_ADMIN_API_KEYS` environment variable before starting the router, and enable admin auth in `auth.yaml`:
+- router and agent health
+- model discovery without tenant filtering
+- detailed routing state
+- persistent and in-memory storage inspection
+- policy reload and runtime replacement
+- Prometheus metrics
+- dynamic API-key management
 
-```yaml
-# auth.yaml
-admin:
-  mode: "api-key"
-  # Keys come from mycoroute_ADMIN_API_KEYS env var
+<Warning>
+  Treat `/admin/*` as a privileged control-plane surface.
+
+  Administrative endpoints can expose tenant identifiers, model access, quotas, agent metadata, infrastructure labels, routing state, and operational history. Some endpoints can change policy or API-key state immediately.
+</Warning>
+
+## Base URL
+
+The admin API uses the router’s main HTTP port.
+
+```text
+http://<router-host>:8080/admin
 ```
 
-```bash
-export mycoroute_ADMIN_API_KEYS="your-admin-key"
+The Docker Compose stack maps the router API to host port `8888`:
 
-curl -H "Authorization: Bearer your-admin-key" http://localhost:8080/admin/health
+```text
+http://<router-host>:8888/admin
 ```
 
-If `admin.mode` is `none` (the default when no `auth.yaml` is configured), admin endpoints are publicly accessible — restrict network access in production.
+Examples on this page use:
 
-> **Dynamic mode is an exception.** When `mycoroute_AUTH_MODE=dynamic`, the router auto-elevates `admin.mode` to `api-key` regardless of `auth.yaml`, and requires `mycoroute_ADMIN_API_KEYS` to be set. Startup fails if it isn't. This guarantees the [API Key Management](#api-key-management) endpoints below are never reachable unauthenticated in dynamic deployments.
-
-## Health Endpoints
-
-### Minimal Health Check
-
+```text
+http://localhost:8080
 ```
+
+## Public health endpoint
+
+The router also exposes a public liveness endpoint outside `/admin`:
+
+```text
 GET /health
 ```
 
-Public endpoint for load balancers.
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
 
 ```json
-{"status":"ok"}
+{
+  "status": "ok"
+}
 ```
 
-### Full Health Status
+This endpoint is intentionally unauthenticated and only confirms that the HTTP process is running.
 
+It does not report:
+
+- agent count
+- model availability
+- queue state
+- backend health
+- storage health
+- routing readiness
+
+Use `GET /admin/health` for an operational view.
+
+## Admin authentication
+
+Administrator authentication is configured separately from client inference authentication.
+
+| Admin mode | Behavior |
+| --- | --- |
+| `none` | No admin credential is checked; requires the explicit insecure startup override |
+| `api-key` | Requires a raw key from `mycoroute_ADMIN_API_KEYS` |
+
+A protected request uses:
+
+```http
+Authorization: Bearer <admin-api-key>
 ```
+
+For example:
+
+```bash
+curl http://localhost:8080/admin/health \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+### Secure-by-default startup
+
+The router refuses to start when administrator mode is `none` unless you explicitly set:
+
+```bash
+export mycoroute_ALLOW_INSECURE_ADMIN=true
+```
+
+Use that override only for isolated local development or testing.
+
+A protected administrator configuration resembles:
+
+```yaml
+api:
+  mode: api-key
+  keys:
+    - key_hash: "<client-key-sha256>"
+      metadata:
+        owner: "client-tenant"
+
+admin:
+  mode: api-key
+```
+
+Set the administrator key separately:
+
+```bash
+export mycoroute_ADMIN_API_KEYS="<raw-admin-key>"
+```
+
+<Warning>
+  Client API keys do not automatically grant administrator access.
+
+  Administrator keys do not grant client inference access unless the same raw value is also configured separately as a client key.
+</Warning>
+
+See [Authentication overview](/security/authentication-overview) for the complete trust-boundary model.
+
+## HTTP semantics
+
+### Content type
+
+Send JSON mutations with:
+
+```http
+Content-Type: application/json
+```
+
+### Request IDs
+
+Admin responses do not currently use the same request-ID and tracing middleware as the client inference endpoints.
+
+Do not depend on `X-Request-ID` or `traceparent` being present on every `/admin/*` response.
+
+### Admin request-body limits
+
+Administrator JSON mutations use endpoint-specific limits that are separate from `mycoroute_MAX_REQUEST_BYTES`:
+
+| Operation | Maximum body size |
+| --- | --: |
+| Policy update | 1 MiB |
+| Create or update one dynamic key | 1 MiB |
+| Replace the complete dynamic-key registry | 16 MiB |
+
+Requests above these limits currently return HTTP `400` with a simple error body from the administration handler. They do not use the `/v1/*` structured Mycoroute error envelope, and raising `mycoroute_MAX_REQUEST_BYTES` does not change these limits.
+
+### Errors
+
+Most admin handlers use plain JSON or plain HTTP error text rather than the structured inference error envelope.
+
+Check both:
+
+- HTTP status
+- response body
+
+when automating the API.
+
+## Endpoint summary
+
+### Health and state
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/admin/health` | Operational router and agent health |
+| `GET` | `/admin/models` | Complete model catalog |
+| `GET` | `/admin/models/{model}` | Complete detail for one model |
+| `GET` | `/admin/routing-table` | Detailed agent and routing state |
+| `GET` | `/admin/in-memory-db` | Current in-memory key/value state |
+| `GET` | `/admin/disk-db` | Persistent key/value state |
+| `GET` | `/admin/disk-db/{key}` | One persistent record |
+| `GET` | `/admin/disk-db-stats` | Persistent-store counts and size |
+| `GET` | `/admin/metrics` | Redirect to Prometheus metrics server |
+
+### Policy management
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/admin/policy` | Current policy and source files |
+| `PUT` | `/admin/policy` | Replace the in-memory policy from JSON |
+| `POST` | `/admin/policy/reload` | Reload policy files from disk |
+
+### Dynamic API keys
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/admin/api-keys` | List metadata for dynamic key entries |
+| `GET` | `/admin/api-keys/version` | Read the registry version |
+| `PUT` | `/admin/api-keys/{id}` | Create or update one key |
+| `DELETE` | `/admin/api-keys/{id}` | Delete one key |
+| `POST` | `/admin/api-keys/replace` | Replace the complete registry |
+
+Dynamic key endpoints are available only when client authentication mode is:
+
+```text
+dynamic
+```
+
+## Operational health
+
+```text
 GET /admin/health
 ```
+
+```bash
+curl http://localhost:8080/admin/health \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+A healthy response resembles:
 
 ```json
 {
   "status": "healthy",
-  "timestamp": 1776870993,
-  "total_agents": 7,
-  "healthy_agents": 7,
+  "total_agents": 2,
+  "healthy_agents": 2,
   "queue_length": 0,
+  "timestamp": 1760000000,
   "agents": [
     {
-      "peer_id": "12D3KooWC2F9LUYFW6cACN2GNPXJwjhE69hMjNbBSSm3wRh715J3",
-      "model": "openai/gpt-oss-20b",
+      "peer_id": "12D3KooW...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
       "engine": "vllm",
-      "region": "EU",
-      "capacity": 20,
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Primary",
       "is_healthy": true,
-      "last_seen": 1776870991,
-      "version": "13e0ea7a8298b9b5ec37a826e1b21a99b702d513"
+      "last_seen": 1760000000
     }
   ]
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `status` | `"healthy"` if all agents healthy, `"degraded"` otherwise |
-| `total_agents` | Total registered agents |
-| `healthy_agents` | Agents currently healthy |
-| `queue_length` | Pending requests in the wait queue |
-| `agents[].model` | Model served by this agent |
-| `agents[].is_healthy` | Whether the agent is healthy |
-| `agents[].last_seen` | Unix timestamp of last heartbeat |
-| `agents[].version` | Router git commit the agent connected on |
+Possible top-level states include:
 
-## Routing Table
+| Status | Meaning |
+| --- | --- |
+| `healthy` | At least one agent is registered and every registered agent is healthy |
+| `degraded` | No agents are registered, or some registered agents are unhealthy |
 
-### Get Routing Table
+The endpoint reports a broad router-wide summary. It does not prove that one particular model is routable.
 
-```
-GET /admin/routing-table
-```
+`queue_length` is the length of the router’s global pending-request channel. It is not the per-model capacity wait queue and does not include requests already forwarded to agents.
 
-Returns full agent state including metrics, hardware, and engine data. Response is an array of agents with `total` count.
+For model readiness, combine:
 
-```json
-{
-  "total": 2,
-  "agents": [
-    {
-      "peer_id": "12D3KooWC2F9LUYFW6cACN2GNPXJwjhE69hMjNbBSSm3wRh715J3",
-      "metadata": {
-        "model": "openai/gpt-oss-20b",
-        "engine": "vllm",
-        "region": "EU",
-        "organization": "Mycoroute",
-        "machine": "GPT-OSS-20B",
-        "capacity": 20,
-        "tags": ["production"],
-        "capability": "llm",
-        "llm_pretty_name": "Balanced · GPT OSS 20B",
-        "llm_info": "Good balance between speed and quality."
-      },
-      "status": {
-        "healthy": true,
-        "backend_healthy": true,
-        "active_requests": 0,
-        "capacity_utilization": 0,
-        "last_seen": "2026-04-22T15:16:46.505518138Z"
-      },
-      "universal": {
-        "successful_requests_total": 3649,
-        "failed_requests_total": 8,
-        "success_rate": 0.9978,
-        "input_tokens_total": 1329627,
-        "output_tokens_total": 3408307,
-        "rejected_requests_total": 0,
-        "disconnections_total": 14,
-        "agent_failures_total": 14,
-        "backend_failures_total": 1,
-        "srtt_ms": 804.01,
-        "rttvar_ms": 1499.05,
-        "latency_state": "KNOWN"
-      },
-      "engine": {
-        "kv_cache_utilization": 0,
-        "running_requests": 0,
-        "waiting_requests": 0,
-        "preemptions_total": 0,
-        "avg_ttft_seconds": 0.106,
-        "p90_ttft_seconds": 0.232,
-        "avg_itl_seconds": 0.0059,
-        "p90_itl_seconds": 0.0094
-      },
-      "hardware": {
-        "gpu": [
-          {
-            "index": 0,
-            "util_percent": 0,
-            "vram_used_bytes": 24251727872,
-            "vram_free_bytes": 1505492992,
-            "vram_total_bytes": 25757220864,
-            "temperature_c": 23,
-            "power_watts": 10.447
-          }
-        ],
-        "cpu": {
-          "usage_percent": 2.3
-        },
-        "memory": {
-          "used_percent": 7.28,
-          "available_bytes": 92613185536,
-          "total_bytes": 101247455232
-        },
-        "timestamp": "2026-04-22T15:16:46Z"
-      }
-    }
-  ]
-}
-```
+- `/admin/health`
+- `/admin/models/{model}`
+- `/admin/routing-table`
+- active routing policies
 
-**Notes:**
-- `engine` object is only present for vLLM and SGLang agents (not Ollama, Infinity, or Custom)
-- `hardware.gpu` is an array — multi-GPU agents have multiple entries
-- `universal.latency_state` is `"KNOWN"` once enough RTT samples exist, `"COLD"` initially
-- `status.last_seen` is an ISO 8601 string; `agents[].last_seen` in `/admin/health` is a Unix timestamp
+## Complete model catalog
 
-### Examples
-
-```bash
-# Get routing table
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/routing-table
-
-# Find agents with high KV cache
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | select(.engine.kv_cache_utilization > 0.8) | .peer_id'
-
-# List all models and their SRTT
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {model: .metadata.model, srtt_ms: .universal.srtt_ms}'
-```
-
-## Models (Operator View)
-
-Mirrors [`/v1/models`](/api/models-list) and `/v1/models/:model` but **bypasses the per-key allow-set filter** — operators always see every model registered in the cluster, regardless of which API key (admin or otherwise) the per-tenant filtering would apply to. Use this for dashboards, support tooling, and capacity-planning workflows where you need ground truth.
-
-### List All Models
-
-```
+```text
 GET /admin/models
-```
-
-Returns the same JSON shape as `GET /v1/models` (`{"object": "list", "data": [...]}`) with **no filter applied** — even models that no tenant has a quota for (newly deployed, hidden, etc.) appear.
-
-### Get Model Detail
-
-```
 GET /admin/models/{model}
 ```
 
-Returns the same JSON shape as `GET /v1/models/:model` including the per-agent `agents.list` breakdown. Returns `404` only if no agent is registered for the model — never because of per-key filtering.
+These endpoints use the same response shape as:
 
-### Examples
+```text
+GET /v1/models
+GET /v1/models/{model}
+```
+
+but do not apply tenant model filtering.
+
+List every registered model:
 
 ```bash
-# Full model catalog
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/models | jq '.data[].id'
-
-# Hidden models (not exposed in /v1/models for any tenant)
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/models \
-  | jq '.data[] | select(.hide_llm == true)'
-
-# Detail for a single model
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  "http://localhost:8080/admin/models/Qwen/Qwen3.6-27B-A3B"
+curl http://localhost:8080/admin/models \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
 ```
 
-### When to use which
+Read one model:
 
-| Endpoint | Auth | View |
-|---|---|---|
-| `GET /v1/models` | tenant API key | filtered by `quota.per_model` keys or `models:` allow-list; full catalog only if neither is set |
-| `GET /admin/models` | admin key | **always** full catalog |
-
-## Storage Stats
-
-### Get BadgerDB Stats
-
-```
-GET /admin/storage
+```bash
+curl \
+  "http://localhost:8080/admin/models/openai/gpt-oss-20b" \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
 ```
 
-```json
-{
-  "mem_db": {
-    "metadata_count": 7,
-    "univ_punctual_count": 7,
-    "eng_punctual_count": 5,
-    "hardware_snapshot_count": 7
-  },
-  "disk_db": {
-    "univ_history_count": 10,
-    "lsm_size_bytes": 1528,
-    "vlog_size_bytes": 2147483666,
-    "entry_ttl_days": 30
-  },
-  "gc_interval": "5s",
-  "last_gc_at": "2026-04-22T15:16:57Z"
-}
-```
+Use the public `/v1/models` endpoints to confirm what a specific client API key can see.
 
-| Field | Description |
-|-------|-------------|
-| `mem_db.metadata_count` | Agents with metadata in memDB |
-| `mem_db.univ_punctual_count` | Agents with live universal counters |
-| `mem_db.eng_punctual_count` | Agents with live engine metrics |
-| `mem_db.hardware_snapshot_count` | Agents with live hardware snapshots |
-| `disk_db.univ_history_count` | Agent lifetime history records in diskDB |
-| `disk_db.lsm_size_bytes` | BadgerDB LSM tree size |
-| `disk_db.vlog_size_bytes` | BadgerDB value log size |
-| `disk_db.entry_ttl_days` | TTL for diskDB entries (0 = no expiry) |
-| `gc_interval` | How often BadgerDB GC runs |
-| `last_gc_at` | Timestamp of last GC run |
+See [Models](/api/models) for the complete response reference.
 
-## Metrics
+## Routing table
 
-### Reset Per-Agent Lifetime Counters
-
-```
-POST /admin/metrics/reset
-```
-
-Clears all **persisted lifetime per-agent counters** so dashboards reflect behaviour *since the reset* instead of historical totals. This affects, in one call:
-
-- the on-disk `universalHistory:` records in BadgerDB (`disk_db.univ_history_count` → 0),
-- the in-memory counter state, and
-- the matching Prometheus series (`mycoroute_agent_requests_success_total`, `..._failed_total`, `mycoroute_agent_success_rate`, `..._disconnections_total`, `mycoroute_agent_connection_resets_total`, `mycoroute_agent_srtt_ms`, input/output tokens, etc.).
-
-**Why:** per-agent counters are persisted to disk and re-seeded into Prometheus when an agent re-registers, so they survive a router restart. After deploying a change you would otherwise still see the *historical* error rate. Reset them to observe the change against a clean baseline.
-
-**Not affected:** tenant/billing counters (`quotaTPD:` and `mycoroute_tenant_*`), agent metadata, liveness gauges (`mycoroute_routing_agent_info` / `_healthy`), and capacity utilization. Routing-level request counters live only in memory and already reset when the router process restarts (e.g. on deploy).
-
-```json
-{
-  "status": "metrics reset",
-  "message": "per-agent lifetime counters cleared (disk, in-memory, and Prometheus series)"
-}
+```text
+GET /admin/routing-table
 ```
 
 ```bash
-curl -X POST -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/metrics/reset
+curl http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
 ```
 
-## Policy Endpoints
+The response includes one entry per registered agent:
 
-### Get Current Policy
-
+```json
+{
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "metadata": {
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
+        "engine": "vllm",
+        "version": "dev",
+        "region": "EU-France",
+        "organization": "ml-team",
+        "machine": "gpu-worker-1",
+        "capacity": 32,
+        "tags": [
+          "production"
+        ],
+        "gpu_model": "NVIDIA H100",
+        "capability": "llm"
+      },
+      "status": {
+        "healthy": true,
+        "last_seen": "2026-04-11T12:00:00Z",
+        "active_requests": 3
+      },
+      "universal": {
+        "total_requests": 1420,
+        "total_tokens": 830000,
+        "lifetime_requests": 10000,
+        "lifetime_tokens": 6500000,
+        "total_failures": 12,
+        "success_rate": 0.9915,
+        "srtt_ms": 80,
+        "rttvar_ms": 15,
+        "last_disconnect": null
+      },
+      "engine": {
+        "kv_cache_utilization": 0.64,
+        "running_requests": 3,
+        "waiting_requests": 0,
+        "preemptions_total": 0,
+        "avg_ttft_seconds": 0.42,
+        "p90_ttft_seconds": 0.71,
+        "avg_itl_seconds": 0.024,
+        "p90_itl_seconds": 0.037
+      },
+      "hardware": {
+        "cpu_utilization": 0.18,
+        "memory_utilization": 0.36,
+        "gpus": [
+          {
+            "index": 0,
+            "model": "NVIDIA H100",
+            "utilization": 0.72,
+            "memory_utilization": 0.68,
+            "temperature_celsius": 67,
+            "power_watts": 285
+          }
+        ]
+      }
+    }
+  ]
+}
 ```
+
+The example is shortened and illustrative. Fields can be zero or omitted when an engine or hardware collector does not provide the corresponding signal.
+
+The response groups data into:
+
+| Object | Purpose |
+| --- | --- |
+| `metadata` | Static registration information |
+| `status` | Current health, heartbeat, and active load |
+| `universal` | Request, token, failure, and latency history |
+| `engine` | Backend-specific live engine signals |
+| `hardware` | CPU, memory, and GPU state |
+
+Use the routing table to debug:
+
+- model and capability registration
+- policy metadata
+- capacity
+- health
+- success rate
+- SRTT and RTTVAR
+- KV cache and engine queues
+- GPU, CPU, and memory pressure
+
+Filter one model:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq '.agents[]
+      | select(
+          .metadata.model ==
+          "meta-llama/Llama-3.1-8B-Instruct"
+        )'
+```
+
+## Inspect the in-memory database
+
+```text
+GET /admin/in-memory-db
+```
+
+```bash
+curl http://localhost:8080/admin/in-memory-db \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+The endpoint returns current key/value records from the router’s in-memory BadgerDB.
+
+Keys and values are exposed as strings when they contain valid UTF-8. Otherwise they are encoded as:
+
+```text
+base64:<encoded-value>
+```
+
+Use this endpoint for debugging current agent and session state. Do not build long-lived automation against internal key names or serialized values.
+
+<Warning>
+  This response can expose sensitive internal state. Restrict access and avoid copying it into unprotected support tickets or public issue reports.
+</Warning>
+
+## Inspect the persistent database
+
+```text
+GET /admin/disk-db
+```
+
+```bash
+curl http://localhost:8080/admin/disk-db \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+The endpoint returns all records from the persistent BadgerDB.
+
+This store can contain:
+
+- agent request and token history
+- smoothed latency state
+- failure and disconnection history
+- persistent daily token-quota counters when the Badger quota backend is enabled
+
+Binary keys and values use the same `base64:` representation as the in-memory database endpoint.
+
+Avoid polling the complete database frequently. The handler reads and serializes every record.
+
+## Read one persistent key
+
+```text
+GET /admin/disk-db/{key}
+```
+
+```bash
+curl \
+  "http://localhost:8080/admin/disk-db/<key>" \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "key": "<key>",
+  "value": "<value>"
+}
+```
+
+A missing key returns HTTP `404`.
+
+URL-encode path separators, spaces, and other reserved characters in the key.
+
+## Persistent database statistics
+
+```text
+GET /admin/disk-db-stats
+```
+
+```bash
+curl http://localhost:8080/admin/disk-db-stats \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "total_keys": 142,
+  "database_size_bytes": 8388608,
+  "last_updated": "2026-04-11T12:00:00Z"
+}
+```
+
+`last_updated` is generated when the stats request is processed. It is not the timestamp of the most recent database write.
+
+## Metrics redirect
+
+```text
+GET /admin/metrics
+```
+
+The handler redirects to:
+
+```text
+http://<router-host>:2112/metrics
+```
+
+```bash
+curl -L http://localhost:8080/admin/metrics \
+  -H "Authorization: Bearer <admin-api-key>"
+```
+
+The separate metrics server does not have built-in authentication.
+
+Protect port `2112` through network controls or a trusted proxy.
+
+## Read the current policy
+
+```text
 GET /admin/policy
 ```
 
+```bash
+curl http://localhost:8080/admin/policy \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+A response includes:
+
 ```json
 {
-  "routing_policy": {
-    "match": {
-      "engine": "vllm",
-      "organization": "Mycoroute",
-      "tags": ["production"]
-    },
-    "exclude_if": {
-      "capacity_utilization": {"gt": 0.9},
-      "kv_cache_utilization": {"gt": 0.85},
-      "gpu_temperature_c": {"gt": 80},
-      "success_rate": {"lt": 0.8},
-      "waiting_requests": {"gt": 20}
-    },
-    "strategy": "least-loaded",
-    "max_tries": 3
-  },
-  "fallback_chain": [
-    {
-      "name": "relaxed",
-      "match": {
-        "engine": "vllm",
-        "organization": "Mycoroute"
-      },
-      "exclude_if": {
-        "kv_cache_utilization": {"gt": 0.95}
-      },
+  "policy": {
+    "routing_policy": {
       "strategy": "least-loaded",
-      "max_tries": 2
-    },
-    {
-      "name": "last-resort",
-      "match": {},
-      "strategy": "least-loaded",
-      "max_tries": 1
+      "max_tries": 3
     }
-  ]
+  },
+  "file": "/etc/mycoroute/policy.yaml",
+  "model_dir": "/etc/mycoroute/policies"
 }
 ```
 
-### Update Policy (Ephemeral)
+When no policy file or directory is configured, the file values are empty strings and the active policy is Mycoroute’s built-in least-loaded policy.
 
-```
+The endpoint reports the current global policy. It does not return the complete resolved per-model policy map.
+
+## Replace the in-memory policy
+
+```text
 PUT /admin/policy
 ```
 
-Replaces current policy (YAML body). **Ephemeral** — lost on restart. Use `--policy-file` + SIGHUP for persistence.
+The body is JSON, not YAML.
 
 ```bash
-curl -X PUT -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  -H "Content-Type: text/yaml" \
-  -d '
-routing_policy:
-  match:
-    engine: "vllm"
-  exclude_if:
-    kv_cache_utilization: { gt: 0.85 }
-  strategy: "least-loaded"
-  max_tries: 3
-' \
-  http://localhost:8080/admin/policy
-```
-
-### Get Per-Model Policies
-
-```
-GET /admin/policy/models
-```
-
-Returns a map of policy name → policy document.
-
-```json
-{
-  "gptoss": {
-    "models": ["openai/gpt-oss-20b"],
+curl -X PUT \
+  http://localhost:8080/admin/policy \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
     "routing_policy": {
-      "match": {"engine": "vllm"},
+      "match": {
+        "region": "EU-France"
+      },
       "exclude_if": {
-        "gpu_temperature_c": {"gt": 85},
-        "kv_cache_utilization": {"gt": 0.95}
+        "success_rate": {
+          "lt": 0.95
+        }
       },
       "strategy": "least-loaded",
       "max_tries": 3
-    },
-    "fallback_chain": [
-      {
-        "name": "relaxed",
-        "match": {"engine": "vllm", "organization": "Mycoroute"},
-        "exclude_if": {"kv_cache_utilization": {"gt": 0.98}},
-        "strategy": "least-loaded",
-        "max_tries": 2
-      },
-      {
-        "name": "last-resort",
-        "match": {},
-        "strategy": "least-loaded",
-        "max_tries": 1
-      }
-    ]
-  },
-  "bge-m3": {
-    "models": ["BAAI/bge-m3"],
-    "routing_policy": {
-      "match": {"engine": "infinity"},
-      "exclude_if": {"gpu_temperature_c": {"gt": 85}},
-      "strategy": "least-loaded",
-      "max_tries": 2
     }
-  }
-}
+  }'
 ```
 
-The key is the **policy name** (not the model name). Each document includes a `models` list of model IDs the policy applies to.
-
-### Get Model Policy
-
-```
-GET /admin/policy/models/{name}
-```
-
-Returns the single named policy document.
-
-### Update Model Policy
-
-```
-PUT /admin/policy/models/{name}
-```
-
-Creates or replaces a named policy (YAML body, ephemeral).
-
-### Delete Model Policy
-
-```
-DELETE /admin/policy/models/{name}
-```
-
-## Examples
-
-### Monitor Agent Health
-
-```bash
-#!/bin/bash
-while true; do
-  curl -s -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-    http://localhost:8080/admin/health \
-    | jq '.agents[] | {model: .model, is_healthy}'
-  sleep 5
-done
-```
-
-### Check Model Distribution
-
-```bash
-curl -s -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/routing-table \
-  | jq '[.agents[] | {model: .metadata.model, region: .metadata.region, srtt_ms: .universal.srtt_ms}]'
-```
-
-### Export Current Policy
-
-```bash
-curl -s -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/policy > current-policy.json
-```
-
-### Hot Reload Policy
-
-```bash
-# Update policy file
-cat > /etc/mycoroute/policy.yaml <<EOF
-routing_policy:
-  strategy: "least-loaded"
-  max_tries: 3
-EOF
-
-# Send SIGHUP
-kill -HUP $(pgrep mycoroute-router)
-```
-
-## API Key Management
-
-Endpoints for managing the dynamic API key registry at runtime. Only available when `mycoroute_AUTH_MODE=dynamic` — returns `501 Not Implemented` otherwise.
-
-### Upsert API Key
-
-```
-PUT /admin/api-keys/:id
-```
-
-Adds or updates a single API key. Idempotent when version is newer.
-
-**Request body:**
+A successful response is:
 
 ```json
 {
-  "version": "rev_00000002",
-  "key_hash": "e3b0c44298fc1c149afbf4c8996fb924...",
-  "key_preview": "sk-...KJ4",
-  "owner": "acme-corp",
-  "name": "Acme Production Key",
-  "enabled": true,
-  "expires_at": "01-01-2027",
-  "allowed_models": ["meta-llama/Llama-3.1-8B-Instruct"],
-  "quota": {
-    "requests_per_minute": 1000,
-    "tokens_per_day": 1000000
-  }
+  "status": "ok"
 }
 ```
 
-**Response (200):**
+The new policy becomes active immediately.
 
-```json
-{"ok": true}
+<Warning>
+  The update changes the policy in memory. It does not write the policy back to disk.
+
+  A later file reload or router restart can replace the runtime policy.
+</Warning>
+
+The policy JSON must pass the same validation as a policy loaded from YAML.
+
+## Reload policy files
+
+```text
+POST /admin/policy/reload
 ```
 
-**Response (409 — stale version):**
-
-```json
-{"error": "stale version", "current_version": "rev_00000003"}
+```bash
+curl -X POST \
+  http://localhost:8080/admin/policy/reload \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `version` | ✅ | Opaque monotonic version string (e.g., `rev_00000001`) |
-| `key_hash` | ✅ | SHA-256 hex of the raw bearer token |
-| `key_preview` | ❌ | Truncated display form (e.g., `sk-...KJ4`) |
-| `owner` | ✅ | Tenant ID for billing and quota tracking |
-| `name` | ✅ | Human-readable label for audit logs |
-| `enabled` | ✅ | Whether the key is active |
-| `expires_at` | ❌ | Expiry date `DD-MM-YYYY`; empty = never expires |
-| `allowed_models` | ❌ | Model whitelist; empty = unrestricted |
-| `quota.requests_per_minute` | ❌ | RPM limit; 0 = unlimited |
-| `quota.tokens_per_day` | ❌ | Daily token limit; 0 = unlimited |
-
-### Delete API Key
-
-```
-DELETE /admin/api-keys/:id?version=rev_00000002
-```
-
-Revokes a key by ID. Idempotent — returns 200 even if the key doesn't exist.
-
-**Response (200):**
-
-```json
-{"ok": true}
-```
-
-The `version` query parameter must be newer than the current registry version, or a 409 Conflict is returned.
-
-### Replace All API Keys
-
-```
-POST /admin/api-keys/replace
-```
-
-Atomically replaces the entire key registry. Always accepted (no version check) — used for bootstrap and reconciliation after router restart.
-
-**Request body:**
+A successful response resembles:
 
 ```json
 {
-  "version": "rev_00000001",
-  "keys": [
-    {
-      "id": "key-abc123",
-      "key_hash": "e3b0c44298fc1c149afbf4c8996fb924...",
-      "key_preview": "sk-...KJ4",
-      "owner": "acme-corp",
-      "name": "Acme Production Key",
-      "enabled": true,
-      "expires_at": "01-01-2027",
-      "allowed_models": ["meta-llama/Llama-3.1-8B-Instruct"],
-      "quota": {
-        "requests_per_minute": 1000,
-        "tokens_per_day": 1000000
-      }
-    }
-  ]
+  "status": "ok",
+  "message": "policy reloaded"
 }
 ```
 
-**Response (200):**
+If both are configured:
 
-```json
-{"ok": true, "count": 1}
+```text
+--policy-file
+--policy-model-dir
 ```
 
-Each key entry in the `keys` array uses the same schema as the Upsert endpoint. The `id` field is required for each key in a replace operation.
+and the model directory contains `_default.yaml`, the directory’s default policy replaces the standalone global file.
 
-### Get API Key Registry Version
+The reload is atomic. When a replacement file is invalid, the current valid policy remains active.
 
-```
-GET /admin/api-keys/version
-```
+## List dynamic API keys
 
-Returns the current registry version and key count.
-
-**Response (200):**
-
-```json
-{"version": "rev_00000002", "count": 3}
-```
-
-### List All API Keys
-
-```
+```text
 GET /admin/api-keys
 ```
 
-Returns all active key entries. **Key hashes are never included** — only metadata for operator visibility and drift detection.
+```bash
+curl http://localhost:8080/admin/api-keys \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
 
-**Response (200):**
+A response resembles:
 
 ```json
 {
-  "count": 2,
-  "keys": [
+  "version": "rev_00000042",
+  "items": [
     {
       "id": "acme-prod",
-      "key_hash": "",
-      "key_preview": "sk-...KJ4",
+      "key_preview": "sk-...a1b2",
       "owner": "acme-corp",
-      "name": "Acme Production Key",
+      "name": "Production application",
       "enabled": true,
-      "expires_at": "2027-01-01T00:00:00Z",
-      "allowed_models": ["meta-llama/Llama-3.1-8B-Instruct"],
+      "expires_at": null,
+      "allowed_models": [
+        "meta-llama/Llama-3.1-8B-Instruct"
+      ],
       "quota": {
-        "requests_per_minute": 1000,
-        "tokens_per_day": 1000000
+        "requests_per_minute": 100,
+        "tokens_per_day": 500000
       }
     }
   ]
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `id` | Key entry ID |
-| `key_hash` | Always empty string — hashes are never exposed |
-| `key_preview` | Truncated display form (e.g., `sk-...KJ4`) |
-| `owner` | Tenant ID |
-| `name` | Human-readable label |
-| `enabled` | Whether the key is active |
-| `expires_at` | ISO 8601 expiry; `null` if never expires |
-| `allowed_models` | Model whitelist; empty array = unrestricted |
-| `quota` | Per-key rate and token limits |
+Raw API keys and full hashes are not returned.
 
-### Get API Key by ID
+The list is sorted by key ID.
 
-```
-GET /admin/api-keys/:id
+## Read the dynamic registry version
+
+```text
+GET /admin/api-keys/version
 ```
 
-Returns a single key entry by ID. **Key hash is never included.**
+```bash
+curl http://localhost:8080/admin/api-keys/version \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
 
-**Response (200):**
+Response:
 
 ```json
 {
-  "key": {
-    "id": "acme-prod",
-    "key_hash": "",
-    "key_preview": "sk-...KJ4",
-    "owner": "acme-corp",
-    "name": "Acme Production Key",
-    "enabled": true,
-    "expires_at": "2027-01-01T00:00:00Z",
-    "allowed_models": ["meta-llama/Llama-3.1-8B-Instruct"],
-    "quota": {
-      "requests_per_minute": 1000,
-      "tokens_per_day": 1000000
-    }
-  }
+  "version": "rev_00000042"
 }
 ```
 
-**Response (404 — key not found):**
+The version is an opaque string compared lexicographically.
 
-```json
-{"error": "key not found: acme-prod"}
+Use a convention such as fixed-width counters or sortable timestamps:
+
+```text
+rev_00000042
+2026-04-11T12:00:00Z
 ```
 
-### Key Management Examples
+Avoid values whose lexical and numeric order differ:
+
+```text
+9
+10
+```
+
+Lexicographically, `10` sorts before `9`.
+
+## Create or update a dynamic key
+
+```text
+PUT /admin/api-keys/{id}
+```
 
 ```bash
-# Bootstrap all keys after router starts
-curl -X POST \
-  -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  -H "Content-Type: application/json" \
-  -d @keys-snapshot.json \
-  http://localhost:8080/admin/api-keys/replace
-
-# List all active keys (no hashes exposed)
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/api-keys
-
-# Get a single key by ID
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/api-keys/acme-prod
-
-# Check current version
-curl -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  http://localhost:8080/admin/api-keys/version
-
-# Revoke a compromised key
-curl -X DELETE \
-  -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
-  "http://localhost:8080/admin/api-keys/key-abc123?version=rev_00000003"
-
-# Update a key's quota
 curl -X PUT \
-  -H "Authorization: Bearer $mycoroute_ADMIN_API_KEYS" \
+  http://localhost:8080/admin/api-keys/acme-prod \
+  -H "Authorization: Bearer <admin-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "version": "rev_00000004",
-    "key_hash": "...",
+    "version": "rev_00000043",
+    "key_hash": "<sha256-of-raw-key>",
+    "key_preview": "sk-...a1b2",
     "owner": "acme-corp",
-    "name": "Acme Production Key",
+    "name": "Production application",
     "enabled": true,
-    "quota": {"requests_per_minute": 2000, "tokens_per_day": 2000000}
-  }' \
-  http://localhost:8080/admin/api-keys/key-abc123
+    "allowed_models": [
+      "meta-llama/Llama-3.1-8B-Instruct"
+    ],
+    "quota": {
+      "requests_per_minute": 100,
+      "tokens_per_day": 500000
+    }
+  }'
 ```
 
-### Security Notes
+Accepted fields include:
 
-- Raw key hashes are **never** echoed in any response
-- Version monotonicity prevents stale data from overwriting newer state
-- `POST /admin/api-keys/replace` bypasses version check for bootstrap after restart
-- These endpoints are the key-management surface, so admin auth is mandatory in dynamic mode. The router automatically elevates `admin.mode` to `api-key` when `mycoroute_AUTH_MODE=dynamic` and requires `mycoroute_ADMIN_API_KEYS` to be set; startup fails with `auth: admin section mode=api-key but mycoroute_ADMIN_API_KEYS env var is not set` if it's missing. There is no env-var-only configuration path that leaves `/admin/*` public in dynamic mode.
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `version` | Yes | Registry revision for ordering updates |
+| `key_hash` | Yes | SHA-256 hash of the raw API key |
+| `key_preview` | No | Masked display value |
+| `owner` | Yes | Tenant identity used for quotas and metrics |
+| `name` | No | Human-readable description |
+| `enabled` | No | Whether the key can authenticate; defaults to `true` |
+| `expires_at` | No | Expiration time; Unix seconds or RFC 3339 |
+| `allowed_models` | No | Model allowlist |
+| `quota` | No | Flat or per-model quota configuration |
 
-## Error Responses
+The raw API key is never sent to the registry. Hash it before making the request.
 
-### Unauthorized
+```bash
+printf '%s' '<raw-api-key>' \
+  | sha256sum
+```
+
+A successful update returns:
 
 ```json
-{"error": "unauthorized"}
+{
+  "status": "ok"
+}
 ```
 
-HTTP Status: 401
+The change takes effect immediately.
 
-## See Also
+## Delete a dynamic key
 
-- [Chat Completions](/api/chat-completions) - User-facing API
-- [Routing Policy](/routing/policy-yaml-reference) - Policy format
-- [Prometheus Metrics](/observability/prometheus-metrics) - Metrics endpoint
+```text
+DELETE /admin/api-keys/{id}?version=<revision>
+```
+
+```bash
+curl -X DELETE \
+  "http://localhost:8080/admin/api-keys/acme-prod?version=rev_00000044" \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+The version query parameter is required.
+
+A successful response is:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+The change takes effect immediately.
+
+## Replace the complete dynamic registry
+
+```text
+POST /admin/api-keys/replace
+```
+
+Use this endpoint to repopulate the registry after a router restart or synchronize it from an external control service.
+
+```bash
+curl -X POST \
+  http://localhost:8080/admin/api-keys/replace \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "rev_00000045",
+    "items": [
+      {
+        "id": "acme-prod",
+        "key_hash": "<sha256-of-raw-key>",
+        "key_preview": "sk-...a1b2",
+        "owner": "acme-corp",
+        "name": "Production application",
+        "enabled": true,
+        "allowed_models": [
+          "meta-llama/Llama-3.1-8B-Instruct"
+        ],
+        "quota": {
+          "requests_per_minute": 100,
+          "tokens_per_day": 500000
+        }
+      }
+    ]
+  }'
+```
+
+A successful response is:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+The replacement is atomic. Existing items remain active when the replacement fails validation.
+
+<Warning>
+  The dynamic registry is memory-only.
+
+  A router restart removes all dynamic key entries. Repopulate the complete registry before expecting clients to authenticate.
+</Warning>
+
+## Dynamic version conflicts
+
+Dynamic mutations compare their `version` with the registry’s current version.
+
+A lower version is rejected with HTTP `409`:
+
+```json
+{
+  "error": "stale version",
+  "current_version": "rev_00000045"
+}
+```
+
+Use a later version and retry.
+
+Versions compare lexicographically, not numerically.
+
+Equal versions are currently accepted. Use a strictly newer version for each distinct update so two different mutations do not share one revision.
+
+## Common status codes
+
+| Status | Typical meaning |
+| --- | --- |
+| `200` | Read or mutation succeeded |
+| `307` | Metrics endpoint redirect |
+| `400` | Invalid JSON, invalid policy, missing field, invalid key, invalid version, or oversized admin body |
+| `401` | Missing or invalid administrator credential |
+| `404` | Model, key, storage record, or mode-specific endpoint not found |
+| `409` | Stale dynamic registry version |
+| `500` | Internal storage, policy, or configuration failure |
+| `503` | No API-key registry is available |
+
+Admin errors are not guaranteed to use the same error envelope as inference endpoints.
+
+For example, a stale version returns:
+
+```json
+{
+  "error": "stale version",
+  "current_version": "rev_00000045"
+}
+```
+
+## Network protection
+
+Do not expose the admin API directly to the public internet.
+
+Use one or more of:
+
+- a private network
+- host or cloud firewall rules
+- a reverse proxy with TLS
+- a VPN
+- an identity-aware proxy
+- a separate operator ingress
+- short-lived administrator credentials
+
+The same HTTP listener serves inference and administration routes, so network controls must preserve application access while restricting `/admin/*` where possible.
+
+## Troubleshooting
+
+### Every admin request returns `401`
+
+Check that:
+
+- `admin.mode` is `api-key`
+- `mycoroute_ADMIN_API_KEYS` is set in the router process
+- the request sends `Authorization: Bearer <admin-api-key>`
+- the admin key is not only configured as a client key
+- the router was restarted after changing its environment
+
+### The router refuses to start with admin mode `none`
+
+This is the secure default.
+
+For isolated local development only, set:
+
+```bash
+export mycoroute_ALLOW_INSECURE_ADMIN=true
+```
+
+For shared or production deployments, configure `admin.mode: api-key` and set `mycoroute_ADMIN_API_KEYS` instead.
+
+### Dynamic key endpoints return `404`
+
+Confirm client authentication mode is:
+
+```text
+dynamic
+```
+
+The endpoints are not registered in static `api-key` or `none` mode.
+
+### A dynamic key disappears after restart
+
+This is expected. The registry is memory-only.
+
+Send the complete current state to:
+
+```text
+POST /admin/api-keys/replace
+```
+
+before applications resume authentication.
+
+### A policy update disappears after restart
+
+`PUT /admin/policy` changes only the in-memory policy.
+
+Update the policy file or model-policy directory on disk, then use:
+
+```text
+POST /admin/policy/reload
+```
+
+### `/admin/metrics` does not return metrics
+
+The endpoint redirects to port `2112`.
+
+Use:
+
+```bash
+curl -L http://localhost:8080/admin/metrics
+```
+
+Check that the metrics port is reachable from the client following the redirect.
+
+### Model discovery differs between admin and public endpoints
+
+This normally means the client API key has:
+
+- `allowed_models`
+- `quota.per_model`
+
+The admin view is complete. The public `/v1/models` view is filtered for the authenticated client.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Models" href="/api/models">
+    Review the public and operator model-catalog response shapes.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure static or dynamic client access and quotas.
+  </Card>
+
+  <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
+    Define routing, fallback, and dynamic gates in version-controlled YAML.
+  </Card>
+</CardGroup>

@@ -1,0 +1,598 @@
+---
+title: "Models"
+description: "List models available to the current API key and inspect their capabilities, agent distribution, health, and declared capacity."
+sidebarTitle: "Models"
+---
+
+Discover which models are currently registered with Mycoroute and available to the calling API key.
+
+```text
+GET /v1/models
+GET /v1/models/{model}
+```
+
+The list endpoint returns an aggregated catalog. The detail endpoint adds information about each agent serving one model.
+
+<Note>
+  Model discovery is authenticated when API authentication is enabled, but these read-only endpoints do not consume inference request or token quotas.
+</Note>
+
+## List available models
+
+```text
+GET /v1/models
+```
+
+Without API authentication:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq .
+```
+
+With API authentication:
+
+```bash
+curl http://localhost:8080/v1/models \
+  -H "Authorization: Bearer <api-key>" \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "openai/gpt-oss-20b",
+      "object": "model",
+      "pretty_name": "Balanced · GPT OSS 20B",
+      "info": "Good balance between speed and quality.",
+      "capability": "llm",
+      "agents": {
+        "total": 2,
+        "healthy": 2,
+        "total_capacity": 40,
+        "engines": [
+          "vllm"
+        ],
+        "regions": [
+          "EU",
+          "US"
+        ]
+      }
+    },
+    {
+      "id": "BAAI/bge-m3",
+      "object": "model",
+      "pretty_name": "Embeddings · BGE-M3",
+      "info": "Multilingual dense embeddings for retrieval.",
+      "capability": "embedding",
+      "agents": {
+        "total": 1,
+        "healthy": 1,
+        "total_capacity": 20,
+        "engines": [
+          "infinity"
+        ],
+        "regions": [
+          "EU"
+        ]
+      }
+    }
+  ]
+}
+```
+
+The order of models, engines, regions, and agents is not guaranteed. Sort the response in the client when display order matters.
+
+## Model fields
+
+| Field | Description |
+| --- | --- |
+| `id` | Model name registered by the agents |
+| `object` | Always `model` |
+| `pretty_name` | Optional display name supplied with `--llm-pretty-name` |
+| `info` | Optional description supplied with `--llm-info` |
+| `capability` | `llm`, `embedding`, or `reranker` |
+| `hide_llm` | Optional metadata supplied by agents using `--hide-llm` |
+| `agents.total` | Number of registered agents serving the model |
+| `agents.healthy` | Number of those agents currently marked healthy |
+| `agents.total_capacity` | Sum of the declared capacity of all registered agents |
+| `agents.engines` | Distinct backend engine names reported by the agents |
+| `agents.regions` | Distinct region values reported by the agents |
+
+`agents.total_capacity` is declared capacity, not currently free capacity. It includes registered agents even when they are unhealthy.
+
+Use the routing table when you need live load, active requests, available capacity, latency, hardware, or engine metrics.
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+<Warning>
+  Do not use `hide_llm` as an access-control mechanism. In the current implementation, it may appear as aggregated model metadata. API-key restrictions determine which models a caller can discover and invoke.
+</Warning>
+
+## Filter the list
+
+List model IDs:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq -r '.data[].id'
+```
+
+List language models:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "llm")'
+```
+
+List embedding models:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "embedding")'
+```
+
+List reranking models:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "reranker")'
+```
+
+List models with healthy capacity:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.agents.healthy > 0)'
+```
+
+Show a compact deployment summary:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[] | {
+      id,
+      capability,
+      healthy_agents: .agents.healthy,
+      total_agents: .agents.total,
+      declared_capacity: .agents.total_capacity,
+      engines: .agents.engines,
+      regions: .agents.regions
+    }'
+```
+
+## Get one model
+
+```text
+GET /v1/models/{model}
+```
+
+The detail endpoint returns the same aggregate fields and adds:
+
+```text
+agents.list
+```
+
+This array contains one entry for each agent registered under the model name.
+
+For model IDs containing slashes, include the complete ID after `/v1/models/`:
+
+```bash
+curl \
+  "http://localhost:8080/v1/models/openai/gpt-oss-20b" \
+  | jq .
+```
+
+URL-encode spaces and other reserved characters when they occur in a model ID.
+
+A response resembles:
+
+```json
+{
+  "id": "openai/gpt-oss-20b",
+  "object": "model",
+  "pretty_name": "Balanced · GPT OSS 20B",
+  "info": "Good balance between speed and quality.",
+  "capability": "llm",
+  "agents": {
+    "total": 2,
+    "healthy": 2,
+    "total_capacity": 40,
+    "engines": [
+      "vllm"
+    ],
+    "regions": [
+      "EU",
+      "US"
+    ],
+    "list": [
+      {
+        "peer_id": "12D3KooW...",
+        "engine": "vllm",
+        "version": "dev",
+        "region": "EU",
+        "organization": "ml-team",
+        "machine": "gpu-worker-1",
+        "capacity": 20,
+        "is_healthy": true,
+        "last_seen": 1760000000
+      },
+      {
+        "peer_id": "12D3KooX...",
+        "engine": "vllm",
+        "version": "dev",
+        "region": "US",
+        "organization": "ml-team",
+        "machine": "gpu-worker-2",
+        "capacity": 20,
+        "is_healthy": true,
+        "last_seen": 1760000000
+      }
+    ]
+  }
+}
+```
+
+Peer IDs and timestamps will differ.
+
+## Agent detail fields
+
+| Field | Description |
+| --- | --- |
+| `peer_id` | Agent’s libp2p peer ID |
+| `engine` | Backend engine type |
+| `version` | Version reported by the agent |
+| `region` | Operator-defined region metadata |
+| `organization` | Operator-defined organization metadata |
+| `machine` | Operator-defined machine identifier |
+| `capacity` | Maximum concurrent requests declared by the agent |
+| `is_healthy` | Current router health state for the agent |
+| `last_seen` | Unix timestamp of the most recent recorded heartbeat |
+
+Check the health of every agent serving a model:
+
+```bash
+curl \
+  "http://localhost:8080/v1/models/openai/gpt-oss-20b" \
+  | jq '.agents.list[] | {
+      peer_id,
+      engine,
+      region,
+      capacity,
+      is_healthy,
+      last_seen
+    }'
+```
+
+## Capabilities
+
+Each agent registers one capability.
+
+| Capability | Main endpoint | Agent setting |
+| --- | --- | --- |
+| `llm` | `POST /v1/chat/completions` | `--capability llm` or omit the flag |
+| `embedding` | `POST /v1/embeddings` | `--capability embedding` |
+| `reranker` | `POST /v1/rerank` | `--capability reranker` |
+
+<Warning>
+  Use different model names when the same model weights are exposed under different capabilities.
+
+  If several agents register the same model name with different capabilities, the aggregated catalog reports only the first non-empty capability encountered.
+</Warning>
+
+## Display metadata
+
+Agents can add a display name and description:
+
+```bash
+mycoroute-agent \
+  --model openai/gpt-oss-20b \
+  --llm-pretty-name "Balanced · GPT OSS 20B" \
+  --llm-info "Good balance between speed and quality." \
+  ...
+```
+
+These values appear as:
+
+```json
+{
+  "pretty_name": "Balanced · GPT OSS 20B",
+  "info": "Good balance between speed and quality."
+}
+```
+
+When several agents serve the same model, Mycoroute uses the first non-empty value found for each field.
+
+Keep these values consistent across agents serving the same model.
+
+## Per-key model filtering
+
+`GET /v1/models` returns the catalog visible to the calling API key.
+
+Mycoroute determines that catalog in this order:
+
+1. When the key has `quota.per_model`, only models declared in that map are visible.
+2. Otherwise, when the key has a non-empty `allowed_models` list, only those models are visible.
+3. When neither restriction exists, the key sees the full public catalog.
+
+For example, a key limited to:
+
+```yaml
+quota:
+  per_model:
+    openai/gpt-oss-20b:
+      requests_per_minute_per_replica: 60
+      tokens_per_day: 100000
+```
+
+sees only:
+
+```text
+openai/gpt-oss-20b
+```
+
+in `GET /v1/models`.
+
+This filtering keeps discovery aligned with the models the key can invoke.
+
+## Restricted models return 404
+
+When a caller requests detail for a model outside its allowed set, Mycoroute returns HTTP `404`, not `403`.
+
+```json
+{
+  "error": {
+    "code": "model_not_found",
+    "message": "No agents registered for model: restricted-model",
+    "source": "router"
+  }
+}
+```
+
+The same response is used when the model does not exist.
+
+This prevents one tenant from using the endpoint to discover model names assigned to another tenant.
+
+## Use the OpenAI Python client
+
+The OpenAI Python client can list the models exposed by Mycoroute:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="<api-key>",
+)
+
+models = client.models.list()
+
+for model in models.data:
+    print(model.id)
+```
+
+Use raw HTTP when you need Mycoroute-specific fields such as agent counts, engines, regions, and capabilities:
+
+```python
+from typing import Any
+
+import requests
+
+response = requests.get(
+    "http://localhost:8080/v1/models",
+    headers={
+        "Authorization": "Bearer <api-key>",
+    },
+    timeout=30,
+)
+
+response.raise_for_status()
+
+payload: dict[str, Any] = response.json()
+
+for model in payload["data"]:
+    print(
+        model["id"],
+        model.get("capability"),
+        model["agents"]["healthy"],
+    )
+```
+
+## Operator view
+
+The public discovery endpoints may be filtered by the caller’s API key.
+
+Operators can use the admin equivalents to see every registered model:
+
+```text
+GET /admin/models
+GET /admin/models/{model}
+```
+
+For example:
+
+```bash
+curl http://localhost:8080/admin/models \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq .
+```
+
+The response shape matches the public endpoint, but the admin view does not apply tenant model filtering.
+
+Admin authentication is configured separately from inference API authentication.
+
+See [Admin endpoints](/api/admin-endpoints) for the complete operator reference.
+
+## Empty and unhealthy catalogs
+
+When no agents are registered, the list endpoint returns:
+
+```json
+{
+  "object": "list",
+  "data": []
+}
+```
+
+A model can remain in the catalog while all of its registered agents are unhealthy:
+
+```json
+{
+  "agents": {
+    "total": 2,
+    "healthy": 0,
+    "total_capacity": 40,
+    "engines": [
+      "vllm"
+    ],
+    "regions": [
+      "EU"
+    ]
+  }
+}
+```
+
+Discovery confirms registration. It does not guarantee that the model can serve a request at that moment.
+
+Check:
+
+```text
+agents.healthy
+```
+
+and use the routing table for live operational details.
+
+## Error responses
+
+| HTTP status | Code | Meaning |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing or invalid API credentials |
+| `404` | `model_not_found` | Model does not exist or is hidden from this API key |
+| `500` | `backend_error` | Router could not read its agent registry |
+
+Errors use the standard envelope:
+
+```json
+{
+  "error": {
+    "code": "model_not_found",
+    "message": "No agents registered for model: unknown-model",
+    "source": "router"
+  }
+}
+```
+
+## Troubleshooting
+
+### A model is missing from the list
+
+Check the public view with the intended API key:
+
+```bash
+curl http://localhost:8080/v1/models \
+  -H "Authorization: Bearer <api-key>" \
+  | jq -r '.data[].id'
+```
+
+Then check the operator view:
+
+```bash
+curl http://localhost:8080/admin/models \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq -r '.data[].id'
+```
+
+If the model appears only in the admin response, review:
+
+- `quota.per_model`
+- `allowed_models`
+- which API key is being sent
+- whether inference and admin authentication use different keys
+
+### The model is listed but cannot serve requests
+
+Check:
+
+```bash
+curl http://localhost:8080/v1/models/<model> \
+  | jq '.agents | {
+      total,
+      healthy,
+      total_capacity
+    }'
+```
+
+Then inspect the live routing table:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq '.agents[]
+      | select(.metadata.model == "<model>")'
+```
+
+Common causes include:
+
+- all agents are unhealthy
+- all healthy agents are at capacity
+- a routing policy excludes the agents
+- the requested capability does not match
+- the API key cannot invoke the model
+
+### The capability is wrong
+
+Check whether agents sharing the model name were started with different capability values.
+
+Use separate model names for language-model, embedding, and reranking registrations.
+
+### Display metadata is inconsistent
+
+Make sure every agent serving the model uses the same:
+
+```text
+--llm-pretty-name
+--llm-info
+```
+
+Mycoroute uses the first non-empty values found while aggregating the catalog.
+
+### Capacity looks higher than available capacity
+
+`total_capacity` is the sum of the agents’ declared maximum capacity.
+
+It does not subtract:
+
+- active requests
+- unhealthy-agent capacity
+- policy exclusions
+- backend queue pressure
+
+Use `/admin/routing-table` for live state.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Admin endpoints" href="/api/admin-endpoints">
+    Inspect the complete operator catalog, routing table, storage, policies, and API keys.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Control which models each client can discover and invoke.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Understand how matching agents are filtered and selected for inference.
+  </Card>
+</CardGroup>

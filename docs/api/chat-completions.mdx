@@ -1,287 +1,488 @@
 ---
-title: "Inference Endpoints (Chat Completions & Messages)"
+Slug: "api/chat-completions"
+title: "Chat completions and messages"
+description: "Send OpenAI-compatible chat-completion and Anthropic Messages requests through Mycoroute, with streaming, routing, authentication, and quota enforcement."
+sidebarTitle: "Chat completions"
 ---
 
-The router serves LLM inference through a single **allowlisted passthrough**: it
-authenticates the request, routes by the top-level `model` field to a healthy
-agent, and forwards the **original request bytes unchanged** to that agent's
-backend at the same path. There is no schema translation, so any request dialect
-the backend understands is supported.
+Mycoroute exposes OpenAI-compatible Chat Completions and Anthropic-compatible Messages endpoints through the same routing pipeline.
 
-Two dialects are available today:
+The router reads the top-level `model` field, selects a healthy language-model agent, and forwards the original request to the same path on that agent’s backend.
 
-| Dialect | Endpoint | Typical client |
-|---------|----------|----------------|
-| OpenAI Chat Completions | `POST /v1/chat/completions` | OpenAI SDKs, LangChain, … |
-| Anthropic Messages | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | Claude Code, Anthropic SDK |
+| API dialect | Endpoint |
+| --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` |
+| Anthropic Messages | `POST /v1/messages` |
+| Anthropic token counting | `POST /v1/messages/count_tokens` |
 
-## How the Passthrough Works
+<Note>
+  The selected backend must support the endpoint used by the client. Mycoroute does not translate between the OpenAI and Anthropic request formats.
+</Note>
 
-- **Authentication & quota.** Identical for every endpoint — `Bearer` API key,
-  per-key RPM and daily token budget.
-- **Routing.** The router reads only the top-level `model` field and selects an
-  agent via the routing policy; the rest of the body is forwarded untouched.
-- **Backend-native.** The selected agent relays the request to its backend at the
-  same path, so the backend must serve that path (vLLM serves both
-  `/v1/chat/completions` and `/v1/messages`).
-- **Streaming.** `text/event-stream` responses are flushed chunk-by-chunk end to
-  end, so tokens arrive progressively.
-- **Token budgeting.** The daily budget is reserved up front (estimated prompt
-  tokens + the requested `max_tokens`) and reconciled after the response — see
-  [Token Budget Enforcement](/security/auth-yaml-reference#token-budget-enforcement).
+## How passthrough works
 
-> **Security — the path allowlist.** Only an explicit allowlist of paths is
-> forwarded; every other path is rejected at the router edge (`404`) and never
-> reaches an agent. Today the allowlist is `/v1/chat/completions`, `/v1/messages`,
-> and `/v1/messages/count_tokens`. A path qualifies only if it carries a top-level
-> `model` field (so the router can pick an agent), is stateless (any agent can
-> serve it), and is inference or a read-only utility — never a control-plane route.
-> This deliberately keeps backend endpoints such as `/scale_elastic_ep`, `/load`,
-> `/metrics`, and `/v1/responses/{id}` unreachable through the router.
+For each request, Mycoroute:
 
----
+1. authenticates the client when API authentication is enabled
+2. applies request and token quotas when configured
+3. reads and validates the top-level `model` field
+4. checks that the API key may use that model
+5. selects a healthy `llm` agent through the routing policy
+6. forwards the original body to the same path on the selected backend
+7. returns the backend response to the client
 
-## OpenAI Chat Completions
+Apart from the fields needed for routing and quota estimation, Mycoroute does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
 
-OpenAI-compatible chat completion endpoint for LLM inference.
+## Allowed passthrough paths
 
-```
-POST /v1/chat/completions
+Mycoroute only forwards an explicit set of inference paths:
+
+```text
+/v1/chat/completions
+/v1/messages
+/v1/messages/count_tokens
 ```
 
-### Headers
+Other backend paths are not exposed through the router.
 
-| Header | Required | Description |
-|--------|----------|-------------|
-| `Content-Type` | ✅ | `application/json` |
-| `Authorization` | ❌ | `Bearer <api-key>` (required if auth enabled) |
-| `X-Request-ID` | ❌ | Custom request ID for tracing |
+This prevents clients from reaching backend administration, scaling, loading, metrics, or other control-plane endpoints through the public inference API.
 
-### Body
+## Request requirements
+
+Every request must contain a non-empty top-level `model` field:
 
 ```json
 {
-  "model": "string",
-  "messages": [
-    {
-      "role": "system|user|assistant",
-      "content": "string"
-    }
-  ],
-  "temperature": 0.7,
-  "max_tokens": 1024,
-  "top_p": 1.0,
-  "frequency_penalty": 0.0,
-  "presence_penalty": 0.0,
-  "stop": ["string"],
-  "stream": false
+  "model": "meta-llama/Llama-3.1-8B-Instruct"
 }
 ```
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `model` | string | ✅ | - | Model name (must be registered by an agent) |
-| `messages` | array | ✅ | - | Conversation messages |
-| `temperature` | float | ❌ | 0.7 | Sampling temperature (0-2) |
-| `max_tokens` | int | ❌ | ∞ | Maximum tokens to generate |
-| `top_p` | float | ❌ | 1.0 | Nucleus sampling (0-1) |
-| `frequency_penalty` | float | ❌ | 0.0 | Penalize frequent tokens (-2 to 2) |
-| `presence_penalty` | float | ❌ | 0.0 | Penalize repeated tokens (-2 to 2) |
-| `stop` | array | ❌ | [] | Stop sequences |
-| `stream` | bool | ❌ | false | Enable streaming (SSE) |
+The model name:
 
-### Messages Format
+- must match a model registered by an agent
+- must not exceed 256 characters
+- must be allowed by the caller’s API key when model restrictions are enabled
+
+Malformed JSON, a missing model, or an overlong model name is rejected before routing.
+
+### Request-body size
+
+Mycoroute limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. Requests above the configured limit are rejected with HTTP `413` before model authorization, quota accounting, queueing, or backend forwarding.
+
+Configure the limit with:
+
+```bash
+export mycoroute_MAX_REQUEST_BYTES=<bytes>
+```
+
+Set it to `0` to disable the built-in limit. A reverse proxy or ingress can still enforce a smaller limit.
+
+Do not depend on a particular JSON error body for `413` responses. Handle the HTTP status directly, because the rejection occurs before the normal inference-handler error path.
+
+## Request headers
+
+| Header | Required | Purpose |
+| --- | --- | --- |
+| `Content-Type: application/json` | Recommended | Identifies the JSON request body |
+| `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
+| `X-Request-ID: <uuid>` | No | Correlates requests with logs and traces |
+
+If `X-Request-ID` contains a valid UUID, Mycoroute preserves it. If it is missing or invalid, the router creates a new UUID. The value is returned in the response.
+
+Mycoroute may also return a W3C `traceparent` header when tracing is enabled.
+
+## OpenAI Chat Completions
+
+Send requests to:
+
+```text
+POST /v1/chat/completions
+```
+
+### Basic request
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Answer clearly and briefly."
+      },
+      {
+        "role": "user",
+        "content": "What does an inference router do?"
+      }
+    ]
+  }'
+```
+
+When authentication is enabled:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+### Fields used by Mycoroute
+
+Mycoroute forwards the complete request, but it reads a small number of fields for routing and quota enforcement.
+
+| Field | How Mycoroute uses it |
+| --- | --- |
+| `model` | Selects matching agents and applies model restrictions |
+| `messages` | Estimates input-token use when token quotas are enabled |
+| `max_completion_tokens` | Checks the worst-case requested output against the daily token budget |
+| `max_tokens` | Used as a fallback when `max_completion_tokens` is absent |
+| `stream` | Enables progressive streaming through the router and agent |
+
+All other fields are passed to the backend without Mycoroute assigning its own default values.
+
+<Note>
+  The selected backend decides which request fields, message roles, modalities, tools, and sampling values it accepts.
+</Note>
+
+### Multimodal message content
+
+Mycoroute can parse message content supplied as plain text or as content-part arrays containing text, image URLs, or input audio.
+
+For example:
 
 ```json
 {
+  "model": "vision-model",
   "messages": [
     {
-      "role": "system",
-      "content": "You are a helpful assistant."
-    },
-    {
       "role": "user",
-      "content": "What is the capital of France?"
-    },
-    {
-      "role": "assistant",
-      "content": "The capital of France is Paris."
-    },
-    {
-      "role": "user",
-      "content": "What is its population?"
+      "content": [
+        {
+          "type": "text",
+          "text": "What is shown in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://example.com/image.jpg"
+          }
+        }
+      ]
     }
   ]
 }
 ```
 
-**Supported roles:** `system`, `user`, `assistant`
+The backend must support the requested modality. Mycoroute routes and forwards the request but does not add vision or audio support to a text-only engine.
 
-### Response — Non-Streaming
+## Non-streaming responses
+
+For a non-streaming request, Mycoroute returns the response produced by the selected backend.
+
+A typical OpenAI-compatible response resembles:
 
 ```json
 {
-  "id": "chat-xxx",
+  "id": "chat-123",
   "object": "chat.completion",
-  "created": 1713724800,
+  "created": 1760000000,
   "model": "meta-llama/Llama-3.1-8B-Instruct",
   "choices": [
     {
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "The capital of France is Paris."
+        "content": "An inference router directs requests to an available model server."
       },
-      "finish_reason": "stop",
-      "logprobs": null
+      "finish_reason": "stop"
     }
   ],
   "usage": {
-    "prompt_tokens": 15,
-    "completion_tokens": 10,
-    "total_tokens": 25
+    "prompt_tokens": 20,
+    "completion_tokens": 13,
+    "total_tokens": 33
   }
 }
 ```
 
-### Response — Streaming (SSE)
+The exact fields and values depend on the backend.
 
-Set `stream: true` in the request.
+If the backend omits token usage from a successful non-streaming response, Mycoroute estimates prompt and completion tokens for accounting and audit records.
 
+## Streaming responses
+
+Set:
+
+```json
+{
+  "stream": true
+}
 ```
-data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{"role":"assistant","content":"The"},"finish_reason":null}]}
 
-data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{"content":" capital"},"finish_reason":null}]}
+and use a client that reads server-sent events progressively.
 
-data: {"id":"chat-xxx","object":"chat.completion.chunk","model":"...","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+```bash
+curl -N -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count from one to five."
+      }
+    ]
+  }'
+```
+
+Mycoroute forwards streaming chunks as they arrive from the backend rather than buffering the full response.
+
+A typical stream resembles:
+
+```text
+data: {"choices":[{"delta":{"content":"One"}}]}
+
+data: {"choices":[{"delta":{"content":", two"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
 ```
 
-### Examples
+The exact event structure comes from the backend.
 
-```bash
-# Basic
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
-
-# Streaming
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "messages": [{"role": "user", "content": "Tell me a joke."}],
-    "stream": true
-  }'
-```
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8080", api_key="sk-mycoroute-...")
-
-response = client.chat.completions.create(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    messages=[
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "What is 2+2?"},
-    ],
-    temperature=0.7,
-    max_tokens=100,
-)
-print(response.choices[0].message.content)
-```
-
----
+<Note>
+  Mycoroute can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
+</Note>
 
 ## Anthropic Messages
 
-Anthropic-compatible endpoint, so tools that speak the Anthropic Messages API —
-notably **Claude Code** — can run against models on the network.
+Send Anthropic-compatible requests to:
 
-```
+```text
 POST /v1/messages
 ```
 
-The request and response use Anthropic's dialect and are forwarded verbatim; the
-backend must natively serve `/v1/messages`.
-
-### Backend Requirement
-
-The selected agent's backend must serve `/v1/messages`. For vLLM, enable its
-Anthropic-compatible endpoint and set `--served-model-name` to the name clients
-will request:
+The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend.
 
 ```bash
-vllm serve Qwen/Qwen3.6-27B --served-model-name Qwen/Qwen3.6-27B
-```
-
-If the backend does not implement `/v1/messages` it returns its own `404`, which
-propagates back to the client unchanged.
-
-### Using Claude Code
-
-Point Claude Code at the router and authenticate with a Mycoroute API key:
-
-```bash
-export ANTHROPIC_BASE_URL="https://<router-host>"
-export ANTHROPIC_API_KEY="sk-..."                       # your Mycoroute key
-export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"   # a model served on the network
-export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
-claude
-```
-
-The model names must match what an agent registers (and what the backend was
-started with via `--served-model-name`). Streaming arrives progressively.
-
-### Token Counting
-
-`POST /v1/messages/count_tokens` is allowlisted and routed like any other
-inference request. It takes the same body as `/v1/messages` and returns the input
-token count (`{"input_tokens": N}`) **without running the model** — Claude Code
-uses it to measure context size before sending. The backend must serve this route
-(vLLM does); if it doesn't, clients fall back to a local token estimate.
-
-### Example
-
-```bash
-curl -X POST https://<router-host>/v1/messages \
+curl -X POST \
+  http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-..." \
+  -H "Authorization: Bearer <api-key>" \
   -d '{
     "model": "Qwen/Qwen3.6-27B",
     "max_tokens": 256,
-    "messages": [{"role": "user", "content": "Write a haiku about routing."}]
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a haiku about routing."
+      }
+    ]
   }'
 ```
 
----
+The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Mycoroute.
 
-## Rate Limit Headers
+Model names must match both:
 
-When API key auth is enabled, responses include remaining quota information:
+- the name registered by the Mycoroute agent
+- the name accepted by the backend
 
+### Use Claude Code
+
+Point Claude Code at the router:
+
+```bash
+unset ANTHROPIC_API_KEY
+
+export ANTHROPIC_BASE_URL="https://<router-host>"
+export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
+
+claude
 ```
-X-RateLimit-Remaining-Requests: 999
-X-RateLimit-Remaining-Tokens: 499985
+
+The router should be exposed through HTTPS before using it outside a trusted network.
+
+See [Claude Code](/integrations/claude-code) for the complete setup and compatibility guidance.
+
+## Count Anthropic input tokens
+
+Mycoroute also allows:
+
+```text
+POST /v1/messages/count_tokens
 ```
 
-| Header | Description |
-|--------|-------------|
-| `X-RateLimit-Remaining-Requests` | Remaining requests in the current minute (RPM quota) |
-| `X-RateLimit-Remaining-Tokens` | Remaining tokens in the current day (TPD quota) |
+The request uses the same top-level `model` field and is routed to a backend that supports the token-counting endpoint.
 
-Both headers return `0` when the respective quota is exhausted (HTTP 429).
+```bash
+curl -X POST \
+  http://localhost:8080/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api-key>" \
+  -d '{
+    "model": "Qwen/Qwen3.6-27B",
+    "messages": [
+      {
+        "role": "user",
+        "content": "How many tokens are in this request?"
+      }
+    ]
+  }'
+```
 
-## See Also
+A compatible backend returns:
 
-- [Integrations](/integrations/overview) - End-to-end setup guides for Claude Code, OpenCode, and other clients against this API
-- [Embeddings](/api/embeddings) - Embedding generation
-- [Reranking](/api/reranking) - Reranking endpoint
-- [Models List](/api/models-list) - Discover available models
-- [auth.yaml Reference](/security/auth-yaml-reference) - Quotas & token budget enforcement
-- [Error Codes](/reference/error-codes) - Complete error reference
+```json
+{
+  "input_tokens": 11
+}
+```
+
+This endpoint counts input tokens without running model inference.
+
+## Authentication and model access
+
+When API authentication is enabled, send:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+An API key can restrict access to specific models.
+
+A request for a model outside the key’s allowlist returns HTTP `403`:
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: restricted-model",
+    "source": "router"
+  }
+}
+```
+
+When authentication is disabled, requests do not need an authorization header.
+
+## Request and token quotas
+
+API keys can enforce:
+
+- requests per minute
+- daily token budgets
+- separate quotas for individual models
+
+Before routing, Mycoroute checks the request-rate quota.
+
+When a daily token budget is configured, it also estimates the prompt and checks whether the remaining budget can cover:
+
+```text
+estimated input tokens + requested maximum output tokens
+```
+
+`max_completion_tokens` is used when present. Otherwise Mycoroute uses `max_tokens`.
+
+The estimated input tokens are charged at admission. Actual completion tokens are charged after the backend responds.
+
+<Warning>
+  Token estimation for Anthropic-format requests is best-effort. The estimator does not fully account for every Anthropic content structure, including some top-level system instructions and non-text blocks.
+</Warning>
+
+## Rate-limit headers
+
+When a finite quota is configured, responses may include:
+
+```text
+X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
+```
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Remaining-Requests` | Requests remaining in the active per-minute bucket |
+| `X-RateLimit-Remaining-Tokens` | Tokens remaining in the active daily bucket |
+
+Unlimited quotas do not produce a remaining-value header.
+
+When a request-rate bucket is exhausted, Mycoroute returns HTTP `429` with `X-RateLimit-Remaining-Requests: 0`.
+
+A token-budget rejection can still report a nonzero `X-RateLimit-Remaining-Tokens` value when the remaining budget is positive but too small for the estimated prompt plus requested maximum output. Post-response token rejection reports `0`.
+
+## Error responses
+
+Router errors use this envelope:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "router"
+  }
+}
+```
+
+Backend-derived errors use:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "backend"
+  }
+}
+```
+
+Common responses include:
+
+| HTTP status | Example code | Meaning |
+| --- | --- | --- |
+| `400` | `request_invalid` | Malformed request or missing model |
+| `400` | `context_length_exceeded` | Backend rejected the context length |
+| `413` | Not guaranteed | Request body exceeds `mycoroute_MAX_REQUEST_BYTES` |
+| `401` | `unauthorized` | Missing or invalid credentials |
+| `403` | `model_forbidden` | API key cannot use the requested model |
+| `404` | `model_not_found` | No registered model matches the request |
+| `429` | `rate_limit_exceeded` | Request-rate quota exhausted |
+| `429` | `token_limit_exceeded` | Daily token budget exhausted |
+| `503` | `no_agents_available` | No healthy matching agent |
+| `503` | `no_capacity` | Matching agents are at capacity |
+| `503` | `queue_full` | Router request queue remained full |
+| `504` | `request_timeout` | Request exceeded the router timeout |
+
+See [Error codes](/reference/error-codes) for the complete reference.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Embeddings" href="/api/embeddings">
+    Generate vectors through capability-specific embedding agents.
+  </Card>
+
+  <Card title="Models" href="/api/models">
+    Discover which models and capabilities are currently available.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure client authentication, model access, and quotas.
+  </Card>
+</CardGroup>

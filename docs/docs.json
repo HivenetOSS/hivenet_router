@@ -60,6 +60,11 @@
           "api/embeddings",
           "api/reranking",
           "api/models-list",
+          "api/admin-endpoints",
+          "api/chat-completions",
+          "api/embeddings",
+          "api/reranking",
+          "api/models",
           "api/admin-endpoints"
         ]
       },

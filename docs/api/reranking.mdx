@@ -1,49 +1,124 @@
 ---
 title: "Reranking"
+description: "Score and reorder candidate documents by relevance through capability-specific reranking agents."
+sidebarTitle: "Reranking"
 ---
 
-Rerank search results via any agent started with `--capability reranker`.
+Send a query and a set of candidate documents to a reranking model, then receive the documents ordered by relevance.
 
-## Endpoint
+Mycoroute routes these requests to agents registered with the `reranker` capability.
 
-```
+```text
 POST /v1/rerank
 ```
 
-## Requirements
+<Note>
+  Infinity is the documented reranking backend. Other engine types can register as rerankers when their backend exposes a compatible `POST /v1/rerank` endpoint. Ollama agents cannot use the `reranker` capability.
+</Note>
 
-- Agent running with `--capability reranker` (Infinity, vLLM, SGLang, llama.cpp, or Custom — **not** Ollama)
+## How reranking requests are routed
 
-## Request
+For each request, Mycoroute:
 
-### Headers
+1. authenticates the client when API authentication is enabled
+2. applies the configured request-rate quota
+3. reads and validates the top-level `model` field
+4. checks that the API key may use that model
+5. filters for agents registered with the `reranker` capability
+6. applies routing policies and capacity checks
+7. forwards the original request to `POST /v1/rerank` on the selected backend
+8. returns the backend response to the client
 
-| Header | Required | Description |
-|--------|----------|-------------|
-| `Content-Type` | ✅ | `application/json` |
-| `Authorization` | ❌ | `Bearer <api-key>` |
+The selected backend validates the query, documents, result count, and any optional reranking fields.
 
-### Body
+## Request headers
+
+| Header | Required | Purpose |
+| --- | --- | --- |
+| `Content-Type: application/json` | Yes | Identifies the JSON request |
+| `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
+| `X-Request-ID: <uuid>` | No | Correlates the request with logs and traces |
+
+## Request body
+
+A typical request contains:
 
 ```json
 {
-  "model": "string",
-  "query": "string",
-  "documents": ["string"],
-  "top_n": 5
+  "model": "bge-reranker-large",
+  "query": "What is the capital of France?",
+  "documents": [
+    "Paris is the capital of France.",
+    "Berlin is the capital of Germany.",
+    "France is located in Western Europe."
+  ],
+  "top_n": 2
 }
 ```
 
-### Fields
+| Field | Type | Required | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| `model` | String | Yes | None | Model registered by a reranking agent |
+| `query` | String | Yes | None | Text used to judge relevance |
+| `documents` | Array of strings | Yes | None | Candidate documents to score |
+| `top_n` | Integer | No | All documents | Maximum number of results to return |
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `model` | string | ✅ | - | Reranker model name |
-| `query` | string | ✅ | - | Search query |
-| `documents` | array | ✅ | - | Documents to rerank |
-| `top_n` | int | ❌ | All | Number of results to return |
+Mycoroute validates the `model` field. The backend validates the other fields.
+
+The model name must:
+
+- match a model registered by a reranking agent
+- be allowed by the caller’s API key when model restrictions are enabled
+- contain no more than 256 characters
+
+### Request-body size
+
+Mycoroute limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. The complete query and document array count toward this limit.
+
+Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `mycoroute_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A reverse proxy or ingress may enforce a smaller limit.
+
+Reduce the number or size of documents when a request receives `413`. Do not depend on a particular JSON error body for this early rejection.
+
+## Basic request
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-reranker-large",
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "France is located in Western Europe."
+    ],
+    "top_n": 2
+  }'
+```
+
+With API authentication enabled:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/rerank \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-reranker-large",
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "France is located in Western Europe."
+    ],
+    "top_n": 2
+  }'
+```
 
 ## Response
+
+A successful response resembles:
 
 ```json
 {
@@ -60,7 +135,7 @@ POST /v1/rerank
       "document": null
     }
   ],
-  "model": "BAAI/bge-reranker-large",
+  "model": "bge-reranker-large",
   "usage": {
     "prompt_tokens": 151,
     "total_tokens": 151
@@ -70,74 +145,447 @@ POST /v1/rerank
 }
 ```
 
-> **Note:** `document` is `null` by default. Results are ordered by `relevance_score` descending; `index` refers to the position of the document in the original input array.
+| Field | Purpose |
+| --- | --- |
+| `results` | Ranked results, normally ordered by descending relevance |
+| `relevance_score` | Backend-generated relevance score |
+| `index` | Position of the document in the original request array |
+| `document` | Document content when returned by the backend; often `null` by default |
+| `model` | Model that produced the ranking |
+| `usage` | Token information when provided by the backend |
 
-## Examples
+The exact fields depend on the backend. Mycoroute returns the successful response without changing result scores or ordering.
 
-### Basic Request
+<Note>
+  Use the `index` field to recover the original document. Do not assume that `document` will contain the text.
+</Note>
+
+## Use Python
+
+```python
+from typing import Any
+
+import requests
+
+documents = [
+    "Random Forest is a supervised learning algorithm.",
+    "Paris is a city in France.",
+    "Neural networks are used for deep learning.",
+]
+
+response = requests.post(
+    "http://localhost:8080/v1/rerank",
+    headers={
+        "Content-Type": "application/json",
+    },
+    json={
+        "model": "bge-reranker-large",
+        "query": "machine learning algorithms",
+        "documents": documents,
+        "top_n": 2,
+    },
+    timeout=120,
+)
+
+response.raise_for_status()
+
+payload: dict[str, Any] = response.json()
+
+for result in payload["results"]:
+    index = result["index"]
+    score = result["relevance_score"]
+
+    print(f"{score:.4f}: {documents[index]}")
+```
+
+With authentication:
+
+```python
+headers = {
+    "Authorization": "Bearer <api-key>",
+    "Content-Type": "application/json",
+}
+```
+
+## Use reranking in a search pipeline
+
+Reranking normally follows a broader retrieval step.
+
+A search system might first retrieve 50 approximate matches from a vector database, then ask a reranker to select the 10 most relevant documents.
+
+```python
+from dataclasses import dataclass
+
+import requests
+
+
+@dataclass
+class SearchResult:
+    text: str
+    source: str
+
+
+candidates: list[SearchResult] = search_index.query(
+    "machine learning",
+    top_k=50,
+)
+
+response = requests.post(
+    "http://localhost:8080/v1/rerank",
+    json={
+        "model": "bge-reranker-large",
+        "query": "machine learning",
+        "documents": [
+            candidate.text
+            for candidate in candidates
+        ],
+        "top_n": 10,
+    },
+    timeout=120,
+)
+
+response.raise_for_status()
+
+ranked_candidates = [
+    {
+        "result": candidates[item["index"]],
+        "relevance_score": item["relevance_score"],
+    }
+    for item in response.json()["results"]
+]
+```
+
+This preserves the metadata held by the search system while using the reranker’s indices and scores to reorder the candidates.
+
+## Additional request fields
+
+Mycoroute forwards the original JSON request to the backend.
+
+You can include additional fields supported by the selected reranking service, but Mycoroute does not interpret or normalize them.
+
+For example:
+
+```json
+{
+  "model": "bge-reranker-large",
+  "query": "What is the capital of France?",
+  "documents": [
+    "Paris is the capital of France.",
+    "Berlin is the capital of Germany."
+  ],
+  "top_n": 1,
+  "return_documents": true
+}
+```
+
+Whether `return_documents` or another optional field works depends entirely on the backend.
+
+Unsupported fields may be ignored or rejected.
+
+## No streaming support
+
+Reranking requests are synchronous.
+
+Mycoroute waits for the selected backend to score the documents and return the complete result set. The endpoint does not use server-sent events.
+
+For large candidate sets, keep the batch within the backend’s limits and configure an appropriate request timeout.
+
+## Authentication and model access
+
+When API authentication is enabled, send:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+An API key can restrict access to specific models.
+
+A request for a model outside the key’s allowlist returns HTTP `403`:
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: bge-reranker-large",
+    "source": "router"
+  }
+}
+```
+
+When authentication is disabled, no authorization header is required.
+
+## Quotas
+
+Reranking requests participate in request-rate quota enforcement.
+
+When a finite request quota is configured, responses may include:
+
+```text
+X-RateLimit-Remaining-Requests
+```
+
+When the request-rate quota is exhausted, Mycoroute returns HTTP `429`.
+
+<Note>
+  The current reranking path does not charge query or document tokens against the daily token quota. Successful reranking requests are recorded with zero input and output tokens for quota accounting.
+</Note>
+
+## Routing policies
+
+Reranking agents use the same routing pipeline as other Mycoroute workloads.
+
+For example:
+
+```yaml
+routing_policy:
+  match:
+    engine: infinity
+    region: EU-France
+  exclude_if:
+    success_rate:
+      lt: 0.95
+  strategy: least-loaded
+```
+
+Capability filtering happens automatically before policy ranking. A reranking request cannot be routed to an agent registered as `llm` or `embedding`.
+
+Fallback chains can route across several compatible reranking agents that expose the same model.
+
+## Discover reranking models
+
+List the reranking models available through the router:
 
 ```bash
-curl -X POST http://localhost:8080/v1/rerank \
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "reranker")
+      | {
+          id,
+          capability,
+          agents
+        }'
+```
+
+Inspect registered reranking agents:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.capability == "reranker")
+      | {
+          peer_id,
+          model: .metadata.model,
+          engine: .metadata.engine,
+          region: .metadata.region,
+          capacity: .metadata.capacity,
+          is_healthy: .status.healthy
+        }'
+```
+
+The administration endpoint may require separate credentials depending on the router’s admin-auth configuration.
+
+## Supported agent configurations
+
+Start the agent with:
+
+```bash
+--capability reranker
+```
+
+Mycoroute accepts the reranker capability with:
+
+- Infinity
+- vLLM
+- SGLang
+- llama.cpp
+- custom engines
+
+The selected backend must expose:
+
+```text
+POST /v1/rerank
+```
+
+<Warning>
+  Ollama does not expose the required reranking endpoint. Mycoroute rejects an agent started with both `--engine ollama` and `--capability reranker`.
+</Warning>
+
+For the documented Infinity setup, see [Infinity agent](/deploy/agents/infinity).
+
+## Error responses
+
+Router errors use this envelope:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "router"
+  }
+}
+```
+
+Backend errors use:
+
+```json
+{
+  "error": {
+    "code": "backend_error",
+    "message": "Backend response or explanation",
+    "source": "backend"
+  }
+}
+```
+
+Common responses include:
+
+| HTTP status | Code | Meaning |
+| --- | --- | --- |
+| `400` | `request_invalid` | Missing model, malformed JSON, or model name too long |
+| `413` | Not guaranteed | Request body exceeds `mycoroute_MAX_REQUEST_BYTES` |
+| `401` | `unauthorized` | Missing or invalid API credentials |
+| `403` | `model_forbidden` | API key cannot use the requested model |
+| `404` | `model_not_found` | No registered model matches the request |
+| `429` | `rate_limit_exceeded` | Request-rate quota exhausted |
+| `503` | `no_agents_available` | No healthy matching reranking agent |
+| `503` | `no_capacity` | Matching agents are at capacity |
+| `503` | `queue_full` | The router queue remained full |
+| `503` | `agent_disconnected` | The selected agent became unreachable |
+| `502` | `backend_error` | Backend rejected or could not process the request |
+| `504` | `request_timeout` | The request exceeded its deadline |
+
+See [Error codes](/reference/error-codes) for the complete reference.
+
+## Troubleshooting
+
+### The model is not found
+
+List available reranking models:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "reranker")'
+```
+
+Check that:
+
+- the agent uses `--capability reranker`
+- the requested model matches the registered model exactly
+- the agent is healthy
+- the API key may access the model
+
+### The request reaches the wrong capability
+
+Inspect the agent registration:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.model == "bge-reranker-large")
+      | {
+          model: .metadata.model,
+          capability: .metadata.capability,
+          engine: .metadata.engine
+        }'
+```
+
+The capability must be:
+
+```text
+reranker
+```
+
+### The backend rejects the request
+
+Test it directly:
+
+```bash
+curl -X POST \
+  http://localhost:7997/v1/rerank \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-reranker-v2-m3",
-    "query": "capital of France",
+    "model": "bge-reranker-large",
+    "query": "Test query",
     "documents": [
-      "Paris is the capital of France.",
-      "Berlin is the capital of Germany.",
-      "France is located in Western Europe."
+      "First document",
+      "Second document"
     ],
     "top_n": 2
   }'
 ```
 
-### Python
+A backend may reject:
 
-```python
-import requests
+- an empty query
+- an empty document list
+- unsupported document formats
+- too many documents
+- documents above the model’s token limit
+- an invalid `top_n`
+- unsupported optional fields
 
-response = requests.post(
-    "http://localhost:8080/v1/rerank",
-    json={
-        "model": "BAAI/bge-reranker-v2-m3",
-        "query": "machine learning algorithms",
-        "documents": [
-            "Random Forest is a supervised learning algorithm.",
-            "Paris is a city in France.",
-            "Neural networks are used for deep learning."
-        ],
-        "top_n": 2
-    }
-)
+### The response contains `document: null`
 
-results = response.json()["results"]
-for r in results:
-    print(f"{r['relevance_score']:.2f}: {r['document']['text']}")
+This is expected for backends that do not return document text by default.
+
+Use each result’s `index` to retrieve the original document from the input array.
+
+### Results do not contain every document
+
+Check `top_n`.
+
+For example:
+
+```json
+{
+  "top_n": 2
+}
 ```
 
-## Use Case: Search Pipeline
+returns at most two results, even when the request contains more documents.
 
-```python
-# 1. Retrieve candidate documents
-candidates = search_index.query("machine learning", top_k=50)
+When `top_n` is omitted, the documented Infinity behavior is to return all ranked documents.
 
-# 2. Rerank with Mycoroute
-rerank_response = requests.post(
-    "http://localhost:8080/v1/rerank",
-    json={
-        "model": "BAAI/bge-reranker-v2-m3",
-        "query": "machine learning",
-        "documents": [doc.text for doc in candidates],
-        "top_n": 10
-    }
-)
+### Requests time out
 
-# 3. Return top results
-top_results = rerank_response.json()["results"]
+Reduce the number or size of candidate documents, or increase the agent’s backend timeout:
+
+```bash
+--http-timeout 10m
 ```
 
-## See Also
+Also check:
 
-- [Chat Completions](/api/chat-completions) - LLM inference
-- [Embeddings](/api/embeddings) - Embedding generation
-- [Infinity Agent](/deploy/agents/infinity) - Recommended reranker backend
+- backend model loading state
+- declared agent capacity
+- accelerator memory
+- competing embedding or reranking traffic
+- backend batch configuration
+
+### The request is rate-limited
+
+Check:
+
+```text
+X-RateLimit-Remaining-Requests
+```
+
+Review the API key’s request-rate quota and any per-model quota configuration.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Models" href="/api/models">
+    Discover available models, capabilities, engines, and healthy capacity.
+  </Card>
+
+  <Card title="Infinity agent" href="/deploy/agents/infinity">
+    Configure embedding and reranking models through Infinity.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Learn how reranking agents are filtered, ranked, and used in fallback chains.
+  </Card>
+</CardGroup>
