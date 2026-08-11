@@ -27,11 +27,13 @@ All Hivenet Router errors use a consistent JSON envelope.
 | `request_invalid` | 400 | router | No | Malformed JSON or missing required field (`model`, `messages`) |
 | `context_length_exceeded` | 400 | backend | No | Input tokens exceed the model's maximum context window |
 | `invalid_parameter` | 400 | backend | No | Invalid inference parameter (`temperature`, `top_p`, `max_tokens`, etc.) |
+| `input_too_long` | 400 | router | No | Request exceeded the policy's `max_input_tokens` or `images_max` cap |
 | `unauthorized` | 401 | router | No | Missing or invalid API key |
 | `model_forbidden` | 403 | router | No | API key's model allowlist does not include the requested model |
 | `model_not_found` | 404 | router | No | No agents are registered for the requested model |
 | `rate_limit_exceeded` | 429 | router | Yes — after delay | Tenant's requests-per-minute bucket exhausted |
 | `token_limit_exceeded` | 429 | router | No — until UTC midnight | Tenant's daily token budget exhausted |
+| `concurrency_limit_exceeded` | 429 | router | Yes — after `Retry-After` | Model's KV-occupancy admit budget or `max_inflight` is full; the park window elapsed before capacity freed |
 | `no_agents_available` | 503 | router | Yes — backoff | Agents registered but all marked unhealthy |
 | `no_capacity` | 503 | router | Yes — immediately | All healthy agents are at full concurrency capacity |
 | `agent_disconnected` | 503 | router | Yes | Agent became unreachable between selection and forwarding |
@@ -44,11 +46,12 @@ All Hivenet Router errors use a consistent JSON envelope.
 
 | Code | Strategy |
 |------|----------|
-| `request_invalid`, `context_length_exceeded`, `invalid_parameter` | **Do not retry.** Fix the request payload. |
+| `request_invalid`, `context_length_exceeded`, `invalid_parameter`, `input_too_long` | **Do not retry with the same payload.** Reduce prompt size or image count so it fits the model's `max_input_tokens` / `images_max` cap. |
 | `unauthorized`, `model_forbidden` | **Do not retry.** Fix credentials or request a different model. |
 | `model_not_found` | **Do not retry** until an agent for that model is running. Verify name via `GET /v1/models`. |
 | `token_limit_exceeded` | **Do not retry** until UTC midnight. Daily budget is exhausted. |
 | `rate_limit_exceeded` | Retry after `60 / rpm` seconds. Use exponential backoff with jitter. |
+| `concurrency_limit_exceeded` | Retry after the `Retry-After` header (default 1 s), then exponential backoff with jitter. Signals the model's occupancy budget is momentarily full, not that the request itself is bad. |
 | `no_capacity`, `agent_disconnected` | Retry immediately or after 1–2 s. Slot contention resolves quickly. |
 | `no_agents_available`, `backend_unavailable`, `queue_full` | Retry with exponential backoff (2 s, 4 s, 8 s…). Resolves when agents reconnect or backend finishes loading. |
 | `backend_error` | Retry once. If it recurs with the same input, investigate the backend (e.g. GPU OOM). |
@@ -74,3 +77,4 @@ If the backend returns a JSON body with a `type` field (vLLM/OpenAI format), tha
 - [Audit Logging](../Observability/03-Audit-Logging.md) - Per-request error_code in audit trail
 - [API Keys](../Security%20&%20Auth/02-API-Keys.md) - Rate limit and quota configuration
 - [Routing Concepts](../Routing%20&%20Policies/01-Routing-Concepts.md) - How agent selection works
+- [Admission Control](../Routing%20&%20Policies/05-Admission-Control.md) - Sources of `input_too_long` and `concurrency_limit_exceeded`

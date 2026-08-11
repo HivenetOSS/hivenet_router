@@ -5,6 +5,13 @@ Complete reference for the routing policy YAML format.
 ## Basic Structure
 
 ```yaml
+mode: "reserved"           # or "serverless" — see Admission Control below
+max_input_tokens: 0        # per-request caps and occupancy budget; 0 disables
+images_max: 0
+admit_budget_tokens: 0
+max_inflight: 0
+shed_if: {}                # front-door shed thresholds
+
 routing_policy:
   match: {}
   exclude_if: {}
@@ -24,6 +31,8 @@ fallback_provider:
 ```
 
 `fallback_provider` is a top-level field — not a step inside `fallback_chain`. It is the last resort after all `fallback_chain` steps are exhausted. API keys are supplied via environment variables (`HIVENET_ROUTER_OPENAI_API_KEY`, `HIVENET_ROUTER_ANTHROPIC_API_KEY`), not in the YAML.
+
+The admission-control fields (`mode`, `max_input_tokens`, `images_max`, `admit_budget_tokens`, `max_inflight`, `shed_if`) are all optional and each defaults to "unset" (inert). A routing-only policy that omits them behaves exactly as before. See [Admission Control](05-Admission-Control.md) for concepts and a worked example.
 
 ## Layer 1: Match (Static Filter)
 
@@ -297,6 +306,72 @@ fallback_provider:
   model: "gpt-4o-mini"
 ```
 
+## Admission Control Fields
+
+Front-door caps applied before a request enters the routing pipeline. Every field is optional; a value of `0` (or an omitted field) leaves that gate inert. See [Admission Control](05-Admission-Control.md) for concepts.
+
+### Top-Level Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `reserved` | `reserved` (shared circuit breaker only) or `serverless` (also enforces per-key caps from `auth.yaml`). An empty string normalises to `reserved`; unknown values are a validation error. |
+| `max_input_tokens` | int | `0` | Reject any single request whose estimated prompt exceeds this many tokens with `400 input_too_long`. `0` disables. |
+| `images_max` | int | `0` | Reject any single request carrying more `image_url` content parts than this with `400 input_too_long`. `0` disables. |
+| `admit_budget_tokens` | int | `0` | KV-occupancy admit budget: total token-weighted in-flight work allowed per model. Scaled by [`HIVENET_ROUTER_ADMIT_FRACTION`](../Reference/01-Configuration-Reference.md) (default `0.85`). Over budget the request parks briefly (`HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`, default `250ms`), then returns `429 concurrency_limit_exceeded` with `Retry-After`. `0` disables. |
+| `max_inflight` | int | `0` | Concurrent-request backstop per model. Applies in parallel to `admit_budget_tokens`. `0` disables. |
+| `shed_if` | object | `{}` | Front-door shed thresholds on live engine signals. See below. |
+
+All caps are non-negative. Negative values are rejected at load.
+
+There is deliberately **no output-token field**. The router never clamps `max_tokens`; the engine bounds output via `max_model_len`.
+
+### `shed_if` Block
+
+Same shape as `exclude_if` (one operator per field: `gt`, `lt`, `gte`, `lte`), but with a narrower field set — only signals that read "the box is full right now" are accepted. Unknown fields are rejected at load.
+
+| Field | Type | Range | Description |
+|---|---|---|---|
+| `kv_cache_utilization` | float | 0.0–1.0 | Engine KV cache usage. |
+| `waiting_requests` | float | 0+ | Requests queued in the engine's own scheduler. |
+
+```yaml
+shed_if:
+  kv_cache_utilization: { gt: 0.95 }
+  waiting_requests: { gt: 20 }
+```
+
+### Serverless Mode
+
+Setting `mode: serverless` enables per-key caps in `auth.yaml`:
+
+- `input_tokens_per_minute` and `output_tokens_per_minute` per-key token buckets
+- `max_occupancy_share` — fraction of `admit_budget_tokens` the key may hold in flight at once
+
+Per-key caps are ignored on `reserved` policies. See [auth.yaml Reference](../Security%20&%20Auth/03-auth.yaml-Reference.md).
+
+**Startup invariant.** For every serverless policy, each API key that could reach the model must have `input_tokens_per_minute ≥ max_input_tokens`, otherwise the key's per-minute bucket would silently cap the usable context. The router refuses to start (and rejects a `SIGHUP` reload) if the invariant is violated.
+
+### Example
+
+```yaml
+models:
+  - "Qwen/Qwen3-32B"
+
+mode: serverless
+max_input_tokens: 32000
+images_max: 10
+admit_budget_tokens: 100000
+max_inflight: 8
+shed_if:
+  kv_cache_utilization: { gt: 0.95 }
+  waiting_requests: { gt: 20 }
+
+routing_policy:
+  match:
+    engine: "vllm"
+  strategy: "least-loaded"
+```
+
 ## Loading Policy
 
 ### From File
@@ -357,6 +432,10 @@ Policy is validated on load. Rules enforced:
 - Unknown `exclude_if` field names are rejected (typos silently disable gates otherwise)
 - Each `exclude_if` field must have exactly one operator (`gt`, `lt`, `gte`, or `lte`)
 - `fallback_provider.engine` and `fallback_provider.model` are both required when the block is present
+- `mode` must be `reserved` or `serverless`; an empty value normalises to `reserved`
+- `max_input_tokens`, `images_max`, `admit_budget_tokens`, `max_inflight` must be `>= 0`
+- Unknown `shed_if` field names are rejected (only `kv_cache_utilization` and `waiting_requests` are accepted); each field must specify exactly one operator
+- On startup and every reload, for every `serverless` policy each key that can reach the model must satisfy `input_tokens_per_minute >= max_input_tokens`; a violation fails startup and rejects the reload
 
 The router refuses to start with an invalid `--policy-file`. `PUT /admin/policy` returns HTTP 400 with the validation message on error.
 
@@ -365,4 +444,5 @@ The router refuses to start with an invalid `--policy-file`. `PUT /admin/policy`
 - [Routing Concepts](01-Routing-Concepts.md) - Pipeline explanation
 - [Fallback Chains](03-Fallback-Chains.md) - Detailed fallback config
 - [Provider Fallback](04-Provider-Fallback.md) - OpenAI/Anthropic setup
+- [Admission Control](05-Admission-Control.md) - Modes, per-request caps, occupancy budget
 - [Admin Endpoints](../API%20Reference/05-Admin-Endpoints.md) - Policy API

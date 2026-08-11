@@ -45,9 +45,12 @@ api:
         created_at: "22-04-2026"
         expires_at: "01-01-2027"   # optional; key rejected after this date (DD-MM-YYYY)
       models: []                   # empty = all models; non-empty = whitelist
+      max_occupancy_share: 0.25    # serverless only — see below
       quota:
         requests_per_minute: 1000
         tokens_per_day: 1000000
+        input_tokens_per_minute: 32000    # serverless only — see below
+        output_tokens_per_minute: 64000   # serverless only — see below
 ```
 
 ### Key Entry Fields
@@ -62,11 +65,26 @@ api:
 | `metadata.created_at` | ❌ | Creation date in DD-MM-YYYY format |
 | `metadata.expires_at` | ❌ | Expiry date in DD-MM-YYYY format |
 | `models` | ❌ | Model whitelist; empty list = unrestricted |
+| `max_occupancy_share` | ❌ | Fraction of a serverless replica's admit budget this key may hold in flight at once. Range `(0, 1]`; 0 (or unset) means no per-key cap. Ignored on `reserved` policies. Sits at the key level, not inside `quota`, because it is measured against `admit_budget_tokens` rather than a per-minute rate. See [Admission Control](../Routing%20&%20Policies/05-Admission-Control.md). |
 | `quota.requests_per_minute` | ❌ | RPM limit; 0 = unlimited. **Flat-shape only — mutually exclusive with `quota.per_model`** |
 | `quota.tokens_per_day` | ❌ | Daily token budget; 0 = unlimited. **Flat-shape only — mutually exclusive with `quota.per_model`** |
-| `quota.per_model` | ❌ | Per-model overrides — see [Per-model quotas](#per-model-quotas) below. **When present, replaces the two flat fields entirely** |
+| `quota.input_tokens_per_minute` | ❌ | Serverless-only per-key input-token bucket (tokens/min); 0 = unset. **Flat-shape only — mutually exclusive with `quota.per_model`.** On a serverless policy the bucket must be `>= max_input_tokens` or the router refuses to start. |
+| `quota.output_tokens_per_minute` | ❌ | Serverless-only per-key output-token bucket (tokens/min); 0 = unset. **Flat-shape only — mutually exclusive with `quota.per_model`.** |
+| `quota.per_model` | ❌ | Per-model overrides — see [Per-model quotas](#per-model-quotas) below. **When present, replaces the flat fields entirely** |
 | `quota.per_model.<model>.requests_per_minute_per_replica` | ✅ (inside per_model entry) | Per-minute request rate **per healthy replica**; effective ceiling = this × live replicas. 0 = unlimited |
 | `quota.per_model.<model>.tokens_per_day` | ✅ (inside per_model entry) | Per-model absolute daily token budget; 0 = unlimited |
+
+### Serverless per-key caps
+
+Three fields apply only when the request lands on a policy with `mode: serverless` (see [Policy YAML Reference](../Routing%20&%20Policies/02-Policy-YAML-Reference.md)):
+
+- **`max_occupancy_share`** (key level) — the fraction of the model's `admit_budget_tokens` this key may hold in flight at once. Prevents one tenant from occupying the whole replica pool. Range `(0, 1]`; unset means unlimited. Values outside the range are rejected at load.
+- **`quota.input_tokens_per_minute`** — per-key input-token bucket. Reserved up front from a request's estimated prompt.
+- **`quota.output_tokens_per_minute`** — per-key output-token bucket.
+
+On a `reserved` policy all three are ignored.
+
+> **Startup invariant.** On every serverless policy, a key that could reach the model must have `input_tokens_per_minute >= max_input_tokens`. If the bucket is smaller than one maximum-size prompt, it silently caps context. The router refuses to start (and rejects a `SIGHUP` reload) with an error that names the key and the offending policy.
 
 ### Per-model quotas
 
@@ -322,6 +340,24 @@ api:
         requests_per_minute: 2000
         tokens_per_day: 0  # unlimited
 
+    # Serverless key — per-key occupancy share and token buckets. Applies only
+    # when the request lands on a policy with mode: serverless. input_tokens_per_minute
+    # must be >= max_input_tokens on every serverless policy the key can reach.
+    - key_hash: "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6"
+      key_preview: "sk-...mno"
+      metadata:
+        name: "Serverless tenant"
+        owner: "tenant-serverless"
+        created_at: "01-08-2026"
+      models:
+        - "Qwen/Qwen3-32B"
+      max_occupancy_share: 0.25            # holds at most 25% of the admit budget
+      quota:
+        requests_per_minute: 200
+        tokens_per_day: 5_000_000
+        input_tokens_per_minute: 32000     # >= policy max_input_tokens
+        output_tokens_per_minute: 64000
+
     # Per-model quotas — different RPM/TPD per model on one key. RPM is
     # per-replica so adding agents lifts the ceiling automatically. Every
     # model the key may call must be enumerated; unlisted models are rejected
@@ -380,4 +416,5 @@ All changes to `auth.yaml` — new keys, revoked keys, updated quotas — take e
 - [Authentication Overview](01-Authentication-Overview.md) - Auth architecture
 - [API Keys](02-API-Keys.md) - Key creation workflow
 - [Model Restrictions](04-Model-Restrictions.md) - Access control
+- [Admission Control](../Routing%20&%20Policies/05-Admission-Control.md) - `reserved` vs `serverless`, occupancy budget
 - [Audit Logging](../Observability/03-Audit-Logging.md) - Request tracking

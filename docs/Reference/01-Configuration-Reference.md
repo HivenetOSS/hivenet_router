@@ -23,6 +23,8 @@ Complete reference for all Router and Agent CLI flags and environment variables.
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default max slot attempts per policy step |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Internal request channel size |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Capacity wait queue depth per model (0 = disabled) |
+| — | `HIVENET_ROUTER_ADMIT_FRACTION` | `0.85` | Scales a policy's `admit_budget_tokens` into the effective KV-occupancy budget. Range `(0, 1]`; values outside the range are ignored. Set below 1.0 to leave headroom for input-token estimator error. See [Admission Control](../Routing%20&%20Policies/05-Admission-Control.md). |
+| — | `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | How long an over-budget request waits for occupancy to free before it is rejected with `429 concurrency_limit_exceeded`. Go duration; `0` rejects immediately. |
 | `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | End-to-end request timeout |
 | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | — | `10485760` | Max `/v1/*` request body size in bytes (10 MB; 0 disables) |
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` | Agent session token TTL (minimum 5m) |
