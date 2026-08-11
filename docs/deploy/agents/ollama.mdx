@@ -1,188 +1,634 @@
 ---
-title: "Ollama Agent"
+title: "Ollama agent"
+description: "Connect an Ollama backend to Mycoroute, select the model an agent represents, and configure capacity for local or edge inference."
+sidebarTitle: "Ollama"
 ---
 
-Deploy a Mycoroute agent connected to an Ollama backend.
+Connect an Ollama server to Mycoroute by running an agent beside the backend.
 
-> **One agent = one model.** Each agent process registers exactly one model with the router — the first model returned by `GET /api/tags`. If Ollama has multiple models pulled, use `--model <name>` to pin each agent to its model and start one agent process per model.
+The agent checks Ollama through its `/api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
 
-> **No engine metrics.** Ollama does not expose a Prometheus `/metrics` endpoint. Only universal metrics (SRTT, request counters) and hardware metrics (GPU via NVML) are available for this engine.
+<Warning>
+  One Mycoroute agent represents one model. If your Ollama server contains several models, pin each agent to a model with `--model` and run a separate agent process for each one.
+</Warning>
 
----
+<Note>
+  Ollama does not provide the engine metrics collected from vLLM, SGLang, or metrics-enabled llama.cpp servers. Mycoroute still records routing, request, latency, health, and available hardware metrics for the agent.
+</Note>
 
-## Prerequisites
+## Before you start
 
-- Ollama installed and running (see below)
-- Mycoroute Router running and reachable
+You need:
 
----
+- a running Mycoroute router
+- Ollama on the agent host
+- at least one model pulled in Ollama
+- network access between the agent and router
+- the Mycoroute agent binary or Docker image
+- the same JWT secret used by the router
 
-## Step 1: Start Ollama
+The examples use:
 
-### Linux
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Start the server (systemd is not running in containers — start manually)
-export OLLAMA_HOST=0.0.0.0:11434   # default port; change to e.g. 8888 if needed
-export OLLAMA_MODELS=/home/ubuntu/models
-export OLLAMA_KEEP_ALIVE=-1        # keep model loaded indefinitely
-nohup ollama serve > ~/ollama.log 2>&1 &
+```text
+Router IP: 192.168.1.100
+Router gRPC port: 50051
+Router libp2p port: 9000
+Agent IP: 192.168.1.101
+Ollama port: 11434
+Model: llama3.1:8b
 ```
 
-### Docker
+Replace these values with addresses and model names from your deployment.
+
+## Start Ollama
+
+<Tabs>
+  <Tab title="Linux">
+    Install Ollama:
+
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+
+    Start the server:
+
+    ```bash
+    export OLLAMA_HOST=127.0.0.1:11434
+    export OLLAMA_KEEP_ALIVE=-1
+    
+    nohup ollama serve > ~/ollama.log 2>&1 &
+    ```
+
+    `OLLAMA_KEEP_ALIVE=-1` keeps loaded models in memory instead of unloading them after an idle period.
+
+    To store models in another directory, set `OLLAMA_MODELS` before starting the server:
+
+    ```bash
+    export OLLAMA_MODELS=/path/to/models
+    ```
+
+    The agent runs on the same host, so Ollama does not need to listen on a public interface. Bind it to `0.0.0.0` only when another machine must connect directly and your network controls restrict access appropriately.
+  </Tab>
+  <Tab title="Docker">
+    Start Ollama with persistent model storage:
+
+    ```bash
+    docker run -d \
+      --name ollama \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -e OLLAMA_KEEP_ALIVE=-1 \
+      -v ollama:/root/.ollama \
+      ollama/ollama
+    ```
+
+    For a CPU-only host, omit:
+
+    ```text
+    --gpus all
+    ```
+
+    Follow the logs:
+
+    ```bash
+    docker logs -f ollama
+    ```
+  </Tab>
+</Tabs>
+
+## Pull a model
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama pull llama3.1:8b
+    ```
+
+    List the available models:
+
+    ```bash
+    ollama list
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama pull llama3.1:8b
+    ```
+
+    List the available models:
+
+    ```bash
+    docker exec ollama \
+      ollama list
+    ```
+  </Tab>
+</Tabs>
+
+Check that the Ollama server is ready:
 
 ```bash
-docker run -d \
-  --name ollama \
-  --network host \
-  --gpus all \
-  -v ollama:/root/.ollama \
-  ollama/ollama
+curl http://localhost:11434/api/tags \
+  | jq .
 ```
 
-### Pull a Model
+The response should contain the model you pulled.
+
+## Prepare the Mycoroute agent
+
+<Tabs>
+  <Tab title="Docker">
+    From the Mycoroute repository, build the agent image if you have not already done so:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t mycoroute/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /opt/mycoroute
+    sudo chown "$USER":"$USER" /opt/mycoroute
+    ```
+
+    Place the router’s JWT secret at:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Protect it:
+
+    ```bash
+    chmod 600 /opt/mycoroute/jwt.secret
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Build the agent from the Mycoroute repository:
+
+    ```bash
+    go build -o bin/mycoroute-agent ./cmd/agent/
+    ```
+
+    Place the router’s JWT secret somewhere the agent can read, for example:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Create a writable directory for the persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /var/lib/mycoroute/agent
+    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    ```
+  </Tab>
+</Tabs>
+
+## Start the agent
+
+The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more than one model is available in Ollama.
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name mycoroute-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/data \
+      mycoroute/agent:latest \
+      --engine ollama \
+      --model llama3.1:8b \
+      --backend-url http://localhost:11434 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 5 \
+      --region EU-France \
+      --identity-path /data/agent-identity.key
+    ```
+
+    The agent container receives GPU access so it can collect NVIDIA hardware metrics. For a CPU-only host, omit:
+
+    ```text
+    --gpus all
+    ```
+
+    The `/data` mount preserves the agent’s peer identity across container replacement and restarts.
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/mycoroute-agent \
+      --engine ollama \
+      --model llama3.1:8b \
+      --backend-url http://localhost:11434 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --capacity 5 \
+      --region EU-France \
+      --identity-path /var/lib/mycoroute/agent/identity.key
+    ```
+  </Tab>
+</Tabs>
+
+The agent waits until Ollama responds and the selected model is available. If Ollama is still starting or loading its model list, the agent continues polling instead of exiting permanently.
+
+## Understand the agent settings
+
+| Setting | Purpose |
+| --- | --- |
+| `--engine ollama` | Selects the Ollama integration |
+| `--model` | Pins the agent to one Ollama model |
+| `--backend-url` | Base URL of the local Ollama server |
+| `--router-grpc` | Router endpoint used for agent authentication |
+| `--jwt-secret-file` | Shared secret used to authenticate the agent |
+| `--capacity` | Maximum concurrent requests Mycoroute may assign |
+| `--region` | Region metadata available to routing policies |
+| `--identity-path` | Persistent private key that keeps the peer ID stable |
+
+You can provide more routing metadata:
 
 ```bash
-ollama pull llama3.1:8b
-ollama list   # confirm it is downloaded
+--organization edge-team \
+--machine office-gpu-1 \
+--tags local,ollama,production
 ```
 
-Wait until Ollama responds before starting the agent:
+Policies can match these values when selecting agents.
 
-```bash
-curl http://localhost:11434/api/tags   # returns 200 with model list when ready
+## Model discovery and naming
+
+If you omit `--model`, the agent requests:
+
+```text
+GET <backend-url>/api/tags
 ```
 
----
+It registers the first model returned by Ollama.
 
-## Step 2: Start the Agent
+Automatic discovery is convenient when the Ollama server contains one model. Pin the model explicitly when more than one is available.
 
-### Bare-Metal
+### The `:latest` suffix
 
-```bash
-./bin/mycoroute-agent \
-  --engine             ollama \
-  --backend-url        http://localhost:11434 \
-  --router-grpc        <ROUTER_IP>:50051 \
-  --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
-  --jwt-secret-file    jwt.secret \
-  --capacity           5 \
-  --region             EU-France \
-  --identity-path      /opt/mycoroute/agent_identity.key
-```
+Ollama adds `:latest` when a model has no explicit tag. Mycoroute removes that implicit suffix during discovery.
 
-### Docker
-
-```bash
-docker run -d --name mycoroute-agent \
-  --network host \
-  -v /path/to/jwt.secret:/jwt.secret:ro \
-  mycoroute/agent:latest \
-    --engine             ollama \
-    --backend-url        http://localhost:11434 \
-    --router-grpc        <ROUTER_IP>:50051 \
-    --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
-    --jwt-secret-file    /jwt.secret \
-    --capacity           5 \
-    --region             EU-France \
-    --identity-path      /opt/mycoroute/agent_identity.key
-```
-
-For Docker Compose, see [Docker Compose — Each GPU Server](/deploy/docker-compose#step-2-each-gpu-server).
-
----
-
-## Model Selection
-
-The agent queries `GET /api/tags` at startup and registers the first model in the list. Ollama strips the implicit `:latest` suffix — `llama3.1:latest` is registered as `llama3.1`.
-
-| Ollama model | Registered as |
-|--------------|---------------|
+| Ollama model name | Registered with Mycoroute |
+| --- | --- |
 | `llama3.1:latest` | `llama3.1` |
 | `llama3.1:8b` | `llama3.1:8b` |
 | `mistral:7b` | `mistral:7b` |
 
-To pin the agent to a specific model (useful when multiple models are pulled):
+Explicit tags remain unchanged.
+
+When using `--model`, provide the model name expected by Ollama:
 
 ```bash
-./bin/mycoroute-agent --model llama3.1:8b --engine ollama ...
+--model llama3.1:8b
 ```
 
-Start one agent process per model when running multiple models on the same host.
+The model name clients send to Mycoroute must match the model registered by the agent.
 
----
+## Run several Ollama models
 
-## Verify Connection
+Run one agent for each model you want Mycoroute to expose.
+
+For the first model:
 
 ```bash
-# On the router — confirm agent registered
-curl http://<ROUTER_IP>:8080/admin/health | jq .
+./bin/mycoroute-agent \
+  --engine ollama \
+  --model llama3.1:8b \
+  --backend-url http://localhost:11434 \
+  --identity-path /var/lib/mycoroute/agent/llama-8b.key \
+  ...
+```
 
-# List models available to clients
-curl http://<ROUTER_IP>:8080/v1/models | jq '.data[].id'
+For another model:
 
-# Test inference
-curl -X POST http://<ROUTER_IP>:8080/v1/chat/completions \
+```bash
+./bin/mycoroute-agent \
+  --engine ollama \
+  --model mistral:7b \
+  --backend-url http://localhost:11434 \
+  --identity-path /var/lib/mycoroute/agent/mistral-7b.key \
+  ...
+```
+
+Each agent on the same host needs a separate `--identity-path` so every process keeps a distinct peer identity.
+
+The agents can share the same Ollama backend URL.
+
+## Set agent capacity
+
+`--capacity` controls how many concurrent requests Mycoroute may assign to the agent.
+
+It does not change Ollama’s own parallelism or memory settings.
+
+A conservative starting point is:
+
+| Host type | Starting capacity |
+| --- | --- |
+| GPU inference | `3` to `5` |
+| CPU-only inference | `1` to `2` |
+
+These values are starting points, not fixed limits. The right setting depends on:
+
+- model size
+- available RAM or VRAM
+- context length
+- Ollama’s parallelism configuration
+- acceptable response time
+- whether several models share the same hardware
+
+Test the backend under representative load before raising capacity.
+
+When the agent reaches capacity, Mycoroute stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
+
+<Note>
+  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
+</Note>
+
+## Verify the connection
+
+On the router, check agent health:
+
+```bash
+curl http://192.168.1.100:8080/admin/health \
+  | jq .
+```
+
+List the models exposed to clients:
+
+```bash
+curl http://192.168.1.100:8080/v1/models \
+  | jq '.data[].id'
+```
+
+Inspect the Ollama agent:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | select(.metadata.engine == "ollama")'
+```
+
+Send a chat-completion request:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama3.1:8b",
-    "messages": [{"role": "user", "content": "Hello"}]
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain what an inference router does in one sentence."
+      }
+    ]
   }'
 ```
 
----
+Applications call Mycoroute’s OpenAI-compatible endpoint. The agent forwards the request to the Ollama backend.
 
-## Capacity Planning
+## Available observability
 
-Ollama processes one request at a time per model. Keep capacity low to avoid unbounded queue growth.
+The Ollama integration does not scrape an engine-specific Prometheus endpoint.
 
-| Use Case | Recommended Capacity |
-|----------|---------------------|
-| GPU inference | 3–5 |
-| CPU-only | 1–2 |
+Mycoroute can still expose:
 
-Set `--capacity` to control the maximum concurrent requests the router will route to this agent. Requests beyond capacity are held at the router until a slot opens.
+- agent health
+- routed request counts
+- failed request counts
+- active request and capacity state
+- smoothed round-trip time
+- success and failure history
+- CPU and memory metrics
+- NVIDIA GPU utilization, memory, temperature, and power when NVML is available
 
----
+View metrics through the router:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep mycoroute
+```
+
+View current agent state:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | select(.metadata.engine == "ollama")'
+```
+
+Engine-specific values such as KV cache utilization, waiting requests, time to first token, and inter-token latency are not available from the Ollama integration.
 
 ## Troubleshooting
 
-**Model not found at startup:**
+### No model is found
+
+List the pulled models:
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama list
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama list
+    ```
+  </Tab>
+</Tabs>
+
+Pull the missing model:
 
 ```bash
-# List pulled models
-ollama list
-
-# Pull the model if missing
 ollama pull llama3.1:8b
 ```
 
-**Slow first response:**
-
-Ollama may be loading the model on first request. Check with:
+Check the endpoint used by the agent:
 
 ```bash
-ollama ps   # shows currently loaded model and GPU memory used
+curl http://localhost:11434/api/tags \
+  | jq .
 ```
 
-**Connection refused:**
+### The wrong model is registered
+
+When `--model` is omitted, the agent registers the first model returned by `/api/tags`.
+
+Restart the agent with an explicit model:
 
 ```bash
-# Verify Ollama is running and accessible
+--model llama3.1:8b
+```
+
+### A model appears without `:latest`
+
+This is expected.
+
+Mycoroute converts:
+
+```text
+llama3.1:latest
+```
+
+to:
+
+```text
+llama3.1
+```
+
+Explicit tags such as `:8b` or `:7b` are preserved.
+
+### Ollama is unreachable
+
+Check the server:
+
+```bash
 curl http://localhost:11434/api/tags
 ```
 
-**Agent gets a new peer ID after restart:**
+For a Linux process, inspect its log:
 
-Ensure `--identity-path` points to a persistent file. The first start creates it; subsequent starts load it.
+```bash
+tail -f ~/ollama.log
+```
 
----
+For Docker:
 
-## Next Steps
+```bash
+docker logs ollama
+```
 
-- [vLLM Agent](/deploy/agents/vllm) — Higher-throughput GPU inference
-- [SGLang Agent](/deploy/agents/sglang) — SGLang backend
-- [Custom Engine](/deploy/agents/custom-engine) — Any OpenAI-compatible backend
-- [Routing Concepts](/routing/routing-concepts) — Configure routing policies
+Confirm that the agent’s `--backend-url` matches the address where Ollama is listening.
+
+### The first response is slow
+
+Ollama may need to load the model into memory before serving the first request.
+
+Check loaded models:
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama ps
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama ps
+    ```
+  </Tab>
+</Tabs>
+
+Using:
+
+```bash
+OLLAMA_KEEP_ALIVE=-1
+```
+
+keeps the model loaded after it has been used.
+
+### The agent does not register
+
+Check the agent logs:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker logs mycoroute-agent
+    ```
+  </Tab>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u mycoroute-agent \
+      -n 100 \
+      --no-pager
+    ```
+  </Tab>
+</Tabs>
+
+Test connectivity from the agent to the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Check that:
+
+- the router and agent use the same JWT secret
+- the router’s libp2p interface is reachable
+- the router advertises a libp2p address the agent can reach
+- Ollama contains the selected model
+
+### The agent gets a new peer ID after restart
+
+Make sure `--identity-path` points to persistent storage.
+
+For Docker:
+
+```bash
+docker inspect mycoroute-agent \
+  | jq '.[0].Mounts'
+```
+
+For bare metal:
+
+```bash
+ls -l /var/lib/mycoroute/agent/identity.key
+```
+
+### GPU metrics are missing
+
+Check that NVIDIA tools work on the host:
+
+```bash
+nvidia-smi
+```
+
+For Docker, confirm the agent received GPU access:
+
+```bash
+docker inspect mycoroute-agent \
+  | jq '.[0].HostConfig.DeviceRequests'
+```
+
+The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+
+### Requests time out
+
+The agent’s backend HTTP timeout defaults to two minutes.
+
+Increase it for long-running requests:
+
+```bash
+--http-timeout 10m
+```
+
+Also check whether the agent capacity is too high for the model and hardware.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="SGLang agent" href="/deploy/agents/sglang">
+    Connect an SGLang backend and collect engine metrics.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Learn how metadata, capacity, and policies affect agent selection.
+  </Card>
+
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Understand the CPU, memory, and GPU signals reported by agents.
+  </Card>
+</CardGroup>

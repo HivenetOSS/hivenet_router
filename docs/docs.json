@@ -37,7 +37,20 @@
               "deploy/agents/infinity",
               "deploy/agents/custom-engine"
             ]
-          }
+          },
+          "deploy/docker-compose",
+          {
+            "group": "Agents",
+            "pages": [
+              "deploy/agents/vllm",
+              "deploy/agents/ollama",
+              "deploy/agents/sglang",
+              "deploy/agents/llama-cpp",
+              "deploy/agents/infinity",
+              "deploy/agents/custom-engine"
+            ]
+          },
+          "deploy/bare-metal"
         ]
       },
       {

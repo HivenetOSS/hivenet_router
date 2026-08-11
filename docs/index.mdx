@@ -1,8 +1,69 @@
 ---
 title: "Mycoroute"
-description: "Mycoroute is an open-source router for self-hosted AI inference. Route across multiple inference engines, backends, machines, and locations from one API surface."
-sidebarTitle: "Overview"
+sidebarTitle: "Home"
+description: "Open-source routing for self-hosted and distributed AI inference."
 ---
+
+<div className="px-6 pt-20 pb-12 lg:pt-28 lg:pb-16 max-w-5xl mx-auto text-center">
+  <Badge color="orange" size="sm" shape="pill">
+    Alpha
+  </Badge>
+
+  <h1 className="mt-6 text-4xl sm:text-5xl lg:text-6xl font-medium tracking-tight text-gray-900 dark:text-zinc-50">
+    One endpoint for self-hosted inference
+  </h1>
+
+  <p className="mt-6 text-lg sm:text-xl leading-8 text-gray-600 dark:text-zinc-400 max-w-3xl mx-auto">
+    Route requests across vLLM, Ollama, SGLang, llama.cpp, Infinity,
+    and custom OpenAI-compatible backends using policies, live signals,
+    fallback, authentication, and observability.
+  </p>
+
+  <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
+    <a href="/quickstart" className="inline-flex items-center justify-center rounded-lg bg-orange-500 px-5 py-3 text-sm font-medium text-white hover:bg-orange-600 transition-colors">
+      Get started
+    </a>
+
+    <a href="https://github.com/HiveNetCode/mycoroute" className="inline-flex items-center justify-center rounded-lg border border-gray-300 dark:border-zinc-700 px-5 py-3 text-sm font-medium text-gray-900 dark:text-zinc-100 hover:bg-gray-50 dark:hover:bg-zinc-900 transition-colors">
+      View on GitHub
+    </a>
+  </div>
+</div>
+
+<div className="max-w-5xl mx-auto px-6 pb-20">
+  <div className="mb-8">
+    <h2 className="text-2xl font-medium tracking-tight text-gray-900 dark:text-zinc-50">
+      Explore the docs
+    </h2>
+
+    <p className="mt-2 text-gray-600 dark:text-zinc-400">
+      Start with the system overview or go directly to deployment, routing,
+      and API guidance.
+    </p>
+  </div>
+
+  <Columns cols={2}>
+    <Card title="Introduction" icon="book-open" color="#FF9A33" href="/getting-started/introduction">
+      Learn what Mycoroute does, when it is useful, and what it does not
+      provide.
+    </Card>
+
+    <Card title="Quickstart" icon="rocket" color="#FF9A33" href="/quickstart">
+      Deploy a router and agents, then send your first routed inference
+      request.
+    </Card>
+
+    <Card title="Architecture overview" icon="network-wired" color="#FF9A33" href="/getting-started/architecture-overview">
+      Understand the router, agents, control plane, data plane, storage,
+      and request flow.
+    </Card>
+
+    <Card title="Mycoroute and Hivenet services" icon="arrows-split-up-and-left" color="#FF9A33" href="/getting-started/mycoroute-hivenet-inference-api-compute">
+      See how Mycoroute differs from Hivenet Inference API and Compute
+      with Hivenet.
+    </Card>
+  </Columns>
+</div>
 
 Mycoroute is an open-source router for self-hosted AI inference, maintained by Hivenet.
 
@@ -35,27 +96,27 @@ It puts one client-facing API in front of multiple inference servers. A central 
 ## Explore by topic
 
 <CardGroup cols={2}>
-  <Card title="Deploy" href="/deploy/docker-quickstart" icon="server">
+  <Card title="Deploy" icon="server" href="/deploy/docker-quickstart">
     Install the router and agents on Docker, Docker Compose, or bare metal.
   </Card>
 
-  <Card title="Routing and policies" href="/routing/routing-concepts" icon="route">
+  <Card title="Routing and policies" icon="route" href="/routing/routing-concepts">
     Filter and rank agents with YAML policies and fallback chains.
   </Card>
 
-  <Card title="Security and auth" href="/security/authentication-overview" icon="lock">
+  <Card title="Security and auth" icon="lock" href="/security/authentication-overview">
     Authenticate agents and clients, enforce quotas, and rotate keys.
   </Card>
 
-  <Card title="Observability" href="/observability/prometheus-metrics" icon="chart-line">
+  <Card title="Observability" icon="chart-line" href="/observability/prometheus-metrics">
     Monitor routing, agents, engines, and hardware with Prometheus and Grafana.
   </Card>
 
-  <Card title="Integrations" href="/integrations/overview" icon="plug">
+  <Card title="Integrations" icon="plug" href="/integrations/overview">
     Connect Mycoroute to Claude Code, OpenCode, Open WebUI, and more.
   </Card>
 
-  <Card title="Reference" href="/reference/detailed-architecture" icon="book">
+  <Card title="Reference" icon="book" href="/reference/detailed-architecture">
     Configuration schema, error codes, and performance characteristics.
   </Card>
 </CardGroup>

@@ -1,12 +1,48 @@
 ---
 title: "Quickstart"
+sidebarTitle: "Quickstart"
+description: "Deploy a Mycoroute router and multiple agents across several machines, then send and observe your first routed inference request."
 ---
+
+This guide deploys one Mycoroute router and three agents across multiple machines.
+
+Two agents connect to vLLM backends serving the same model. A third connects to Ollama. You will send requests through the router, confirm that the agents registered, and inspect the resulting routing metrics.
+
+<Note>
+  The hostnames and private IP addresses in this guide are examples. Replace them with addresses from your own network.
+</Note>
+
+## What you will deploy
+
+This example uses four machines:
+
+| Machine | Role | IP address | Backend |
+| --- | --- | --- | --- |
+| `router-server` | Mycoroute router | `192.168.1.100` | None |
+| `gpu-eu-1` | Agent | `192.168.1.101` | vLLM |
+| `gpu-eu-2` | Agent | `192.168.1.102` | vLLM |
+| `gpu-us-1` | Agent | `192.168.1.103` | Ollama |
+
+The router exposes one client-facing API to applications. Each agent connects an inference backend to the router.
+
+## Network requirements
+
+The machines must be able to communicate over these ports:
+
+| Direction | Port | Purpose |
+| --- | --- | --- |
+| Clients → Router | `8080` | Client HTTP API |
+| Agents → Router | `50051` | gRPC authentication |
+| Agents → Router | `9000` | libp2p registration and data plane |
+| Monitoring → Router | `2112` | Prometheus metrics |
+
+Agent hosts need outbound access to the router’s gRPC and libp2p ports. They do not need to expose an inbound Mycoroute port. Keep the Prometheus endpoint limited to your monitoring network.
 
 Deploy Mycoroute across multiple machines in 10 minutes. See how the Router distributes traffic to Agents on different servers.
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Client Requests                           │
 │              POST /v1/chat/completions                       │
@@ -41,27 +77,117 @@ Agents make **outbound connections only** — the router never dials them. No in
 
 ## Prerequisites
 
+You need:
+
+- Go 1.25.5 or later on one build machine
+- Git
+- OpenSSL
+- SSH and `scp`
+- `curl`
+- `jq` for formatting JSON responses
+- vLLM installed on the two vLLM hosts
+- Ollama installed, or permission to install it, on the Ollama host
+- access to the models used in this example
+
+The compiled Mycoroute binaries do not require Go on the target machines.
+
+## Prepare the target machines
+
+On each router and agent machine, create the Mycoroute directory:
+
+```bash
+sudo mkdir -p /opt/mycoroute
+sudo chown "$USER":"$USER" /opt/mycoroute
+```
+
+Run these commands on:
+
+- `router-server`
+- `gpu-eu-1`
+- `gpu-eu-2`
+- `gpu-us-1`
+
+## Build and distribute Mycoroute
+
+On the build machine:
+
+```bash
+git clone https://github.com/HiveNetCode/mycoroute.git
+cd mycoroute
+
+go build -o bin/mycoroute-router ./cmd/router/
+go build -o bin/mycoroute-agent ./cmd/agent/
+```
+
+Copy the router binary:
+
+```bash
+scp bin/mycoroute-router router-server:/opt/mycoroute/
+```
+
+Copy the agent binary to each inference host:
+
+```bash
+scp bin/mycoroute-agent gpu-eu-1:/opt/mycoroute/
+scp bin/mycoroute-agent gpu-eu-2:/opt/mycoroute/
+scp bin/mycoroute-agent gpu-us-1:/opt/mycoroute/
+```
+
+## Create the shared JWT secret
+
+The router and every agent must use the same JWT secret.
+
+On the build machine:
+
+```bash
+openssl rand -hex 32 > jwt.secret
+chmod 600 jwt.secret
+```
+
+Copy it to every machine:
+
+```bash
+scp jwt.secret router-server:/opt/mycoroute/jwt.secret
+scp jwt.secret gpu-eu-1:/opt/mycoroute/jwt.secret
+scp jwt.secret gpu-eu-2:/opt/mycoroute/jwt.secret
+scp jwt.secret gpu-us-1:/opt/mycoroute/jwt.secret
+```
+
+Set restrictive permissions on each machine:
+
+```bash
+chmod 600 /opt/mycoroute/jwt.secret
+```
+
+<Warning>
+  Anyone with this secret can authenticate an agent with the router. Store and distribute it through your normal secrets-management process in production.
+</Warning>
+
+## Start the vLLM backends
+
+Run the following command on both `gpu-eu-1` and `gpu-eu-2`:
+
 - **3 machines** (or VMs):
   - 1 Router server (any machine, no GPU required)
-  - 2+ Agent servers (NVIDIA GPU required for inference)
-- **Go 1.23+** on the build machine (binaries have no runtime Go dependency)
+  - 2\+ Agent servers (NVIDIA GPU required for inference)
+- **Go 1.23\+** on the build machine (binaries have no runtime Go dependency)
 - **Backend inference server** (vLLM, Ollama, SGLang, …) running on each GPU server
 - **Network:** Agents can reach Router on TCP 50051 (gRPC) and 9000 (libp2p) — outbound only; agents need no inbound connectivity
 
 ## Deployment Topology
 
 | Machine | Role | IP Address | GPU |
-|---------|------|------------|-----|
+| --- | --- | --- | --- |
 | router-server | Router | `192.168.1.100` | None |
-| gpu-eu-1 | Agent + vLLM | `192.168.1.101` | NVIDIA A100 |
-| gpu-eu-2 | Agent + vLLM | `192.168.1.102` | NVIDIA A100 |
-| gpu-us-1 | Agent + Ollama | `192.168.1.103` | Any NVIDIA GPU |
+| gpu-eu-1 | Agent \+ vLLM | `192.168.1.101` | NVIDIA A100 |
+| gpu-eu-2 | Agent \+ vLLM | `192.168.1.102` | NVIDIA A100 |
+| gpu-us-1 | Agent \+ Ollama | `192.168.1.103` | Any NVIDIA GPU |
 
 ---
 
 ## Step 1: Build Binaries
 
-Build on any machine with Go 1.23+ and copy to the target servers. No Go installation needed on the servers themselves.
+Build on any machine with Go 1.23\+ and copy to the target servers. No Go installation needed on the servers themselves.
 
 ```bash
 git clone https://github.com/mycoroute/mycoroute.git
@@ -112,6 +238,176 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-num-seqs 32 \
   --max-model-len 8192
 ```
+
+Wait for the model to load, then check the health endpoint:
+
+```bash
+curl http://localhost:8888/health
+```
+
+A ready vLLM server returns HTTP status `200`.
+
+## Start the Ollama backend
+
+On `gpu-us-1`, install Ollama if it is not already installed:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Configure and start the server:
+
+```bash
+export OLLAMA_HOST=0.0.0.0:11434
+export OLLAMA_KEEP_ALIVE=-1
+
+nohup ollama serve > ~/ollama.log 2>&1 &
+```
+
+Pull the model:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+Check that Ollama is ready:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+The endpoint should return HTTP status `200` and a list containing `llama3.1:8b`.
+
+## Start the router
+
+On `router-server`, prepare the persistent database directory:
+
+```bash
+sudo mkdir -p /var/lib/mycoroute/badger
+sudo chown "$USER":"$USER" /var/lib/mycoroute/badger
+```
+
+Start the router with unauthenticated administrator endpoints enabled for this isolated quickstart:
+
+```bash
+mycoroute_ALLOW_INSECURE_ADMIN=true \
+/opt/mycoroute/mycoroute-router \
+  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --http-port :8080 \
+  --grpc-port :50051 \
+  --p2p-port 9000 \
+  --p2p-listen-addr 0.0.0.0 \
+  --metrics-port :2112 \
+  --disk-db-path /var/lib/mycoroute/badger
+```
+
+The `--p2p-listen-addr 0.0.0.0` flag allows agents on other machines to reach the router’s libp2p endpoint.
+
+<Warning>
+  `mycoroute_ALLOW_INSECURE_ADMIN=true` is suitable only for this isolated quickstart. It permits unauthenticated access to `/admin/*`. Configure administrator API-key authentication before exposing the router to shared or untrusted networks.
+</Warning>
+
+Check the public liveness endpoint:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Check the operational health endpoint:
+
+```bash
+curl http://localhost:8080/admin/health | jq .
+```
+
+Before any agents register, the response should report zero agents and a degraded operational state:
+
+```json
+{
+  "status": "degraded",
+  "total_agents": 0,
+  "healthy_agents": 0,
+  "queue_length": 0,
+  "agents": []
+}
+```
+
+The full response also includes a Unix timestamp.
+
+<Note>
+  If the router runs behind NAT, inside Docker, or behind a public hostname, you may also need `--p2p-announce-addr` so agents receive a reachable router address.
+</Note>
+
+## Start the first vLLM agent
+
+On `gpu-eu-1`:
+
+```bash
+/opt/mycoroute/mycoroute-agent \
+  --router-grpc 192.168.1.100:50051 \
+  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --capacity 32 \
+  --region EU-Primary \
+  --identity-path /opt/mycoroute/agent_identity.key
+```
+
+## Start the second vLLM agent
+
+On `gpu-eu-2`:
+
+```bash
+/opt/mycoroute/mycoroute-agent \
+  --router-grpc 192.168.1.100:50051 \
+  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --capacity 32 \
+  --region EU-Secondary \
+  --identity-path /opt/mycoroute/agent_identity.key
+```
+
+## Start the Ollama agent
+
+On `gpu-us-1`:
+
+```bash
+/opt/mycoroute/mycoroute-agent \
+  --router-grpc 192.168.1.100:50051 \
+  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --engine ollama \
+  --backend-url http://localhost:11434 \
+  --capacity 5 \
+  --region US-Primary \
+  --identity-path /opt/mycoroute/agent_identity.key
+```
+
+This example gives the Ollama agent a capacity of `5`. Set capacity according to the concurrency your backend can handle.
+
+For a multi-machine deployment, these two agent settings are particularly important:
+
+| Setting | Purpose |
+| --- | --- |
+| `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+| `--identity-path` | Preserves the agent’s peer identity across restarts |
+
+Agents initiate the connection to the router. You do not need to expose an inbound agent port or configure an agent announce address.
+
+The agent waits until its backend is healthy and a model is available before registering. If you do not pass `--model`, it registers the first model returned by the backend.
+
+Each agent registers one model.
+
+## Verify agent registration
+
+On `router-server`:
 
 Wait until ready:
 
@@ -233,6 +529,54 @@ Each agent queries its backend at startup and registers the first model returned
 curl http://localhost:8080/admin/health | jq .
 ```
 
+With all three agents healthy, the response should resemble:
+
+```json
+{
+  "status": "healthy",
+  "total_agents": 3,
+  "healthy_agents": 3,
+  "queue_length": 0,
+  "timestamp": 1760000000,
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Primary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    },
+    {
+      "peer_id": "12D3KooX...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Secondary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    },
+    {
+      "peer_id": "12D3KooY...",
+      "model": "llama3.1:8b",
+      "engine": "ollama",
+      "version": "dev",
+      "capacity": 5,
+      "region": "US-Primary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    }
+  ]
+}
+```
+
+Peer IDs and timestamps will differ.
+
+For a fuller snapshot that includes routing, latency, hardware, and engine data:
+
 Expected output (three agents registered):
 
 ```json
@@ -277,6 +621,55 @@ For a full snapshot including live SRTT, hardware, and engine metrics:
 curl http://localhost:8080/admin/routing-table | jq .
 ```
 
+## Send an inference request
+
+From any machine that can reach the router:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+The router selects one of the two vLLM agents serving the requested model and forwards the request to it.
+
+## Observe load distribution
+
+Send ten requests in parallel:
+
+```bash
+for i in {1..10}; do
+  curl -s http://192.168.1.100:8080/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    }' &
+done
+
+wait
+```
+
+Inspect the routing counter:
+
+```bash
+curl -s http://192.168.1.100:2112/metrics \
+  | grep mycoroute_routing_requests_routed_total
+```
+
 ---
 
 ## Step 7: Test Inference
@@ -313,6 +706,78 @@ curl -s http://192.168.1.100:2112/metrics | grep mycoroute_routing_requests_rout
 
 ## Troubleshooting
 
+### The router gRPC endpoint is unreachable
+
+On `router-server`, check that the port is listening:
+
+```bash
+ss -tlnp | grep 50051
+```
+
+On an agent machine, test connectivity to the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+### An agent does not register
+
+Check for these common causes:
+
+- `--router-grpc` points to the wrong or unreachable address
+- the router is still listening for libp2p only on `127.0.0.1`
+- the router advertises a libp2p address the agent cannot reach
+- the router needs a correct `--p2p-announce-addr`
+- the inference backend is not ready
+- the router and agent use different JWT secrets
+
+### A backend is not ready
+
+Check vLLM:
+
+```bash
+curl http://localhost:8888/health
+```
+
+Check Ollama:
+
+```bash
+curl http://localhost:11434/api/tags
+ollama ps
+```
+
+### The JWT secret does not match
+
+Confirm that every machine has the same secret:
+
+```bash
+sha256sum /opt/mycoroute/jwt.secret
+```
+
+The hash should be identical on the router and every agent host.
+
+### A firewall blocks the connection
+
+The exact commands depend on your firewall. With UFW, a basic router configuration could look like:
+
+```bash
+sudo ufw allow 50051/tcp
+sudo ufw allow 9000/tcp
+sudo ufw allow 8080/tcp
+sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
+```
+
+Agent hosts do not need an inbound Mycoroute firewall rule. Allow their outbound connections to the router’s ports `50051` and `9000`.
+
+<Warning>
+  These are examples, not a complete network-security policy. Restrict every port to the clients, agents, or monitoring systems that require access.
+</Warning>
+
+## Next step
+
+Read the [architecture overview](/getting-started/architecture-overview) to understand the router-agent control flow, data plane, storage, authentication, and routing pipeline.
+
 **Router gRPC not reachable:**
 
 ```bash
@@ -327,6 +792,7 @@ nc -zv 192.168.1.100 9000
 **Agent not registering:**
 
 Common causes:
+
 - Missing `--router-p2p` — agent cannot complete libp2p handshake
 - Agent's outbound connection to the router blocked (check egress to router ports 50051/9000)
 

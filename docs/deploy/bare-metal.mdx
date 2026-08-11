@@ -1,168 +1,288 @@
 ---
-title: "Bare-Metal Deployment"
+title: "Bare-metal deployment"
+description: "Run the Mycoroute router and agents as native Linux services managed by systemd."
+sidebarTitle: "Bare metal"
 ---
 
-Run Mycoroute as native binaries managed by systemd. This is the recommended approach for production servers where you want full control over resource limits, log rotation, and process supervision without a container runtime.
+Run the Mycoroute router and agents as native Linux binaries managed by systemd.
 
-> **Connection model and port layout** are the same as for Docker. Read [Docker Quickstart — Connection flow](/deploy/docker-quickstart#connection-flow) and the [Port Reference](/deploy/docker-quickstart#port-reference) if you haven't already — this document does not repeat them.
+This setup avoids a container runtime and gives you direct control over process supervision, filesystem permissions, logs, resource limits, and upgrades.
 
----
+<Note>
+  This guide uses example hostnames and private IP addresses. Replace them with addresses from your own network.
+</Note>
+
+## What you will deploy
+
+The examples use three machines:
+
+| Machine | Role | Example IP | Software |
+| --- | --- | --- | --- |
+| `router-server` | Mycoroute router | `192.168.1.100` | Router binary |
+| `gpu-eu-1` | Inference host | `192.168.1.101` | vLLM and Mycoroute agent |
+| `gpu-eu-2` | Inference host | `192.168.1.102` | vLLM and Mycoroute agent |
+
+Applications send requests to the router. Each agent connects its local inference backend to the router.
+
+## Network requirements
+
+| Connection | Port | Purpose |
+| --- | --- | --- |
+| Clients → Router | `8080` | Client HTTP API |
+| Agents → Router | `50051` | gRPC authentication |
+| Agents → Router | `9000` | libp2p registration and communication |
+| Monitoring → Router | `2112` | Prometheus metrics |
+
+Restrict ports `50051` and `9000` to agent hosts.
+
+Agent hosts initiate their connections to the router and do not need to expose an inbound Mycoroute port. Keep the metrics endpoint limited to your monitoring network.
 
 ## Prerequisites
 
-| Requirement | Router server | Agent / GPU servers |
-|-------------|:---:|:---:|
-| Linux (Ubuntu 22.04+ / Debian 12+ / RHEL 9+) | ✓ | ✓ |
-| Go 1.23+ (build only — not needed at runtime) | ✓ | ✓ |
-| NVIDIA driver + `nvidia-smi` working | — | ✓ |
-| Port 8080 / 50051 / 9000 open to agents | ✓ | — |
+You need:
 
----
+- Linux with systemd on the router and agent hosts
+- Go 1.25.5 or later on one build machine
+- Git, OpenSSL, SSH, `scp`, `curl`, and `jq`
+- an inference backend on each agent host
+- an NVIDIA driver on GPU hosts if you want GPU metrics
+- network access between the router and agents
 
-## Step 1: Build Binaries
+Go is required only to build the binaries. It does not need to be installed on the runtime hosts.
 
-Build on any machine with Go 1.23+ and copy the resulting binaries to the target servers. Binaries have no runtime dependencies — no Go installation needed on production hosts.
+This guide uses vLLM as the example backend. Mycoroute also supports Ollama, SGLang, llama.cpp, Infinity, and custom OpenAI-compatible servers.
+
+## Build the binaries
+
+On the build machine:
 
 ```bash
-git clone https://github.com/mycoroute/mycoroute.git
+git clone https://github.com/HiveNetCode/mycoroute.git
 cd mycoroute
 
 go build -o bin/mycoroute-router ./cmd/router/
-go build -o bin/mycoroute-agent  ./cmd/agent/
+go build -o bin/mycoroute-agent ./cmd/agent/
+```
 
-# Smoke-test
+Check that both binaries start:
+
+```bash
 ./bin/mycoroute-router --help
-./bin/mycoroute-agent  --help
+./bin/mycoroute-agent --help
 ```
 
-Distribute to servers:
+## Prepare the runtime hosts
+
+Create a dedicated service account and directories before copying the binaries.
+
+### Router host
+
+On `router-server`:
 
 ```bash
-# Router binary
-scp bin/mycoroute-router router-server:/opt/mycoroute/
-
-# Agent binary (all GPU servers)
-scp bin/mycoroute-agent gpu-eu-1:/opt/mycoroute/
-scp bin/mycoroute-agent gpu-eu-2:/opt/mycoroute/
+sudo useradd \
+  --system \
+  --no-create-home \
+  --shell /usr/sbin/nologin \
+  mycoroute
 ```
 
----
+If the account already exists, `useradd` will report an error that you can ignore.
 
-## Step 2: JWT Secret
-
-**On router-server:**
+Create the required directories:
 
 ```bash
-sudo mkdir -p /opt/mycoroute
-sudo install -m 600 -o root -g root /dev/null /opt/mycoroute/jwt.secret
-openssl rand -hex 32 | sudo tee /opt/mycoroute/jwt.secret > /dev/null
+sudo install -d \
+  -o root \
+  -g root \
+  -m 0755 \
+  /opt/mycoroute
+
+sudo install -d \
+  -o root \
+  -g mycoroute \
+  -m 0750 \
+  /etc/mycoroute
+
+sudo install -d \
+  -o mycoroute \
+  -g mycoroute \
+  -m 0750 \
+  /var/lib/mycoroute/badger \
+  /var/log/mycoroute
 ```
 
-Copy to every GPU server:
+### Agent hosts
+
+Run these commands on each inference host:
 
 ```bash
-scp /opt/mycoroute/jwt.secret gpu-eu-1:/opt/mycoroute/jwt.secret
-scp /opt/mycoroute/jwt.secret gpu-eu-2:/opt/mycoroute/jwt.secret
+sudo useradd \
+  --system \
+  --no-create-home \
+  --shell /usr/sbin/nologin \
+  mycoroute
 ```
 
----
-
-## Step 3: Start the Inference Backend
-
-Start the inference engine (vLLM, Ollama, llama.cpp, …) on each GPU server **before** starting the agent. The agent reads the available models from the backend's `/v1/models` endpoint at startup and won't register if the backend is unreachable.
+Create the required directories:
 
 ```bash
-# vLLM example
+sudo install -d \
+  -o root \
+  -g root \
+  -m 0755 \
+  /opt/mycoroute
+
+sudo install -d \
+  -o root \
+  -g mycoroute \
+  -m 0750 \
+  /etc/mycoroute
+
+sudo install -d \
+  -o mycoroute \
+  -g mycoroute \
+  -m 0750 \
+  /var/lib/mycoroute/agent
+```
+
+On GPU hosts, add the service account to the `video` group so it can access NVIDIA device metrics:
+
+```bash
+sudo usermod -aG video mycoroute
+```
+
+If your distribution uses a separate `render` group for device access, add that group as well:
+
+```bash
+getent group render >/dev/null \
+  && sudo usermod -aG render mycoroute
+```
+
+## Install the binaries
+
+Copy the router binary to the router host through a temporary location:
+
+```bash
+scp bin/mycoroute-router router-server:/tmp/mycoroute-router
+```
+
+On `router-server`:
+
+```bash
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/mycoroute-router \
+  /opt/mycoroute/mycoroute-router
+
+rm /tmp/mycoroute-router
+```
+
+Copy the agent binary to each inference host:
+
+```bash
+scp bin/mycoroute-agent gpu-eu-1:/tmp/mycoroute-agent
+scp bin/mycoroute-agent gpu-eu-2:/tmp/mycoroute-agent
+```
+
+On each inference host:
+
+```bash
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/mycoroute-agent \
+  /opt/mycoroute/mycoroute-agent
+
+rm /tmp/mycoroute-agent
+```
+
+Keeping the binaries owned by `root` prevents the service account from replacing its own executable.
+
+## Create and distribute the JWT secret
+
+The router and every agent must use the same JWT secret.
+
+On the build machine:
+
+```bash
+openssl rand -hex 32 > jwt.secret
+chmod 600 jwt.secret
+```
+
+Copy the secret to a temporary path on every host:
+
+```bash
+scp jwt.secret router-server:/tmp/mycoroute-jwt.secret
+scp jwt.secret gpu-eu-1:/tmp/mycoroute-jwt.secret
+scp jwt.secret gpu-eu-2:/tmp/mycoroute-jwt.secret
+```
+
+On each host, install it with permissions that allow the Mycoroute service to read it:
+
+```bash
+sudo install \
+  -o root \
+  -g mycoroute \
+  -m 0640 \
+  /tmp/mycoroute-jwt.secret \
+  /etc/mycoroute/jwt.secret
+
+rm /tmp/mycoroute-jwt.secret
+```
+
+Delete the local copy from the build machine when you no longer need it:
+
+```bash
+rm jwt.secret
+```
+
+<Warning>
+  Anyone with this secret can authenticate an agent with the router. Use your normal secrets-management and rotation process in production.
+</Warning>
+
+## Start an inference backend
+
+Run an inference backend on each agent host.
+
+For vLLM:
+
+```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --host 0.0.0.0 \
   --port 8888 \
   --tensor-parallel-size 1 \
+  --max-num-seqs 32 \
   --max-model-len 8192
-
-# Wait until ready
-curl http://localhost:8888/health   # returns 200 when the model is loaded
 ```
 
-See [Agent Deployment guides](/deploy/agents/vllm) for vLLM, Ollama, llama.cpp, and SGLang-specific flags.
-
----
-
-## Step 4: Start the Router
-
-On **router-server**, create the data directory and run the router. `--disk-db-path` points to where BadgerDB stores SRTT history and agent counters across restarts — always set this to a persistent path, not the default `./badger_disk`.
+Check that the backend is ready:
 
 ```bash
-sudo mkdir -p /var/lib/mycoroute/badger
-sudo chown $USER /var/lib/mycoroute/badger
-
-/opt/mycoroute/mycoroute-router \
-  --jwt-secret-file /opt/mycoroute/jwt.secret \
-  --http-port     :8080 \
-  --grpc-port     :50051 \
-  --p2p-port      9000 \
-  --metrics-port  :2112 \
-  --disk-db-path  /var/lib/mycoroute/badger
+curl http://localhost:8888/health
 ```
 
-Verify:
+A ready vLLM server returns HTTP status `200`.
 
-```bash
-curl http://localhost:8080/admin/health
-# Expected: {"status":"ok","agents":0}
+The Mycoroute agent runs as a long-lived daemon. It can start before the backend is ready and will continue polling until it becomes available. If the backend or router later becomes unavailable, the agent waits and reconnects rather than exiting on the first transient failure.
+
+## Configure the router service
+
+Create:
+
+```text
+/etc/systemd/system/mycoroute-router.service
 ```
 
----
-
-## Step 5: Start an Agent
-
-Two flags are required on any multi-machine deployment:
-
-- `--router-p2p /ip4/<ROUTER_IP>/tcp/9000` — the router's libp2p address (needed alongside `--router-grpc`)
-- `--identity-path` — path where the agent's Ed25519 key is stored; without a stable path the agent gets a new peer ID on every restart and the router sees it as a different agent each time
-
-**On gpu-eu-1 (192.168.1.101):**
-
-```bash
-/opt/mycoroute/mycoroute-agent \
-  --router-grpc        192.168.1.100:50051 \
-  --router-p2p         /ip4/192.168.1.100/tcp/9000 \
-  --jwt-secret-file    /opt/mycoroute/jwt.secret \
-  --engine             vllm \
-  --backend-url        http://localhost:8888 \
-  --capacity           32 \
-  --region             EU-Primary \
-  --identity-path      /opt/mycoroute/agent_identity.key
-```
-
-**On gpu-eu-2 (192.168.1.102):**
-
-```bash
-/opt/mycoroute/mycoroute-agent \
-  --router-grpc        192.168.1.100:50051 \
-  --router-p2p         /ip4/192.168.1.100/tcp/9000 \
-  --jwt-secret-file    /opt/mycoroute/jwt.secret \
-  --engine             vllm \
-  --backend-url        http://localhost:8888 \
-  --capacity           32 \
-  --region             EU-Secondary \
-  --identity-path      /opt/mycoroute/agent_identity.key
-```
-
-Verify both agents registered — see [Docker Quickstart — Step 5](/deploy/docker-quickstart#step-5-verify-registration) for the expected output and the test-inference command.
-
----
-
-## Running as systemd Services
-
-For production, run both binaries under systemd so they restart on failure, log to journald, and start automatically on boot.
-
-### Router service
-
-**`/etc/systemd/system/mycoroute-router.service`:**
+with the following content:
 
 ```ini
 [Unit]
-Description=Mycoroute Router
+Description=Mycoroute router
+Documentation=https://github.com/HiveNetCode/mycoroute
 After=network-online.target
 Wants=network-online.target
 
@@ -170,40 +290,84 @@ Wants=network-online.target
 Type=simple
 User=mycoroute
 Group=mycoroute
-WorkingDirectory=/opt/mycoroute
+WorkingDirectory=/var/lib/mycoroute
 
 ExecStart=/opt/mycoroute/mycoroute-router \
-  --jwt-secret-file   /opt/mycoroute/jwt.secret \
-  --http-port         :8080 \
-  --grpc-port         :50051 \
-  --p2p-port          9000 \
-  --metrics-port      :2112 \
-  --disk-db-path      /var/lib/mycoroute/badger
+  --jwt-secret-file /etc/mycoroute/jwt.secret \
+  --http-port :8080 \
+  --grpc-port :50051 \
+  --p2p-port 9000 \
+  --p2p-listen-addr 0.0.0.0 \
+  --metrics-port :2112 \
+  --disk-db-path /var/lib/mycoroute/badger
+
+Environment=mycoroute_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
+Environment=mycoroute_ALLOW_INSECURE_ADMIN=true
 
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=30s
 
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mycoroute-router
 
-# Hardening
+UMask=0027
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/mycoroute/badger /var/log/mycoroute
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mycoroute /var/log/mycoroute
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### Agent service
+The `--p2p-listen-addr 0.0.0.0` setting is required when agents connect from other machines. The router defaults to listening on `127.0.0.1`.
 
-**`/etc/systemd/system/mycoroute-agent.service`** (one per GPU server — fill in the `ExecStart` values for each host):
+<Warning>
+  `mycoroute_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` in this example. Replace it with administrator API-key authentication before exposing the router to shared or untrusted networks.
+</Warning>
+
+<Warning>
+  The built-in HTTP API does not terminate client-facing TLS. Put the router behind a reverse proxy or load balancer that provides HTTPS before exposing it outside a trusted network.
+</Warning>
+
+## Configure the first agent
+
+Create a host-specific environment file on `gpu-eu-1`:
+
+```text
+/etc/mycoroute/agent.env
+```
+
+with:
+
+```bash
+ROUTER_IP=192.168.1.100
+AGENT_REGION=EU-Primary
+AGENT_CAPACITY=32
+```
+
+Protect the file:
+
+```bash
+sudo chown root:mycoroute /etc/mycoroute/agent.env
+sudo chmod 0640 /etc/mycoroute/agent.env
+```
+
+Create:
+
+```text
+/etc/systemd/system/mycoroute-agent.service
+```
+
+with:
 
 ```ini
 [Unit]
-Description=Mycoroute Agent
+Description=Mycoroute agent
+Documentation=https://github.com/HiveNetCode/mycoroute
 After=network-online.target
 Wants=network-online.target
 
@@ -211,172 +375,450 @@ Wants=network-online.target
 Type=simple
 User=mycoroute
 Group=mycoroute
-WorkingDirectory=/opt/mycoroute
-
-# ── Edit these two lines per server ──────────────────────────────────────────
-Environment=ROUTER_IP=192.168.1.100
-Environment=AGENT_REGION=EU-Primary
-# ─────────────────────────────────────────────────────────────────────────────
+SupplementaryGroups=video
+WorkingDirectory=/var/lib/mycoroute/agent
+EnvironmentFile=/etc/mycoroute/agent.env
 
 ExecStart=/opt/mycoroute/mycoroute-agent \
-  --router-grpc        ${ROUTER_IP}:50051 \
-  --router-p2p         /ip4/${ROUTER_IP}/tcp/9000 \
-  --jwt-secret-file    /opt/mycoroute/jwt.secret \
-  --engine             vllm \
-  --backend-url        http://localhost:8888 \
-  --capacity           32 \
-  --region             ${AGENT_REGION} \
-  --identity-path      /opt/mycoroute/agent_identity.key
+  --router-grpc ${ROUTER_IP}:50051 \
+  --jwt-secret-file /etc/mycoroute/jwt.secret \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --capacity ${AGENT_CAPACITY} \
+  --region ${AGENT_REGION} \
+  --identity-path /var/lib/mycoroute/agent/identity.key
 
 Restart=on-failure
 RestartSec=10s
+TimeoutStopSec=30s
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mycoroute-agent
 
+UMask=0027
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/mycoroute
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mycoroute/agent
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### Enable and start
+<Note>
+  If the `video` group does not exist on your host, remove the `SupplementaryGroups=video` line. If your NVIDIA device permissions use another group, add that group instead.
+</Note>
 
-Run these commands on each server after writing the unit file:
+The important multi-machine settings are:
+
+| Setting | Purpose |
+| --- | --- |
+| `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+| `--identity-path` | Persistent key that keeps the peer ID stable across restarts |
+
+## Configure the second agent
+
+Install the same systemd service file on `gpu-eu-2`.
+
+Create `/etc/mycoroute/agent.env` with host-specific values:
 
 ```bash
-# Create the service user (no login shell, no home directory)
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin mycoroute
+ROUTER_IP=192.168.1.100
+AGENT_REGION=EU-Secondary
+AGENT_CAPACITY=32
+```
 
-# Fix ownership
-sudo chown -R mycoroute:mycoroute /opt/mycoroute /var/lib/mycoroute
+Protect it:
 
-# Enable and start
+```bash
+sudo chown root:mycoroute /etc/mycoroute/agent.env
+sudo chmod 0640 /etc/mycoroute/agent.env
+```
+
+The service file itself does not need to change between hosts.
+
+## Start the services
+
+On `router-server`:
+
+```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now mycoroute-router   # on router-server
-sudo systemctl enable --now mycoroute-agent    # on GPU servers
+sudo systemctl enable --now mycoroute-router
+```
 
-# Check status
+Check its status:
+
+```bash
 sudo systemctl status mycoroute-router
 sudo journalctl -fu mycoroute-router
 ```
 
----
-
-## Scaling — Add a GPU Server
+On each agent host:
 
 ```bash
-# 1. Copy binary and JWT secret
-scp bin/mycoroute-agent  gpu-us-1:/opt/mycoroute/
-scp /opt/mycoroute/jwt.secret gpu-us-1:/opt/mycoroute/
-
-# 2. Copy and edit the unit file
-scp /etc/systemd/system/mycoroute-agent.service gpu-us-1:/etc/systemd/system/
-# Edit AGENT_REGION on gpu-us-1
-
-# 3. Start
-sudo systemctl daemon-reload && sudo systemctl enable --now mycoroute-agent
+sudo systemctl daemon-reload
+sudo systemctl enable --now mycoroute-agent
 ```
 
-No router restart needed — the new agent registers automatically on connect.
-
----
-
-## Upgrade Procedure
+Check the agent:
 
 ```bash
-# 1. Build new binaries
-go build -o bin/mycoroute-router ./cmd/router/
-go build -o bin/mycoroute-agent  ./cmd/agent/
+sudo systemctl status mycoroute-agent
+sudo journalctl -fu mycoroute-agent
+```
 
-# 2. Stop agents first (on all GPU servers) so in-flight requests drain
+## Verify the deployment
+
+On the router host, check the public liveness endpoint:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Check the operational health endpoint:
+
+```bash
+curl http://localhost:8080/admin/health | jq .
+```
+
+With both agents registered, the response should resemble:
+
+```json
+{
+  "status": "healthy",
+  "total_agents": 2,
+  "healthy_agents": 2,
+  "queue_length": 0,
+  "timestamp": 1760000000,
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Primary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    },
+    {
+      "peer_id": "12D3KooX...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Secondary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    }
+  ]
+}
+```
+
+Peer IDs and timestamps will differ.
+
+For a fuller view of routing, latency, hardware, and engine state:
+
+```bash
+curl http://localhost:8080/admin/routing-table | jq .
+```
+
+## Send an inference request
+
+From a machine that can reach the router:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+The router selects one of the agents serving the requested model and forwards the request to its local backend.
+
+Client authentication is disabled when no auth configuration is provided. Add API-key authentication before exposing the service beyond a trusted environment.
+
+## Add another agent host
+
+You do not need to restart the router when adding capacity.
+
+On the new host:
+
+1. Create the `mycoroute` account and directories.
+2. Install the agent binary.
+3. Install the shared JWT secret.
+4. Create `/etc/mycoroute/agent.env` with the router address and agent region.
+5. Install the agent systemd unit.
+6. Start the inference backend.
+7. Enable and start `mycoroute-agent`.
+
+The new agent registers automatically once it can reach the router and its backend is ready.
+
+## Upgrade Mycoroute
+
+Build the new binaries on the build machine:
+
+```bash
+git pull
+
+go build -o bin/mycoroute-router ./cmd/router/
+go build -o bin/mycoroute-agent ./cmd/agent/
+```
+
+### Upgrade agents
+
+When several agents serve the same model, upgrade them one at a time to preserve capacity.
+
+Copy the new agent binary:
+
+```bash
+scp bin/mycoroute-agent gpu-eu-1:/tmp/mycoroute-agent.new
+```
+
+On the agent host:
+
+```bash
 sudo systemctl stop mycoroute-agent
 
-# 3. Stop router
-sudo systemctl stop mycoroute-router
+sudo cp \
+  /opt/mycoroute/mycoroute-agent \
+  /opt/mycoroute/mycoroute-agent.bak
 
-# 4. Back up current binaries
-cp /opt/mycoroute/mycoroute-router /opt/mycoroute/mycoroute-router.bak
-cp /opt/mycoroute/mycoroute-agent  /opt/mycoroute/mycoroute-agent.bak
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/mycoroute-agent.new \
+  /opt/mycoroute/mycoroute-agent
 
-# 5. Deploy new binaries
-scp bin/mycoroute-router router-server:/opt/mycoroute/
-scp bin/mycoroute-agent  gpu-eu-1:/opt/mycoroute/
-scp bin/mycoroute-agent  gpu-eu-2:/opt/mycoroute/
+rm /tmp/mycoroute-agent.new
 
-# 6. Start router first, then agents
-sudo systemctl start mycoroute-router
-# verify router is healthy before starting agents
-curl http://192.168.1.100:8080/admin/health
-sudo systemctl start mycoroute-agent   # on each GPU server
-
-# 7. Rollback if needed
-sudo systemctl stop mycoroute-router mycoroute-agent
-mv /opt/mycoroute/mycoroute-router.bak /opt/mycoroute/mycoroute-router
-mv /opt/mycoroute/mycoroute-agent.bak  /opt/mycoroute/mycoroute-agent
-sudo systemctl start mycoroute-router mycoroute-agent
+sudo systemctl start mycoroute-agent
+sudo systemctl status mycoroute-agent
 ```
 
----
+Confirm that the agent registers again before upgrading the next host.
 
-## NAT / Edge Device Deployment
+### Upgrade the router
 
-Agents behind NAT (no public IP) need no special setup. The agent establishes an outbound libp2p connection to the router, and the router forwards inference requests back over that same connection — the router never dials the agent. As long as the edge device can reach the router's ports 50051 and 9000 outbound, it works; the SSH reverse-tunnel workaround previously documented here is no longer needed.
+Copy the new binary:
 
----
+```bash
+scp bin/mycoroute-router router-server:/tmp/mycoroute-router.new
+```
+
+On the router host:
+
+```bash
+sudo systemctl stop mycoroute-router
+
+sudo cp \
+  /opt/mycoroute/mycoroute-router \
+  /opt/mycoroute/mycoroute-router.bak
+
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/mycoroute-router.new \
+  /opt/mycoroute/mycoroute-router
+
+rm /tmp/mycoroute-router.new
+
+sudo systemctl start mycoroute-router
+sudo systemctl status mycoroute-router
+```
+
+Check the health endpoint before returning traffic:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Roll back
+
+To restore the previous router binary:
+
+```bash
+sudo systemctl stop mycoroute-router
+
+sudo mv \
+  /opt/mycoroute/mycoroute-router.bak \
+  /opt/mycoroute/mycoroute-router
+
+sudo systemctl start mycoroute-router
+```
+
+Use the equivalent commands with `mycoroute-agent` on an agent host.
+
+## Run an agent behind NAT
+
+Agents initiate both authentication and libp2p connectivity to the router. An agent behind NAT therefore does not need an inbound port, reverse tunnel, or public announce address.
+
+The agent host needs outbound access to:
+
+```text
+<router-host>:50051
+<router-host>:9000
+```
+
+When the router itself is behind NAT or another translated network, configure the router’s `--p2p-announce-addr` with a multiaddress the agent can reach.
 
 ## Troubleshooting
 
-**Ports already in use:**
+### A service does not start
+
+Inspect its status and recent logs:
 
 ```bash
-sudo ss -tlnp | grep -E '8080|50051|9000'
+sudo systemctl status mycoroute-router
+sudo journalctl -u mycoroute-router -n 100 --no-pager
 ```
 
-**Agent not connecting to router:**
+For an agent:
 
 ```bash
-# From GPU server — verify router ports are reachable (agents connect outbound only)
-nc -zv <ROUTER_IP> 50051
-nc -zv <ROUTER_IP> 9000
-
-# Router firewall
-sudo ufw status | grep -E '50051|9000|8080'
-
-# Agents accept no inbound connections — no agent-side firewall rule is needed
+sudo systemctl status mycoroute-agent
+sudo journalctl -u mycoroute-agent -n 100 --no-pager
 ```
 
-**Agent gets a new peer ID after restart:**
+### The router cannot read the JWT secret
 
-Ensure `--identity-path` points to a persistent file that survives reboots. The first startup creates the file; subsequent startups load it.
+Check the file ownership and mode:
 
 ```bash
-ls -la /opt/mycoroute/agent_identity.key
+sudo ls -l /etc/mycoroute/jwt.secret
 ```
 
-**GPU metrics not appearing:**
+Expected ownership and permissions:
 
-The agent process must run as a user in the `video` group (or root) to access NVML:
+```text
+-rw-r----- root mycoroute
+```
+
+Test access as the service account:
+
+```bash
+sudo -u mycoroute cat /etc/mycoroute/jwt.secret >/dev/null
+```
+
+### An agent does not register
+
+From the agent host, check the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Common causes include:
+
+- the router is not listening on `0.0.0.0`
+- `ROUTER_IP` is incorrect
+- the router advertises a libp2p address the agent cannot reach
+- the router needs a correct `--p2p-announce-addr` behind NAT or port translation
+- the router or agent firewall blocks outbound agent connectivity
+- the JWT secret differs between hosts
+- the backend has not become healthy
+- the agent environment file contains an invalid value
+
+### The agent gets a new peer ID after restart
+
+Confirm that the persistent identity file exists:
+
+```bash
+sudo ls -l /var/lib/mycoroute/agent/identity.key
+```
+
+The service account must be able to read and write this file.
+
+### GPU metrics are missing
+
+Check NVIDIA access:
+
+```bash
+nvidia-smi
+```
+
+Test access as the service account:
+
+```bash
+sudo -u mycoroute nvidia-smi
+```
+
+Check the account’s groups:
+
+```bash
+id mycoroute
+```
+
+If necessary:
 
 ```bash
 sudo usermod -aG video mycoroute
 sudo systemctl restart mycoroute-agent
 ```
 
-**Check live metrics and SRTT:**
+If NVML remains unavailable, the agent continues to report CPU and memory metrics but omits GPU metrics.
+
+### Ports are already in use
 
 ```bash
-curl http://192.168.1.100:8080/admin/routing-table | jq '.agents[] | {peer_id, region, srtt_ms}'
-curl http://192.168.1.100:2112/metrics | grep mycoroute_routing_requests_routed_total
+sudo ss -tlnp \
+  | grep -E '8080|50051|9000|2112'
 ```
 
----
+### Check live routing data
 
-## Next Steps
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      engine: .metadata.engine,
+      region: .metadata.region,
+      healthy: .status.healthy,
+      active_requests: .status.active_requests,
+      srtt_ms: .universal.srtt_ms
+    }'
+```
 
-- [Docker Compose](/deploy/docker-compose) — Add Prometheus + Grafana observability alongside the router
-- [Agent Deployment](/deploy/agents/vllm) — Engine-specific flags for vLLM, Ollama, llama.cpp, SGLang
-- [Configuration Reference](/reference/configuration-reference) — All flags and environment variables
+Check the routing counter:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep mycoroute_routing_requests_routed_total
+```
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Configure vLLM discovery, capacity, metrics, and multi-model deployments.
+  </Card>
+
+  <Card title="Configuration reference" href="/reference/configuration-reference">
+    Review every router and agent flag and environment variable.
+  </Card>
+
+  <Card title="Authentication overview" href="/security/authentication-overview">
+    Protect the client and administration APIs before production use.
+  </Card>
+</CardGroup>

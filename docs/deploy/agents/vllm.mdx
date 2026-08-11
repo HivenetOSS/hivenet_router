@@ -1,232 +1,573 @@
 ---
-title: "vLLM Agent"
+title: "vLLM agent"
+description: "Connect a vLLM backend to Mycoroute, configure model discovery and capacity, and expose vLLM metrics for routing and observability."
+sidebarTitle: "vLLM"
 ---
 
-Deploy a Mycoroute agent connected to a vLLM inference backend.
+Connect a vLLM inference server to Mycoroute by running an agent beside the backend.
 
-> **One agent = one model.** Each agent process registers exactly one model with the router. If vLLM is serving multiple models, start one agent process per model and use `--model <name>` to pin each agent to its model.
+The agent discovers the model served by vLLM, registers it with the router, forwards requests, and reports engine and hardware metrics that Mycoroute can use for routing and observability.
 
----
+<Warning>
+  Each Mycoroute agent registers one model. If a backend exposes several models, run a separate agent for each model and use `--model` to select the model that agent represents.
+</Warning>
 
-## Prerequisites
+## Before you start
 
-- vLLM installed and running (see below)
-- NVIDIA GPU with CUDA support
-- Mycoroute Router running and reachable
+You need:
 
----
+- a running Mycoroute router
+- an NVIDIA GPU with CUDA support
+- network access between the agent host and the router
+- access to the model you want to serve
+- either Docker or a Python environment supported by vLLM
+- the Mycoroute agent binary or Docker image
+- the same JWT secret used by the router
 
-## Step 1: Start vLLM
+The examples use:
 
-### Docker
-
-```bash
-docker run -d --name vllm \
-  --gpus all \
-  --network host \
-  -v /data/models:/data/models \
-  vllm/vllm-openai:latest \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --host 0.0.0.0 \
-  --port 8888 \
-  --tensor-parallel-size 1 \
-  --max-num-seqs 256
+```text
+Router IP: 192.168.1.100
+Router gRPC port: 50051
+Router libp2p port: 9000
+Agent IP: 192.168.1.101
+vLLM port: 8888
+Model: meta-llama/Llama-3.1-8B-Instruct
 ```
 
-### Bare-Metal
+Replace these values with addresses and model names from your deployment.
+
+## Start vLLM
+
+<Tabs>
+  <Tab title="Docker">
+    Start vLLM with host networking:
+
+    ```bash
+    docker run -d \
+      --name vllm \
+      --restart unless-stopped \
+      --gpus all \
+      --network host \
+      vllm/vllm-openai:latest \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --tensor-parallel-size 1 \
+      --max-num-seqs 256
+    ```
+
+    If the model requires authentication or license acceptance, provide the required credentials through your normal secrets-management process.
+
+    Follow the startup logs:
+
+    ```bash
+    docker logs -f vllm
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Install vLLM:
+
+    ```bash
+    pip install vllm
+    ```
+
+    Start the server:
+
+    ```bash
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --tensor-parallel-size 1 \
+      --max-num-seqs 256
+    ```
+  </Tab>
+</Tabs>
+
+Wait for the model to load, then check the backend:
 
 ```bash
-pip install vllm
-
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-  --host 0.0.0.0 \
-  --port 8888 \
-  --tensor-parallel-size 1 \
-  --max-num-seqs 256
+curl -i http://localhost:8888/health
 ```
 
-Wait until vLLM is ready before starting the agent:
+A ready vLLM server returns HTTP status `200`.
+
+List the models reported by vLLM:
 
 ```bash
-curl http://localhost:8888/health   # returns 200 when the model is loaded
+curl http://localhost:8888/v1/models \
+  | jq '.data[].id'
 ```
 
----
+The model ID returned here is the value clients must use when sending requests through Mycoroute.
 
-## Step 2: Start the Agent
+## Prepare the Mycoroute agent
 
-### Bare-Metal
+<Tabs>
+  <Tab title="Docker">
+    From the Mycoroute repository, build the agent image if you have not already done so:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t mycoroute/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /opt/mycoroute
+    sudo chown "$USER":"$USER" /opt/mycoroute
+    ```
+
+    Place the router’s JWT secret at:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Protect it:
+
+    ```bash
+    chmod 600 /opt/mycoroute/jwt.secret
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Build the agent from the Mycoroute repository:
+
+    ```bash
+    go build -o bin/mycoroute-agent ./cmd/agent/
+    ```
+
+    Place the shared JWT secret somewhere the agent process can read, for example:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Create a writable directory for the persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /var/lib/mycoroute/agent
+    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    ```
+  </Tab>
+</Tabs>
+
+## Start the agent
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name mycoroute-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/app/data \
+      mycoroute/agent:latest \
+      --engine vllm \
+      --backend-url http://localhost:8888 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 256 \
+      --region EU-France \
+      --organization ml-team \
+      --machine gpu-worker-1 \
+      --identity-path /app/data/agent-identity.key
+    ```
+
+    The `/app/data` mount preserves the agent’s peer identity across container replacement and restarts.
+
+    The agent container receives GPU access so it can collect NVIDIA hardware metrics. Inference still runs in the separate vLLM process or container.
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/mycoroute-agent \
+      --engine vllm \
+      --backend-url http://localhost:8888 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --capacity 256 \
+      --region EU-France \
+      --organization ml-team \
+      --machine gpu-worker-1 \
+      --identity-path /var/lib/mycoroute/agent/identity.key
+    ```
+  </Tab>
+</Tabs>
+
+The agent waits for vLLM to become healthy before registering. If vLLM is still loading, the agent continues polling rather than exiting permanently.
+
+## Understand the agent settings
+
+| Setting | Purpose |
+| --- | --- |
+| `--engine vllm` | Selects the vLLM backend integration |
+| `--backend-url` | Base URL of the local vLLM server |
+| `--router-grpc` | Router endpoint used for agent authentication |
+| `--jwt-secret-file` | Shared secret used to authenticate the agent |
+| `--capacity` | Maximum concurrent requests the router may assign to the agent |
+| `--region` | Region metadata available to routing policies |
+| `--organization` | Organization or infrastructure-provider metadata |
+| `--machine` | Stable machine identifier |
+| `--identity-path` | Persistent private key that keeps the peer ID stable |
+
+You can also add comma-separated routing tags:
+
+```bash
+--tags production,a100,high-memory
+```
+
+Tags can be matched in routing policies.
+
+## Select the model
+
+The agent can discover the model automatically or use an explicit model name.
+
+### Automatic discovery
+
+When `--model` is omitted, the agent requests:
+
+```text
+GET <backend-url>/v1/models
+```
+
+It registers the first model in the response.
+
+For a vLLM server exposing one model, automatic discovery is usually sufficient.
+
+### Explicit model selection
+
+Use `--model` when you want to pin the agent to a specific model:
+
+```bash
+--model meta-llama/Llama-3.1-8B-Instruct
+```
+
+The explicit value overrides automatic discovery.
+
+<Note>
+  The model name registered by the agent must match the model name clients send to Mycoroute.
+</Note>
+
+## Connect multiple models
+
+Each agent registers as an independent peer and represents one model.
+
+If one backend exposes multiple models, start one agent process for each model:
 
 ```bash
 ./bin/mycoroute-agent \
-  --engine             vllm \
-  --backend-url        http://localhost:8888 \
-  --router-grpc        <ROUTER_IP>:50051 \
-  --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
-  --jwt-secret-file    jwt.secret \
-  --capacity           256 \
-  --region             EU-France \
-  --organization       ml-team \
-  --machine            gpu-worker-1 \
-  --identity-path      /opt/mycoroute/agent_identity.key
+  --engine vllm \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --backend-url http://localhost:8888 \
+  --identity-path /var/lib/mycoroute/agent/llama-8b.key \
+  ...
 ```
 
-Set `--capacity` to match vLLM's `--max-num-seqs` — this prevents the router from queuing more requests than vLLM can handle concurrently.
-
-### Docker
+Start the second agent with a different model and identity:
 
 ```bash
-docker run -d --name mycoroute-agent \
-  --network host \
-  --gpus all \
-  -v /path/to/jwt.secret:/jwt.secret:ro \
-  mycoroute/agent:latest \
-    --engine             vllm \
-    --backend-url        http://localhost:8888 \
-    --router-grpc        <ROUTER_IP>:50051 \
-    --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
-    --jwt-secret-file    /jwt.secret \
-    --capacity           256 \
-    --region             EU-France \
-    --identity-path      /opt/mycoroute/agent_identity.key
+./bin/mycoroute-agent \
+  --engine vllm \
+  --model meta-llama/Llama-3.1-70B-Instruct \
+  --backend-url http://localhost:8888 \
+  --identity-path /var/lib/mycoroute/agent/llama-70b.key \
+  ...
 ```
 
-For Docker Compose, see [Docker Compose — Each GPU Server](/deploy/docker-compose#step-2-each-gpu-server).
+When several agents run on the same host, each one needs a separate `--identity-path` so every process keeps a distinct peer identity.
 
----
+## Set agent capacity
 
-## Model Selection
+Set `--capacity` to the number of concurrent requests the backend can safely accept.
 
-The agent connects to one model. There are two ways to specify it:
-
-**Auto-detect (default):** The agent queries `GET /v1/models` at startup and registers the first model returned:
-
-```
-GET http://localhost:8888/v1/models
-→ registers models[0]
-```
-
-**Explicit (`--model`):** Pin the agent to a specific model. Use this when vLLM serves multiple models — start one agent per model:
+For vLLM, start by matching it to `--max-num-seqs`:
 
 ```bash
-# Agent for Llama-3.1-8B
-./bin/mycoroute-agent --model meta-llama/Llama-3.1-8B-Instruct --engine vllm ...
-
-# Separate agent for Llama-3.1-70B (different process, different --identity-path)
-./bin/mycoroute-agent --model meta-llama/Llama-3.1-70B-Instruct --engine vllm ...
+vllm serve ... \
+  --max-num-seqs 256
 ```
 
-Each agent registers as an independent peer with the router.
+```bash
+mycoroute-agent ... \
+  --capacity 256
+```
 
----
-
-## Verify Connection
+You may set the Mycoroute capacity slightly lower to preserve headroom:
 
 ```bash
-# On the router — check both agents registered
-curl http://<ROUTER_IP>:8080/admin/health | jq .
+--capacity 224
+```
 
-# List models available to clients
-curl http://<ROUTER_IP>:8080/v1/models | jq '.data[].id'
+When an agent reaches its declared capacity, the router stops assigning new requests to it and considers other matching agents or configured fallback steps.
 
-# Test inference
-curl -X POST http://<ROUTER_IP>:8080/v1/chat/completions \
+Capacity does not change vLLM’s own scheduler limit. It tells Mycoroute how much work the agent is prepared to accept.
+
+<Note>
+  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify vLLM concurrency under sustained streaming load.
+</Note>
+
+## Verify the connection
+
+On the router, check agent health:
+
+```bash
+curl http://192.168.1.100:8080/admin/health \
+  | jq .
+```
+
+List the models available to clients:
+
+```bash
+curl http://192.168.1.100:8080/v1/models \
+  | jq '.data[].id'
+```
+
+Inspect detailed routing state:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      engine: .metadata.engine,
+      capacity: .metadata.capacity,
+      region: .metadata.region,
+      healthy: .status.healthy,
+      active_requests: .status.active_requests
+    }'
+```
+
+Send an inference request:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "messages": [{"role": "user", "content": "Hello"}]
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
   }'
 ```
 
----
+## vLLM metrics
 
-## vLLM-Specific Metrics
+The agent scrapes vLLM’s `/metrics` endpoint every 500 milliseconds by default.
 
-Mycoroute scrapes these vLLM metrics every 500 ms and aggregates them at the router's Prometheus endpoint (`:2112`). Agents have no separate Prometheus port.
+It sends the resulting engine data to the router, which exposes it through the router’s Prometheus endpoint. The agent does not expose a separate Prometheus port.
 
-| Metric | vLLM source | Description | Policy field |
-|--------|-------------|-------------|--------------|
-| KV cache utilization | `vllm:kv_cache_usage_perc` | Fraction of KV cache in use (0–1) | `kv_cache_utilization` |
-| Running requests | `vllm:num_requests_running` | Requests currently being decoded | `running_requests` |
-| Waiting requests | `vllm:num_requests_waiting` | Requests queued, not yet scheduled | `waiting_requests` |
-| TTFT avg / P90 | `vllm:time_to_first_token_seconds` | Time to first output token | — |
-| ITL avg / P90 | `vllm:inter_token_latency_seconds` | Per-token decode latency | — |
-| Preemptions | `vllm:num_preemptions_total` | Cumulative KV-cache evictions | — |
+| Signal | vLLM source | Mycoroute use |
+| --- | --- | --- |
+| KV cache utilization | `vllm:kv_cache_usage_perc` | Routing gates and observability |
+| Running requests | `vllm:num_requests_running` | Routing and load visibility |
+| Waiting requests | `vllm:num_requests_waiting` | Scheduler saturation |
+| Preemptions | `vllm:num_preemptions_total` | KV-cache pressure |
+| Time to first token | `vllm:time_to_first_token_seconds` | Average, P90, and histogram metrics |
+| Inter-token latency | `vllm:inter_token_latency_seconds` | Average, P90, and histogram metrics |
+| Prompt-token distribution | `vllm:request_prompt_tokens` | Workload-shape analysis |
+| Generated-token distribution | `vllm:request_generation_tokens` | Workload-shape analysis |
+| Finish reason | `vllm:request_success_total` | Completion outcome analysis |
 
-### View Metrics
-
-```bash
-# On the router — all agent metrics are here
-curl http://<ROUTER_IP>:2112/metrics | grep mycoroute_agent_engine
-
-# Or via the routing table
-curl http://<ROUTER_IP>:8080/admin/routing-table | jq '.agents[] | {peer_id, kv_cache_utilization, running_requests}'
-```
-
----
-
-## Capacity Planning
-
-Set `--capacity` to vLLM's `--max-num-seqs` (or slightly below for headroom). This is the maximum number of concurrent requests the agent will accept before the router stops sending it new ones.
+View all engine metrics on the router:
 
 ```bash
-# vLLM configured for 256 max sequences
-vllm serve ... --max-num-seqs 256
-
-# Match the agent capacity
---capacity 256
+curl http://192.168.1.100:2112/metrics \
+  | grep mycoroute_agent_engine
 ```
 
----
+Useful exported metrics include:
+
+```text
+mycoroute_agent_engine_kv_cache_utilization
+mycoroute_agent_engine_running_requests
+mycoroute_agent_engine_waiting_requests
+mycoroute_agent_engine_preemptions_total
+mycoroute_agent_engine_avg_ttft_seconds
+mycoroute_agent_engine_p90_ttft_seconds
+mycoroute_agent_engine_avg_itl_seconds
+mycoroute_agent_engine_p90_itl_seconds
+```
+
+View live values through the routing table:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.engine == "vllm")
+      | {
+          peer_id,
+          model: .metadata.model,
+          kv_cache_utilization: .engine.kv_cache_utilization,
+          running_requests: .engine.running_requests,
+          waiting_requests: .engine.waiting_requests
+        }'
+```
+
+## Use vLLM metrics in routing policies
+
+You can exclude agents whose KV cache is under pressure:
+
+```yaml
+exclude_if:
+  kv_cache_utilization:
+    gt: 0.85
+```
+
+Or exclude agents with queued work:
+
+```yaml
+exclude_if:
+  waiting_requests:
+    gt: 0
+```
+
+When a metric is unavailable for an agent, Mycoroute skips that gate for the agent rather than excluding it.
+
+See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy schema.
 
 ## Troubleshooting
 
-**Agent not discovering a model:**
+### The agent cannot discover a model
+
+Check vLLM health:
 
 ```bash
-# Verify vLLM is up and returning a model
-curl http://localhost:8888/health
-curl http://localhost:8888/v1/models | jq '.data[].id'
+curl -i http://localhost:8888/health
 ```
 
-Wait for vLLM to finish loading — `/health` returns 200 when ready, but model loading can take longer.
-
-**Wrong model registered (auto-detect picked the wrong one):**
-
-Use `--model` to pin the agent to the correct model name.
-
-**High KV cache usage:**
+Check model discovery:
 
 ```bash
-# Reduce accepted concurrency
---capacity 50
-
-# Or exclude the agent from routing when cache is full
-# In policy YAML:
-# exclude_if:
-#   kv_cache_utilization: { gt: 0.85 }
+curl http://localhost:8888/v1/models \
+  | jq '.data[].id'
 ```
 
-**Preemptions increasing:**
+The agent waits and retries if vLLM is healthy but no model is available yet.
 
-vLLM is evicting in-flight KV caches under memory pressure. Reduce `--capacity` or lower `--max-num-seqs` in vLLM to match available VRAM.
+### The wrong model is registered
 
-**Backend requests timing out:**
+Automatic discovery selects the first model returned by `/v1/models`.
+
+Pin the correct one:
 
 ```bash
-# Increase the HTTP timeout (default: 5 minutes)
+--model meta-llama/Llama-3.1-8B-Instruct
+```
+
+Restart the agent after changing the setting.
+
+### The agent does not register
+
+Check the agent logs:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker logs mycoroute-agent
+    ```
+  </Tab>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl -u mycoroute-agent -n 100 --no-pager
+    ```
+  </Tab>
+</Tabs>
+
+Confirm connectivity:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Check that the router and agent use the same JWT secret.
+
+### KV cache utilization remains high
+
+Reduce the amount of work Mycoroute assigns to the agent:
+
+```bash
+--capacity 128
+```
+
+Or reduce vLLM’s scheduler limit:
+
+```bash
+--max-num-seqs 128
+```
+
+You can also use a routing gate to stop selecting the agent above a chosen threshold.
+
+### Preemptions keep increasing
+
+Rising preemptions indicate that vLLM is evicting in-flight KV-cache data under memory pressure.
+
+Reduce:
+
+- `--capacity` on the Mycoroute agent
+- `--max-num-seqs` on vLLM
+- model context or batch pressure, where appropriate for your workload
+
+### Backend requests time out
+
+The agent’s backend HTTP timeout defaults to two minutes.
+
+Increase it for longer requests:
+
+```bash
 --http-timeout 10m
 ```
 
-**Agent gets a new peer ID after restart:**
+### The peer ID changes after restart
 
-Ensure `--identity-path` points to a persistent file. The first start creates it; subsequent starts load it.
+Make sure `--identity-path` points to persistent storage.
 
----
+For Docker, confirm the volume is mounted:
 
-## Next Steps
+```bash
+docker inspect mycoroute-agent \
+  | jq '.[0].Mounts'
+```
 
-- [Ollama Agent](/deploy/agents/ollama) — Ollama backend setup
-- [SGLang Agent](/deploy/agents/sglang) — SGLang backend setup
-- [Routing Concepts](/routing/routing-concepts) — Configure routing policies
-- [Hardware Metrics](/observability/hardware-metrics) — GPU monitoring
+For bare metal:
+
+```bash
+ls -l /var/lib/mycoroute/agent/identity.key
+```
+
+### Metrics are missing
+
+Check vLLM’s metrics endpoint:
+
+```bash
+curl http://localhost:8888/metrics \
+  | head
+```
+
+Check the agent logs for scrape errors.
+
+Metrics are scraped in the background. A scrape failure does not stop the agent from forwarding requests.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Ollama agent" href="/deploy/agents/ollama">
+    Connect an Ollama backend for local or edge inference.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Learn how Mycoroute filters and ranks matching agents.
+  </Card>
+
+  <Card title="Engine metrics" href="/observability/engine-metrics">
+    Understand the metrics collected from vLLM and other engines.
+  </Card>
+</CardGroup>
