@@ -205,31 +205,5 @@
     }
   },
   "description": "Open-source routing for self-hosted and distributed AI inference.",
-  "redirects": [
-    {
-      "source": "/api/:slug*",
-      "destination": "/use-the-api/:slug*",
-      "permanent": true
-    },
-    {
-      "source": "/integrations/overview",
-      "destination": "/integrations/integrations-overview",
-      "permanent": true
-    },
-    {
-      "source": "/integrations/opencode",
-      "destination": "/integrations/open-code",
-      "permanent": true
-    },
-    {
-      "source": "/integrations/open-webui",
-      "destination": "/integrations/open-web-ui",
-      "permanent": true
-    },
-    {
-      "source": "/integrations/using-from-code",
-      "destination": "/integrations/use-from-code",
-      "permanent": true
-    }
-  ]
+  "redirects": []
 }
