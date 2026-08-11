@@ -4,23 +4,23 @@ description: "Connect a llama.cpp server to Mycoroute, set a stable model name, 
 sidebarTitle: "llama.cpp"
 ---
 
-Connect a llama.cpp server to Mycoroute by running an agent beside the backend.
+Connect a llama.cpp server to Hivenet Router by running an agent beside the backend.
 
 The agent discovers the model served by llama.cpp, registers it with the router, forwards OpenAI-compatible chat-completion requests, and reports engine and hardware metrics.
 
 <Warning>
-  A llama.cpp server runs one model per process, and each Mycoroute agent registers one model. Run a separate server and agent pair for each model you want to expose.
+  A llama.cpp server runs one model per process, and each Hivenet Router agent registers one model. Run a separate server and agent pair for each model you want to expose.
 </Warning>
 
 ## Before you start
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - a GGUF model file
 - llama.cpp built locally or available as a Docker image
 - network access between the agent host and router
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 - an NVIDIA GPU if you want CUDA acceleration and GPU metrics
 
@@ -39,9 +39,9 @@ Replace these values with addresses and model names from your deployment.
 
 ## Start llama.cpp
 
-Use the `-a` option to give the model a stable alias. The alias becomes the model name registered with Mycoroute and used by API clients.
+Use the `-a` option to give the model a stable alias. The alias becomes the model name registered with Hivenet Router and used by API clients.
 
-Start llama.cpp with `--metrics` if you want Mycoroute to collect cache, queue, latency, and throughput metrics.
+Start llama.cpp with `--metrics` if you want Hivenet Router to collect cache, queue, latency, and throughput metrics.
 
 <Tabs>
   <Tab title="Docker">
@@ -135,7 +135,7 @@ curl http://localhost:8888/v1/models \
 
 The alias passed with `-a` determines the model name returned by llama.cpp.
 
-| llama.cpp launch options | Model registered with Mycoroute |
+| llama.cpp launch options | Model registered with Hivenet Router |
 | --- | --- |
 | `-m model.gguf -a "my-model"` | `my-model` |
 | `-m llama-3.1-8b.Q4_K_M.gguf` without `-a` | `llama-3.1-8b.Q4_K_M` |
@@ -143,14 +143,14 @@ The alias passed with `-a` determines the model name returned by llama.cpp.
 Using an explicit alias makes client configuration and routing policies less dependent on the model filename.
 
 <Note>
-  Changing the alias changes the model name seen by Mycoroute. Clients and routing policies must use the new value.
+  Changing the alias changes the model name seen by Hivenet Router. Clients and routing policies must use the new value.
 </Note>
 
-## Prepare the Mycoroute agent
+## Prepare the Hivenet Router agent
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -179,10 +179,10 @@ Using an explicit alias makes client configuration and routing policies less dep
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the shared JWT secret somewhere the agent can read, for example:
@@ -206,7 +206,7 @@ Using an explicit alias makes client configuration and routing policies less dep
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -234,7 +234,7 @@ Using an explicit alias makes client configuration and routing policies less dep
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine llamacpp \
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
@@ -258,7 +258,7 @@ The agent waits until llama.cpp is healthy and exposes a model before registerin
 | `--backend-url` | Base URL of the local llama.cpp server |
 | `--router-grpc` | Router endpoint used for agent authentication |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Mycoroute may assign |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -292,7 +292,7 @@ The value must match the model alias returned by llama.cpp.
 
 ## Set agent capacity
 
-`--capacity` limits how many concurrent requests Mycoroute may assign to the agent.
+`--capacity` limits how many concurrent requests Hivenet Router may assign to the agent.
 
 It does not change llama.cpp’s own parallelism, slot count, context allocation, or batch configuration.
 
@@ -305,10 +305,10 @@ Conservative starting values from the original deployment guidance are:
 
 Treat these as starting points rather than universal limits. Test with your model, quantization, context size, and hardware.
 
-When the agent reaches its declared capacity, Mycoroute considers another matching agent or a configured fallback step.
+When the agent reaches its declared capacity, Hivenet Router considers another matching agent or a configured fallback step.
 
 <Note>
-  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify llama.cpp concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify llama.cpp concurrency under sustained streaming load.
 </Note>
 
 ## Verify the connection
@@ -358,7 +358,7 @@ The agent scrapes llama.cpp’s `/metrics` endpoint every 500 milliseconds by de
 
 Start llama.cpp with `--metrics` to make this data available. Metrics are sent to the router and re-exported through its Prometheus endpoint. The agent does not expose a separate Prometheus port.
 
-| Signal | llama.cpp source | Mycoroute field |
+| Signal | llama.cpp source | Hivenet Router field |
 | --- | --- | --- |
 | KV cache utilization | `llamacpp:kv_cache_usage_ratio` | `kv_cache_utilization` |
 | Running requests | `llamacpp:requests_processing` | `running_requests` |
@@ -368,27 +368,27 @@ Start llama.cpp with `--metrics` to make this data available. Metrics are sent t
 | Generation throughput | `llamacpp:predicted_tokens_seconds` | Predicted tokens per second |
 | Prompt throughput | `llamacpp:prompt_tokens_seconds` | Prompt tokens per second |
 
-llama.cpp does not use the preemption mechanism measured for vLLM, so Mycoroute does not populate a preemption metric for this engine.
+llama.cpp does not use the preemption mechanism measured for vLLM, so Hivenet Router does not populate a preemption metric for this engine.
 
 View all engine metrics through the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep mycoroute_agent_engine
+  | grep hivenet_router_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-mycoroute_agent_engine_kv_cache_utilization
-mycoroute_agent_engine_running_requests
-mycoroute_agent_engine_waiting_requests
-mycoroute_agent_engine_avg_ttft_seconds
-mycoroute_agent_engine_p90_ttft_seconds
-mycoroute_agent_engine_avg_itl_seconds
-mycoroute_agent_engine_p90_itl_seconds
-mycoroute_agent_engine_predicted_tps
-mycoroute_agent_engine_prompt_tps
+hivenet_router_agent_engine_kv_cache_utilization
+hivenet_router_agent_engine_running_requests
+hivenet_router_agent_engine_waiting_requests
+hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_router_agent_engine_avg_itl_seconds
+hivenet_router_agent_engine_p90_itl_seconds
+hivenet_router_agent_engine_predicted_tps
+hivenet_router_agent_engine_prompt_tps
 ```
 
 View current values through the routing table:
@@ -434,7 +434,7 @@ exclude_if:
     gt: 2
 ```
 
-When a metric is unavailable, Mycoroute skips that gate for the agent rather than excluding it.
+When a metric is unavailable, Hivenet Router skips that gate for the agent rather than excluding it.
 
 See [Policy YAML reference](/routing/policy-yaml-reference) for the full schema.
 
@@ -531,7 +531,7 @@ curl http://localhost:8888/metrics \
   | head
 ```
 
-Without `--metrics`, the endpoint returns HTTP `404` and Mycoroute cannot collect engine-specific metrics.
+Without `--metrics`, the endpoint returns HTTP `404` and Hivenet Router cannot collect engine-specific metrics.
 
 A metrics scrape failure does not stop the agent from forwarding requests.
 
@@ -550,13 +550,13 @@ Use `-a` to set a stable alias:
 -a "llama-3.1-8b"
 ```
 
-Clients must send the same name to Mycoroute.
+Clients must send the same name to Hivenet Router.
 
 ### Responses are slow
 
 Possible adjustments include:
 
-- reduce `--capacity` on the Mycoroute agent
+- reduce `--capacity` on the Hivenet Router agent
 - reduce llama.cpp’s context size
 - use a smaller model or quantization
 - increase GPU offloading
@@ -571,13 +571,13 @@ Check the agent logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
   </Tab>
   <Tab title="systemd">
     ```bash
     sudo journalctl \
-      -u mycoroute-agent \
+      -u hivenet-agent \
       -n 100 \
       --no-pager
     ```
@@ -605,7 +605,7 @@ Make sure `--identity-path` points to persistent storage.
 For Docker:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].Mounts'
 ```
 
@@ -638,7 +638,7 @@ nvidia-smi
 For Docker, confirm the agent received GPU access:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].HostConfig.DeviceRequests'
 ```
 
@@ -652,7 +652,7 @@ The agent continues to operate without NVML. It reports CPU and memory metrics b
   </Card>
 
   <Card title="Routing concepts" href="/routing/routing-concepts">
-    Learn how Mycoroute filters and ranks matching agents.
+    Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
   <Card title="Engine metrics" href="/observability/engine-metrics">
