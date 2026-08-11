@@ -1,0 +1,209 @@
+---
+title: "llama.cpp Agent"
+---
+
+Deploy a Mycoroute agent connected to a llama.cpp inference backend.
+
+> **One agent = one model.** llama.cpp server runs a single model per process. Each agent process registers that one model with the router.
+
+---
+
+## Prerequisites
+
+- llama.cpp server installed and running (see below)
+- GGUF format model file
+- Mycoroute Router running and reachable
+
+---
+
+## Step 1: Start llama.cpp
+
+Use the `-a` flag to set a stable model alias — this becomes the model name registered with the router. Without `-a`, the GGUF filename (minus extension) is used.
+
+**`--metrics` is required** for Mycoroute to scrape KV cache and latency metrics from llama.cpp.
+
+### Docker
+
+```bash
+docker run -d --name llama-cpp \
+  --gpus all \
+  --network host \
+  -v /data/models:/models \
+  ghcr.io/ggerganov/llama.cpp:server \
+  -m /models/llama-3.1-8b-instruct.Q4_K_M.gguf \
+  -a "llama-3.1-8b" \
+  --host 0.0.0.0 \
+  --port 8888 \
+  --metrics
+```
+
+### Bare-Metal
+
+```bash
+# Clone and build with CUDA support
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j
+
+./build/bin/llama-server \
+  -m /path/to/llama-3.1-8b-instruct.Q4_K_M.gguf \
+  -a "llama-3.1-8b" \
+  --host 0.0.0.0 \
+  --port 8888 \
+  -ngl 99 \
+  --flash-attn \
+  --metrics
+```
+
+Wait until llama.cpp is ready:
+
+```bash
+curl http://localhost:8888/health   # returns 200 when ready
+```
+
+### Model Alias → Registered Name
+
+| Launch flags | Registered model name |
+|---|---|
+| `-m model.gguf -a "my-model"` | `my-model` |
+| `-m llama-3.1-8b.Q4_K_M.gguf` (no `-a`) | `llama-3.1-8b.Q4_K_M` |
+
+---
+
+## Step 2: Start the Agent
+
+### Bare-Metal
+
+```bash
+./bin/mycoroute-agent \
+  --engine             llamacpp \
+  --backend-url        http://localhost:8888 \
+  --router-grpc        <ROUTER_IP>:50051 \
+  --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
+  --jwt-secret-file    jwt.secret \
+  --capacity           5 \
+  --region             EU-France \
+  --organization       ml-team \
+  --identity-path      /opt/mycoroute/agent_identity.key
+```
+
+### Docker
+
+```bash
+docker run -d --name mycoroute-agent \
+  --network host \
+  --gpus all \
+  -v /path/to/jwt.secret:/jwt.secret:ro \
+  mycoroute/agent:latest \
+    --engine             llamacpp \
+    --backend-url        http://localhost:8888 \
+    --router-grpc        <ROUTER_IP>:50051 \
+    --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
+    --jwt-secret-file    /jwt.secret \
+    --capacity           5 \
+    --region             EU-France \
+    --identity-path      /opt/mycoroute/agent_identity.key
+```
+
+For Docker Compose, see [Docker Compose — Each GPU Server](/deploy/docker-compose#step-2-each-gpu-server).
+
+---
+
+## llama.cpp-Specific Metrics
+
+Mycoroute scrapes these metrics every 500 ms (requires `--metrics` at llama.cpp launch). All metrics are aggregated at the router's Prometheus endpoint (`:2112`). Agents have no separate Prometheus port.
+
+| Metric | llama.cpp source | Description | Policy field |
+|--------|-----------------|-------------|--------------|
+| KV cache utilization | `llamacpp:kv_cache_usage_ratio` | Fraction of KV cache in use (0–1) | `kv_cache_utilization` |
+| Running requests | `llamacpp:requests_processing` | Requests currently being decoded | `running_requests` |
+| Waiting requests | `llamacpp:requests_deferred` | Requests queued | `waiting_requests` |
+| TTFT avg / P90 | `llamacpp:time_to_first_token_seconds` | Time to first output token | — |
+| ITL avg / P90 | `llamacpp:time_per_output_token_seconds` | Per-token decode latency | — |
+| Generation throughput | `llamacpp:predicted_tokens_seconds` | Output tokens/sec | — |
+| Prompt throughput | `llamacpp:prompt_tokens_seconds` | Prompt tokens/sec | — |
+
+> llama.cpp has no preemption mechanism — `num_preemptions_total` is not populated for this engine.
+
+### View Metrics
+
+```bash
+# On the router — all agent metrics are here
+curl http://<ROUTER_IP>:2112/metrics | grep mycoroute_agent_engine
+
+# Or via the routing table
+curl http://<ROUTER_IP>:8080/admin/routing-table | jq '.agents[] | {peer_id, kv_cache_utilization, running_requests}'
+```
+
+---
+
+## Verify Connection
+
+```bash
+# On the router — confirm agent registered
+curl http://<ROUTER_IP>:8080/admin/health | jq .
+
+# List models available to clients
+curl http://<ROUTER_IP>:8080/v1/models | jq '.data[].id'
+
+# Test inference
+curl -X POST http://<ROUTER_IP>:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.1-8b",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+---
+
+## Capacity Planning
+
+llama.cpp processes requests serially by default. Keep capacity low.
+
+| Use Case | Recommended Capacity |
+|----------|---------------------|
+| GPU inference | 5–10 |
+| CPU-only | 2–5 |
+
+Set `--capacity` to the maximum number of concurrent requests you want this agent to accept.
+
+---
+
+## Troubleshooting
+
+**Metrics not appearing in Grafana:**
+
+Ensure llama.cpp was started with `--metrics`. Without it, `/metrics` returns 404 and engine metrics will be absent.
+
+```bash
+curl http://localhost:8888/metrics   # should return Prometheus text
+```
+
+**Model name mismatch:**
+
+Use `-a "model-alias"` to set an explicit, stable name. If you change the alias, the router sees it as a new model.
+
+**Slow responses:**
+
+```bash
+# Reduce context window to free up KV cache memory
+./llama-server ... --ctx-size 4096
+
+# Use a smaller quantization for faster inference
+# Q4_K_M is a good balance of speed/quality
+```
+
+**Agent gets a new peer ID after restart:**
+
+Ensure `--identity-path` points to a persistent file. The first start creates it; subsequent starts load it.
+
+---
+
+## Next Steps
+
+- [vLLM Agent](/deploy/agents/vllm) — Higher-throughput GPU inference
+- [Ollama Agent](/deploy/agents/ollama) — Ollama backend
+- [SGLang Agent](/deploy/agents/sglang) — SGLang backend
+- [Routing Concepts](/routing/routing-concepts) — Configure routing policies

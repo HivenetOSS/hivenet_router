@@ -1,0 +1,116 @@
+---
+title: "Custom Engine"
+---
+
+Deploy any OpenAI-compatible inference backend using the `custom` engine.
+
+> **`--model` is required.** The custom engine does not auto-discover the model name. You must pass `--model <name>` explicitly.
+
+> **`--health-url` is required.** The custom engine does not assume a health endpoint path. Provide the full URL, e.g. `http://localhost:8000/health`.
+
+---
+
+## Requirements
+
+Your backend must expose:
+
+1. A health endpoint that returns HTTP 200 when ready — passed via `--health-url`
+2. `POST /v1/chat/completions` — OpenAI-compatible chat completions
+
+---
+
+## Step 1: Start Your Backend
+
+Example with a generic OpenAI-compatible server:
+
+```bash
+python -m my_inference_server \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+Verify it is ready:
+
+```bash
+curl http://localhost:8000/health
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+---
+
+## Step 2: Start the Agent
+
+```bash
+./bin/mycoroute-agent \
+  --engine             custom \
+  --backend-url        http://localhost:8000 \
+  --health-url         http://localhost:8000/health \
+  --model              meta-llama/Llama-3.1-8B-Instruct \
+  --router-grpc        <ROUTER_IP>:50051 \
+  --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
+  --jwt-secret-file    jwt.secret \
+  --capacity           32 \
+  --region             EU-Custom \
+  --identity-path      /opt/mycoroute/agent_identity.key
+```
+
+---
+
+## Verify Registration
+
+```bash
+# Confirm agent registered
+curl http://<ROUTER_IP>:8080/admin/health | jq '.agents'
+
+# Verify model is visible to clients
+curl http://<ROUTER_IP>:8080/v1/models | jq '.data[] | select(.id=="meta-llama/Llama-3.1-8B-Instruct")'
+```
+
+---
+
+## Available Metrics
+
+Custom engines do not expose engine-specific metrics (KV cache, TTFT, ITL). The following are still available:
+
+- **Universal metrics** — SRTT, request success/failure counters, active requests
+- **Hardware metrics** — GPU temperature, VRAM, utilization (if NVML accessible)
+
+All metrics are aggregated at the router's Prometheus endpoint (`:2112`).
+
+---
+
+## Routing Policy
+
+Route to custom engines using `engine: "custom"` in the match filter:
+
+```yaml
+routing_policy:
+  match:
+    engine: "custom"
+    region: "EU-Custom"
+  exclude_if:
+    success_rate: { lt: 0.95 }
+  strategy: "least-loaded"
+  max_tries: 3
+
+fallback_chain:
+  - name: "vllm-backup"
+    match:
+      engine: "vllm"
+    strategy: "least-loaded"
+```
+
+Valid `exclude_if` fields: `srtt`, `kv_cache_utilization`, `running_requests`, `waiting_requests`, `p90_ttft_seconds`, `gpu_temperature_c`, `gpu_util_percent`, `gpu_vram_used_percent`, `memory_used_percent`, `cpu_usage_percent`, `success_rate`.
+
+---
+
+## See Also
+
+- [vLLM Agent](/deploy/agents/vllm) — vLLM-specific configuration
+- [Ollama Agent](/deploy/agents/ollama) — Ollama setup
+- [SGLang Agent](/deploy/agents/sglang) — SGLang configuration
+- [Routing Concepts](/routing/routing-concepts) — Policy routing

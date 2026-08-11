@@ -1,0 +1,243 @@
+---
+title: "Audit Logging"
+---
+
+Mycoroute writes structured audit logs for every request, enabling request tracing and compliance.
+
+## Log Format
+
+Each request is logged as a single JSON line to `/var/log/mycoroute/audit.jsonl`:
+
+```json
+{
+  "log_type": "audit",
+  "level": "info",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "request_id": "req-abc123",
+  "tenant_id": "acme-corp",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "status_code": 200,
+  "latency_ms": 1523,
+  "input_tokens": 15,
+  "output_tokens": 42,
+  "agent_id": "12D3Koo0...",
+  "error_code": "",
+  "source_ip": "10.0.0.5",
+  "ts": "2026-04-22T12:00:00.000+02:00"
+}
+```
+
+`level` is `"info"` for 2xx/3xx responses and `"error"` for 4xx/5xx.
+
+## What Is Logged
+
+| Field | Description |
+|-------|-------------|
+| `log_type` | Always `"audit"` |
+| `level` | `"info"` (success) or `"error"` (4xx/5xx) |
+| `trace_id` | OpenTelemetry trace ID (empty if tracing disabled) |
+| `request_id` | From `X-Request-ID` header, or generated UUID |
+| `tenant_id` | From API key `metadata.owner`; empty if auth disabled |
+| `model` | Model name from request body |
+| `status_code` | HTTP response status (integer) |
+| `latency_ms` | End-to-end latency in milliseconds |
+| `input_tokens` | Prompt tokens from response `usage` |
+| `output_tokens` | Completion tokens from response `usage` |
+| `agent_id` | Peer ID of the selected agent |
+| `error_code` | Domain error code (see below); empty on success |
+| `source_ip` | Client IP address |
+| `ts` | Request start time (CET/CEST timezone) |
+
+## What Is NOT Logged
+
+- **Request body** — No prompt content
+- **Response body** — No completion content
+- **Authorization header** — Bearer tokens excluded
+- **HTTP method / path** — Not recorded per-line; visible in router access logs
+
+## Error Codes
+
+| Code | HTTP Status | Cause |
+|------|-------------|-------|
+| `request_invalid` | 400 | Malformed JSON or missing required field |
+| `context_length_exceeded` | 400 | Input exceeds model's maximum context window (backend) |
+| `invalid_parameter` | 400 | Invalid inference parameter value (backend) |
+| `unauthorized` | 401 | Missing or invalid API key |
+| `model_forbidden` | 403 | Key not authorized for the requested model |
+| `model_not_found` | 404 | No agent serves the requested model |
+| `rate_limit_exceeded` | 429 | Requests-per-minute bucket exhausted |
+| `token_limit_exceeded` | 429 | Daily token budget exhausted |
+| `no_agents_available` | 503 | All registered agents are unhealthy |
+| `no_capacity` | 503 | All healthy agents are at full concurrency capacity |
+| `agent_disconnected` | 503 | Agent became unreachable during the request |
+| `backend_unavailable` | 503 | Inference engine not ready (model still loading) |
+| `queue_full` | 503 | Router request queue at capacity |
+| `backend_error` | 502 | Unexpected error from the inference engine |
+| `request_timeout` | 504 | Request exceeded `--request-timeout` |
+
+## Log Location
+
+Default: `/var/log/mycoroute/audit.jsonl`
+
+Configure with `mycoroute_AUDIT_LOG_PATH`:
+
+```bash
+export mycoroute_AUDIT_LOG_PATH=/custom/path/audit.jsonl
+./bin/mycoroute-router ...
+```
+
+Falls back to stdout if the directory cannot be created (useful in local development).
+
+## Loki + Promtail Pipeline
+
+### Promtail Configuration
+
+```yaml
+# /etc/promtail/config.yaml
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: mycoroute
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: router
+          __path__: /var/log/mycoroute/audit.jsonl
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            model: model
+            tenant_id: tenant_id
+            status_code: status_code
+      - labels:
+          level:
+          model:
+          tenant_id:
+```
+
+### Loki Query Examples
+
+```logql
+# All audit entries
+{job="router"} | json
+
+# Failed requests (4xx/5xx)
+{job="router"} | json | level = "error"
+
+# By model
+{job="router"} | json | model = "meta-llama/Llama-3.1-8B-Instruct"
+
+# By tenant
+{job="router"} | json | tenant_id = "acme-corp"
+
+# High latency (>5s)
+{job="router"} | json | latency_ms > 5000
+
+# Specific request
+{job="router"} | json | request_id = "req-abc123"
+```
+
+### Aggregation Queries
+
+```logql
+# Error rate by model (last hour)
+sum by (model) (
+  count_over_time({job="router"} | json | level = "error" [1h])
+) /
+sum by (model) (
+  count_over_time({job="router"} | json [1h])
+)
+
+# Token usage by tenant (last day)
+sum by (tenant_id) (
+  sum_over_time({job="router"} | json | unwrap output_tokens [1d])
+)
+
+# Average latency by tenant (last hour)
+avg by (tenant_id) (
+  avg_over_time({job="router"} | json | unwrap latency_ms [1h])
+)
+```
+
+## Grafana Audit Dashboard
+
+The pre-configured audit dashboard is available at `http://localhost:3000/d/mycoroute-audit/`. See [Grafana Dashboards](/observability/grafana-dashboards) for provisioning and customization.
+
+## Retention Policy
+
+Configure log rotation:
+
+```bash
+# /etc/logrotate.d/mycoroute
+/var/log/mycoroute/audit.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+}
+```
+
+## Compliance Use Cases
+
+### GDPR
+
+- Logs request metadata without content (no prompts, no completions)
+- Tracks tenant activity for data processing records
+- `source_ip` can be anonymised at Loki ingest if required
+
+### SOC 2
+
+- Complete request audit trail with `request_id` and `trace_id`
+- Authentication failure tracking via `error_code: "unauthorized"`
+- `tenant_id` links every request to an authorised key owner
+
+### Internal Auditing
+
+- Usage and cost allocation by `tenant_id` and `model`
+- Performance analysis via `latency_ms`
+
+## Examples
+
+### Find All Requests for a Tenant
+
+```logql
+{job="router"} | json | tenant_id = "acme-corp"
+```
+
+### Identify Slow Requests
+
+```logql
+{job="router"} | json | latency_ms > 10000
+```
+
+### Token Usage by Model
+
+```logql
+sum by (model) (
+  sum_over_time({job="router"} | json | unwrap output_tokens [1d])
+)
+```
+
+### Detect Error Spikes
+
+```logql
+sum(rate({job="router"} | json | level = "error" [5m]))
+```
+
+## See Also
+
+- [Prometheus Metrics](/observability/prometheus-metrics) - Metrics export
+- [Grafana Dashboards](/observability/grafana-dashboards) - Visual dashboards
+- [Error Codes](/reference/error-codes) - Complete error code reference

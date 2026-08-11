@@ -1,0 +1,143 @@
+---
+title: "Reranking"
+---
+
+Rerank search results via any agent started with `--capability reranker`.
+
+## Endpoint
+
+```
+POST /v1/rerank
+```
+
+## Requirements
+
+- Agent running with `--capability reranker` (Infinity, vLLM, SGLang, llama.cpp, or Custom — **not** Ollama)
+
+## Request
+
+### Headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | ✅ | `application/json` |
+| `Authorization` | ❌ | `Bearer <api-key>` |
+
+### Body
+
+```json
+{
+  "model": "string",
+  "query": "string",
+  "documents": ["string"],
+  "top_n": 5
+}
+```
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `model` | string | ✅ | - | Reranker model name |
+| `query` | string | ✅ | - | Search query |
+| `documents` | array | ✅ | - | Documents to rerank |
+| `top_n` | int | ❌ | All | Number of results to return |
+
+## Response
+
+```json
+{
+  "object": "rerank",
+  "results": [
+    {
+      "relevance_score": 0.9997,
+      "index": 0,
+      "document": null
+    },
+    {
+      "relevance_score": 0.0212,
+      "index": 2,
+      "document": null
+    }
+  ],
+  "model": "BAAI/bge-reranker-large",
+  "usage": {
+    "prompt_tokens": 151,
+    "total_tokens": 151
+  },
+  "id": "infinity-6a911ac9-d522-4fa9-8234-5b65580bc2a5",
+  "created": 1776870533
+}
+```
+
+> **Note:** `document` is `null` by default. Results are ordered by `relevance_score` descending; `index` refers to the position of the document in the original input array.
+
+## Examples
+
+### Basic Request
+
+```bash
+curl -X POST http://localhost:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "BAAI/bge-reranker-v2-m3",
+    "query": "capital of France",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "France is located in Western Europe."
+    ],
+    "top_n": 2
+  }'
+```
+
+### Python
+
+```python
+import requests
+
+response = requests.post(
+    "http://localhost:8080/v1/rerank",
+    json={
+        "model": "BAAI/bge-reranker-v2-m3",
+        "query": "machine learning algorithms",
+        "documents": [
+            "Random Forest is a supervised learning algorithm.",
+            "Paris is a city in France.",
+            "Neural networks are used for deep learning."
+        ],
+        "top_n": 2
+    }
+)
+
+results = response.json()["results"]
+for r in results:
+    print(f"{r['relevance_score']:.2f}: {r['document']['text']}")
+```
+
+## Use Case: Search Pipeline
+
+```python
+# 1. Retrieve candidate documents
+candidates = search_index.query("machine learning", top_k=50)
+
+# 2. Rerank with Mycoroute
+rerank_response = requests.post(
+    "http://localhost:8080/v1/rerank",
+    json={
+        "model": "BAAI/bge-reranker-v2-m3",
+        "query": "machine learning",
+        "documents": [doc.text for doc in candidates],
+        "top_n": 10
+    }
+)
+
+# 3. Return top results
+top_results = rerank_response.json()["results"]
+```
+
+## See Also
+
+- [Chat Completions](/api/chat-completions) - LLM inference
+- [Embeddings](/api/embeddings) - Embedding generation
+- [Infinity Agent](/deploy/agents/infinity) - Recommended reranker backend

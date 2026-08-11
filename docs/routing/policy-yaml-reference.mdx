@@ -1,0 +1,370 @@
+---
+title: "Policy YAML Reference"
+---
+
+Complete reference for the routing policy YAML format.
+
+## Basic Structure
+
+```yaml
+routing_policy:
+  match: {}
+  exclude_if: {}
+  strategy: "least-loaded"
+  max_tries: 3
+
+fallback_chain:
+  - name: "fallback-name"
+    match: {}
+    exclude_if: {}
+    strategy: "least-loaded"
+    max_tries: 2
+
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+`fallback_provider` is a top-level field — not a step inside `fallback_chain`. It is the last resort after all `fallback_chain` steps are exhausted. API keys are supplied via environment variables (`mycoroute_OPENAI_API_KEY`, `mycoroute_ANTHROPIC_API_KEY`), not in the YAML.
+
+## Layer 1: Match (Static Filter)
+
+Filter agents by static metadata. All conditions must be true (AND logic). All comparisons are **exact and case-sensitive**.
+
+```yaml
+match:
+  region: "EU-France"
+  engine: "vllm"
+  tags: ["production", "gpu-a100"]
+  organization: "ml-team"
+  machine: "gpu-worker-1"
+  gpu_model: "RTX4090"
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `region` | string | Agent region label |
+| `engine` | string | Backend engine (`vllm`, `ollama`, `sglang`, `llamacpp`, `infinity`, `custom`) |
+| `tags` | array | Agent tags (all must match) |
+| `organization` | string | Organization label |
+| `machine` | string | Machine hostname |
+| `gpu_model` | string | GPU model name |
+
+**Empty match:** `{}` matches all agents (after model filter).
+
+## Layer 2: Exclude If (Dynamic Gates)
+
+Exclude agents based on real-time metrics. Any failing condition removes the agent.
+
+A gate whose metric is **unavailable** for an agent (e.g. `kv_cache_utilization` on a non-vLLM agent) is silently skipped — the agent is not excluded.
+
+Unknown field names are **rejected at load time** with a validation error.
+
+```yaml
+exclude_if:
+  kv_cache_utilization: { gt: 0.85 }
+  gpu_temperature_c: { gt: 82 }
+  success_rate: { lt: 0.95 }
+  srtt: { gt: 500 }
+  gpu_vram_used_percent: { gt: 0.9 }
+```
+
+### Operators
+
+| Operator | Description |
+|----------|-------------|
+| `gt` | Greater than |
+| `lt` | Less than |
+| `gte` | Greater than or equal |
+| `lte` | Less than or equal |
+
+Only one operator per field is allowed. Specifying two operators on the same field is a validation error.
+
+### Metrics
+
+#### Universal Metrics (all agents)
+
+| Field | Type | Range | Description |
+|-------|------|-------|-------------|
+| `capacity_utilization` | float | 0.0–1.0 | `active_requests / capacity` |
+| `success_rate` | float | 0.0–1.0 | Lifetime success fraction |
+| `srtt` | float | 0+ ms | Smoothed RTT in **milliseconds** (RFC 6298) |
+| `consecutive_failures` | float | 0+ | Forward failures since last success (resets on any success) |
+
+#### vLLM / SGLang Engine Metrics
+
+| Field | Type | Range | Description |
+|-------|------|-------|-------------|
+| `kv_cache_utilization` | float | 0.0–1.0 | KV cache usage |
+| `running_requests` | float | 0+ | Requests currently being processed |
+| `waiting_requests` | float | 0+ | Requests queued in the engine scheduler |
+| `avg_ttft_seconds` | float | 0+ | Average time to first token (seconds) |
+| `p90_ttft_seconds` | float | 0+ | P90 time to first token (seconds) |
+| `avg_itl_seconds` | float | 0+ | Average inter-token latency (seconds) |
+| `p90_itl_seconds` | float | 0+ | P90 inter-token latency (seconds) |
+
+#### Hardware Metrics (NVML + gopsutil)
+
+| Field | Type | Range | Description |
+|-------|------|-------|-------------|
+| `gpu_temperature_c` | float | 0–150 | Hottest GPU temperature in °C (absolute) |
+| `gpu_util_percent` | float | 0.0–1.0 | Highest GPU compute utilization (normalised) |
+| `gpu_vram_used_percent` | float | 0.0–1.0 | Highest VRAM used / VRAM total (normalised) |
+| `cpu_usage_percent` | float | 0.0–1.0 | Node CPU utilization (normalised) |
+| `memory_used_percent` | float | 0.0–1.0 | RAM used / RAM total (normalised) |
+
+> **Note:** All hardware fraction fields (`gpu_util_percent`, `cpu_usage_percent`, `memory_used_percent`, `gpu_vram_used_percent`) are normalised to 0.0–1.0 by the router regardless of the 0–100 values shown in Prometheus gauges. `gpu_temperature_c` is the only hardware field that stays as absolute Celsius.
+
+**Empty exclude_if:** `{}` — no dynamic filtering.
+
+## Layer 3: Strategy (Ranking)
+
+Rank remaining agents. Only `least-loaded` is currently implemented.
+
+```yaml
+strategy: "least-loaded"
+```
+
+### Available Strategies
+
+| Strategy | Status | Description |
+|----------|--------|-------------|
+| `least-loaded` | ✅ | Rank by `active_requests / capacity` ascending |
+| `lowest-srtt` | 📋 Planned | Rank by smoothed RTT |
+| `round-robin` | 📋 Planned | Rotating index |
+| `prefix-aware` | 📋 Planned | CHWBL consistent hashing |
+
+## Max Tries
+
+```yaml
+max_tries: 3
+```
+
+Number of **failed forward attempts to the backend** before escalating to the next fallback step. Slot-acquisition races (where another request takes the slot between scoring and acquisition) do not count as tries and are retried silently within the same step.
+
+- **Default:** 3 (or the value of `--max-tries-per-step`)
+- **Per-step override:** set `max_tries` on each `fallback_chain` step independently
+
+## Fallback Chain
+
+Ordered fallback steps when the primary policy produces no eligible agent.
+
+```yaml
+fallback_chain:
+  - name: "any-region"
+    match:
+      engine: "vllm"
+    exclude_if:
+      success_rate: { lt: 0.90 }
+    strategy: "least-loaded"
+    max_tries: 2
+
+  - name: "relaxed"
+    match: {}
+    strategy: "least-loaded"
+    max_tries: 2
+```
+
+### Fallback Step Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Step identifier (used in logs and metrics) |
+| `match` | object | Static filter (same fields as primary) |
+| `exclude_if` | object | Dynamic gates (same fields as primary) |
+| `strategy` | string | Ranking algorithm |
+| `max_tries` | int | Failed forward attempts before advancing |
+
+### When Fallback Triggers
+
+A step advances to the next fallback when any of the following occur:
+
+1. **Model not found** — No agents are registered for the requested model
+2. **All unhealthy** — Agents exist but all are unhealthy or have a failed backend
+3. **No candidates** — No agents pass the `match` filter
+4. **All excluded** — All filter-passing agents fail `exclude_if` gates
+5. **Capacity queue exhausted** — All healthy agents are full and the wait queue timed out or reached its depth limit
+6. **Max tries exhausted** — Failed forward attempts reach `max_tries` for the current step
+
+## Provider Fallback
+
+Last-resort closed-source API (OpenAI, Anthropic). Top-level field — not a step inside `fallback_chain`.
+
+```yaml
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+Invoked only after all `fallback_chain` steps are exhausted.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `engine` | string | ✅ | `openai` or `anthropic` |
+| `model` | string | ✅ | Model name sent to the provider API |
+
+### API Key Configuration
+
+Credentials are never stored in the YAML — supply them via environment variables:
+
+| Provider | Environment Variable |
+|----------|---------------------|
+| `openai` | `mycoroute_OPENAI_API_KEY` |
+| `anthropic` | `mycoroute_ANTHROPIC_API_KEY` |
+
+## Per-Model Policies
+
+To apply different policies per model, declare the models the file applies to with the `models:` field:
+
+```yaml
+models:
+  - "meta-llama/Llama-3.1-8B-Instruct"
+  - "meta-llama/Llama-3.1-70B-Instruct"
+
+routing_policy:
+  match:
+    region: "EU-France"
+  strategy: "least-loaded"
+```
+
+### Loading from a Directory
+
+```bash
+./bin/mycoroute-router --policy-model-dir /etc/mycoroute/models/
+```
+
+Each `.yaml` / `.yml` file in the directory is a named policy document. Rules:
+
+| Rule | Behaviour |
+|------|-----------|
+| `_default.yaml` | Loaded as the **global policy override** (replaces `--policy-file`). Its `models:` field is ignored. A parse error here is fatal. |
+| Per-model files | Must declare at least one model via `models:`. Files without `models:` are skipped with a warning. |
+| Conflict resolution | The **oldest file by modification time** wins when two files claim the same model. The losing file is skipped entirely (logged as an error). |
+| Parse errors | Non-fatal for per-model files — the file is skipped and other files continue loading. |
+
+### Per-Model Policy API
+
+Named policies can also be managed at runtime without restarting:
+
+```bash
+# List all named policies
+GET /admin/policy/models
+
+# Get a named policy
+GET /admin/policy/models/{name}
+
+# Create or replace a named policy (YAML body)
+PUT /admin/policy/models/{name}
+
+# Delete a named policy (model reverts to global policy)
+DELETE /admin/policy/models/{name}
+```
+
+> **Note:** API-loaded named policies are ephemeral and lost on restart. Use `--policy-model-dir` for persistent per-model policies.
+
+## Complete Example
+
+```yaml
+# Primary: EU vLLM agents with healthy GPU
+routing_policy:
+  match:
+    region: "EU-France"
+    engine: "vllm"
+    tags: ["production"]
+  exclude_if:
+    kv_cache_utilization: { gt: 0.85 }
+    gpu_temperature_c: { gt: 82 }
+    success_rate: { lt: 0.95 }
+    srtt: { gt: 500 }
+  strategy: "least-loaded"
+  max_tries: 3
+
+# Fallback 1: Any region, relaxed filters
+fallback_chain:
+  - name: "any-region"
+    match:
+      engine: "vllm"
+    exclude_if:
+      success_rate: { lt: 0.90 }
+    strategy: "least-loaded"
+    max_tries: 2
+
+# Last resort: OpenAI (set mycoroute_OPENAI_API_KEY in environment)
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+## Loading Policy
+
+### From File
+
+```bash
+./bin/mycoroute-router --policy-file /etc/mycoroute/policy.yaml
+```
+
+### From Directory (Per-Model)
+
+```bash
+./bin/mycoroute-router --policy-model-dir /etc/mycoroute/models/
+```
+
+Example directory layout:
+```
+/etc/mycoroute/models/
+  _default.yaml          # global policy override (optional)
+  llama-8b.yaml          # models: ["meta-llama/Llama-3.1-8B-Instruct"]
+  llama-70b.yaml         # models: ["meta-llama/Llama-3.1-70B-Instruct"]
+```
+
+### Ephemeral via API
+
+```bash
+# Replace global policy (lost on restart)
+curl -X PUT -H "Content-Type: text/yaml" \
+  -d '@policy.yaml' \
+  http://localhost:8080/admin/policy
+
+# Replace a named per-model policy (lost on restart)
+curl -X PUT -H "Content-Type: text/yaml" \
+  -d '@llama-8b.yaml' \
+  http://localhost:8080/admin/policy/models/llama-8b
+```
+
+## Hot Reload
+
+```bash
+# Reload both --policy-file and --policy-model-dir from disk
+kill -HUP $(pgrep mycoroute-router)
+```
+
+SIGHUP reloads all policy sources atomically. In-flight requests complete under their current policy snapshot; new requests pick up the updated policy immediately.
+
+Reload events are tracked by:
+
+```promql
+mycoroute_policy_reload_total{trigger="sighup", result="success"}
+mycoroute_policy_reload_total{trigger="sighup", result="error"}
+```
+
+## Validation
+
+Policy is validated on load. Rules enforced:
+
+- `strategy` is required on every step; only `least-loaded` is accepted
+- Unknown `exclude_if` field names are rejected (typos silently disable gates otherwise)
+- Each `exclude_if` field must have exactly one operator (`gt`, `lt`, `gte`, or `lte`)
+- `fallback_provider.engine` and `fallback_provider.model` are both required when the block is present
+
+The router refuses to start with an invalid `--policy-file`. `PUT /admin/policy` returns HTTP 400 with the validation message on error.
+
+## See Also
+
+- [Routing Concepts](/routing/routing-concepts) - Pipeline explanation
+- [Fallback Chains](/routing/fallback-chains) - Detailed fallback config
+- [Provider Fallback](/routing/provider-fallback) - OpenAI/Anthropic setup
+- [Admin Endpoints](/api/admin-endpoints) - Policy API

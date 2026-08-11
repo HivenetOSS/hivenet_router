@@ -1,0 +1,188 @@
+---
+title: "Ollama Agent"
+---
+
+Deploy a Mycoroute agent connected to an Ollama backend.
+
+> **One agent = one model.** Each agent process registers exactly one model with the router — the first model returned by `GET /api/tags`. If Ollama has multiple models pulled, use `--model <name>` to pin each agent to its model and start one agent process per model.
+
+> **No engine metrics.** Ollama does not expose a Prometheus `/metrics` endpoint. Only universal metrics (SRTT, request counters) and hardware metrics (GPU via NVML) are available for this engine.
+
+---
+
+## Prerequisites
+
+- Ollama installed and running (see below)
+- Mycoroute Router running and reachable
+
+---
+
+## Step 1: Start Ollama
+
+### Linux
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start the server (systemd is not running in containers — start manually)
+export OLLAMA_HOST=0.0.0.0:11434   # default port; change to e.g. 8888 if needed
+export OLLAMA_MODELS=/home/ubuntu/models
+export OLLAMA_KEEP_ALIVE=-1        # keep model loaded indefinitely
+nohup ollama serve > ~/ollama.log 2>&1 &
+```
+
+### Docker
+
+```bash
+docker run -d \
+  --name ollama \
+  --network host \
+  --gpus all \
+  -v ollama:/root/.ollama \
+  ollama/ollama
+```
+
+### Pull a Model
+
+```bash
+ollama pull llama3.1:8b
+ollama list   # confirm it is downloaded
+```
+
+Wait until Ollama responds before starting the agent:
+
+```bash
+curl http://localhost:11434/api/tags   # returns 200 with model list when ready
+```
+
+---
+
+## Step 2: Start the Agent
+
+### Bare-Metal
+
+```bash
+./bin/mycoroute-agent \
+  --engine             ollama \
+  --backend-url        http://localhost:11434 \
+  --router-grpc        <ROUTER_IP>:50051 \
+  --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
+  --jwt-secret-file    jwt.secret \
+  --capacity           5 \
+  --region             EU-France \
+  --identity-path      /opt/mycoroute/agent_identity.key
+```
+
+### Docker
+
+```bash
+docker run -d --name mycoroute-agent \
+  --network host \
+  -v /path/to/jwt.secret:/jwt.secret:ro \
+  mycoroute/agent:latest \
+    --engine             ollama \
+    --backend-url        http://localhost:11434 \
+    --router-grpc        <ROUTER_IP>:50051 \
+    --router-p2p         /ip4/<ROUTER_IP>/tcp/9000 \
+    --jwt-secret-file    /jwt.secret \
+    --capacity           5 \
+    --region             EU-France \
+    --identity-path      /opt/mycoroute/agent_identity.key
+```
+
+For Docker Compose, see [Docker Compose — Each GPU Server](/deploy/docker-compose#step-2-each-gpu-server).
+
+---
+
+## Model Selection
+
+The agent queries `GET /api/tags` at startup and registers the first model in the list. Ollama strips the implicit `:latest` suffix — `llama3.1:latest` is registered as `llama3.1`.
+
+| Ollama model | Registered as |
+|--------------|---------------|
+| `llama3.1:latest` | `llama3.1` |
+| `llama3.1:8b` | `llama3.1:8b` |
+| `mistral:7b` | `mistral:7b` |
+
+To pin the agent to a specific model (useful when multiple models are pulled):
+
+```bash
+./bin/mycoroute-agent --model llama3.1:8b --engine ollama ...
+```
+
+Start one agent process per model when running multiple models on the same host.
+
+---
+
+## Verify Connection
+
+```bash
+# On the router — confirm agent registered
+curl http://<ROUTER_IP>:8080/admin/health | jq .
+
+# List models available to clients
+curl http://<ROUTER_IP>:8080/v1/models | jq '.data[].id'
+
+# Test inference
+curl -X POST http://<ROUTER_IP>:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.1:8b",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+---
+
+## Capacity Planning
+
+Ollama processes one request at a time per model. Keep capacity low to avoid unbounded queue growth.
+
+| Use Case | Recommended Capacity |
+|----------|---------------------|
+| GPU inference | 3–5 |
+| CPU-only | 1–2 |
+
+Set `--capacity` to control the maximum concurrent requests the router will route to this agent. Requests beyond capacity are held at the router until a slot opens.
+
+---
+
+## Troubleshooting
+
+**Model not found at startup:**
+
+```bash
+# List pulled models
+ollama list
+
+# Pull the model if missing
+ollama pull llama3.1:8b
+```
+
+**Slow first response:**
+
+Ollama may be loading the model on first request. Check with:
+
+```bash
+ollama ps   # shows currently loaded model and GPU memory used
+```
+
+**Connection refused:**
+
+```bash
+# Verify Ollama is running and accessible
+curl http://localhost:11434/api/tags
+```
+
+**Agent gets a new peer ID after restart:**
+
+Ensure `--identity-path` points to a persistent file. The first start creates it; subsequent starts load it.
+
+---
+
+## Next Steps
+
+- [vLLM Agent](/deploy/agents/vllm) — Higher-throughput GPU inference
+- [SGLang Agent](/deploy/agents/sglang) — SGLang backend
+- [Custom Engine](/deploy/agents/custom-engine) — Any OpenAI-compatible backend
+- [Routing Concepts](/routing/routing-concepts) — Configure routing policies

@@ -1,0 +1,123 @@
+---
+title: "Integrations"
+---
+
+Guides for using Mycoroute with third-party tools and clients. Every integration here points its client at the router and uses one of the [Inference Endpoints](/api/chat-completions) — `/v1/chat/completions` (OpenAI dialect) or `/v1/messages` (Anthropic dialect) — without any per-client special-casing in the router.
+
+## What's in this section
+
+| Client | Audience | Endpoint used | Status (as of 2026-06-09) | Guide |
+|---|---|---|---|---|
+| [Claude Code](/integrations/claude-code) | Developers in a terminal | `/v1/messages` (Anthropic) | Working with a Claude Code version pin and vLLM ≤ 0.20.x caveat | [01-Claude-Code.md](/integrations/claude-code) |
+| [OpenCode](/integrations/opencode) | Developers in a terminal | `/v1/chat/completions` (OpenAI-compatible) | Working without workarounds | [02-OpenCode.md](/integrations/opencode) |
+| [pi](/integrations/pi) | Developers in a terminal | `/v1/chat/completions` (OpenAI-compatible) | Working without workarounds | [03-Pi.md](/integrations/pi) |
+| [Open WebUI](/integrations/open-webui) | **Anyone with a browser** (non-developers, ops, multi-user teams) | `/v1/chat/completions` (OpenAI-compatible) | Working — pin model IDs on first run (see guide) | [04-Open-WebUI.md](/integrations/open-webui) |
+| [Code & SDKs](/integrations/using-from-code) | **App developers** writing Python / Node code | `/v1/chat/completions` (OpenAI-compatible) or `/v1/messages` (Anthropic) | Working without workarounds | [05-Using-from-Code.md](/integrations/using-from-code) |
+
+## Choosing a client
+
+The clients fall into three groups:
+
+- **Coding agents** (Claude Code, OpenCode, pi) — run in a terminal, drive your project files, call tools. Designed for developers in an interactive session.
+- **Web chat UI** (Open WebUI) — runs as a long-lived Docker service, anyone with the URL can use it. Designed for general chat access without setting up a terminal client.
+- **Code & SDKs** (Python / Node) — call the router directly from your own scripts and services using the standard OpenAI / Anthropic SDKs. Designed for app developers integrating LLM calls into a codebase, not for interactive use.
+
+For the coding agents, the comparison below highlights the per-client setup differences. For Open WebUI and Code & SDKs, the setup is fundamentally different — see [Open WebUI's guide](/integrations/open-webui) and [Code & SDKs](/integrations/using-from-code) directly.
+
+| Dimension | Claude Code | OpenCode | pi |
+|---|---|---|---|
+| Router endpoint | `/v1/messages` (Anthropic dialect) | `/v1/chat/completions` (OpenAI dialect) | `/v1/chat/completions` (OpenAI dialect) |
+| Header | `Authorization: Bearer …` (via `ANTHROPIC_AUTH_TOKEN`) | `Authorization: Bearer …` (via `options.apiKey`) | `Authorization: Bearer …` (via the OpenAI SDK's `apiKey`) |
+| Config style | Environment variables | `opencode.json` config file | `~/.pi/agent/models.json` + `settings.json` |
+| Background "small" model | `ANTHROPIC_DEFAULT_HAIKU_MODEL` (required) | `"small_model"` in config | None — reuses the active model |
+| Known time-bound caveats | Version pin to `2.1.153` while vLLM ≤ 0.20.x | None today | None today |
+| In-session backend switch | No (one endpoint per process) | No (one endpoint per process) | No (one endpoint per process) |
+
+Rule of thumb:
+
+- **Default to OpenCode or pi** if you just want a coding agent against Mycoroute with zero version-pinning gymnastics. Both run against `/v1/chat/completions`, which your vLLM agents already serve natively, so nothing on the backend has to change.
+- **pi specifically wins on simplicity** of the "small model" question: there is no separate background-model alias to map, so there is no hidden second endpoint that might leak to a hosted provider.
+- **Use Claude Code** if you specifically want its UX, plugins, or hooks. Plan for the version pin and the related vLLM compatibility note in the guide.
+
+## Common prerequisites — Node.js
+
+All three clients in this section are **Node CLIs**. They share the same install path (`npm install -g …`), so they share the same prerequisite: a recent Node.js runtime. Each client doc links back to this section instead of repeating the setup.
+
+### Minimum Node version per client
+
+| Client | Minimum Node version |
+|---|---|
+| Claude Code | Node 20 LTS works for `2.1.153`; the latest 2.1.16x releases want Node 22 LTS — using Node 22+ is safe across the board |
+| OpenCode | Node 18 minimum; the latest releases recommend Node 22 LTS |
+| pi | **Node 22.19+** (hard minimum — pi will refuse to install on older versions) |
+
+Running **Node 22 LTS or newer** satisfies all three at once. If you do not need pi, Node 20 LTS is also fine for Claude Code (pinned) and OpenCode.
+
+### Check your current Node
+
+```bash
+node -v
+# v22.x.x or v24.x.x → fine for all three clients
+# v20.x.x           → fine for Claude Code + OpenCode, NOT enough for pi
+# anything older    → upgrade before installing any client below
+```
+
+### Install / upgrade Node with `nvm` (recommended)
+
+`nvm` lets you have multiple Node versions side by side and switch with one command — preferable to your distro's `apt`/`yum` package, which is often out of date and intrusive to update.
+
+```bash
+# Install nvm (skip if you already have it)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+exec $SHELL          # reload your shell so the `nvm` command is available
+
+# Install the latest LTS (currently Node 22 / 24 line) and make it the default
+nvm install --lts
+nvm alias default lts/*
+
+node -v              # confirm
+```
+
+If you prefer a system package, on Ubuntu/Debian:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+On macOS with Homebrew:
+```bash
+brew install node@22
+brew link node@22 --force
+```
+
+### ⚠️ The `nvm` per-version trap
+
+`nvm`'s global packages are **isolated per Node version**. If you upgrade Node (e.g. 20 → 22 to install pi), the CLI clients you previously installed globally — **Claude Code `2.1.153`, OpenCode**, anything `npm install -g`'d — are not migrated. They will appear "uninstalled" on the new Node version.
+
+Symptoms: `claude: command not found` (or `opencode: command not found`) right after running `nvm install <newer-version>`.
+
+Fix: reinstall the clients you use on the new Node version:
+```bash
+nvm use default      # or the specific version you upgraded to
+npm install -g @anthropic-ai/claude-code@2.1.153    # if you use Claude Code (pinned per its guide)
+npm install -g opencode-ai@latest                    # if you use OpenCode
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+You can also keep an older Node version around (`nvm install 20`, `nvm use 20`) if you specifically need to pin one client to an older runtime — but the simpler path is "everything on Node 22+".
+
+## Designing your own integration
+
+If the client you're integrating is not listed here, the router only requires three things from it:
+
+1. **Endpoint** — speaks one of `/v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank` (see the [allowlisted passthrough](/api/chat-completions#how-the-passthrough-works)).
+2. **Authentication** — sends `Authorization: Bearer <mycoroute-api-key>` (the router does not accept `x-api-key`).
+3. **Model field** — puts the model name as a top-level `"model"` field in the request body, matching exactly what an agent registers.
+
+If those three are true, the integration will work. Anything else (system prompt format, tool-call format, streaming events) is forwarded raw to the backend — so the backend (e.g. vLLM) decides whether it understands the dialect.
+
+## Operational notes that apply to every integration
+
+- **Per-key token budgeting** is enforced front-door by the router — see [Token Budget Enforcement](/security/auth-yaml-reference#token-budget-enforcement). A misconfigured client cannot bypass the limit by switching dialect.
+- **Audit logging** is emitted for every request, populated with the tenant, model, agent ID, and (for streaming responses) the actual token totals once the stream completes.
+- **No client-specific code in the router.** All clients share the same handler, model-routing policy, and security allowlist. A bug or surprise behaviour in one client is therefore likely to surface in this docs section, not in router config.

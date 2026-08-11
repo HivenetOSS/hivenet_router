@@ -1,0 +1,246 @@
+---
+title: "Using Claude Code with Mycoroute"
+---
+
+This guide shows how to point [Claude Code](https://docs.claude.com/en/docs/claude-code) at a Mycoroute router so it runs against your own models (e.g. served by vLLM) instead of Anthropic's hosted API. The setup uses the router's Anthropic-compatible `/v1/messages` endpoint — see [Inference Endpoints](/api/chat-completions) for the underlying API.
+
+> **Snapshot date — last verified 2026-06-09.**
+> Some of the workarounds below (Claude Code version pin, vLLM upgrade path) exist because of bugs in **specific** versions of Claude Code and vLLM at the time of writing. **Re-verify them** before applying — once newer Claude Code releases drop the inline `system` role *and* the agent fleet runs a vLLM build with [PR #44283](https://github.com/vllm-project/vllm/pull/44283), the pin and the related troubleshooting steps become unnecessary. Each time-sensitive section is dated inline.
+
+## What you get
+
+- Claude Code's full UX — chat, file editing, slash commands, tools — against any model in your fleet.
+- Auth, quotas, audit logging, and routing inherited from the router (no Anthropic account required).
+- Independent of the backend: any agent serving `/v1/messages` answers, including Qwen, Llama, etc.
+
+## Prerequisites
+
+- A reachable Mycoroute router with at least one `llm` agent registered.
+- The agent's backend must serve `/v1/messages` natively (vLLM does, started with `--served-model-name <name>`).
+- A Mycoroute API key with access to the model(s) you plan to use.
+- Node.js — see [Common prerequisites — Node.js](/integrations/overview#common-prerequisites--nodejs) for version guidance and the `nvm` per-version trap (relevant if you upgrade Node, your pinned Claude Code disappears).
+
+---
+
+## Step 1 — Install Claude Code (pinned)
+
+> **⚠ Critical version pin — as of 2026-06-09.** Claude Code **≥ 2.1.154** sends a non-standard inline `system` role inside the `messages` array (part of its context-management feature). vLLM's `/v1/messages` strictly validates roles as `user`/`assistant` only, so newer Claude Code is rejected with a `400 literal_error` on every call. **Pin to 2.1.153** (the last good version *at the time of writing*) until either:
+>
+> - your vLLM build includes [vllm PR #44283](https://github.com/vllm-project/vllm/pull/44283) (merged 2026-06-02), **or**
+> - the router normalizes inline `system` roles in the passthrough, **or**
+> - a newer Claude Code release reverts the inline-role behavior.
+>
+> Before pinning, **re-check** [vllm/vllm-project issue #44000](https://github.com/vllm-project/vllm/issues/44000) and the [Claude Code changelog](https://docs.claude.com/en/release-notes/claude-code) — if either side has shipped a fix that covers your stack, the pin is no longer needed.
+
+```bash
+npm install -g @anthropic-ai/claude-code@2.1.153
+
+# Belt + braces — Claude Code has TWO updaters and DISABLE_AUTOUPDATER alone is
+# not enough on every version (the in-process one will silently bump you to the
+# latest release behind your back, putting you back in the bug zone).
+export DISABLE_AUTOUPDATER=1
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+```
+
+Make those exports permanent (e.g. add to `~/.bashrc`) so the pin survives across shells.
+
+Verify the pin is actually holding:
+
+```bash
+claude doctor
+# Expect:  Currently running: 2.1.153
+# If it shows 2.1.16x, the auto-updater overrode the pin — reinstall 2.1.153
+# and consider chmod -w on the install path as a last resort:
+#   chmod -w "$(npm root -g)/@anthropic-ai/claude-code/bin/claude.exe"
+```
+
+> **Why this matters.** A session that starts on a "safe" 2.1.153 binary can fail mid-conversation if the updater swaps it under you. The next request that includes an inline `system` turn (typical once Claude Code summarises context) lands as a 400 at vLLM, and via the router's `prev_failures` gate it can transiently bench every agent serving the model.
+
+---
+
+## Step 2 — Configure auth and base URL
+
+Set the environment variables that point Claude Code at your router and map the model aliases.
+
+```bash
+export ANTHROPIC_BASE_URL="https://<router-host>"
+export ANTHROPIC_AUTH_TOKEN="<your-mycoroute-api-key>"
+
+# Map the three aliases Claude Code uses internally. ALL THREE are required —
+# the HAIKU alias is called in the background for titles/summaries, not optional.
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen/Qwen3.6-27B"
+```
+
+> **Use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY`.**
+> Claude Code's precedence sends `ANTHROPIC_AUTH_TOKEN` as `Authorization: Bearer …`, which matches what the router accepts. `ANTHROPIC_API_KEY` is sent as `x-api-key` and triggers an interactive approval prompt at startup; if you ever answer **No** (the default "(recommended)"), Claude Code persists that decision in `~/.claude.json` under `customApiKeyResponses.rejected` and silently refuses the key on every subsequent run — with **no further prompt**. `ANTHROPIC_AUTH_TOKEN` bypasses that prompt entirely.
+
+---
+
+## Step 3 — Sign out of claude.ai (if needed)
+
+If you've ever run `claude /login`, Claude Code holds a claude.ai OAuth session that overrides your environment variables and ignores `ANTHROPIC_BASE_URL`. You will see:
+
+```
+⚠ Both claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected
+```
+
+Fix it:
+
+```bash
+claude /logout      # drops the claude.ai session
+```
+
+After this, **never run `/login` again** — that recreates the conflict and Claude Code will quietly start talking to claude.ai instead of your router.
+
+---
+
+## Step 4 — Start it
+
+```bash
+claude
+```
+
+Send "hello". You should get a response from the model you mapped to OPUS.
+
+---
+
+## Verifying without Claude Code
+
+Before fighting the client, prove the router path works with `curl`. This isolates the router/agent/backend chain from any client-side issue.
+
+```bash
+# OpenAI-style endpoint
+curl -s https://<router-host>/v1/chat/completions \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3.6-27B","max_tokens":64,
+       "messages":[{"role":"user","content":"hi"}]}'
+
+# Anthropic Messages endpoint (what Claude Code uses)
+curl -s https://<router-host>/v1/messages \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3.6-27B","max_tokens":64,
+       "messages":[{"role":"user","content":"hi"}]}'
+```
+
+> **`max_tokens` is required on `/v1/messages`** (Anthropic spec); it is optional on `/v1/chat/completions`. Omitting it returns a `400` from the backend, which the router currently surfaces as `no_agents_available` (see [Known limitations](#known-limitations)).
+
+Discover what models the router actually serves:
+
+```bash
+curl -s https://<router-host>/v1/models \
+  -H "Authorization: Bearer <api-key>"
+```
+
+Use whatever names appear there in the `ANTHROPIC_DEFAULT_*_MODEL` env vars — case- and slash-sensitive.
+
+---
+
+## Making the configuration persistent
+
+To avoid re-exporting in every terminal, put the env block in a project-local `.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<router-host>",
+    "ANTHROPIC_AUTH_TOKEN": "<your-mycoroute-api-key>",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen/Qwen3.6-27B",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen/Qwen3.6-35B-A3B",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen/Qwen3.6-27B",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+```
+
+> **Do not commit a settings file containing your API key.** Add `.claude/settings.json` to `.gitignore`, or use Claude Code's `apiKeyHelper` to fetch the token dynamically from a secret store.
+
+---
+
+## Running Claude Code against both Mycoroute and Anthropic
+
+Claude Code resolves its endpoint **once at startup** — you cannot switch backends inside a running session. The `/model` slash command only swaps between OPUS / SONNET / HAIKU *aliases*, all against the same base URL. To use both providers, run two sessions with two shell launchers:
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/claude-gpt — point Claude Code at your Mycoroute router
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL="https://<router-host>"
+export ANTHROPIC_AUTH_TOKEN="<your-mycoroute-api-key>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen/Qwen3.6-27B"
+export DISABLE_AUTOUPDATER=1
+exec claude "$@"
+```
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/claude-real — Anthropic-hosted (claude.ai or Anthropic API key)
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
+      ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+# For the Anthropic API instead of a claude.ai login, also:
+#   export ANTHROPIC_API_KEY="sk-ant-..."
+exec claude "$@"
+```
+
+Make both executable (`chmod +x`) and run them from separate terminals. Each session is independent — memory, history, tools, billing.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Both claude.ai and ANTHROPIC_API_KEY set · auth may not work` | A `claude.ai` OAuth session is overriding your env vars | `claude /logout` and don't run `/login` again |
+| Retry loop, no requests visible in router logs | Claude Code is talking to `claude.ai`, not your router | Same as above — log out of `claude.ai` |
+| Router logs `401 POST /v1/messages` | Token not sent, or sent as `x-api-key` and silently rejected by the persisted approval state | Use `ANTHROPIC_AUTH_TOKEN` (Bearer), not `ANTHROPIC_API_KEY` |
+| Router logs `503 no_agents_available` after at least one prior success | Backend rejected Claude Code's payload as 400; the agent got benched by the `prev_failures` gate | Pin Claude Code 2.1.153 (Step 1) **and** `docker restart` the affected agent containers to clear the gate |
+| vLLM log shows `literal_error … role … 'Input should be user or assistant'`, `input: 'system'` | Claude Code ≥ 2.1.154 inline `system` role bug | Pin Claude Code 2.1.153, **or** upgrade vLLM past [PR #44283](https://github.com/vllm-project/vllm/pull/44283) |
+| Claude Code never shows the API-key approval prompt | You answered "No" previously and it's persisted in `~/.claude.json` | Edit `~/.claude.json` and remove your key suffix from `customApiKeyResponses.rejected`, **or** switch to `ANTHROPIC_AUTH_TOKEN` |
+| `model_not_found` from router | Your alias points at a model no agent serves | `curl /v1/models` to see what's registered; update the env var to a real name |
+| Streaming arrives only at the end of the response | Old agent image without the SSE-flush fix | Bump the agent image to one that flushes per chunk |
+
+### Reading the right logs
+
+- **Router**: `docker logs gpt-router 2>&1 | grep -iE "messages|policy|no eligible"`
+- **Agent (proxy)**: `docker logs mycoroute-agent-<model> 2>&1 | tail -40`
+- **Backend (vLLM)**: `docker logs vllm-<model> 2>&1 | tail -40` — the **400 with `literal_error`** lives here, not in the agent log.
+
+### Quick isolation curl (bypasses the router entirely)
+
+```bash
+ssh <gpu-host> 'curl -s http://localhost:8888/v1/messages \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"<model-id>\",\"max_tokens\":32,\
+       \"messages\":[{\"role\":\"system\",\"content\":\"x\"},\
+                     {\"role\":\"user\",\"content\":\"hi\"}]}"'
+```
+
+If this 400s with `Input should be 'user' or 'assistant'`, your vLLM has the role bug — pin Claude Code or upgrade vLLM.
+
+---
+
+## Known limitations
+
+> The version-specific items below were accurate **on 2026-06-09**. Re-verify them against the current Claude Code and vLLM releases before relying on them.
+
+- **vLLM ≤ 0.20.x** rejects Claude Code's inline `system` role *(time-bound: vLLM PR #44283 merged 2026-06-02 fixes this on vLLM `main`; a build that carries it removes the limitation)*. Until your fleet's vLLM build includes that fix, either pin Claude Code 2.1.153 or normalize the role server-side.
+- **Claude Code ≥ 2.1.154 sends the offending inline role** *(time-bound: as of 2026-06-09 still present through the latest 2.1.16x releases)*. Check the [Claude Code release notes](https://docs.claude.com/en/release-notes/claude-code) before assuming a pin is still needed.
+- **`max_tokens` is required** on `/v1/messages` (Anthropic spec, not time-bound). Claude Code always sends it; hand-written curls must too.
+- **Backend 4xx responses currently bench the agent** via the router's `prev_failures` gate (router behaviour, not time-bound to Claude Code/vLLM). A malformed client can transiently take all agents serving a model offline. Mitigation: pin Claude Code; the durable fix is a router-side change to distinguish backend 4xx from agent failures.
+- **No in-session backend switching** (Claude Code architecture, not time-bound). Claude Code reads `ANTHROPIC_BASE_URL` once at startup; use two launchers as shown above to keep Mycoroute and Anthropic side-by-side.
+
+---
+
+## See also
+
+- [Integrations Overview](/integrations/overview) — when to use Claude Code vs OpenCode vs your own integration.
+- [Inference Endpoints](/api/chat-completions) — `/v1/chat/completions` and `/v1/messages` reference, including the passthrough mechanism.
+- [auth.yaml Reference](/security/auth-yaml-reference) — API keys, quotas, token budget enforcement.
+- [Claude Code authentication](https://code.claude.com/docs/en/authentication) — upstream reference for `ANTHROPIC_AUTH_TOKEN` vs `ANTHROPIC_API_KEY`.
+- [Claude Code LLM gateway guide](https://code.claude.com/docs/en/llm-gateway) — upstream guidance for pointing Claude Code at a gateway/proxy.
+- [vLLM Claude Code integration](https://docs.vllm.ai/en/stable/serving/integrations/claude_code/) — backend-side configuration.

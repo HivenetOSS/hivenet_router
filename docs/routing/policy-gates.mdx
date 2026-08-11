@@ -1,0 +1,150 @@
+---
+title: "Policy Funnel Gates"
+---
+
+Every routing request passes through a sequential 7-gate funnel before an agent is selected.
+The funnel is visualised in [`docs/images/Policy.png`](../images/Policy.png).
+
+When all policy steps in a chain are exhausted without selecting an agent, the router emits a
+single `policy_exhausted` WARN line that names the exact gate that drained the pool:
+
+```
+WARN  req=chatcmpl-abc123 model="Qwen-3.6-35B" capability="llm" tenant=chaintrust
+      policy_exhausted  chain=[routing_policy→relaxed→last-resort]  tried=3/3
+      reason="routing_policy: gate[4] match [engine(got="",want="vllm")=2]
+              | relaxed: gate[4] match [region(got="",want="UAE")=2]
+              | last-resort: gate[7] exclude_if [kv_cache_utilization=2]"
+```
+
+Each segment of `reason` has the form `<step>: gate[N] <name> [<detail>]`.
+
+---
+
+## Gate reference
+
+### Gate 1 — `model_filter`
+
+**What it checks:** `AgentLister.ListByModel(model)` establishes the initial candidate pool —
+all agents registered for the requested model. If the pool is empty the gate drains to zero
+and routing fails with `ErrModelNotFound`; no subsequent gate can recover from an empty pool.
+
+**FAIL means:** no agents are registered for the model at all.
+
+**How to fix:** register at least one agent with the matching `model` metadata field.
+
+---
+
+### Gate 2 — `health`
+
+**What it checks:** `agent.IsHealthy() && agent.IsBackendHealthy()`. Both flags must be true.
+`IsHealthy` is set by the p2p liveness probe; `IsBackendHealthy` reflects the vLLM `/health`
+endpoint polled by the agent.
+
+**FAIL means:** every agent for this model is marked unhealthy or offline.
+
+**How to diagnose:**
+- Check agent registration: `GET /v1/agents` — look for `healthy: false`.
+- Check the agent's own logs for backend health poll failures.
+- Check the agent's outbound p2p connection to the router (router libp2p port, default 9000).
+
+---
+
+### Gate 3 — `capability`
+
+**What it checks:** `agent.Metadata.Capability == request.capability`.
+Requests carry one of `llm`, `embedding`, or `reranker`; agents are registered with a fixed
+capability type. An `llm` request will never be routed to an `embedding` agent.
+
+**FAIL means:** all agents for the model have a different capability type.
+
+**How to fix:** ensure the agent is registered with the correct `capability` field, or check
+that the request is targeting the right model name.
+
+---
+
+### Gate 4 — `match` (Layer 1 static filter)
+
+**What it checks:** static metadata fields declared in the policy step's `match:` block.
+All non-empty fields must match the agent's metadata exactly (case-sensitive):
+
+| Field          | Agent metadata field    |
+|----------------|-------------------------|
+| `engine`       | `Metadata.Engine`       |
+| `region`       | `Metadata.Region`       |
+| `organization` | `Metadata.Organization` |
+| `machine`      | `Metadata.Machine`      |
+| `gpu_model`    | `Metadata.GPUModel`     |
+| `tags`         | `Metadata.Tags` (all required tags must be present) |
+
+**FAIL means:** no agent satisfies every field in the `match:` block.
+
+**How to diagnose:** the `reason` field shows the mismatch verbatim, e.g.
+`engine(got="",want="vllm")=2` means 2 agents have an empty engine field while the policy
+requires `vllm`. Cross-check agent registration metadata against the policy YAML.
+
+---
+
+### Gate 5 — `prev_failures`
+
+**What it checks:** agents that already failed a forward attempt **in the current policy step**
+are excluded from further selection within that step. The set is reset when the session
+advances to a new step (primary → fallback).
+
+**FAIL means:** the step's `max_tries` budget was not the limiting factor, but every remaining
+agent has already been tried and failed in this step.
+
+**How to diagnose:** look for upstream forward errors (`forward_error` log lines) preceding
+the `policy_exhausted` line for the same `req=` ID. The number of previous failures equals the
+step's `MaxTries` value.
+
+---
+
+### Gate 6 — `capacity`
+
+**What it checks:** `agent.GetLoad() < agent.Metadata.Capacity`. The agent tracks concurrent
+in-flight requests; it is excluded when the slot counter reaches the declared `capacity` limit.
+
+**FAIL means:** all filter-passing agents are at full concurrency capacity.
+
+**How to fix:**
+- Increase agent `capacity` in the agent config if the hardware can handle more concurrency.
+- Add more agents for the model.
+- Enable the wait queue (`defaultQueueDepth > 0`) so requests park briefly instead of
+  escalating immediately to a fallback step.
+
+---
+
+### Gate 7 — `exclude_if` (Layer 2 dynamic metric gates)
+
+**What it checks:** runtime metric thresholds declared in the policy step's `exclude_if:` block.
+Each rule is a field name mapped to a threshold (`gt`, `lt`, `gte`, `lte`). Supported fields:
+
+| Field                   | Source                       | Unit      |
+|-------------------------|------------------------------|-----------|
+| `kv_cache_utilization`  | vLLM engine punctual metrics | 0.0–1.0   |
+| `running_requests`      | vLLM engine punctual metrics | count     |
+| `waiting_requests`      | vLLM engine punctual metrics | count     |
+| `avg_ttft_seconds`      | vLLM engine punctual metrics | seconds   |
+| `p90_ttft_seconds`      | vLLM engine punctual metrics | seconds   |
+| `avg_itl_seconds`       | vLLM engine punctual metrics | seconds   |
+| `p90_itl_seconds`       | vLLM engine punctual metrics | seconds   |
+| `capacity_utilization`  | live load counter            | 0.0–1.0   |
+| `success_rate`          | in-memory counter store      | 0.0–1.0   |
+| `srtt`                  | in-memory counter store      | seconds   |
+| `consecutive_failures`  | in-memory counter store      | count     |
+| `gpu_temperature_c`     | hardware snapshot            | °C        |
+| `gpu_util_percent`      | hardware snapshot            | 0.0–1.0   |
+| `gpu_vram_used_percent` | hardware snapshot            | 0.0–1.0   |
+| `memory_used_percent`   | hardware snapshot            | 0.0–1.0   |
+| `cpu_usage_percent`     | hardware snapshot            | 0.0–1.0   |
+
+A nil metric (agent has not yet reported that field) silently passes the gate — the rule is
+skipped for that agent.
+
+**FAIL means:** every remaining agent violates at least one threshold rule.
+
+**How to diagnose:** the `reason` field lists violated fields with agent counts, e.g.
+`kv_cache_utilization=2`. Check current vLLM metrics on the affected agents. Consider:
+- Raising the `gt` threshold in the policy if the current value is too conservative.
+- Adding a fallback step with relaxed `exclude_if` rules for burst conditions.
+- Scaling out with additional agents.

@@ -1,0 +1,61 @@
+---
+title: "Mycoroute"
+description: "Mycoroute is an open-source router for self-hosted AI inference. Route across multiple inference engines, backends, machines, and locations from one API surface."
+sidebarTitle: "Overview"
+---
+
+Mycoroute is an open-source router for self-hosted AI inference, maintained by Hivenet.
+
+It puts one client-facing API in front of multiple inference servers. A central router tracks the health, load, latency, models, and capabilities of connected agents, then forwards each request according to your routing policies.
+
+<Warning>
+  Mycoroute is currently in alpha. Interfaces, configuration, and deployment workflows may change as the project develops.
+</Warning>
+
+## Start here
+
+<CardGroup cols={2}>
+  <Card title="Introduction" href="/getting-started/introduction">
+    Understand what Mycoroute does and when to use it.
+  </Card>
+
+  <Card title="Quickstart" href="/quickstart">
+    Deploy a router and an agent and send your first request.
+  </Card>
+
+  <Card title="Architecture overview" href="/getting-started/architecture-overview">
+    See the control plane, data plane, and request flow.
+  </Card>
+
+  <Card title="Docker quickstart" href="/deploy/docker-quickstart">
+    Deploy a router and two vLLM agents with Docker.
+  </Card>
+</CardGroup>
+
+## Explore by topic
+
+<CardGroup cols={2}>
+  <Card title="Deploy" href="/deploy/docker-quickstart" icon="server">
+    Install the router and agents on Docker, Docker Compose, or bare metal.
+  </Card>
+
+  <Card title="Routing and policies" href="/routing/routing-concepts" icon="route">
+    Filter and rank agents with YAML policies and fallback chains.
+  </Card>
+
+  <Card title="Security and auth" href="/security/authentication-overview" icon="lock">
+    Authenticate agents and clients, enforce quotas, and rotate keys.
+  </Card>
+
+  <Card title="Observability" href="/observability/prometheus-metrics" icon="chart-line">
+    Monitor routing, agents, engines, and hardware with Prometheus and Grafana.
+  </Card>
+
+  <Card title="Integrations" href="/integrations/overview" icon="plug">
+    Connect Mycoroute to Claude Code, OpenCode, Open WebUI, and more.
+  </Card>
+
+  <Card title="Reference" href="/reference/detailed-architecture" icon="book">
+    Configuration schema, error codes, and performance characteristics.
+  </Card>
+</CardGroup>

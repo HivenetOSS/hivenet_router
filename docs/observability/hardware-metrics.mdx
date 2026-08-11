@@ -1,0 +1,266 @@
+---
+title: "Hardware Metrics"
+---
+
+Mycoroute collects GPU and system metrics for hardware-aware routing and capacity planning.
+
+## GPU Metrics
+
+GPU metrics are collected per device via the NVIDIA Management Library (NVML). Each series carries a `gpu_index` label (0, 1, …) identifying the physical device on the node.
+
+### Utilization
+
+**What it measures:** The percentage of time the GPU compute cores were actively executing instructions during the last sampling window. A value of 0 means the GPU was idle; 100 means it was continuously busy. This is the primary signal for whether an agent can take on more inference work.
+
+```promql
+# GPU compute utilization
+mycoroute_agent_gpu_utilization_percent{peer_id="12D3Koo0..."}
+
+# Average utilization by region
+avg by (region) (mycoroute_agent_gpu_utilization_percent)
+```
+
+**Interpretation:**
+
+- **0-30%:** Underutilized, can accept more load
+- **30-70%:** Optimal utilization
+- **70-90%:** High utilization, approaching capacity
+- **>90%:** Saturated, consider scaling
+
+### VRAM Usage
+
+**What it measures:** How much of the GPU's video memory (VRAM) is currently allocated. Models, KV-caches, and activations all live in VRAM — if it fills up, new inference requests will fail with out-of-memory errors. Three complementary gauges are exposed:
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| `mycoroute_agent_gpu_vram_used_bytes` | bytes | Memory currently allocated on the device |
+| `mycoroute_agent_gpu_vram_free_bytes` | bytes | Memory available for new allocations |
+| `mycoroute_agent_gpu_vram_total_bytes` | bytes | Total VRAM capacity (fixed for a given GPU) |
+
+```promql
+# Fraction of VRAM in use (derived)
+mycoroute_agent_gpu_vram_used_bytes / mycoroute_agent_gpu_vram_total_bytes
+
+# Agents with high VRAM pressure (>85%)
+mycoroute_agent_gpu_vram_used_bytes / mycoroute_agent_gpu_vram_total_bytes > 0.85
+```
+
+### Temperature
+
+**What it measures:** The GPU die temperature in degrees Celsius, read directly from the on-chip thermal sensor. Sustained high temperatures cause the GPU driver to reduce clock speeds (thermal throttling), which degrades inference throughput. Routers can use this gate to exclude overheated agents.
+
+```promql
+# GPU temperature by agent
+mycoroute_agent_gpu_temperature_celsius{peer_id="12D3Koo0..."}
+
+# Agents exceeding threshold
+mycoroute_agent_gpu_temperature_celsius > 82
+```
+
+**Thresholds:**
+
+| Temperature | Status | Action |
+|-------------|--------|--------|
+| < 70°C | Optimal | Normal operation |
+| 70-82°C | Warning | Monitor closely |
+| 82-85°C | Critical | Consider exclusion |
+| > 85°C | Danger | Immediate exclusion |
+
+### Power Draw
+
+**What it measures:** The instantaneous electrical power the GPU is consuming, in watts. Useful for budget enforcement (e.g. rack PDU limits), energy cost estimation, and detecting whether the GPU is actually doing work (idle GPU draws minimal power). The NVML driver reports in milliwatts; the agent converts to watts before sending.
+
+```promql
+# GPU power consumption (W)
+mycoroute_agent_gpu_power_watts{peer_id="12D3Koo0..."}
+
+# Total power by region
+sum by (region) (mycoroute_agent_gpu_power_watts)
+```
+
+## CPU Metrics
+
+### CPU Usage
+
+**What it measures:** The fraction of all CPU cores that were busy during the last sampling interval, expressed as a percentage (0–100). Sampled across the whole node (not per-core). High values can indicate that the host OS, the inference engine process, or token pre/post-processing is saturating the CPU, which can indirectly stall GPU inference pipelines.
+
+```promql
+# CPU utilization (0-100)
+mycoroute_agent_cpu_usage_percent{peer_id="12D3Koo0..."}
+
+# Average CPU by engine
+avg by (engine) (mycoroute_agent_cpu_usage_percent)
+```
+
+## Memory Metrics
+
+System memory metrics cover the host node's RAM, independent of GPU VRAM.
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| `mycoroute_agent_memory_used_percent` | % (0–100) | Percentage of total RAM currently in use |
+| `mycoroute_agent_memory_available_bytes` | bytes | RAM the OS can make available immediately (includes reclaimable page cache on Linux — larger than "free") |
+| `mycoroute_agent_memory_total_bytes` | bytes | Total physical RAM installed on the node (fixed) |
+
+**What it measures:** How much of the host's system RAM is being used. The inference engine itself is largely GPU-bound, but high system memory pressure can force the OS to swap, stall memory-mapped file I/O, or kill processes — all of which degrade serving reliability.
+
+```promql
+# Memory utilization (0-100)
+mycoroute_agent_memory_used_percent{peer_id="12D3Koo0..."}
+
+# Available RAM in GB
+mycoroute_agent_memory_available_bytes / 1e9
+```
+
+## Hardware-Aware Routing
+
+### Exclude Overheated GPUs
+
+```yaml
+routing_policy:
+  match:
+    region: "EU"
+    engine: "vllm"
+  exclude_if:
+    gpu_temperature_c: { gt: 82 }
+    gpu_vram_used_percent: { gt: 0.9 }
+  strategy: "least-loaded"
+```
+
+### Prefer Healthy Hardware
+
+```yaml
+routing_policy:
+  match:
+    region: "EU"
+  exclude_if:
+    gpu_temperature_c: { gt: 80 }
+    gpu_util_percent: { gt: 0.85 }
+    gpu_vram_used_percent: { gt: 0.85 }
+  strategy: "least-loaded"
+```
+
+### GPU Tier Routing
+
+```yaml
+routing_policy:
+  match:
+    gpu_model: "NVIDIA H100"
+  strategy: "least-loaded"
+
+fallback_chain:
+  - name: "a100-tier"
+    match:
+      gpu_model: "NVIDIA A100"
+    strategy: "least-loaded"
+
+  - name: "a10-tier"
+    match:
+      gpu_model: "NVIDIA A10"
+    strategy: "least-loaded"
+```
+
+## Monitoring Dashboards
+
+### GPU Health Panel
+
+```promql
+# Temperature heatmap
+mycoroute_agent_gpu_temperature_celsius
+
+# VRAM pressure (derived ratio)
+mycoroute_agent_gpu_vram_used_bytes / mycoroute_agent_gpu_vram_total_bytes
+
+# Utilization distribution
+avg by (peer_id) (mycoroute_agent_gpu_utilization_percent)
+```
+
+### Alerting Rules
+
+**GPU Overheating:**
+
+```yaml
+- alert: GPUOverheating
+  expr: mycoroute_agent_gpu_temperature_celsius > 85
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "GPU overheating on {{ $labels.peer_id }}"
+```
+
+**High VRAM Pressure:**
+
+```yaml
+- alert: HighVRAMPressure
+  expr: mycoroute_agent_gpu_vram_used_bytes / mycoroute_agent_gpu_vram_total_bytes > 0.9
+  for: 2m
+  labels:
+    severity: warning
+  annotations:
+    summary: "High VRAM usage on {{ $labels.peer_id }}"
+```
+
+**Power Budget Exceeded:**
+
+```yaml
+- alert: PowerBudgetExceeded
+  expr: sum(mycoroute_agent_gpu_power_watts) > 1200
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Power consumption exceeded budget"
+```
+
+## NVML Integration
+
+Hardware metrics are collected via the NVIDIA Management Library (NVML) for GPU readings and [gopsutil](https://github.com/shirou/gopsutil) for CPU and system memory.
+
+| Source | Metrics |
+|--------|---------|
+| NVML `DeviceGetUtilizationRates` | `gpu_utilization_percent` |
+| NVML `DeviceGetMemoryInfo` | `gpu_vram_used_bytes`, `gpu_vram_free_bytes`, `gpu_vram_total_bytes` |
+| NVML `DeviceGetTemperature` | `gpu_temperature_celsius` |
+| NVML `DeviceGetPowerUsage` | `gpu_power_watts` |
+| gopsutil `cpu.Percent` | `cpu_usage_percent` |
+| gopsutil `mem.VirtualMemory` | `memory_used_percent`, `memory_available_bytes`, `memory_total_bytes` |
+
+On nodes without a GPU (or when NVML fails to initialize), only CPU and memory metrics are reported. GPU slices will be empty in that case — no GPU series appear in Prometheus.
+
+**Collection interval:** 2 seconds (configurable via `--hardware-sample-interval`)
+
+```bash
+./bin/mycoroute-agent --hardware-sample-interval 2s
+```
+
+## Troubleshooting
+
+### Missing GPU Metrics
+
+```bash
+# Check NVML availability
+nvidia-smi
+
+# Verify agent permissions
+ls -la /dev/nvidia*
+
+# Check agent logs
+journalctl -u mycoroute-agent | grep -i nvm
+```
+
+### Inaccurate Readings
+
+```bash
+# Reset NVML
+nvidia-smi --gpu-reset
+
+# Restart agent
+systemctl restart mycoroute-agent
+```
+
+## See Also
+
+- [Prometheus Metrics](/observability/prometheus-metrics) - All metrics
+- [Routing Policies](/routing/policy-yaml-reference) - Exclude gates
+- [Engine Metrics](/observability/engine-metrics) - vLLM-specific metrics

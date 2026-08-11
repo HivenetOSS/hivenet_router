@@ -1,0 +1,196 @@
+---
+title: "Provider Fallback"
+---
+
+Configure closed-source API providers (OpenAI, Anthropic) as last-resort fallback when all agents are unavailable.
+
+## Provider Configuration
+
+`fallback_provider` is a **top-level field** in the policy YAML — not a step inside `fallback_chain`. It is invoked only after every local routing step is exhausted.
+
+```yaml
+# fallback_chain steps run first …
+fallback_chain:
+  - name: "any-region"
+    match: {}
+    strategy: "least-loaded"
+
+# … then fallback_provider as last resort
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+API keys are **not** stored in the YAML. Supply them via environment variables before starting the router.
+
+## Supported Providers
+
+### OpenAI
+
+```yaml
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"  # or gpt-4o, gpt-4-turbo
+```
+
+**Setup:**
+
+```bash
+export mycoroute_OPENAI_API_KEY="sk-..."
+```
+
+### Anthropic
+
+```yaml
+fallback_provider:
+  engine: "anthropic"
+  model: "claude-3-5-sonnet-20241022"  # or claude-3-haiku-20240307
+```
+
+**Setup:**
+
+```bash
+export mycoroute_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## API Key Management
+
+### Environment Variable (Recommended)
+
+```bash
+# Set before starting router
+export mycoroute_OPENAI_API_KEY="sk-..."
+
+./bin/mycoroute-router --policy-file policy.yaml
+```
+
+### Docker
+
+```yaml
+services:
+  router:
+    image: mycoroute-router
+    environment:
+      - mycoroute_OPENAI_API_KEY=${OPENAI_API_KEY}
+```
+
+### Kubernetes
+
+```yaml
+env:
+  - name: mycoroute_OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: provider-keys
+        key: openai-api-key
+```
+
+## Model Mapping
+
+Provider fallback uses a different model than your self-hosted models.
+
+```yaml
+routing_policy:
+  # Routes to self-hosted "meta-llama/Llama-3.1-8B-Instruct"
+  match:
+    region: "EU"
+
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"  # Different model for fallback
+```
+
+**Client behavior:** Client requests `meta-llama/Llama-3.1-8B-Instruct`, but receives response from `gpt-4o-mini` when fallback triggers.
+
+## Complete Example
+
+```yaml
+# Primary: Self-hosted EU agents
+routing_policy:
+  match:
+    region: "EU"
+    engine: "vllm"
+  exclude_if:
+    kv_cache_utilization: { gt: 0.85 }
+    gpu_temperature_c: { gt: 82 }
+  strategy: "least-loaded"
+  max_tries: 3
+
+# Fallback: Any self-hosted agent
+fallback_chain:
+  - name: "any-self-hosted"
+    match: {}
+    exclude_if:
+      success_rate: { lt: 0.90 }
+    strategy: "least-loaded"
+    max_tries: 2
+
+# Last resort: OpenAI (set mycoroute_OPENAI_API_KEY in environment)
+fallback_provider:
+  engine: "openai"
+  model: "gpt-4o-mini"
+```
+
+## Cost Considerations
+
+Provider fallback incurs per-token costs that differ between input and output tokens and change over time. Check the provider's current pricing pages before relying on any specific figure:
+
+- **OpenAI** — https://openai.com/api/pricing
+- **Anthropic** — https://www.anthropic.com/pricing
+
+**Monitor usage:**
+
+```promql
+# Requests served by provider fallback
+rate(mycoroute_policy_provider_fallback_total[5m])
+```
+
+## Testing Provider Fallback
+
+### Verify API Key
+
+```bash
+curl https://api.openai.com/v1/chat/completions \
+  -H "Authorization: Bearer $mycoroute_OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Trigger Fallback
+
+Temporarily disable all agents to test:
+
+```bash
+# Stop all agents
+pkill mycoroute-agent
+
+# Send request - should trigger provider fallback
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## Monitoring
+
+```promql
+# Provider fallback requests served
+rate(mycoroute_policy_provider_fallback_total[5m])
+
+# All policy exhausted (503, including after provider failure)
+rate(mycoroute_policy_exhausted_total[5m])
+```
+
+## Security Best Practices
+
+1. **Use secrets manager** - Never hardcode API keys
+2. **Limit key permissions** - Use restricted API keys when possible
+3. **Monitor usage** - Alert on unexpected fallback volume
+4. **Set budget alerts** - Configure provider billing alerts
+5. **Rotate keys** - Periodically rotate provider API keys
+
+## See Also
+
+- [Fallback Chains](/routing/fallback-chains) - Fallback configuration
+- [Policy YAML Reference](/routing/policy-yaml-reference) - Complete schema
+- [Audit Logging](/observability/audit-logging) - Track provider usage
+- [Prometheus Metrics](/observability/prometheus-metrics) - Fallback metrics
