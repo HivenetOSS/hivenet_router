@@ -1,0 +1,124 @@
+---
+title: "Introduction to Mycoroute"
+description: "Learn what Mycoroute does, when to use it, and how it fits around your inference engines."
+sidebarTitle: "Introduction"
+---
+
+Mycoroute is an open-source router for self-hosted AI inference, maintained by Hivenet.
+
+It puts one client-facing API surface in front of multiple inference servers. A central router tracks the health, load, latency, models, and capabilities of connected agents, then forwards each request according to your routing policies.
+
+Mycoroute handles the layer around your inference engines. It does not run models itself.
+
+<Warning>
+  Mycoroute is currently in alpha. Interfaces, configuration, and deployment workflows may change as the project develops.
+</Warning>
+
+## When to use Mycoroute
+
+Mycoroute is designed for setups where inference runs across more than one backend, machine, model, or location.
+
+Use it when you need to:
+
+- expose one API endpoint for multiple inference backends
+- route requests using live health, load, latency, and hardware signals
+- define routing behavior in YAML policies
+- move traffic through ordered fallback chains
+- enforce API keys, quotas, and model restrictions
+- observe requests, agents, engines, and hardware through Prometheus and Grafana
+- run the routing layer without depending on Kubernetes or a hosted control plane
+
+For a single inference server with no routing, fallback, or shared access requirements, calling the inference engine directly may be simpler.
+
+## How Mycoroute works
+
+Mycoroute has two main components.
+
+### Router
+
+The router is the central entry point for applications.
+
+It exposes OpenAI-compatible and Anthropic-compatible endpoints, authenticates clients, evaluates routing policies, tracks connected agents, and forwards requests to a suitable backend.
+
+### Agent
+
+An agent connects an inference server to the router.
+
+It forwards requests to the local backend and reports information the router can use when making routing decisions, including health, models, engine metrics, and hardware state.
+
+You can run agents beside inference servers on the same machine, across a private network, at different sites, or on remote infrastructure.
+
+## Supported backends
+
+Mycoroute supports:
+
+- vLLM
+- Ollama
+- SGLang
+- llama.cpp
+- Infinity
+- custom OpenAI-compatible servers
+
+Backend capabilities differ. For example, Infinity supports embedding and reranking workloads, while vLLM, Ollama, SGLang, and llama.cpp serve language-model requests.
+
+## API compatibility
+
+Applications send requests to the router through OpenAI-compatible and Anthropic-compatible endpoints.
+
+Mycoroute currently supports:
+
+| Workload | Endpoint |
+| --- | --- |
+| OpenAI-format chat | `POST /v1/chat/completions` |
+| Anthropic-format messages | `POST /v1/messages` |
+| Anthropic token counting | `POST /v1/messages/count_tokens` |
+| Embeddings | `POST /v1/embeddings` |
+| Reranking | `POST /v1/rerank` |
+| Model discovery | `GET /v1/models` |
+
+This lets existing clients and SDKs connect to Mycoroute without needing to know which agent or inference engine handles each request.
+
+## Routing and fallback
+
+Routing policies can filter and rank agents using static metadata and live signals.
+
+Policies can consider:
+
+- requested model
+- engine type
+- region and tags
+- active requests and queue state
+- request latency
+- success rate
+- KV cache usage
+- GPU utilization, temperature, and memory pressure
+
+Fallback chains provide ordered alternatives when the preferred backend is unavailable or cannot accept more work. Mycoroute can also be configured to use OpenAI or Anthropic as a final provider fallback.
+
+## Authentication and observability
+
+Agents authenticate with the router using a shared JWT secret.
+
+Client API-key authentication is optional and can be used for tenant access, quotas, and model restrictions.
+
+Mycoroute exports Prometheus metrics and includes Grafana dashboards for routing, agents, hardware, engine behavior, tenant activity, and audit logs.
+
+## Start exploring
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Build Mycoroute, start a router and agent, and send your first request.
+  </Card>
+
+  <Card title="Architecture overview" href="/getting-started/architecture-overview">
+    Understand the control plane, data plane, storage, authentication, and request flow.
+  </Card>
+
+  <Card title="Mycoroute and Hivenet services" href="/getting-started/mycoroute-hivenet-inference-api-compute">
+    See how Mycoroute differs from Hivenet Inference API and Compute with Hivenet.
+  </Card>
+
+  <Card title="GitHub repository" href="https://github.com/HiveNetCode/mycoroute">
+    View the source code, project status, license, and contribution guidance.
+  </Card>
+</CardGroup>

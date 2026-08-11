@@ -16,22 +16,50 @@
           "index",
           "quickstart"
         ]
+      },
+      "index",
+      {
+        "group": "Getting started",
+        "pages": [
+          "getting-started/introduction",
+          "quickstart",
+          "getting-started/architecture-overview",
+          "getting-started/mycoroute-hivenet-inference-api-compute"
+        ]
+      },
+      {
+        "group": "Deploy Mycoroute",
+        "pages": []
+      },
+      {
+        "group": "Use the API",
+        "pages": []
+      },
+      {
+        "group": "Routing and policies",
+        "pages": []
+      },
+      {
+        "group": "Security and auth",
+        "pages": []
+      },
+      {
+        "group": "Observability",
+        "pages": []
+      },
+      {
+        "group": "Integrations",
+        "pages": []
+      },
+      {
+        "group": "Reference",
+        "pages": []
+      },
+      {
+        "group": "Project",
+        "pages": []
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   },
   "logo": {
     "light": "/logo/light.svg",

@@ -1,0 +1,230 @@
+---
+title: "Architecture overview"
+description: "Understand how the router, agents, control plane, data plane, storage, authentication, and routing pipeline fit together."
+sidebarTitle: "Architecture overview"
+---
+
+Mycoroute uses a hub-and-spoke architecture.
+
+A central router exposes the API used by applications and coordinates a fleet of agents. Each agent connects one inference backend to the router and reports the information needed to make routing decisions.
+
+Applications only need to know the router endpoint. They do not need to know which machine, engine, or agent handles each request.
+
+![Architecture](/images/Architecture.png)
+
+## Main components
+
+Mycoroute has two runtime components: the router and one or more agents.
+
+### Router
+
+The router is the central entry point and coordinator.
+
+It:
+
+- exposes OpenAI-compatible and Anthropic-compatible inference endpoints
+- authenticates clients when API authentication is enabled
+- authenticates and registers agents
+- tracks agent health, models, capabilities, and metadata
+- evaluates routing policies
+- selects an available agent for each request
+- enforces quotas and model restrictions
+- maintains operational and historical state
+- exports Prometheus metrics
+
+The router exposes four interfaces by default:
+
+| Interface | Default port | Purpose |
+| --- | --- | --- |
+| HTTP API | `:8080` | Inference, model discovery, health, and administration |
+| gRPC authentication | `:50051` | Initial agent authentication and session creation |
+| libp2p data plane | `:9000` | Agent registration, health signals, and request forwarding |
+| Prometheus metrics | `:2112` | Metrics export |
+
+<Note>
+  The router’s libp2p interface listens on `127.0.0.1` by default. For agents on other machines, configure `--p2p-listen-addr` with an address they can reach.
+</Note>
+
+### Agent
+
+An agent connects one inference backend to the router.
+
+It:
+
+- authenticates with the router
+- registers its engine, model, capability, capacity, region, and tags
+- forwards inference requests to its local backend
+- checks backend health
+- collects CPU, memory, and GPU metrics
+- scrapes engine metrics when the backend exposes them
+- sends heartbeats and routing signals to the router
+- maintains a persistent libp2p identity when an identity path is configured
+
+Each agent registers one model and one capability. Supported capabilities are:
+
+- `llm`
+- `embedding`
+- `reranker`
+
+## Supported backends
+
+| Backend | Typical capability | Notes |
+| --- | --- | --- |
+| vLLM | Language-model inference | Full engine metrics, including KV cache and request-state metrics |
+| Ollama | Language-model inference | Local and edge-friendly backend |
+| SGLang | Language-model inference | Uses a metrics interface similar to vLLM |
+| llama.cpp | Language-model inference | Engine metrics require llama.cpp metrics to be enabled |
+| Infinity | Embeddings or reranking | Supports `embedding` and `reranker` agents |
+| Custom | OpenAI-compatible inference | Requires an explicit model name and health endpoint |
+
+A deployment can mix different backend types. Applications continue to use the router’s API rather than connecting to each backend separately.
+
+## Request lifecycle
+
+A typical inference request moves through Mycoroute like this:
+
+1. A client sends a request to the router.
+2. The router authenticates the client if API authentication is enabled.
+3. The router identifies the requested model and capability.
+4. Static policy filters remove agents that do not match the request.
+5. Dynamic policy gates remove agents that fail configured health or metric thresholds.
+6. The routing strategy ranks the remaining agents.
+7. The router acquires capacity on the selected agent.
+8. The request is forwarded to the agent over the encrypted libp2p data plane.
+9. The agent sends the request to its local inference backend.
+10. The response returns through the agent and router to the client.
+11. Mycoroute records the outcome and updates routing and latency metrics.
+
+If the initial routing step cannot serve the request, Mycoroute can continue through a configured fallback chain. An optional provider fallback can send the request to OpenAI or Anthropic after local options are exhausted.
+
+## Routing pipeline
+
+Routing policies use three stages.
+
+| Stage | Purpose | Examples |
+| --- | --- | --- |
+| Static matching | Select agents whose metadata matches the request | Model, engine, region, organization, machine, GPU model, or tags |
+| Dynamic gates | Exclude agents based on current operating conditions | Capacity, success rate, latency, KV cache, queue state, temperature, CPU, or memory |
+| Strategy ranking | Order the remaining candidates | `least-loaded` |
+
+`least-loaded` is currently the only implemented ranking strategy. It ranks agents by the proportion of their declared capacity that is in use.
+
+If you do not configure a policy file, Mycoroute uses its built-in least-loaded policy without static filters or dynamic gates.
+
+## Control and data paths
+
+Mycoroute separates authentication from inference traffic.
+
+### Agent authentication
+
+1. The agent signs a JWT with the shared secret.
+2. It connects to the router’s gRPC authentication endpoint.
+3. The router validates the token and agent metadata.
+4. The router returns a session token and its libp2p address.
+5. The agent registers over libp2p using the session token.
+
+The gRPC connection uses TLS 1.3. The certificate and client trust material are derived from the shared JWT secret, so the deployment does not require a separate public-key infrastructure for router-agent authentication.
+
+Agent sessions last one hour by default. Agents reauthenticate before their current session expires.
+
+### Request forwarding
+
+Router-agent traffic uses libp2p with Noise encryption.
+
+The same connection carries registration, heartbeats, routing signals, and forwarded inference requests. Agents initiate the persistent connection to the router, which then uses that established connection for bidirectional signaling and request forwarding.
+
+### Client traffic
+
+The router’s built-in API server listens over HTTP.
+
+For production deployments, place the API behind a reverse proxy or load balancer that provides TLS and any network controls your environment requires.
+
+## Health and metrics
+
+Agents collect backend and system state at different intervals. The router uses these signals to maintain agent health and make routing decisions.
+
+| Activity | Default interval or threshold |
+| --- | --- |
+| Backend health check | 2 seconds |
+| Hardware sampling | 2 seconds |
+| Engine metrics sampling | 500 milliseconds |
+| Routing signal push | 500 milliseconds |
+| Agent heartbeat | 5 seconds |
+| Router health check | 5 seconds |
+| Mark an agent unhealthy | 15 seconds without a heartbeat |
+| Remove an agent | 30 seconds without a heartbeat |
+
+Routing signals carry recent engine and hardware data without updating the agent’s heartbeat timestamp. Heartbeats act as the health keepalive and include fallback metric information.
+
+This separation lets Mycoroute receive fresh routing data without treating every metrics update as proof that the agent is healthy.
+
+## Storage
+
+Mycoroute uses two BadgerDB stores.
+
+| Store | Location | Purpose | Default lifetime |
+| --- | --- | --- | --- |
+| In-memory database | Memory | Agent metadata, current metrics, and session-scoped state | Current router session |
+| Disk database | `./badger_disk` | Persistent counters, latency history, and other longer-lived state | 30 days |
+
+The in-memory database is rebuilt as agents connect and report state.
+
+The disk database preserves information such as smoothed round-trip time and lifetime counters across router restarts. You can change its path and retention period through router configuration.
+
+<Note>
+  Persistent daily token-quota counters use separate day-based records with a 48-hour lifetime. This provides an overlap between quota periods while preventing old counters from accumulating indefinitely.
+</Note>
+
+## Authentication and access control
+
+Mycoroute handles agent and client authentication separately.
+
+### Agents
+
+Agents authenticate with a shared HMAC-SHA256 secret. The router validates their JWTs over the gRPC authentication connection.
+
+### API clients
+
+The inference API supports three authentication modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `none` | No client authentication |
+| `api-key` | Load hashed API keys from `auth.yaml` |
+| `dynamic` | Manage an in-memory key registry through protected admin endpoints |
+
+API keys can also define:
+
+- allowed models
+- requests-per-minute limits
+- daily token limits
+- ownership and descriptive metadata
+- expiration dates
+
+The administration API has its own authentication configuration and should not be exposed without protection in production.
+
+## Deployment shape
+
+The router and agents do not need to run in the same place.
+
+Common deployments include:
+
+- one router and several agents on a private network
+- agents distributed across multiple sites
+- inference backends running on bare-metal GPU hosts
+- router and agents running in Docker
+- a mix of local infrastructure and hosted compute instances
+
+Mycoroute does not require Kubernetes. The current repository does not include a supported Helm deployment.
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Deploy a router and several agents, then send your first routed request.
+  </Card>
+
+  <Card title="Mycoroute and Hivenet services" href="/getting-started/mycoroute-hivenet-inference-api-compute">
+    Understand how Mycoroute differs from Hivenet Inference API and Compute with Hivenet.
+  </Card>
+</CardGroup>
