@@ -229,6 +229,11 @@ type Handlers struct {
 	// is queued. Nil disables the gate (e.g. tests, or when no policy declares a
 	// budget). Reservations it hands out are released on every request exit path.
 	admission *admission.Controller
+
+	// enginePressure returns the aggregate live engine KV-cache utilization and
+	// waiting-request count for a model (each nil when no healthy agent reports
+	// it), driving the front-door shed gate. Nil disables the gate (e.g. tests).
+	enginePressure func(model string) (kvUtil, waiting *float64)
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -253,6 +258,7 @@ func NewHandlers(
 	healthyAgentCount func(model string) int,
 	registrationFeed RegistrationFeed,
 	admissionController *admission.Controller,
+	enginePressure func(model string) (kvUtil, waiting *float64),
 ) *Handlers {
 	return &Handlers{
 		storage:              storage,
@@ -272,6 +278,7 @@ func NewHandlers(
 		healthyAgentCount:    healthyAgentCount,
 		registrationFeed:     registrationFeed,
 		admission:            admissionController,
+		enginePressure:       enginePressure,
 	}
 }
 
@@ -359,6 +366,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		return
 	}
 	if !h.enforceRequestCaps(c, &req) {
+		return
+	}
+	if !h.enforceShedPressure(c, req.Model) {
 		return
 	}
 	// Occupancy admit budget. The reservation is released on every exit path
@@ -538,6 +548,39 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		return nil, false
 	}
 	return res, true
+}
+
+// enforceShedPressure is the front-door KV-pressure shed: when the live engine
+// pressure for the model breaches the policy's shed_if thresholds, new requests
+// are rejected with 429 + Retry-After at the door rather than queued into an
+// already-saturated pool. It reads the aggregate engine signal (mean KV-cache
+// utilization and waiting requests across healthy replicas) and evaluates it
+// with the same threshold logic and nil-passes contract routing uses for its
+// per-agent exclude_if gates — a missing signal (non-vLLM engine, no snapshot
+// yet) passes, so the gate fails open. This is additive: the per-agent exclude_if
+// routing gates are unchanged; this adds the clean front-door reject on top.
+//
+// Returns false (after writing 429) when the pool is shedding.
+func (h *Handlers) enforceShedPressure(c *gin.Context, model string) bool {
+	if h.enginePressure == nil || h.executor == nil {
+		return true
+	}
+	pol := h.executor.EffectivePolicy(model)
+	if pol == nil || len(pol.ShedIf) == 0 {
+		return true // no shed thresholds declared — gate inert
+	}
+	kvUtil, waiting := h.enginePressure(model)
+	if kvUtil == nil && waiting == nil {
+		return true // no live engine signal — fail open
+	}
+	snap := policy.AgentSnapshot{KVCacheUtilization: kvUtil, WaitingRequests: waiting}
+	if policy.PassesGates(snap, pol.ShedIf) {
+		return true
+	}
+	c.Header("Retry-After", "1")
+	writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
+		"model is under high load, please retry", domain.SourceRouter)
+	return false
 }
 
 // estimatePromptTokens returns the input-token estimate used by both admission

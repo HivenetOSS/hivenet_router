@@ -8,8 +8,10 @@ routing_policy:
     tags: ["production"]
 
   # ── Layer 2: dynamic safety gates ─────────────────────────────────────────
+  # Per-agent routing gates: an agent breaching any of these is dropped from the
+  # candidate pool for this request (503 no_capacity only if none remain).
   exclude_if:
-    kv_cache_utilization: { gt: 0.85 }
+    kv_cache_utilization: { gt: 0.90 }
     waiting_requests:     { gt: 20 }
     capacity_utilization: { gt: 0.90 }
     success_rate:         { lt: 0.95 }
@@ -19,6 +21,22 @@ routing_policy:
   # ── Layer 3: ranking ───────────────────────────────────────────────────────
   strategy: "least-loaded"
   max_tries: 3
+
+
+# ── Front-door shed thresholds ────────────────────────────────────────────────
+# When the aggregate live engine pressure across the healthy replicas serving a
+# model breaches one of these, new requests are rejected with 429 + Retry-After
+# at the door — before queueing — instead of piling into an already-saturated
+# pool. This is additive to the per-agent exclude_if gates above.
+#
+# Operator note: 0.90 is deliberately more permissive than the industry de-facto
+# ~0.80 shed threshold. The headroom leans on the accuracy of the occupancy
+# budget's token estimate — under-counting at 0.90 is what would let preemption
+# start — so this threshold should move down if the token estimator proves
+# optimistic in production (tracked with the estimator-accuracy work).
+shed_if:
+  kv_cache_utilization: { gt: 0.90 }
+  waiting_requests:     { gt: 20 }
 
 
 fallback_chain:
