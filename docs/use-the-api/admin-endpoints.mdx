@@ -1,0 +1,1121 @@
+---
+title: "Admin endpoints"
+description: "Inspect router health, models, routing state, storage, policies, metrics, and dynamic API keys through protected operator endpoints."
+sidebarTitle: "Admin endpoints"
+---
+
+The administration API provides operational visibility and runtime controls for a Hivenet Router router.
+
+Use these endpoints to inspect agents, models, storage, and routing state; update policies; reset historical agent metrics; and manage API keys when dynamic authentication is enabled.
+
+<Warning>
+  Protect `/admin/*` with an admin API key and network controls before using Hivenet Router in production. Without admin authentication, these endpoints expose operational data and, in dynamic mode, control the client key registry.
+</Warning>
+
+## Endpoint overview
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Public process liveness |
+| `GET` | `/admin/health` | Router and agent health summary |
+| `GET` | `/admin/routing-table` | Complete live agent state |
+| `GET` | `/admin/models` | Unfiltered operator model catalog |
+| `GET` | `/admin/models/{model}` | Unfiltered model and agent detail |
+| `GET` | `/admin/storage` | BadgerDB counts, size, and garbage collection |
+| `POST` | `/admin/metrics/reset` | Reset persisted per-agent lifetime metrics |
+| `GET` | `/admin/policy` | Read the active global policy |
+| `PUT` | `/admin/policy` | Replace the global policy until restart |
+| `GET` | `/admin/policy/models` | List named model-policy documents |
+| `GET` | `/admin/policy/models/{name}` | Read one named policy |
+| `PUT` | `/admin/policy/models/{name}` | Create or replace one named policy |
+| `DELETE` | `/admin/policy/models/{name}` | Remove one named policy |
+| `GET` | `/admin/api-keys` | List dynamic key entries |
+| `GET` | `/admin/api-keys/{id}` | Read one dynamic key entry |
+| `PUT` | `/admin/api-keys/{id}` | Add or update a dynamic key |
+| `DELETE` | `/admin/api-keys/{id}` | Revoke a dynamic key |
+| `POST` | `/admin/api-keys/replace` | Replace the dynamic key registry |
+| `GET` | `/admin/api-keys/version` | Read the registry version and key count |
+
+The dynamic key endpoints return HTTP `501` unless the router is using dynamic API authentication.
+
+## Configure admin authentication
+
+Admin authentication is separate from client authentication for `/v1/*`.
+
+Enable it in `auth.yaml`:
+
+```yaml
+admin:
+  mode: api-key
+```
+
+Provide one or more raw admin keys through the router environment:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="first-admin-key,second-admin-key"
+```
+
+Start the router with the auth configuration:
+
+```bash
+./bin/hivenet-router \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  ...
+```
+
+Admin keys are comma-separated. The router hashes them at startup and does not retain the plaintext values.
+
+For client commands, store one key in a convenient shell variable:
+
+```bash
+export MYCOROUTE_ADMIN_KEY="first-admin-key"
+```
+
+Then send it as a bearer token:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/health
+```
+
+If `admin.mode` is `none`, or no auth configuration is provided, the router refuses to start unless:
+
+```bash
+export HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+```
+
+That override makes `/admin/*` publicly accessible to any client that can reach the router. Use it only in an isolated development environment.
+
+### Dynamic mode
+
+When the client API uses dynamic authentication, Hivenet Router automatically requires admin API-key authentication, even when `admin.mode` is absent or set to `none`.
+
+For example:
+
+```bash
+export HIVENET_ROUTER_AUTH_MODE=dynamic
+export HIVENET_ROUTER_ADMIN_API_KEYS="first-admin-key"
+```
+
+The router refuses to start in dynamic mode when `HIVENET_ROUTER_ADMIN_API_KEYS` is missing. This prevents the API-key management endpoints from becoming publicly writable.
+
+## Public liveness
+
+```text
+GET /health
+```
+
+This endpoint does not use admin authentication.
+
+```bash
+curl http://localhost:8080/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+It returns HTTP `200` while the router process is running. It does not report whether agents or inference backends are available.
+
+Use it for load balancers, process monitoring, and liveness probes.
+
+## Router health
+
+```text
+GET /admin/health
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/health \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "status": "healthy",
+  "timestamp": 1776870993,
+  "total_agents": 2,
+  "healthy_agents": 2,
+  "queue_length": 0,
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "model": "openai/gpt-oss-20b",
+      "engine": "vllm",
+      "version": "13e0ea7a8298b9b5ec37a826e1b21a99b702d513",
+      "capacity": 20,
+      "region": "EU",
+      "is_healthy": true,
+      "last_seen": 1776870991
+    }
+  ]
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `status` | `healthy` when at least one agent is healthy; `degraded` when none are healthy |
+| `timestamp` | Current Unix timestamp from the router |
+| `total_agents` | Number of registered agents |
+| `healthy_agents` | Number currently considered healthy |
+| `queue_length` | Current length of the router’s buffered global pending-request channel; it excludes per-model capacity waiters, semaphore waiters, forwarded work, and active streams |
+| `agents[].peer_id` | Agent’s libp2p peer ID |
+| `agents[].model` | Model registered by the agent |
+| `agents[].engine` | Backend engine type |
+| `agents[].version` | Version reported by the agent |
+| `agents[].capacity` | Declared maximum concurrent requests |
+| `agents[].region` | Operator-defined region metadata |
+| `agents[].is_healthy` | Current agent health state |
+| `agents[].last_seen` | Unix timestamp of the last heartbeat |
+
+<Note>
+  The top-level `status` does not mean every registered agent is healthy. Compare `healthy_agents` with `total_agents` when partial fleet health matters.
+</Note>
+
+## Routing table
+
+```text
+GET /admin/routing-table
+```
+
+This endpoint combines:
+
+- agent metadata
+- live connection and capacity state
+- lifetime success and failure counters
+- smoothed latency
+- engine metrics
+- CPU, memory, and GPU state
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/routing-table \
+  | jq .
+```
+
+A shortened response resembles:
+
+```json
+{
+  "total": 1,
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "metadata": {
+        "model": "openai/gpt-oss-20b",
+        "engine": "vllm",
+        "region": "EU",
+        "organization": "ml-team",
+        "machine": "gpu-worker-1",
+        "capacity": 20,
+        "tags": [
+          "production"
+        ],
+        "capability": "llm",
+        "gpu_model": "RTX5090"
+      },
+      "status": {
+        "healthy": true,
+        "backend_healthy": true,
+        "active_requests": 0,
+        "capacity_utilization": 0,
+        "last_seen": "2026-04-22T15:16:46.505518138Z"
+      },
+      "universal": {
+        "successful_requests_total": 3649,
+        "failed_requests_total": 8,
+        "success_rate": 0.9978,
+        "input_tokens_total": 1329627,
+        "output_tokens_total": 3408307,
+        "rejected_requests_total": 0,
+        "disconnections_total": 14,
+        "agent_failures_total": 14,
+        "backend_failures_total": 1,
+        "srtt_ms": 804.01,
+        "rttvar_ms": 1499.05,
+        "latency_state": "KNOWN"
+      },
+      "engine": {
+        "kv_cache_utilization": 0,
+        "running_requests": 0,
+        "waiting_requests": 0,
+        "preemptions_total": 0,
+        "avg_ttft_seconds": 0.106,
+        "p90_ttft_seconds": 0.232,
+        "avg_itl_seconds": 0.0059,
+        "p90_itl_seconds": 0.0094
+      },
+      "hardware": {
+        "gpu": [
+          {
+            "index": 0,
+            "util_percent": 0,
+            "vram_used_bytes": 24251727872,
+            "vram_free_bytes": 1505492992,
+            "vram_total_bytes": 25757220864,
+            "temperature_c": 23,
+            "power_watts": 10.447
+          }
+        ],
+        "cpu": {
+          "usage_percent": 2.3
+        },
+        "memory": {
+          "used_percent": 7.28,
+          "available_bytes": 92613185536,
+          "total_bytes": 101247455232
+        },
+        "timestamp": "2026-04-22T15:16:46Z"
+      }
+    }
+  ]
+}
+```
+
+### Response sections
+
+| Section | Contains |
+| --- | --- |
+| `metadata` | Model, engine, capability, capacity, region, organization, machine, tags, and display metadata |
+| `status` | Router and backend health, active requests, capacity use, and last heartbeat |
+| `universal` | Success, failure, token, rejection, disconnection, and latency history |
+| `engine` | Backend-specific cache, queue, TTFT, and ITL metrics when available |
+| `hardware` | Latest GPU, CPU, and memory snapshot |
+
+`engine` is omitted until the agent reports at least one supported engine metric. It is normally available for vLLM, SGLang, and metrics-enabled llama.cpp agents.
+
+`hardware` is omitted until the first hardware snapshot arrives. CPU-only agents return an empty or omitted GPU array.
+
+`latency_state` is:
+
+- `UNKNOWN` before Hivenet Router has initialized latency history
+- `KNOWN` after enough routing observations are available
+
+### Find unhealthy agents
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.status.healthy == false)
+      | {
+          peer_id,
+          model: .metadata.model,
+          engine: .metadata.engine,
+          backend_healthy: .status.backend_healthy,
+          last_seen: .status.last_seen
+        }'
+```
+
+### Find agents with high KV-cache use
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(
+          .engine.kv_cache_utilization > 0.8
+        )
+      | {
+          peer_id,
+          model: .metadata.model,
+          kv_cache: .engine.kv_cache_utilization
+        }'
+```
+
+### Compare model latency
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      region: .metadata.region,
+      srtt_ms: .universal.srtt_ms
+    }'
+```
+
+## Operator model catalog
+
+```text
+GET /admin/models
+GET /admin/models/{model}
+```
+
+These endpoints use the same response shapes as:
+
+```text
+GET /v1/models
+GET /v1/models/{model}
+```
+
+The difference is filtering.
+
+The public endpoints return only models visible to the calling client API key. The admin endpoints always return the complete registered catalog.
+
+List every registered model:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/models \
+  | jq '.data[].id'
+```
+
+Read one model and its agent list:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  "http://localhost:8080/admin/models/Qwen/Qwen3.6-27B-A3B" \
+  | jq .
+```
+
+| Endpoint | View |
+| --- | --- |
+| `/v1/models` | Filtered by the client key’s model access |
+| `/admin/models` | Complete operator catalog |
+
+See [Models](/use-the-api/models) for the full response reference.
+
+## Storage statistics
+
+```text
+GET /admin/storage
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/storage \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "mem_db": {
+    "metadata_count": 7,
+    "univ_punctual_count": 7,
+    "eng_punctual_count": 5,
+    "hardware_snapshot_count": 7
+  },
+  "disk_db": {
+    "univ_history_count": 10,
+    "lsm_size_bytes": 1528,
+    "vlog_size_bytes": 2147483666,
+    "entry_ttl_days": 30
+  },
+  "gc_interval": "5s",
+  "last_gc_at": "2026-04-22T15:16:57Z"
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `mem_db.metadata_count` | Agent metadata records in the in-memory database |
+| `mem_db.univ_punctual_count` | Live universal agent records |
+| `mem_db.eng_punctual_count` | Live engine-metric records |
+| `mem_db.hardware_snapshot_count` | Live hardware snapshots |
+| `disk_db.univ_history_count` | Persistent agent-history records |
+| `disk_db.lsm_size_bytes` | BadgerDB LSM-tree size |
+| `disk_db.vlog_size_bytes` | BadgerDB value-log size |
+| `disk_db.entry_ttl_days` | Persistent entry lifetime; `0` means no expiry |
+| `gc_interval` | Configured BadgerDB garbage-collection interval |
+| `last_gc_at` | Last garbage-collection attempt, or `never` |
+
+When another storage backend is used, the endpoint may return:
+
+```json
+{
+  "error": "storage stats not available for this backend"
+}
+```
+
+with HTTP `200`.
+
+## Reset lifetime metrics
+
+```text
+POST /admin/metrics/reset
+```
+
+This endpoint clears persisted per-agent lifetime metrics so dashboards begin from a clean baseline.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/metrics/reset
+```
+
+Response:
+
+```json
+{
+  "status": "metrics reset",
+  "message": "per-agent lifetime counters cleared (disk, in-memory, and Prometheus series)"
+}
+```
+
+<Danger>
+  This operation is destructive. It cannot restore the cleared historical counters.
+</Danger>
+
+It resets:
+
+- successful and failed request totals
+- input and output token totals
+- rejected-request totals
+- disconnection and failure counters
+- SRTT and RTTVAR history
+- the matching in-memory state
+- the matching Prometheus series
+
+It does not reset:
+
+- tenant or billing quota counters
+- API-key registry entries
+- agent metadata
+- liveness gauges
+- capacity utilization
+- routing-level counters that already reset when the router restarts
+
+A common use is immediately after deploying a routing or backend change, so new success and latency measurements are not mixed with older history.
+
+## Global policy
+
+### Read the active policy
+
+```text
+GET /admin/policy
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/policy \
+  | jq .
+```
+
+The response is the active policy serialized as JSON.
+
+### Replace the active policy
+
+```text
+PUT /admin/policy
+```
+
+Send the policy as YAML:
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary '
+routing_policy:
+  match:
+    engine: vllm
+  exclude_if:
+    kv_cache_utilization:
+      gt: 0.85
+  strategy: least-loaded
+  max_tries: 3
+' \
+  http://localhost:8080/admin/policy
+```
+
+Response:
+
+```json
+{
+  "status": "policy updated"
+}
+```
+
+The request body is limited to 1 MiB (`1048576` bytes).
+
+Hivenet Router parses and validates the YAML before replacing the active policy. Invalid YAML, unsupported fields, or invalid provider-fallback configuration return HTTP `400`.
+
+<Warning>
+  Policies written through the administration API are ephemeral. A router restart reloads the policy supplied through `--policy-file`, or the built-in default when no file is configured.
+</Warning>
+
+For a persistent change:
+
+1. update the policy file on disk
+2. send `SIGHUP` to the router
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+## Named model policies
+
+Named policies apply to the model IDs listed inside each policy document.
+
+The name in the URL identifies the policy document, not the model.
+
+### List named policies
+
+```text
+GET /admin/policy/models
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/policy/models \
+  | jq .
+```
+
+The response is an object keyed by policy name:
+
+```json
+{
+  "gpt-oss": {
+    "models": [
+      "openai/gpt-oss-20b"
+    ],
+    "routing_policy": {
+      "match": {
+        "engine": "vllm"
+      },
+      "strategy": "least-loaded",
+      "max_tries": 3
+    }
+  }
+}
+```
+
+An empty configuration returns:
+
+```json
+{}
+```
+
+### Read one named policy
+
+```text
+GET /admin/policy/models/{name}
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/policy/models/gpt-oss \
+  | jq .
+```
+
+An unknown policy name returns HTTP `404`.
+
+### Create or replace a named policy
+
+```text
+PUT /admin/policy/models/{name}
+```
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Content-Type: text/yaml" \
+  --data-binary '
+models:
+  - openai/gpt-oss-20b
+
+routing_policy:
+  match:
+    engine: vllm
+  exclude_if:
+    kv_cache_utilization:
+      gt: 0.9
+  strategy: least-loaded
+  max_tries: 3
+' \
+  http://localhost:8080/admin/policy/models/gpt-oss
+```
+
+Response:
+
+```json
+{
+  "status": "policy updated",
+  "name": "gpt-oss",
+  "models": [
+    "openai/gpt-oss-20b"
+  ]
+}
+```
+
+The body must contain at least one model under:
+
+```yaml
+models:
+```
+
+A model can belong to only one named policy document. Hivenet Router returns HTTP `409` when another named policy already claims one of the models.
+
+Like the global policy update, this change is ephemeral and the body is limited to 1 MiB (`1048576` bytes).
+
+### Delete a named policy
+
+```text
+DELETE /admin/policy/models/{name}
+```
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/policy/models/gpt-oss
+```
+
+Response:
+
+```json
+{
+  "status": "policy deleted",
+  "name": "gpt-oss"
+}
+```
+
+Deletion is idempotent. The endpoint returns HTTP `200` even when the named policy did not exist.
+
+Models previously assigned to the document return to the global policy.
+
+See [Policy YAML reference](/routing/policy-yaml-reference) for the complete policy format.
+
+## Dynamic API-key management
+
+The following endpoints work only when the client API uses dynamic authentication:
+
+```bash
+export HIVENET_ROUTER_AUTH_MODE=dynamic
+```
+
+Dynamic key state is held in memory. After a router restart, an external control service must repopulate the registry.
+
+When dynamic mode is not active, these endpoints return HTTP `501`:
+
+```json
+{
+  "error": "dynamic key registry not active"
+}
+```
+
+### Registry versions
+
+Mutating requests carry an opaque version string.
+
+Use values whose lexical order matches their chronological order, such as:
+
+```text
+rev_00000001
+rev_00000002
+rev_00000003
+```
+
+or RFC 3339 timestamps:
+
+```text
+2026-07-27T10:15:00Z
+```
+
+The registry rejects versions that sort lower than its current version. Equal and higher values are accepted.
+
+Use a new monotonically increasing version for each intended change.
+
+### Hash a client API key
+
+The dynamic API accepts a SHA-256 hexadecimal hash, never the raw bearer key.
+
+```bash
+export RAW_API_KEY="sk-hivenet-secret"
+
+export API_KEY_HASH="$(
+  printf '%s' "$RAW_API_KEY" \
+    | sha256sum \
+    | awk '{print $1}'
+)"
+```
+
+The hash must contain exactly 64 hexadecimal characters.
+
+### Add or update a key
+
+```text
+PUT /admin/api-keys/{id}
+```
+
+The URL parameter is the source of truth for the entry ID.
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"version\": \"rev_00000002\",
+    \"key_hash\": \"$API_KEY_HASH\",
+    \"key_preview\": \"sk-...cret\",
+    \"owner\": \"acme-corp\",
+    \"name\": \"Acme production key\",
+    \"enabled\": true,
+    \"expires_at\": \"2027-01-01T00:00:00Z\",
+    \"allowed_models\": [
+      \"meta-llama/Llama-3.1-8B-Instruct\"
+    ],
+    \"quota\": {
+      \"requests_per_minute\": 1000,
+      \"tokens_per_day\": 1000000
+    }
+  }" \
+  http://localhost:8080/admin/api-keys/acme-prod
+```
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `version` | Yes | Monotonic registry version |
+| `key_hash` | Yes | SHA-256 hexadecimal hash of the raw bearer key |
+| `key_preview` | No | Truncated form for logs and operator display |
+| `owner` | Yes | Tenant identifier used for quotas and metrics |
+| `name` | Yes | Human-readable label |
+| `enabled` | Yes | Whether the key may authenticate |
+| `expires_at` | No | RFC 3339 timestamp; empty means no expiry |
+| `allowed_models` | No | Model allowlist; empty means unrestricted |
+| `quota` | No | Flat or per-model quota configuration |
+
+A stale version returns HTTP `409`:
+
+```json
+{
+  "error": "stale version",
+  "current_version": "rev_00000003"
+}
+```
+
+A key hash cannot belong to two different IDs. Delete the existing entry before assigning its hash to another ID.
+
+### Use per-model quotas
+
+The dynamic API accepts the same quota shapes as `auth.yaml`.
+
+A per-model example:
+
+```json
+{
+  "quota": {
+    "per_model": {
+      "meta-llama/Llama-3.1-8B-Instruct": {
+        "requests_per_minute_per_replica": 60,
+        "tokens_per_day": 1000000
+      }
+    }
+  }
+}
+```
+
+Do not mix:
+
+```text
+requests_per_minute
+tokens_per_day
+```
+
+with:
+
+```text
+quota.per_model
+```
+
+on the same key.
+
+Every per-model entry must contain both quota fields. Use `0` to mean unlimited.
+
+### Delete a key
+
+```text
+DELETE /admin/api-keys/{id}?version={version}
+```
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  "http://localhost:8080/admin/api-keys/acme-prod?version=rev_00000003"
+```
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+The `version` query parameter is required.
+
+Deletion is idempotent. It returns HTTP `200` when the ID does not exist, provided the version is accepted.
+
+### Replace the registry
+
+```text
+POST /admin/api-keys/replace
+```
+
+Use this endpoint to bootstrap or reconcile the entire in-memory registry.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "rev_00000004",
+    "keys": [
+      {
+        "id": "acme-prod",
+        "key_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "key_preview": "sk-...KJ4",
+        "owner": "acme-corp",
+        "name": "Acme production key",
+        "enabled": true,
+        "expires_at": "2027-01-01T00:00:00Z",
+        "allowed_models": [
+          "meta-llama/Llama-3.1-8B-Instruct"
+        ],
+        "quota": {
+          "requests_per_minute": 1000,
+          "tokens_per_day": 1000000
+        }
+      }
+    ]
+  }' \
+  http://localhost:8080/admin/api-keys/replace
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "count": 1
+}
+```
+
+Each entry requires its own `id`.
+
+The operation:
+
+- validates every entry before applying changes
+- rejects duplicate IDs
+- rejects duplicate key hashes
+- replaces the registry atomically
+- accepts request bodies up to 16 MiB (`16777216` bytes)
+
+Use a current or newer registry version. A lexically lower version is rejected.
+
+### Read the registry version
+
+```text
+GET /admin/api-keys/version
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/api-keys/version \
+  | jq .
+```
+
+Response:
+
+```json
+{
+  "version": "rev_00000004",
+  "count": 3
+}
+```
+
+### List registry entries
+
+```text
+GET /admin/api-keys
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/api-keys \
+  | jq .
+```
+
+A response resembles:
+
+```json
+{
+  "count": 1,
+  "keys": [
+    {
+      "id": "acme-prod",
+      "key_hash": "",
+      "key_preview": "sk-...KJ4",
+      "owner": "acme-corp",
+      "name": "Acme production key",
+      "enabled": true,
+      "expires_at": "2027-01-01T00:00:00Z",
+      "allowed_models": [
+        "meta-llama/Llama-3.1-8B-Instruct"
+      ],
+      "quota": {
+        "requests_per_minute": 1000,
+        "tokens_per_day": 1000000
+      }
+    }
+  ]
+}
+```
+
+The response includes enabled and disabled registry entries.
+
+`key_hash` is always an empty string. Hivenet Router never returns stored hashes through the API.
+
+### Read one key
+
+```text
+GET /admin/api-keys/{id}
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  http://localhost:8080/admin/api-keys/acme-prod \
+  | jq .
+```
+
+Response:
+
+```json
+{
+  "key": {
+    "id": "acme-prod",
+    "key_hash": "",
+    "key_preview": "sk-...KJ4",
+    "owner": "acme-corp",
+    "name": "Acme production key",
+    "enabled": true,
+    "expires_at": "2027-01-01T00:00:00Z",
+    "allowed_models": [
+      "meta-llama/Llama-3.1-8B-Instruct"
+    ],
+    "quota": {
+      "requests_per_minute": 1000,
+      "tokens_per_day": 1000000
+    }
+  }
+}
+```
+
+An unknown ID returns HTTP `404`:
+
+```json
+{
+  "error": "key not found: acme-prod"
+}
+```
+
+## Administration request-body limits
+
+Administration write endpoints use fixed route-specific limits. They are separate from `HIVENET_ROUTER_MAX_REQUEST_BYTES`, which applies to `/v1/*` inference requests.
+
+| Endpoint | Maximum body |
+| --- | --: |
+| `PUT /admin/policy` | 1 MiB (`1048576` bytes) |
+| `PUT /admin/policy/models/{name}` | 1 MiB (`1048576` bytes) |
+| `PUT /admin/api-keys/{id}` | 1 MiB (`1048576` bytes) |
+| `POST /admin/api-keys/replace` | 16 MiB (`16777216` bytes) |
+
+When a body exceeds its route limit, the current handler returns HTTP `400` with a simple `{"error":"..."}` response rather than the structured `/v1/*` error envelope.
+
+## Error responses
+
+Missing or invalid admin credentials return HTTP `401` with a bearer challenge:
+
+```text
+WWW-Authenticate: Bearer realm="mycoroute"
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "unauthorized",
+    "source": "router"
+  }
+}
+```
+
+Most endpoint-specific validation errors use a simpler response:
+
+```json
+{
+  "error": "Explanation of the invalid request"
+}
+```
+
+Common statuses include:
+
+| HTTP status | Meaning |
+| --- | --- |
+| `400` | Invalid YAML, JSON, version, key entry, or policy |
+| `401` | Missing or invalid admin key |
+| `404` | Named policy, model, or key not found |
+| `409` | Stale key version or model-policy ownership conflict |
+| `500` | Internal router or storage error |
+| `501` | Dynamic key registry is not active |
+| `503` | Metrics reset is unavailable |
+
+## Operational guidance
+
+- Keep `/admin/*` on a private management network where possible.
+- Use HTTPS through a reverse proxy or load balancer.
+- Use different values for client and admin API keys.
+- Rotate admin keys through the router environment and restart the process.
+- Do not log raw client or admin keys.
+- Treat policy updates and metrics resets as privileged operator actions.
+- Reconcile the dynamic API-key registry after every router restart.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Understand how global and named policies select agents.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure static and dynamic client authentication, access, and quotas.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Query router, agent, tenant, policy, and hardware metrics.
+  </Card>
+</CardGroup>

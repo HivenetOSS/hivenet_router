@@ -1,0 +1,581 @@
+---
+title: "Contributing"
+description: "Set up a Hivenet Router development environment, run the required checks, update generated code, and submit focused pull requests."
+sidebarTitle: "Contributing"
+---
+
+Contributions to Hivenet Router are welcome, including bug reports, feature proposals, documentation improvements, tests, and code changes.
+
+The repository’s root [`CONTRIBUTING.md`](https://github.com/HiveNetCode/mycoroute/blob/main/CONTRIBUTING.md) file is the canonical contribution guide. This page summarizes the workflow and provides additional context for common changes.
+
+By participating in the project, you agree to follow the [Code of conduct](/project/code-of-conduct).
+
+<CardGroup cols={2}>
+  <Card title="Report a bug" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Share a reproducible problem with the affected version, configuration, and relevant logs.
+  </Card>
+
+  <Card title="Propose a feature" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Describe the use case and expected behavior before investing in a substantial implementation.
+  </Card>
+
+  <Card title="Improve the documentation" href="https://github.com/HiveNetCode/mycoroute/tree/main/docs">
+    Correct stale commands, clarify behavior, improve examples, or add missing troubleshooting guidance.
+  </Card>
+
+  <Card title="Open a pull request" href="https://github.com/HiveNetCode/mycoroute/pulls">
+    Submit a focused change with tests, verification details, and a clear explanation of the problem it solves.
+  </Card>
+</CardGroup>
+
+## Development requirements
+
+Hivenet Router is one Go module.
+
+The current `go.mod` requires:
+
+```text
+Go 1.25.5
+```
+
+Use Go 1.25.5 or a compatible later release.
+
+Check the installed version:
+
+```bash
+go version
+```
+
+Clone the repository:
+
+```bash
+git clone \
+  https://github.com/HiveNetCode/mycoroute.git
+
+cd mycoroute
+```
+
+Build the complete module:
+
+```bash
+go build ./...
+```
+
+Build the router and agent binaries:
+
+```bash
+mkdir -p bin
+
+go build \
+  -o bin/hivenet-router \
+  ./cmd/router/
+
+go build \
+  -o bin/hivenet-agent \
+  ./cmd/agent/
+```
+
+The generated binaries are placed under:
+
+```text
+bin/
+```
+
+which is excluded from Git.
+
+## Repository structure
+
+The main implementation areas are:
+
+| Path | Purpose |
+| --- | --- |
+| `cmd/router/` | Router entry point and process startup |
+| `cmd/agent/` | Agent entry point and process startup |
+| `internal/use-the-api/` | HTTP routes, handlers, middleware, and audit behavior |
+| `internal/auth/` | Client, administrator, agent, and quota authentication |
+| `internal/router/` | Agent registry, request processing, forwarding, and queueing |
+| `internal/policy/` | Routing policies, gates, fallback chains, and selection |
+| `internal/agent/` | Agent lifecycle, backend adapters, and request proxying |
+| `internal/storage/` | In-memory and persistent BadgerDB state |
+| `internal/metrics/` | Prometheus metrics and persisted agent history |
+| `internal/provider/` | External provider fallback |
+| `internal/transport/` | gRPC and libp2p transport |
+| `proto/` | Agent-authentication protobuf source and generated Go code |
+| `test/` | Most black-box package tests and shared test utilities |
+| `docs/` | Mintlify documentation source |
+| `scripts/` | Setup, benchmark, load, and comparison scripts |
+
+Most tests live under `test/` and use external packages such as:
+
+```go
+package router_test
+```
+
+This exercises exported behavior without depending on internal implementation details.
+
+A small number of focused white-box tests live beside the implementation when they need access to an unexported helper.
+
+## Run the tests
+
+Run the complete test suite:
+
+```bash
+go test ./...
+```
+
+Force a fresh run without cached test results:
+
+```bash
+go test \
+  -count=1 \
+  ./...
+```
+
+Run with coverage across the internal and protobuf packages:
+
+```bash
+go test \
+  -coverpkg=./internal/...,./proto \
+  ./...
+```
+
+Run one package:
+
+```bash
+go test \
+  ./test/router
+```
+
+Run one test by name:
+
+```bash
+go test \
+  ./test/router \
+  -run TestName
+```
+
+Use verbose output while diagnosing a failure:
+
+```bash
+go test \
+  -v \
+  ./test/router \
+  -run TestName
+```
+
+## Add tests with a change
+
+A behavior change should normally include tests covering:
+
+- the expected path
+- invalid input
+- boundary conditions
+- failure behavior
+- relevant precedence rules
+- regression scenarios
+
+Prefer table-driven tests when several inputs should produce related outcomes:
+
+```go
+func TestExample(t *testing.T) {
+    cases := []struct {
+        name string
+        input string
+        want string
+    }{
+        {
+            name: "first case",
+            input: "value",
+            want: "result",
+        },
+    }
+
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            got := example(tc.input)
+
+            if got != tc.want {
+                t.Fatalf(
+                    "example(%q) = %q, want %q",
+                    tc.input,
+                    got,
+                    tc.want,
+                )
+            }
+        })
+    }
+}
+```
+
+Keep each test focused on behavior that would help a future contributor understand why the case matters.
+
+Use a white-box test only when testing an unexported behavior directly is clearer than expanding the production API solely for testing.
+
+## Format and check the code
+
+Before opening a pull request, run:
+
+```bash
+go fmt ./...
+go vet ./...
+go test ./...
+go build ./...
+```
+
+`go fmt ./...` updates Go source files in place.
+
+Review the resulting diff:
+
+```bash
+git diff
+```
+
+Check for accidental changes:
+
+```bash
+git status --short
+```
+
+Match the surrounding code’s:
+
+- naming
+- error handling
+- comment density
+- logging style
+- package boundaries
+- concurrency patterns
+
+Keep the change focused. Move unrelated cleanup or refactoring into a separate pull request.
+
+## Update dependencies carefully
+
+After intentionally changing module dependencies:
+
+```bash
+go mod tidy
+```
+
+Review both:
+
+```text
+go.mod
+go.sum
+```
+
+Do not run `go mod tidy` as unrelated cleanup in a pull request that does not change dependencies.
+
+A dependency change should explain:
+
+- why the dependency is needed
+- why the selected version is appropriate
+- whether it changes compatibility or runtime behavior
+- whether it introduces a security or licensing concern
+
+## Regenerate protobuf code
+
+The generated files are:
+
+```text
+proto/auth.pb.go
+proto/auth_grpc.pb.go
+```
+
+Do not edit them manually.
+
+Edit the source definition instead:
+
+```text
+proto/auth.proto
+```
+
+Install:
+
+- `protoc`
+- `protoc-gen-go`
+- `protoc-gen-go-grpc`
+
+Then regenerate:
+
+```bash
+protoc \
+  --go_out=. \
+  --go_opt=paths=source_relative \
+  --go-grpc_out=. \
+  --go-grpc_opt=paths=source_relative \
+  proto/auth.proto
+```
+
+Run formatting and tests afterward:
+
+```bash
+go fmt ./...
+go test ./...
+```
+
+Review the generated diff carefully.
+
+Generated output can change when contributors use different protobuf compiler or plugin versions. Avoid unrelated generated-file churn.
+
+<Warning>
+  Do not change only the generated `*.pb.go` files.
+
+  Those edits will be overwritten the next time `proto/auth.proto` is regenerated.
+</Warning>
+
+## Improve the documentation
+
+Documentation lives under:
+
+```text
+docs/
+```
+
+Useful documentation contributions include:
+
+- correcting behavior that changed in the implementation
+- replacing stale commands or defaults
+- clarifying API and configuration boundaries
+- documenting edge cases
+- improving navigation
+- adding verified troubleshooting steps
+- fixing broken links
+- correcting examples that no longer match the code
+
+When editing an existing technical page:
+
+1. Treat the current implementation as the source of truth.
+2. Preserve exact commands, flags, endpoints, schemas, and units.
+3. Distinguish verified behavior from guidance or interpretation.
+4. Do not add product claims that the repository does not support.
+5. Update related pages when one behavior affects several guides.
+6. Check internal links and sidebar placement.
+
+When documentation and code disagree, verify the relevant implementation before deciding which one needs to change.
+
+## Report a bug
+
+Open a GitHub issue and include:
+
+- the Hivenet Router release or commit
+- operating system and deployment method
+- whether the problem affects the router, agent, or both
+- inference engine and version
+- exact model ID and capability
+- relevant configuration with secrets removed
+- clear reproduction steps
+- expected behavior
+- actual behavior
+- relevant logs
+- `X-Request-ID` when one request demonstrates the problem
+
+A useful report separates:
+
+- client behavior
+- router behavior
+- agent behavior
+- inference-backend behavior
+
+This makes it easier to identify the failing layer.
+
+<Warning>
+  Remove secrets and sensitive data before attaching configuration or logs.
+
+  Do not include:
+
+  - client API keys
+  - administrator keys
+  - agent JWT secrets
+  - provider credentials
+  - private prompts
+  - customer data
+</Warning>
+
+## Propose a feature
+
+Open an issue before beginning a substantial feature.
+
+Describe:
+
+- the user or operator problem
+- the intended use case
+- current behavior
+- expected behavior
+- API or configuration changes
+- persistence implications
+- authentication and security implications
+- compatibility concerns
+- operational trade-offs
+
+A proposal is more useful when it explains the problem rather than presenting one implementation as the only acceptable solution.
+
+Discussing the approach first reduces the risk of building a large change that conflicts with the project’s architecture or scope.
+
+## Create a branch
+
+Fork the repository, then create a topic branch from the current `main` branch.
+
+```bash
+git switch main
+git pull --ff-only
+git switch -c feat/short-description
+```
+
+Use a prefix that reflects the change:
+
+```text
+feat/
+fix/
+docs/
+```
+
+Examples:
+
+```text
+feat/per-model-health-gate
+fix/streaming-token-accounting
+docs/clarify-agent-addresses
+```
+
+Keep one coherent change on each branch.
+
+## Prepare the pull request
+
+Before opening the pull request:
+
+```bash
+go fmt ./...
+go vet ./...
+go test ./...
+go build ./...
+```
+
+Then update the branch with the latest `main` when necessary.
+
+A useful pull request description explains:
+
+- what changed
+- why the change is needed
+- how the behavior works
+- how it was tested
+- any compatibility or migration impact
+- any remaining limitation
+- related issues
+
+For example:
+
+```text
+What changed
+
+Added ...
+
+Why
+
+The previous behavior ...
+
+Verification
+
+- go test ./...
+- go vet ./...
+- manual request against ...
+```
+
+Include screenshots only when they help explain:
+
+- documentation rendering
+- dashboards
+- user-interface integrations
+- another visual change
+
+Do not use screenshots as the only evidence for API or routing behavior.
+
+## Review feedback
+
+Review may ask for:
+
+- clearer behavior boundaries
+- additional tests
+- smaller changes
+- compatibility handling
+- documentation updates
+- removal of unrelated refactoring
+
+Respond to feedback directly and update the branch rather than opening a replacement pull request for the same work.
+
+When you disagree with a suggestion, explain the technical trade-off and provide supporting evidence.
+
+## Report a security issue privately
+
+<Danger>
+  Do not open a public GitHub issue for a suspected vulnerability.
+</Danger>
+
+Email:
+
+```text
+support@hivenet.com
+```
+
+Include:
+
+- affected component and version
+- reproduction steps
+- expected security boundary
+- observed behavior
+- potential impact
+- any temporary mitigation
+
+Do not include production credentials unless the maintainers explicitly request them through an appropriate secure channel.
+
+The maintainers will coordinate investigation, remediation, and disclosure.
+
+## License for contributions
+
+Hivenet Router is licensed under the Apache License 2.0.
+
+By contributing, you agree that your contribution will be licensed under the same terms.
+
+Read the complete [License](/project/license) before submitting a contribution.
+
+## Contribution checklist
+
+Before submitting:
+
+- the change has one clear purpose
+- new behavior has appropriate tests
+- existing tests pass
+- Go source is formatted
+- `go vet ./...` passes
+- the complete module builds
+- generated files were updated from their source
+- documentation reflects externally visible changes
+- secrets and sensitive data were removed
+- the pull request explains the reason and verification
+- the branch is based on a current `main`
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Canonical contribution guide" href="https://github.com/HiveNetCode/mycoroute/blob/main/CONTRIBUTING.md">
+    Read the authoritative repository version of the contribution instructions.
+  </Card>
+
+  <Card title="Code of conduct" href="/project/code-of-conduct">
+    Review the standards applying to project participation.
+  </Card>
+
+  <Card title="License" href="/project/license">
+    Review the Apache License 2.0 terms applying to contributions.
+  </Card>
+
+  <Card title="GitHub issues" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Report bugs and discuss feature proposals.
+  </Card>
+
+  <Card title="Pull requests" href="https://github.com/HiveNetCode/mycoroute/pulls">
+    Review current work or submit a focused change.
+  </Card>
+
+  <Card title="Detailed architecture" href="/reference/detailed-architecture">
+    Understand the components and request paths affected by a code change.
+  </Card>
+</CardGroup>

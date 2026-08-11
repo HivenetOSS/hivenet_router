@@ -1,0 +1,1711 @@
+---
+title: "Prometheus metrics"
+description: "Scrape Hivenet Router metrics for routing, agents, engines, hardware, policies, queues, tenants, quotas, and HTTP traffic."
+sidebarTitle: "Prometheus metrics"
+---
+
+Hivenet Router exports router, agent, inference-engine, hardware, policy, quota, and HTTP metrics in Prometheus format.
+
+```text
+GET /metrics
+```
+
+The metrics server runs separately from the main HTTP API and listens on port `2112` by default.
+
+```bash
+curl http://localhost:2112/metrics
+```
+
+<Warning>
+  The metrics endpoint does not have built-in authentication.
+
+  Restrict it to Prometheus and trusted operators through a private network, firewall, reverse proxy, or equivalent network control.
+</Warning>
+
+## Start the metrics server
+
+The router starts the Prometheus endpoint automatically.
+
+The default address is:
+
+```text
+:2112
+```
+
+Change it with:
+
+```bash
+./bin/hivenet-router \
+  --metrics-port :9212 \
+  ...
+```
+
+The metrics endpoint is then available at:
+
+```text
+http://<router-host>:9212/metrics
+```
+
+## Configure Prometheus
+
+A minimal scrape configuration is:
+
+```yaml
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: hivenet-router
+
+    static_configs:
+      - targets:
+          - router.example.internal:2112
+```
+
+Reload Prometheus after changing its configuration.
+
+With the repository’s Docker Compose stack, Prometheus reaches the router through the internal Compose network:
+
+```yaml
+scrape_configs:
+  - job_name: hivenet-router
+
+    static_configs:
+      - targets:
+          - router:2112
+```
+
+Port `2112` does not need to be published to the host when Prometheus runs in the same Compose network.
+
+## Check the scrape target
+
+From the Prometheus interface, open:
+
+```text
+Status → Targets
+```
+
+Or query the Prometheus API:
+
+```bash
+curl \
+  http://localhost:9090/use-the-api/v1/targets \
+  | jq '.data.activeTargets[] | {
+      scrape_url: .scrapeUrl,
+      health,
+      last_error: .lastError
+    }'
+```
+
+A healthy target reports:
+
+```json
+{
+  "health": "up",
+  "last_error": ""
+}
+```
+
+Check that Hivenet Router metrics exist:
+
+```bash
+curl -s \
+  http://localhost:2112/metrics \
+  | grep '^mycoroute_'
+```
+
+## How metrics reach the router
+
+Prometheus scrapes only the router.
+
+Agents send operational information to the router through:
+
+- frequent routing-signal updates
+- periodic heartbeats
+- request outcomes
+
+The router then exposes this information through its own Prometheus registry.
+
+You do not need to configure Prometheus to scrape every agent directly.
+
+For supported engines, each agent scrapes its local backend’s `/metrics` endpoint and forwards the resulting values to the router.
+
+## Metric groups
+
+| Group | What it covers |
+| --- | --- |
+| Routing | Registered agents, health, routed and failed requests |
+| Per-agent history | Success, failure, tokens, capacity, latency, and disconnections |
+| Engine | Cache, queue, latency, finish reasons, and throughput |
+| Hardware | GPU, CPU, and system memory |
+| Policies | Primary routing, fallback, exhaustion, reloads, and connection resets |
+| Queue | Requests waiting for agent capacity |
+| Tenant and quota | Requests, tokens, limits, last use, and quota failures |
+| HTTP | Router endpoint latency, active requests, and provider calls |
+
+## Metric labels and cardinality
+
+Several metrics include labels such as:
+
+- `peer_id`
+- `model`
+- `tenant_id`
+- `key_id`
+- `deployment_id`
+- `organization`
+- `machine`
+- `region`
+- `engine`
+
+These labels make operational breakdowns possible, but each distinct label combination creates another Prometheus time series.
+
+<Warning>
+  Do not use unbounded or frequently changing values for agent metadata.
+
+  Values such as `machine`, `organization`, `region`, and `deployment_id` should remain stable. Avoid putting request IDs, user IDs, timestamps, or other high-cardinality data into agent metadata.
+</Warning>
+
+## Routing metrics
+
+### Registered agents
+
+These gauges use:
+
+```text
+peer_id
+region
+engine
+model
+capacity
+organization
+machine
+```
+
+as labels.
+
+```promql
+hivenet_router_routing_agent_info
+```
+
+The value is `1` while an agent is registered.
+
+Count registered agents:
+
+```promql
+count(
+  hivenet_router_routing_agent_info
+)
+```
+
+Count agents by model:
+
+```promql
+count by (model) (
+  hivenet_router_routing_agent_info
+)
+```
+
+### Agent health
+
+```promql
+hivenet_router_routing_agent_healthy
+```
+
+Values are:
+
+| Value | Meaning |
+| --: | --- |
+| `1` | Agent is healthy |
+| `0` | Health monitor marked the agent unhealthy |
+
+Count healthy agents by model:
+
+```promql
+sum by (model) (
+  hivenet_router_routing_agent_healthy
+)
+```
+
+Find unhealthy agents:
+
+```promql
+hivenet_router_routing_agent_healthy == 0
+```
+
+### Last heartbeat
+
+```promql
+hivenet_router_routing_agent_last_seen_timestamp
+```
+
+The value is a Unix timestamp in **milliseconds**.
+
+Show seconds since the most recent heartbeat:
+
+```promql
+time()
+-
+(
+  hivenet_router_routing_agent_last_seen_timestamp
+  / 1000
+)
+```
+
+### Routed requests
+
+```promql
+hivenet_router_routing_requests_routed_total
+```
+
+Labels:
+
+```text
+region
+engine
+model
+tenant_id
+```
+
+Request rate by model:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+```
+
+Request rate by region and engine:
+
+```promql
+sum by (region, engine) (
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+```
+
+### Failed routing
+
+```promql
+hivenet_router_routing_requests_failed_total
+```
+
+This counts inference requests that the router could not forward successfully.
+
+Failure rate:
+
+```promql
+sum(
+  rate(
+    hivenet_router_routing_requests_failed_total[5m]
+  )
+)
+/
+clamp_min(
+  sum(
+    rate(
+      hivenet_router_routing_requests_routed_total[5m]
+    )
+  )
+  +
+  sum(
+    rate(
+      hivenet_router_routing_requests_failed_total[5m]
+    )
+  ),
+  0.000001
+)
+```
+
+## Per-agent metrics
+
+These metrics use:
+
+```text
+peer_id
+model
+engine
+organization
+machine
+```
+
+as labels.
+
+### Successful and failed requests
+
+```promql
+hivenet_router_agent_requests_success_total
+hivenet_router_agent_requests_failed_total
+```
+
+Request rate by agent:
+
+```promql
+sum by (peer_id, model) (
+  rate(
+    hivenet_router_agent_requests_success_total[5m]
+  )
+)
+```
+
+### Success rate
+
+```promql
+hivenet_router_agent_success_rate
+```
+
+The value ranges from `0.0` to `1.0`.
+
+Find agents below 95%:
+
+```promql
+hivenet_router_agent_success_rate < 0.95
+```
+
+A new agent may not expose a meaningful success rate until it has completed requests.
+
+### Capacity utilization
+
+```promql
+hivenet_router_agent_capacity_utilization
+```
+
+The value is:
+
+```text
+active requests / declared capacity
+```
+
+For non-streaming requests, the slot normally remains occupied until the response completes. For streaming requests, the current implementation releases the agent capacity slot when response headers arrive and streaming begins, while backend generation can continue.
+
+<Warning>
+  Do not use `hivenet_router_agent_capacity_utilization` as the authoritative count of ongoing streaming generations.
+
+  For streaming-heavy workloads, compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL.
+</Warning>
+
+Show agents above 80%:
+
+```promql
+hivenet_router_agent_capacity_utilization > 0.8
+```
+
+### Tokens
+
+```promql
+hivenet_router_agent_input_tokens_total
+hivenet_router_agent_output_tokens_total
+```
+
+Token rate by model:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_agent_input_tokens_total[5m]
+  )
+  +
+  rate(
+    hivenet_router_agent_output_tokens_total[5m]
+  )
+)
+```
+
+### Capacity rejections
+
+```promql
+hivenet_router_agent_rejected_requests_total
+```
+
+This increases when Hivenet Router tries to acquire a capacity slot and the agent is already full.
+
+```promql
+sum by (peer_id, model) (
+  rate(
+    hivenet_router_agent_rejected_requests_total[5m]
+  )
+)
+```
+
+### Disconnections and health failures
+
+```promql
+hivenet_router_agent_disconnections_total
+hivenet_router_agent_failure_total
+hivenet_router_model_backend_failure_total
+```
+
+| Metric | Meaning |
+| --- | --- |
+| `hivenet_router_agent_disconnections_total` | Agent disconnection history |
+| `hivenet_router_agent_failure_total` | Agent marked unhealthy after missed heartbeats |
+| `hivenet_router_model_backend_failure_total` | Agent reported its inference backend as unhealthy |
+
+Compare agent-process and backend failures:
+
+```promql
+sum by (peer_id, model) (
+  rate(
+    hivenet_router_agent_failure_total[1h]
+  )
+)
+```
+
+```promql
+sum by (peer_id, model) (
+  rate(
+    hivenet_router_model_backend_failure_total[1h]
+  )
+)
+```
+
+### Smoothed latency
+
+```promql
+hivenet_router_agent_srtt_ms
+hivenet_router_agent_rttvar_ms
+```
+
+These follow the RFC 6298 smoothed round-trip-time calculation.
+
+Show SRTT by agent:
+
+```promql
+hivenet_router_agent_srtt_ms
+```
+
+Find high or unstable latency:
+
+```promql
+hivenet_router_agent_srtt_ms > 5000
+```
+
+```promql
+hivenet_router_agent_rttvar_ms > 2000
+```
+
+<Note>
+  SRTT reflects the request path observed by Hivenet Router. It includes more than raw network latency.
+</Note>
+
+## Persistence and resets
+
+Current agent metadata, health, hardware, and engine snapshots are held in memory.
+
+Per-agent lifetime counters and latency history are also stored in BadgerDB and reseeded into Prometheus when an agent registers again. These include:
+
+- successful and failed request counts
+- input and output tokens
+- capacity rejections
+- disconnections and failure counters
+- SRTT and RTTVAR
+
+The router’s default persistent-entry lifetime is 30 days.
+
+Reset these values through:
+
+```text
+POST /admin/metrics/reset
+```
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/metrics/reset
+```
+
+<Danger>
+  This clears persisted per-agent lifetime counters, latency history, matching in-memory state, and their Prometheus series.
+
+  It does not reset tenant quota counters or every router-level metric.
+</Danger>
+
+## Engine metrics
+
+Engine metrics use:
+
+```text
+peer_id
+model
+engine
+organization
+machine
+```
+
+as labels.
+
+Availability depends on the backend:
+
+| Backend | Engine metrics |
+| --- | --- |
+| vLLM | Full supported set |
+| SGLang | Cache, queue, and TTFT subset |
+| llama.cpp with `--metrics` | Cache, queue, TTFT, ITL, and throughput |
+| Ollama | No engine-specific metrics |
+| Infinity | No engine-specific metrics |
+| Custom | No engine-specific metrics |
+
+A metric is absent until the agent reports it.
+
+### Cache and queue state
+
+```promql
+hivenet_router_agent_engine_kv_cache_utilization
+hivenet_router_agent_engine_running_requests
+hivenet_router_agent_engine_waiting_requests
+```
+
+Agents under cache pressure:
+
+```promql
+hivenet_router_agent_engine_kv_cache_utilization > 0.9
+```
+
+Agents with backend queues:
+
+```promql
+hivenet_router_agent_engine_waiting_requests > 0
+```
+
+### Preemptions
+
+```promql
+hivenet_router_agent_engine_preemptions_total
+```
+
+Despite the `_total` suffix, this series is exported as a gauge representing the backend’s latest cumulative value.
+
+Use a change function to detect growth:
+
+```promql
+delta(
+  hivenet_router_agent_engine_preemptions_total[5m]
+) > 0
+```
+
+Do not assume ordinary counter-reset behavior across every backend restart.
+
+### Per-agent TTFT and ITL gauges
+
+```promql
+hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_router_agent_engine_avg_itl_seconds
+hivenet_router_agent_engine_p90_itl_seconds
+```
+
+These are convenient for viewing one agent.
+
+For fleet-wide percentiles, use the histogram metrics instead of averaging per-agent percentile gauges.
+
+### Finish reasons
+
+```promql
+hivenet_router_agent_engine_request_success_total
+```
+
+Additional label:
+
+```text
+finished_reason
+```
+
+For vLLM, common values include:
+
+```text
+stop
+length
+abort
+```
+
+Completion rate by finish reason:
+
+```promql
+sum by (finished_reason) (
+  rate(
+    hivenet_router_agent_engine_request_success_total[5m]
+  )
+)
+```
+
+### llama.cpp throughput
+
+```promql
+hivenet_router_agent_engine_predicted_tps
+hivenet_router_agent_engine_prompt_tps
+```
+
+These expose the latest reported generation and prompt-ingestion throughput from llama.cpp.
+
+## Engine histograms
+
+The current router re-exports raw engine histogram buckets for vLLM agents. SGLang and llama.cpp can contribute scalar average and P90 values, but their raw histogram buckets are not currently re-exported through Hivenet Router.
+
+The vLLM-backed histogram families are:
+
+```text
+hivenet_router_agent_engine_ttft_seconds
+hivenet_router_agent_engine_itl_seconds
+hivenet_router_agent_engine_request_prompt_tokens
+hivenet_router_agent_engine_request_generation_tokens
+```
+
+Prometheus exposes each histogram as:
+
+```text
+<name>_bucket
+<name>_sum
+<name>_count
+```
+
+### Fleet P90 TTFT
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+### P90 TTFT by model
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le, model) (
+    rate(
+      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+### Fleet P90 ITL
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_itl_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+### P90 prompt length
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+    )
+  )
+)
+```
+
+### P90 generation length
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_request_generation_tokens_bucket[5m]
+    )
+  )
+)
+```
+
+<Note>
+  Use `histogram_quantile()` over aggregated buckets for fleet percentiles.
+
+  Averaging several per-agent P90 gauges does not produce a valid fleet P90.
+</Note>
+
+## GPU metrics
+
+GPU metrics use:
+
+```text
+peer_id
+region
+model
+engine
+gpu_index
+gpu_id
+organization
+machine
+```
+
+as labels.
+
+```promql
+hivenet_router_agent_gpu_utilization_percent
+hivenet_router_agent_gpu_vram_used_bytes
+hivenet_router_agent_gpu_vram_free_bytes
+hivenet_router_agent_gpu_vram_total_bytes
+hivenet_router_agent_gpu_temperature_celsius
+hivenet_router_agent_gpu_power_watts
+```
+
+Unlike policy gates, the Prometheus utilization value uses a `0` to `100` scale.
+
+### GPU utilization
+
+```promql
+hivenet_router_agent_gpu_utilization_percent
+```
+
+Average utilization by model:
+
+```promql
+avg by (model) (
+  hivenet_router_agent_gpu_utilization_percent
+)
+```
+
+### VRAM percentage
+
+```promql
+100
+*
+hivenet_router_agent_gpu_vram_used_bytes
+/
+clamp_min(
+  hivenet_router_agent_gpu_vram_total_bytes,
+  1
+)
+```
+
+### Temperature
+
+```promql
+max by (peer_id, model) (
+  hivenet_router_agent_gpu_temperature_celsius
+)
+```
+
+### Power
+
+```promql
+sum by (peer_id, model) (
+  hivenet_router_agent_gpu_power_watts
+)
+```
+
+CPU-only agents do not expose GPU series.
+
+## CPU and memory metrics
+
+Labels:
+
+```text
+peer_id
+region
+model
+engine
+organization
+machine
+```
+
+```promql
+hivenet_router_agent_cpu_usage_percent
+hivenet_router_agent_memory_used_percent
+hivenet_router_agent_memory_available_bytes
+hivenet_router_agent_memory_total_bytes
+```
+
+CPU usage:
+
+```promql
+hivenet_router_agent_cpu_usage_percent
+```
+
+Memory use:
+
+```promql
+hivenet_router_agent_memory_used_percent
+```
+
+Available GiB:
+
+```promql
+hivenet_router_agent_memory_available_bytes
+/
+1024
+/
+1024
+/
+1024
+```
+
+## Policy metrics
+
+### Primary and fallback routing
+
+```promql
+hivenet_router_policy_primary_routed_total
+hivenet_router_policy_fallback_routed_total
+hivenet_router_policy_provider_fallback_total
+hivenet_router_policy_exhausted_total
+```
+
+All use the `model` label.
+
+Local fallback rate by model:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_fallback_routed_total[5m]
+  )
+)
+```
+
+Provider fallback rate:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_provider_fallback_total[5m]
+  )
+)
+```
+
+Policy exhaustion:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_exhausted_total[5m]
+  )
+)
+```
+
+This counter describes an exhausted policy path, not one guaranteed final HTTP status. A request can proceed to provider fallback, and a failed provider call can end with a provider or backend error rather than a local `503`.
+
+### Stale connection resets
+
+```promql
+hivenet_router_agent_connection_resets_total
+```
+
+Labels:
+
+```text
+model
+reason
+```
+
+A sustained rate can indicate repeated router-agent connection loss:
+
+```promql
+sum by (model, reason) (
+  rate(
+    hivenet_router_agent_connection_resets_total[5m]
+  )
+)
+```
+
+### Policy reloads
+
+```promql
+hivenet_router_policy_reload_total
+```
+
+Labels:
+
+```text
+trigger
+result
+```
+
+Current values include:
+
+```text
+trigger="api"
+trigger="sighup"
+
+result="success"
+result="error"
+```
+
+Failed reloads:
+
+```promql
+sum by (trigger) (
+  increase(
+    hivenet_router_policy_reload_total{
+      result="error"
+    }[1h]
+  )
+)
+```
+
+## Queue metrics
+
+These metrics describe the per-model queue used when eligible agents exist but all declared capacity slots are occupied. They do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
+
+### Current queue depth
+
+```promql
+hivenet_router_queue_depth
+```
+
+Label:
+
+```text
+model
+```
+
+```promql
+hivenet_router_queue_depth > 0
+```
+
+### Queue wait duration
+
+```promql
+hivenet_router_queue_wait_seconds
+```
+
+P95 queue wait by model:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, model) (
+    rate(
+      hivenet_router_queue_wait_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+## Tenant and quota metrics
+
+Tenant metrics attribute activity to clients and deployments.
+
+### Label defaults
+
+| Label | Source | Default |
+| --- | --- | --- |
+| `tenant_id` | Authenticated owner or tenant | `default` in no-auth mode |
+| `key_id` | Dynamic registry entry ID | `anonymous` for static or no-auth access |
+| `deployment_id` | Selected agent registration metadata | `unset` before routing or when absent |
+| `model` | Request body | Requested model |
+
+A pre-routing failure cannot have a selected deployment, so its `deployment_id` is:
+
+```text
+unset
+```
+
+### Successful and failed requests
+
+```promql
+hivenet_router_tenant_requests_success_total
+hivenet_router_tenant_requests_failed_total
+```
+
+Labels:
+
+```text
+tenant_id
+key_id
+deployment_id
+model
+```
+
+Request count by tenant and deployment:
+
+```promql
+sum by (tenant_id, deployment_id) (
+  increase(
+    hivenet_router_tenant_requests_success_total[7d]
+  )
+)
+```
+
+### Token use
+
+```promql
+hivenet_router_tenant_input_tokens_total
+hivenet_router_tenant_output_tokens_total
+```
+
+Token rate by tenant and model:
+
+```promql
+sum by (tenant_id, model) (
+  rate(
+    hivenet_router_tenant_input_tokens_total[5m]
+  )
+  +
+  rate(
+    hivenet_router_tenant_output_tokens_total[5m]
+  )
+)
+```
+
+### Request-rate rejection
+
+```promql
+hivenet_router_tenant_rate_limited_total
+```
+
+Labels:
+
+```text
+tenant_id
+key_id
+```
+
+```promql
+sum by (tenant_id, key_id) (
+  rate(
+    hivenet_router_tenant_rate_limited_total[5m]
+  )
+)
+```
+
+### Token-budget rejection
+
+```promql
+hivenet_router_tenant_token_limited_total
+```
+
+Labels:
+
+```text
+tenant_id
+key_id
+deployment_id
+phase
+```
+
+`phase` is:
+
+```text
+input
+output
+```
+
+```promql
+sum by (tenant_id, phase) (
+  rate(
+    hivenet_router_tenant_token_limited_total[5m]
+  )
+)
+```
+
+### Flat quota limits
+
+```promql
+hivenet_router_tenant_quota_rpm_limit
+hivenet_router_tenant_quota_tpd_limit
+```
+
+Label:
+
+```text
+tenant_id
+```
+
+A value of `0` means unlimited.
+
+These gauges describe keys using the flat quota shape.
+
+### Per-model quota limits
+
+```promql
+hivenet_router_tenant_per_model_quota_rpm_limit
+hivenet_router_tenant_per_model_quota_tpd_limit
+```
+
+Labels:
+
+```text
+tenant_id
+model
+```
+
+The RPM gauge reflects the current effective ceiling:
+
+```text
+requests per minute per replica
+× healthy replicas
+```
+
+It can change as agent health and fleet size change.
+
+### Tokens used today
+
+```promql
+hivenet_router_tenant_tokens_used_today
+```
+
+Label:
+
+```text
+tenant_id
+```
+
+The value resets at midnight UTC.
+
+Token-budget utilization for flat quotas:
+
+```promql
+hivenet_router_tenant_tokens_used_today
+/
+clamp_min(
+  hivenet_router_tenant_quota_tpd_limit,
+  1
+)
+```
+
+### Last request timestamp
+
+```promql
+hivenet_router_tenant_last_request_timestamp
+```
+
+Labels:
+
+```text
+tenant_id
+key_id
+deployment_id
+```
+
+Most recent request per API key:
+
+```promql
+max by (tenant_id, key_id) (
+  hivenet_router_tenant_last_request_timestamp
+)
+```
+
+Seconds since last request:
+
+```promql
+time()
+-
+max by (tenant_id, key_id) (
+  hivenet_router_tenant_last_request_timestamp
+)
+```
+
+### Tenant request duration
+
+```promql
+hivenet_router_tenant_request_duration_seconds
+```
+
+Labels:
+
+```text
+tenant_id
+key_id
+deployment_id
+model
+```
+
+P95 by tenant and model:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, tenant_id, model) (
+    rate(
+      hivenet_router_tenant_request_duration_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+### Quota persistence errors
+
+```promql
+hivenet_router_quota_backend_errors_total
+```
+
+This increases when the Badger-backed daily token limiter cannot flush quota state to disk.
+
+```promql
+increase(
+  hivenet_router_quota_backend_errors_total[15m]
+) > 0
+```
+
+<Warning>
+  A persistence error may leave the in-memory quota path working while daily usage is not safely stored for restart recovery.
+
+  Investigate any increase rather than treating it as a harmless background error.
+</Warning>
+
+## Per-request duration by agent
+
+```promql
+hivenet_router_request_duration_seconds
+```
+
+Labels:
+
+```text
+tenant_id
+peer_id
+model
+status_code
+```
+
+P95 duration by agent:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, peer_id, model) (
+    rate(
+      hivenet_router_request_duration_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+## HTTP server metrics
+
+### Request duration
+
+```promql
+http_server_request_duration_seconds
+```
+
+Labels:
+
+```text
+method
+route
+status_code
+```
+
+P95 by route:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, route) (
+    rate(
+      http_server_request_duration_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+Error rate by route:
+
+```promql
+sum by (route) (
+  rate(
+    http_server_request_duration_seconds_count{
+      status_code=~"5.."
+    }[5m]
+  )
+)
+```
+
+### Active requests
+
+```promql
+http_server_active_requests
+```
+
+Labels:
+
+```text
+method
+route
+```
+
+```promql
+http_server_active_requests{
+  method="POST",
+  route="/v1/chat/completions"
+}
+```
+
+## Provider HTTP metrics
+
+```promql
+http_client_request_duration_seconds
+```
+
+Labels:
+
+```text
+provider
+status_code
+```
+
+P95 provider latency:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, provider) (
+    rate(
+      http_client_request_duration_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+Provider responses by status:
+
+```promql
+sum by (provider, status_code) (
+  rate(
+    http_client_request_duration_seconds_count[5m]
+  )
+)
+```
+
+Network failures use:
+
+```text
+status_code="0"
+```
+
+## Alerting examples
+
+The thresholds below are examples. Adjust them to your hardware, workload, and service objectives.
+
+### Agent unhealthy
+
+```yaml
+groups:
+  - name: mycoroute
+
+    rules:
+      - alert: MycorouteAgentUnhealthy
+
+        expr: |
+          hivenet_router_routing_agent_healthy == 0
+
+        for: 1m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            Hivenet Router agent {{ $labels.peer_id }} is unhealthy
+```
+
+### High routing failure rate
+
+```yaml
+      - alert: MycorouteHighRoutingFailureRate
+
+        expr: |
+          (
+            sum(
+              rate(
+                hivenet_router_routing_requests_failed_total[5m]
+              )
+            )
+            /
+            clamp_min(
+              sum(
+                rate(
+                  hivenet_router_routing_requests_routed_total[5m]
+                )
+              )
+              +
+              sum(
+                rate(
+                  hivenet_router_routing_requests_failed_total[5m]
+                )
+              ),
+              0.000001
+            )
+          ) > 0.10
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            More than 10% of Hivenet Router routing attempts are failing
+```
+
+### KV-cache pressure
+
+```yaml
+      - alert: MycorouteKVCachePressure
+
+        expr: |
+          hivenet_router_agent_engine_kv_cache_utilization > 0.90
+
+        for: 2m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High KV-cache use on {{ $labels.peer_id }}
+```
+
+### GPU temperature
+
+```yaml
+      - alert: MycorouteGPUHighTemperature
+
+        expr: |
+          hivenet_router_agent_gpu_temperature_celsius > 85
+
+        for: 5m
+
+        labels:
+          severity: critical
+
+        annotations:
+          summary: >-
+            High GPU temperature on {{ $labels.peer_id }}
+```
+
+### Policy exhaustion
+
+```yaml
+      - alert: MycoroutePolicyExhaustion
+
+        expr: |
+          sum by (model) (
+            rate(
+              hivenet_router_policy_exhausted_total[5m]
+            )
+          ) > 0
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            Routing policy is being exhausted for {{ $labels.model }}
+```
+
+### Quota persistence failure
+
+```yaml
+      - alert: MycorouteQuotaPersistenceFailure
+
+        expr: |
+          increase(
+            hivenet_router_quota_backend_errors_total[15m]
+          ) > 0
+
+        labels:
+          severity: critical
+
+        annotations:
+          summary: >-
+            Hivenet Router could not persist daily quota state
+```
+
+## Recording rules
+
+Recording rules can simplify expensive or frequently reused dashboard queries.
+
+```yaml
+groups:
+  - name: mycoroute-recording
+
+    interval: 30s
+
+    rules:
+      - record: mycoroute:model_request_rate5m
+
+        expr: |
+          sum by (model) (
+            rate(
+              hivenet_router_routing_requests_routed_total[5m]
+            )
+          )
+
+      - record: mycoroute:model_failure_rate5m
+
+        expr: |
+          sum by (model) (
+            rate(
+              hivenet_router_routing_requests_failed_total[5m]
+            )
+          )
+
+      - record: mycoroute:model_p95_ttft_seconds5m
+
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, model) (
+              rate(
+                hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+              )
+            )
+          )
+```
+
+## Troubleshooting
+
+### Prometheus cannot reach the router
+
+Check the endpoint directly:
+
+```bash
+curl -i \
+  http://<router-host>:2112/metrics
+```
+
+Check the router logs:
+
+```bash
+journalctl \
+  -u hivenet-router \
+  | grep -i prometheus
+```
+
+For Docker Compose:
+
+```bash
+docker compose exec prometheus \
+  wget -qO- \
+  http://router:2112/metrics \
+  | head
+```
+
+Check firewall and container-network rules.
+
+### A metric is missing
+
+A series often appears only after the relevant event or data has occurred.
+
+For example:
+
+- tenant metrics appear after requests
+- engine metrics appear after a successful engine scrape
+- TTFT and ITL appear after completions
+- GPU metrics require NVML and visible NVIDIA devices
+- policy counters appear after routing activity
+- per-model quota gauges appear when those quota paths are used or seeded
+
+Search by prefix:
+
+```bash
+curl -s \
+  http://localhost:2112/metrics \
+  | grep 'hivenet_router_agent_engine'
+```
+
+### An engine metric is missing
+
+Check the backend endpoint locally on the agent host:
+
+```bash
+curl \
+  http://localhost:8888/metrics \
+  | head
+```
+
+Confirm the engine-specific requirement:
+
+- SGLang needs `--enable-metrics`
+- llama.cpp needs `--metrics`
+- Ollama, Infinity, and custom engines do not currently supply engine metrics
+
+Inspect the agent logs for scrape errors.
+
+A failed metrics scrape does not stop request forwarding.
+
+### Prometheus shows duplicate or stale agents
+
+The `peer_id` label identifies the agent.
+
+If an agent starts with a new identity after every restart, Prometheus sees a new series.
+
+Configure a persistent:
+
+```text
+--identity-path
+```
+
+and preserve the file or mounted volume across restarts.
+
+### Tenant labels show `anonymous` or `default`
+
+In no-auth mode:
+
+```text
+tenant_id="default"
+key_id="anonymous"
+```
+
+Static API keys currently use:
+
+```text
+key_id="anonymous"
+```
+
+because stable key IDs belong to dynamic registry entries.
+
+`deployment_id="unset"` is expected before an agent is selected or when the agent does not advertise a deployment ID.
+
+### Histogram queries return no data
+
+Check that the corresponding `_bucket` series exists:
+
+```bash
+curl -s \
+  http://localhost:2112/metrics \
+  | grep \
+    'hivenet_router_agent_engine_ttft_seconds_bucket'
+```
+
+Use `rate()` over a window that contains completed observations.
+
+A new or idle engine may not have enough data yet.
+
+### Counter graphs drop after a restart
+
+Prometheus counters are process-local series.
+
+Some per-agent lifetime counters are reseeded from BadgerDB when agents register again, but other router, policy, HTTP, tenant, and queue metrics begin again with the new router process.
+
+Use `rate()` or `increase()` rather than graphing raw counter values when restart behavior matters.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+    Explore the provisioned dashboards, data sources, variables, and panels.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Query structured request records through Loki or local JSONL files.
+  </Card>
+
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Review how agents collect GPU, CPU, and memory data.
+  </Card>
+</CardGroup>

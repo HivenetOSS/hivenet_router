@@ -1,0 +1,943 @@
+---
+title: "Provider fallback"
+description: "Use OpenAI or Anthropic as a final fallback after every local routing step has been exhausted."
+sidebarTitle: "Provider fallback"
+---
+
+Provider fallback sends an eligible language-model request to OpenAI or Anthropic after every local Hivenet Router routing step has been exhausted.
+
+It is the last step in a policy:
+
+```text
+Primary local policy
+        ↓
+Local fallback chain
+        ↓
+External provider fallback
+        ↓
+Error
+```
+
+Provider fallback can preserve availability when self-hosted agents are offline, excluded by policy, or out of capacity. It also changes who processes the request, which model answers it, and how the request is billed.
+
+<Warning>
+  Provider fallback sends request content to an external service.
+
+  Review the provider’s data handling, retention, region, access controls, and commercial terms before enabling it.
+</Warning>
+
+## Supported providers
+
+Hivenet Router currently supports:
+
+| Provider | Policy engine | Credential |
+| --- | --- | --- |
+| OpenAI | `openai` | `HIVENET_ROUTER_OPENAI_API_KEY` |
+| Anthropic | `anthropic` | `HIVENET_ROUTER_ANTHROPIC_API_KEY` |
+
+Provider names are lowercase and case-sensitive.
+
+Hivenet Router supports one `fallback_provider` per policy. It does not provide an ordered chain of several external providers.
+
+## Configure provider fallback
+
+`fallback_provider` is a top-level policy field.
+
+Do not place it inside `routing_policy` or `fallback_chain`.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: any-local-agent
+    match: {}
+    strategy: least-loaded
+    max_tries: 2
+
+fallback_provider:
+  engine: openai
+  model: "<provider-model>"
+```
+
+Replace `<provider-model>` with a model currently available to your provider account.
+
+The block requires both fields:
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `engine` | Yes | Selects `openai` or `anthropic` |
+| `model` | Yes | Model sent to the external provider |
+
+The router rejects a policy when:
+
+- `engine` is missing
+- `model` is missing
+- the provider is not supported
+- the required provider API key is not configured
+
+## Configure credentials
+
+Provider credentials are router configuration. They do not belong in the policy YAML.
+
+### OpenAI
+
+```bash
+export HIVENET_ROUTER_OPENAI_API_KEY="<openai-api-key>"
+```
+
+### Anthropic
+
+```bash
+export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
+```
+
+Then start the router with the policy:
+
+```bash
+./bin/hivenet-router \
+  --policy-file /etc/hivenet-router/policy.yaml \
+  ...
+```
+
+The environment-variable names are case-sensitive.
+
+<Warning>
+  Provider credentials are loaded when the router starts.
+
+  Restart the router after adding, removing, or rotating a provider API key. Reloading the policy with `SIGHUP` does not reload provider credentials.
+</Warning>
+
+## Docker Compose
+
+Keep the host-side secret in `.env`:
+
+```text
+OPENAI_API_KEY=<openai-api-key>
+```
+
+Map it to the environment variable Hivenet Router reads inside the container:
+
+```yaml
+services:
+  router:
+    environment:
+      - HIVENET_ROUTER_OPENAI_API_KEY=${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+```
+
+For Anthropic:
+
+```text
+ANTHROPIC_API_KEY=<anthropic-api-key>
+```
+
+```yaml
+services:
+  router:
+    environment:
+      - HIVENET_ROUTER_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY}
+```
+
+Protect the `.env` file:
+
+```bash
+chmod 600 .env
+```
+
+Do not commit it.
+
+## systemd
+
+Create a protected environment file:
+
+```text
+/etc/hivenet-router/provider.env
+```
+
+For OpenAI:
+
+```bash
+HIVENET_ROUTER_OPENAI_API_KEY=<openai-api-key>
+```
+
+For Anthropic:
+
+```bash
+HIVENET_ROUTER_ANTHROPIC_API_KEY=<anthropic-api-key>
+```
+
+Set its ownership and permissions:
+
+```bash
+sudo chown root:hivenet-router \
+  /etc/hivenet-router/provider.env
+
+sudo chmod 0640 \
+  /etc/hivenet-router/provider.env
+```
+
+Add it to the router service:
+
+```ini
+[Service]
+EnvironmentFile=/etc/hivenet-router/provider.env
+```
+
+Reload systemd and restart the router:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart hivenet-router
+```
+
+## When provider fallback runs
+
+Hivenet Router attempts the provider only after every local policy step has been exhausted.
+
+Local routing may be exhausted because:
+
+- no agents are registered for the requested model
+- all matching agents are unhealthy
+- no agent serves the required capability
+- static filters remove every agent
+- live policy gates remove every candidate
+- matching agents remain at capacity
+- local forward attempts exhaust their retry budgets
+
+Provider fallback is limited to requests using the `llm` capability.
+
+It is not used for:
+
+- embeddings
+- reranking
+
+Provider fallback also does not run after a client-side error that Hivenet Router considers non-retryable, such as:
+
+- malformed request data
+- invalid parameters
+- a context-length failure
+- a token-quota rejection
+
+Trying another provider would not reliably correct those requests.
+
+## Use it for chat generation
+
+Provider fallback is designed for OpenAI-style chat-generation requests:
+
+```text
+POST /v1/chat/completions
+```
+
+<Warning>
+  Do not rely on provider fallback for:
+
+  - `POST /v1/messages/count_tokens`
+  - complete passthrough of every Anthropic-native field
+  - streaming responses
+
+  The provider adapters reconstruct a supported chat request rather than forwarding the original raw body unchanged.
+</Warning>
+
+Requests sent to `/v1/messages` may lose fields that are outside the subset understood by Hivenet Router’s fallback adapters.
+
+For predictable behavior, use `/v1/chat/completions` with a non-streaming text request.
+
+## Model substitution
+
+The provider model replaces the model requested by the client.
+
+For example, the client may request:
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct"
+}
+```
+
+The policy may specify:
+
+```yaml
+fallback_provider:
+  engine: openai
+  model: "<provider-model>"
+```
+
+When provider fallback runs, Hivenet Router sends:
+
+```json
+{
+  "model": "<provider-model>"
+}
+```
+
+to OpenAI.
+
+This has several consequences:
+
+- the response may come from a different model family
+- response quality and behavior may differ
+- tokenization and context limits may differ
+- provider billing applies to the substituted model
+- the provider model does not need to be registered by a Hivenet Router agent
+
+The provider model does not normally appear in:
+
+```text
+GET /v1/models
+```
+
+That catalog is built from registered Hivenet Router agents.
+
+## Client access and quotas
+
+Hivenet Router authorizes the **original requested model** before routing.
+
+For example, the client API key must be allowed to request:
+
+```text
+meta-llama/Llama-3.1-8B-Instruct
+```
+
+It does not need a Hivenet Router allowlist entry for the external provider model.
+
+Request and token accounting also remains associated with the original requested model and tenant. When the provider returns usage data, Hivenet Router charges the resulting input and output tokens to the same quota bucket used during request admission.
+
+## OpenAI fallback
+
+Configure:
+
+```yaml
+fallback_provider:
+  engine: openai
+  model: "<openai-model>"
+```
+
+and:
+
+```bash
+export HIVENET_ROUTER_OPENAI_API_KEY="<openai-api-key>"
+```
+
+Hivenet Router sends:
+
+```text
+POST https://api.openai.com/v1/chat/completions
+```
+
+with:
+
+```text
+Authorization: Bearer <openai-api-key>
+```
+
+The configured provider model overrides the client’s original model.
+
+### Request handling
+
+The OpenAI adapter re-encodes the fields represented by Hivenet Router’s internal chat request.
+
+These include:
+
+- messages
+- temperature
+- `top_p`
+- `max_tokens`
+- `max_completion_tokens`
+- modalities and audio configuration
+- service tier
+
+Fields that Hivenet Router does not parse into its internal request are not preserved.
+
+This can include fields such as:
+
+- tools
+- tool choice
+- structured-output configuration
+- stop sequences
+- log probabilities
+- provider-specific extensions
+
+<Warning>
+  The OpenAI fallback adapter does not forward the original raw JSON body.
+
+  Test every field your application depends on before enabling fallback for production traffic.
+</Warning>
+
+### Response handling
+
+Hivenet Router decodes the provider response into its OpenAI-compatible response type.
+
+The response must:
+
+- return HTTP `200`
+- contain at least one choice
+- contain valid JSON in the expected chat-completion shape
+
+A successful response contains:
+
+```json
+{
+  "processed_by": "provider:openai"
+}
+```
+
+alongside the normal chat-completion fields.
+
+## Anthropic fallback
+
+Configure:
+
+```yaml
+fallback_provider:
+  engine: anthropic
+  model: "<anthropic-model>"
+```
+
+and:
+
+```bash
+export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
+```
+
+Hivenet Router sends:
+
+```text
+POST https://api.anthropic.com/v1/messages
+```
+
+with:
+
+```text
+x-api-key: <anthropic-api-key>
+anthropic-version: 2023-06-01
+```
+
+### Request translation
+
+Hivenet Router converts its OpenAI-style internal chat request into an Anthropic Messages request.
+
+It:
+
+- replaces the model with the configured Anthropic model
+- joins system-role messages into one top-level `system` string
+- forwards user and assistant messages
+- extracts text from message content
+- forwards `temperature`
+- forwards `max_tokens`
+- uses `4096` when `max_tokens` is absent
+
+At least one non-system message is required.
+
+The current translation does not fully preserve:
+
+- image content
+- audio content
+- tools and tool definitions
+- tool results
+- structured output
+- `top_p`
+- `max_completion_tokens`
+- other provider-specific fields
+
+When a message contains several content parts, the adapter extracts text and ignores non-text parts.
+
+### Response translation
+
+Hivenet Router converts the Anthropic response into an OpenAI-compatible chat response.
+
+It:
+
+- uses the first text content block as the assistant message
+- maps input tokens to `prompt_tokens`
+- maps output tokens to `completion_tokens`
+- calculates `total_tokens`
+- maps `max_tokens` to the finish reason `length`
+- maps `tool_use` to `tool_calls`
+- maps other stop reasons to `stop`
+
+A response without a text content block is treated as a provider failure.
+
+This means a tool-only Anthropic response cannot currently be returned successfully through provider fallback.
+
+A successful response contains:
+
+```json
+{
+  "processed_by": "provider:anthropic"
+}
+```
+
+## Streaming limitations
+
+Provider fallback is not implemented as a streaming adapter.
+
+Use:
+
+```json
+{
+  "stream": false
+}
+```
+
+or omit `stream`.
+
+For OpenAI, a request with:
+
+```json
+{
+  "stream": true
+}
+```
+
+may cause the provider to return server-sent events, while Hivenet Router’s provider adapter expects one JSON response. The fallback then fails.
+
+Anthropic fallback also returns one completed OpenAI-compatible response rather than an SSE stream.
+
+## Timeout behavior
+
+Provider clients use a default HTTP timeout of:
+
+```text
+120 seconds
+```
+
+The provider request is also bound by the original Hivenet Router request deadline.
+
+The effective limit is therefore the shorter of:
+
+- the remaining Hivenet Router request deadline
+- the provider client timeout
+
+The default router request timeout is normally shorter than 120 seconds.
+
+If local routing and queueing consume most of the request deadline, little or no time may remain for the provider fallback.
+
+For example, with:
+
+```bash
+--request-timeout 60s
+```
+
+a request that waits 55 seconds for local capacity has about five seconds left for the provider call.
+
+Consider this interaction when configuring:
+
+- queue depth
+- local retry budgets
+- fallback-chain length
+- router request timeout
+
+## Complete OpenAI example
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+
+  exclude_if:
+    kv_cache_utilization:
+      gt: 0.85
+    success_rate:
+      lt: 0.95
+
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: any-local-agent
+
+    match: {}
+
+    strategy: least-loaded
+    max_tries: 2
+
+fallback_provider:
+  engine: openai
+  model: "<openai-model>"
+```
+
+Set the credential:
+
+```bash
+export HIVENET_ROUTER_OPENAI_API_KEY="<openai-api-key>"
+```
+
+Start the router:
+
+```bash
+./bin/hivenet-router \
+  --policy-file /etc/hivenet-router/policy.yaml \
+  ...
+```
+
+## Complete Anthropic example
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: any-local-agent
+
+    match: {}
+
+    strategy: least-loaded
+    max_tries: 2
+
+fallback_provider:
+  engine: anthropic
+  model: "<anthropic-model>"
+```
+
+Set the credential:
+
+```bash
+export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
+```
+
+Restart the router after changing the credential.
+
+## Test provider fallback
+
+Use a temporary policy that cannot match any local agent.
+
+For example:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - provider-fallback-test-only
+  strategy: least-loaded
+
+fallback_provider:
+  engine: openai
+  model: "<openai-model>"
+```
+
+Do not add the test tag to any agent.
+
+Send a non-streaming request:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "stream": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with the word fallback."
+      }
+    ]
+  }' \
+  | jq '{
+      model,
+      processed_by,
+      usage,
+      choices
+    }'
+```
+
+A successful OpenAI fallback reports:
+
+```json
+{
+  "processed_by": "provider:openai"
+}
+```
+
+A successful Anthropic fallback reports:
+
+```json
+{
+  "processed_by": "provider:anthropic"
+}
+```
+
+The response `model` should be the configured provider model rather than the original local model.
+
+Restore the production policy after the test.
+
+## Monitor provider fallback
+
+Successful provider fallbacks:
+
+```promql
+rate(
+  hivenet_router_policy_provider_fallback_total[5m]
+)
+```
+
+This counter is labeled with the original model requested by the client.
+
+Successful fallbacks by original model:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_provider_fallback_total[5m]
+  )
+)
+```
+
+Outbound provider request latency:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, provider) (
+    rate(
+      http_client_request_duration_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+Outbound provider responses by status:
+
+```promql
+sum by (provider, status_code) (
+  rate(
+    http_client_request_duration_seconds_count[5m]
+  )
+)
+```
+
+A network failure is recorded with:
+
+```text
+status_code="0"
+```
+
+Provider failures also increase:
+
+```text
+hivenet_router_policy_exhausted_total
+```
+
+and the corresponding failed-request metrics.
+
+<Note>
+  `hivenet_router_policy_provider_fallback_total` counts successful provider responses, not every attempted provider call.
+
+  Use the outbound HTTP histogram and router logs to observe failed attempts.
+</Note>
+
+## Failure behavior
+
+Hivenet Router makes one outbound provider call.
+
+It does not:
+
+- retry the same provider automatically
+- try another external provider
+- return to local routing after the provider fails
+
+If the provider call fails, Hivenet Router returns HTTP `502`:
+
+```json
+{
+  "error": {
+    "code": "backend_error",
+    "message": "Provider error details",
+    "source": "backend"
+  }
+}
+```
+
+Provider failure can be caused by:
+
+- invalid credentials
+- an unavailable provider model
+- provider rate limits
+- provider quota or billing limits
+- request incompatibility
+- an upstream server error
+- a network error
+- request timeout
+- a response with no usable completion
+
+The router logs the provider name, model, request ID, and outcome. It does not log the configured API key.
+
+## Operational guidance
+
+### Treat fallback as a changed execution boundary
+
+A request may leave infrastructure you control and enter an external provider environment.
+
+Make that behavior explicit to:
+
+- application owners
+- security teams
+- compliance teams
+- customers whose data may be processed
+- incident responders
+
+### Monitor fallback volume
+
+A sustained rise in provider fallback may indicate:
+
+- insufficient local capacity
+- unhealthy agents
+- overly strict policy gates
+- network instability
+- incorrect agent metadata
+- local model deployment problems
+
+Fallback should not quietly become the normal execution path unless that is intentional.
+
+### Control provider spending
+
+Provider requests may incur separate input and output charges.
+
+Use:
+
+- provider-side spending limits
+- budget alerts
+- restricted project credentials
+- Hivenet Router fallback metrics
+- tenant and model quotas
+
+Do not put current provider prices in the policy or assume they will remain stable.
+
+### Rotate credentials
+
+Use a secrets manager where available.
+
+After rotating a provider key:
+
+1. update the router environment
+2. restart the router
+3. confirm that the policy loads
+4. run a controlled fallback test
+5. revoke the old credential
+
+## Troubleshooting
+
+### The router does not start
+
+Check the error message.
+
+If the policy uses OpenAI, confirm:
+
+```bash
+echo "${HIVENET_ROUTER_OPENAI_API_KEY:+configured}"
+```
+
+If it uses Anthropic:
+
+```bash
+echo "${HIVENET_ROUTER_ANTHROPIC_API_KEY:+configured}"
+```
+
+Also check that the policy engine is exactly:
+
+```text
+openai
+```
+
+or:
+
+```text
+anthropic
+```
+
+### A policy reload is rejected
+
+A policy added through `SIGHUP` or the admin API is validated against the provider credentials loaded at router startup.
+
+Adding the environment variable to your shell after the router is running is not enough. Restart the router so it can create the provider adapter.
+
+### Fallback is never attempted
+
+Check that:
+
+- every local routing step was exhausted
+- the request uses the `llm` capability
+- the request did not fail with a non-retryable client error
+- `fallback_provider` is at the policy’s top level
+- the request deadline has not already expired
+
+Enable debug logs:
+
+```bash
+export GOLOG_LOG_LEVEL="policy=debug,router=debug"
+```
+
+### The provider model is rejected
+
+The external model name is independent of the model registered in Hivenet Router.
+
+Confirm that:
+
+- the model exists at the provider
+- the provider account may access it
+- the model name is spelled exactly
+- the credential belongs to the expected provider account or project
+
+### OpenAI fallback fails only for streaming requests
+
+Set:
+
+```json
+{
+  "stream": false
+}
+```
+
+The current provider adapter expects one JSON response and cannot decode an SSE stream.
+
+### Anthropic fallback loses system or content data
+
+System-role messages are joined into the top-level Anthropic `system` field.
+
+Anthropic-native top-level fields and non-text content may not survive the conversion into Hivenet Router’s internal OpenAI-style request.
+
+Use a simple text Chat Completions request when provider fallback must behave predictably.
+
+### Anthropic returns a tool-use response and fallback fails
+
+The current response translator requires at least one text content block.
+
+Tool-only responses are treated as provider errors.
+
+Do not depend on Anthropic tools through provider fallback in the current implementation.
+
+### The provider call times out
+
+Check how much of the original request deadline was consumed by:
+
+- local retries
+- capacity waiting
+- local fallback steps
+
+Increase the router request timeout only after considering the effect on client latency and queued work.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Policy gates" href="/routing/policy-gates">
+    Apply practical health, latency, cache, and hardware thresholds.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Monitor provider usage, latency, failures, and policy exhaustion.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Record request outcomes, tenants, models, and routing behavior.
+  </Card>
+</CardGroup>

@@ -1,0 +1,634 @@
+---
+title: "Ollama agent"
+description: "Connect an Ollama backend to Hivenet Router, select the model an agent represents, and configure capacity for local or edge inference."
+sidebarTitle: "Ollama"
+---
+
+Connect an Ollama server to Hivenet Router by running an agent beside the backend.
+
+The agent checks Ollama through its `/use-the-api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
+
+<Warning>
+  One Hivenet Router agent represents one model. If your Ollama server contains several models, pin each agent to a model with `--model` and run a separate agent process for each one.
+</Warning>
+
+<Note>
+  Ollama does not provide the engine metrics collected from vLLM, SGLang, or metrics-enabled llama.cpp servers. Hivenet Router still records routing, request, latency, health, and available hardware metrics for the agent.
+</Note>
+
+## Before you start
+
+You need:
+
+- a running Hivenet Router router
+- Ollama on the agent host
+- at least one model pulled in Ollama
+- network access between the agent and router
+- the Hivenet Router agent binary or Docker image
+- the same JWT secret used by the router
+
+The examples use:
+
+```text
+Router IP: 192.168.1.100
+Router gRPC port: 50051
+Router libp2p port: 9000
+Agent IP: 192.168.1.101
+Ollama port: 11434
+Model: llama3.1:8b
+```
+
+Replace these values with addresses and model names from your deployment.
+
+## Start Ollama
+
+<Tabs>
+  <Tab title="Linux">
+    Install Ollama:
+
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+
+    Start the server:
+
+    ```bash
+    export OLLAMA_HOST=127.0.0.1:11434
+    export OLLAMA_KEEP_ALIVE=-1
+    
+    nohup ollama serve > ~/ollama.log 2>&1 &
+    ```
+
+    `OLLAMA_KEEP_ALIVE=-1` keeps loaded models in memory instead of unloading them after an idle period.
+
+    To store models in another directory, set `OLLAMA_MODELS` before starting the server:
+
+    ```bash
+    export OLLAMA_MODELS=/path/to/models
+    ```
+
+    The agent runs on the same host, so Ollama does not need to listen on a public interface. Bind it to `0.0.0.0` only when another machine must connect directly and your network controls restrict access appropriately.
+  </Tab>
+  <Tab title="Docker">
+    Start Ollama with persistent model storage:
+
+    ```bash
+    docker run -d \
+      --name ollama \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -e OLLAMA_KEEP_ALIVE=-1 \
+      -v ollama:/root/.ollama \
+      ollama/ollama
+    ```
+
+    For a CPU-only host, omit:
+
+    ```text
+    --gpus all
+    ```
+
+    Follow the logs:
+
+    ```bash
+    docker logs -f ollama
+    ```
+  </Tab>
+</Tabs>
+
+## Pull a model
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama pull llama3.1:8b
+    ```
+
+    List the available models:
+
+    ```bash
+    ollama list
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama pull llama3.1:8b
+    ```
+
+    List the available models:
+
+    ```bash
+    docker exec ollama \
+      ollama list
+    ```
+  </Tab>
+</Tabs>
+
+Check that the Ollama server is ready:
+
+```bash
+curl http://localhost:11434/use-the-api/tags \
+  | jq .
+```
+
+The response should contain the model you pulled.
+
+## Prepare the Hivenet Router agent
+
+<Tabs>
+  <Tab title="Docker">
+    From the Hivenet Router repository, build the agent image if you have not already done so:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t mycoroute/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /opt/mycoroute
+    sudo chown "$USER":"$USER" /opt/mycoroute
+    ```
+
+    Place the router’s JWT secret at:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Protect it:
+
+    ```bash
+    chmod 600 /opt/mycoroute/jwt.secret
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Build the agent from the Hivenet Router repository:
+
+    ```bash
+    go build -o bin/hivenet-agent ./cmd/agent/
+    ```
+
+    Place the router’s JWT secret somewhere the agent can read, for example:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Create a writable directory for the persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /var/lib/mycoroute/agent
+    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    ```
+  </Tab>
+</Tabs>
+
+## Start the agent
+
+The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more than one model is available in Ollama.
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name hivenet-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/data \
+      mycoroute/agent:latest \
+      --engine ollama \
+      --model llama3.1:8b \
+      --backend-url http://localhost:11434 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 5 \
+      --region EU-France \
+      --identity-path /data/agent-identity.key
+    ```
+
+    The agent container receives GPU access so it can collect NVIDIA hardware metrics. For a CPU-only host, omit:
+
+    ```text
+    --gpus all
+    ```
+
+    The `/data` mount preserves the agent’s peer identity across container replacement and restarts.
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/hivenet-agent \
+      --engine ollama \
+      --model llama3.1:8b \
+      --backend-url http://localhost:11434 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --capacity 5 \
+      --region EU-France \
+      --identity-path /var/lib/mycoroute/agent/identity.key
+    ```
+  </Tab>
+</Tabs>
+
+The agent waits until Ollama responds and the selected model is available. If Ollama is still starting or loading its model list, the agent continues polling instead of exiting permanently.
+
+## Understand the agent settings
+
+| Setting | Purpose |
+| --- | --- |
+| `--engine ollama` | Selects the Ollama integration |
+| `--model` | Pins the agent to one Ollama model |
+| `--backend-url` | Base URL of the local Ollama server |
+| `--router-grpc` | Router endpoint used for agent authentication |
+| `--jwt-secret-file` | Shared secret used to authenticate the agent |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
+| `--region` | Region metadata available to routing policies |
+| `--identity-path` | Persistent private key that keeps the peer ID stable |
+
+You can provide more routing metadata:
+
+```bash
+--organization edge-team \
+--machine office-gpu-1 \
+--tags local,ollama,production
+```
+
+Policies can match these values when selecting agents.
+
+## Model discovery and naming
+
+If you omit `--model`, the agent requests:
+
+```text
+GET <backend-url>/use-the-api/tags
+```
+
+It registers the first model returned by Ollama.
+
+Automatic discovery is convenient when the Ollama server contains one model. Pin the model explicitly when more than one is available.
+
+### The `:latest` suffix
+
+Ollama adds `:latest` when a model has no explicit tag. Hivenet Router removes that implicit suffix during discovery.
+
+| Ollama model name | Registered with Hivenet Router |
+| --- | --- |
+| `llama3.1:latest` | `llama3.1` |
+| `llama3.1:8b` | `llama3.1:8b` |
+| `mistral:7b` | `mistral:7b` |
+
+Explicit tags remain unchanged.
+
+When using `--model`, provide the model name expected by Ollama:
+
+```bash
+--model llama3.1:8b
+```
+
+The model name clients send to Hivenet Router must match the model registered by the agent.
+
+## Run several Ollama models
+
+Run one agent for each model you want Hivenet Router to expose.
+
+For the first model:
+
+```bash
+./bin/hivenet-agent \
+  --engine ollama \
+  --model llama3.1:8b \
+  --backend-url http://localhost:11434 \
+  --identity-path /var/lib/mycoroute/agent/llama-8b.key \
+  ...
+```
+
+For another model:
+
+```bash
+./bin/hivenet-agent \
+  --engine ollama \
+  --model mistral:7b \
+  --backend-url http://localhost:11434 \
+  --identity-path /var/lib/mycoroute/agent/mistral-7b.key \
+  ...
+```
+
+Each agent on the same host needs a separate `--identity-path` so every process keeps a distinct peer identity.
+
+The agents can share the same Ollama backend URL.
+
+## Set agent capacity
+
+`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
+
+It does not change Ollama’s own parallelism or memory settings.
+
+A conservative starting point is:
+
+| Host type | Starting capacity |
+| --- | --- |
+| GPU inference | `3` to `5` |
+| CPU-only inference | `1` to `2` |
+
+These values are starting points, not fixed limits. The right setting depends on:
+
+- model size
+- available RAM or VRAM
+- context length
+- Ollama’s parallelism configuration
+- acceptable response time
+- whether several models share the same hardware
+
+Test the backend under representative load before raising capacity.
+
+When the agent reaches capacity, Hivenet Router stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
+
+<Note>
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
+</Note>
+
+## Verify the connection
+
+On the router, check agent health:
+
+```bash
+curl http://192.168.1.100:8080/admin/health \
+  | jq .
+```
+
+List the models exposed to clients:
+
+```bash
+curl http://192.168.1.100:8080/v1/models \
+  | jq '.data[].id'
+```
+
+Inspect the Ollama agent:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | select(.metadata.engine == "ollama")'
+```
+
+Send a chat-completion request:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.1:8b",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain what an inference router does in one sentence."
+      }
+    ]
+  }'
+```
+
+Applications call Hivenet Router’s OpenAI-compatible endpoint. The agent forwards the request to the Ollama backend.
+
+## Available observability
+
+The Ollama integration does not scrape an engine-specific Prometheus endpoint.
+
+Hivenet Router can still expose:
+
+- agent health
+- routed request counts
+- failed request counts
+- active request and capacity state
+- smoothed round-trip time
+- success and failure history
+- CPU and memory metrics
+- NVIDIA GPU utilization, memory, temperature, and power when NVML is available
+
+View metrics through the router:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep mycoroute
+```
+
+View current agent state:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | select(.metadata.engine == "ollama")'
+```
+
+Engine-specific values such as KV cache utilization, waiting requests, time to first token, and inter-token latency are not available from the Ollama integration.
+
+## Troubleshooting
+
+### No model is found
+
+List the pulled models:
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama list
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama list
+    ```
+  </Tab>
+</Tabs>
+
+Pull the missing model:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+Check the endpoint used by the agent:
+
+```bash
+curl http://localhost:11434/use-the-api/tags \
+  | jq .
+```
+
+### The wrong model is registered
+
+When `--model` is omitted, the agent registers the first model returned by `/use-the-api/tags`.
+
+Restart the agent with an explicit model:
+
+```bash
+--model llama3.1:8b
+```
+
+### A model appears without `:latest`
+
+This is expected.
+
+Hivenet Router converts:
+
+```text
+llama3.1:latest
+```
+
+to:
+
+```text
+llama3.1
+```
+
+Explicit tags such as `:8b` or `:7b` are preserved.
+
+### Ollama is unreachable
+
+Check the server:
+
+```bash
+curl http://localhost:11434/use-the-api/tags
+```
+
+For a Linux process, inspect its log:
+
+```bash
+tail -f ~/ollama.log
+```
+
+For Docker:
+
+```bash
+docker logs ollama
+```
+
+Confirm that the agent’s `--backend-url` matches the address where Ollama is listening.
+
+### The first response is slow
+
+Ollama may need to load the model into memory before serving the first request.
+
+Check loaded models:
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ollama ps
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker exec ollama \
+      ollama ps
+    ```
+  </Tab>
+</Tabs>
+
+Using:
+
+```bash
+OLLAMA_KEEP_ALIVE=-1
+```
+
+keeps the model loaded after it has been used.
+
+### The agent does not register
+
+Check the agent logs:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker logs hivenet-agent
+    ```
+  </Tab>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u hivenet-agent \
+      -n 100 \
+      --no-pager
+    ```
+  </Tab>
+</Tabs>
+
+Test connectivity from the agent to the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Check that:
+
+- the router and agent use the same JWT secret
+- the router’s libp2p interface is reachable
+- the router advertises a libp2p address the agent can reach
+- Ollama contains the selected model
+
+### The agent gets a new peer ID after restart
+
+Make sure `--identity-path` points to persistent storage.
+
+For Docker:
+
+```bash
+docker inspect hivenet-agent \
+  | jq '.[0].Mounts'
+```
+
+For bare metal:
+
+```bash
+ls -l /var/lib/mycoroute/agent/identity.key
+```
+
+### GPU metrics are missing
+
+Check that NVIDIA tools work on the host:
+
+```bash
+nvidia-smi
+```
+
+For Docker, confirm the agent received GPU access:
+
+```bash
+docker inspect hivenet-agent \
+  | jq '.[0].HostConfig.DeviceRequests'
+```
+
+The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+
+### Requests time out
+
+The agent’s backend HTTP timeout defaults to two minutes.
+
+Increase it for long-running requests:
+
+```bash
+--http-timeout 10m
+```
+
+Also check whether the agent capacity is too high for the model and hardware.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="SGLang agent" href="/deploy/agents/sglang">
+    Connect an SGLang backend and collect engine metrics.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Learn how metadata, capacity, and policies affect agent selection.
+  </Card>
+
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Understand the CPU, memory, and GPU signals reported by agents.
+  </Card>
+</CardGroup>

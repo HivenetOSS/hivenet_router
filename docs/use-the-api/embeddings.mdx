@@ -1,0 +1,487 @@
+---
+title: "Embeddings"
+description: "Generate vector embeddings through capability-specific agents, with batch requests, routing, authentication, and error handling."
+sidebarTitle: "Embeddings"
+---
+
+Send text to an embedding model through Hivenet Router and receive vector representations for search, retrieval, clustering, classification, and other similarity-based tasks.
+
+Hivenet Router routes embedding requests to agents registered with the `embedding` capability.
+
+```text
+POST /v1/embeddings
+```
+
+<Note>
+  The backend must implement an OpenAI-compatible `POST /v1/embeddings` endpoint. Infinity is the documented embedding backend, but any compatible engine can be used through an agent registered with `--capability embedding`.
+</Note>
+
+## How embedding requests are routed
+
+For each request, Hivenet Router:
+
+1. authenticates the client when API authentication is enabled
+2. applies the configured request-rate quota
+3. reads and validates the top-level `model` field
+4. checks that the API key may use that model
+5. filters for agents registered with the `embedding` capability
+6. applies the routing policy and capacity checks
+7. forwards the original request to `POST /v1/embeddings` on the selected backend
+8. returns the backend response to the client
+
+The embedding request uses the same routing pipeline as other Hivenet Router workloads. Static filters, dynamic gates, fallback chains, and least-loaded routing can all apply.
+
+## Request headers
+
+| Header | Required | Purpose |
+| --- | --- | --- |
+| `Content-Type: application/json` | Yes | Identifies the JSON request |
+| `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
+| `X-Request-ID: <uuid>` | No | Correlates the request with logs and traces |
+
+If `X-Request-ID` is absent or is not a valid UUID, Hivenet Router generates one and returns it in the response.
+
+## Request body
+
+The minimal request contains a model and input:
+
+```json
+{
+  "model": "bge-m3",
+  "input": "The quick brown fox jumps over the lazy dog."
+}
+```
+
+| Field | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `model` | String | Yes | Model registered by an embedding agent |
+| `input` | Backend-defined; commonly a string or array of strings | Yes | Content to convert into vectors |
+
+The model name must:
+
+- match a model registered by an embedding agent
+- be allowed by the caller’s API key when model restrictions are enabled
+- contain no more than 256 characters
+
+Hivenet Router validates the `model` field. The selected backend validates the input content, batch size, token limits, and any optional embedding parameters.
+
+### Request-body size
+
+Hivenet Router limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. This limit includes the complete JSON body, so large embedding batches can reach it before the backend’s own batch or token limits.
+
+Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `HIVENET_ROUTER_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A proxy or ingress may still enforce a smaller limit.
+
+Handle HTTP `413` by reducing the batch or input size. Do not depend on a specific JSON error envelope for this early rejection.
+
+## Single input
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": "The quick brown fox jumps over the lazy dog."
+  }'
+```
+
+With API authentication enabled:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/embeddings \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": "The quick brown fox jumps over the lazy dog."
+  }'
+```
+
+## Batch input
+
+Send several strings in one request:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": [
+      "Document one text.",
+      "Document two text.",
+      "Document three text."
+    ]
+  }'
+```
+
+A compatible backend returns one embedding for each input. The `index` field identifies the position of the corresponding input in the original array.
+
+<Warning>
+  Batch-size and token limits are defined by the selected backend and model. Hivenet Router does not split an oversized batch into smaller requests.
+</Warning>
+
+## Use the OpenAI Python client
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-hivenet-...",
+)
+
+response = client.embeddings.create(
+    model="bge-m3",
+    input="The quick brown fox.",
+    encoding_format="float",
+)
+
+embedding = response.data[0].embedding
+
+print(f"Dimensions: {len(embedding)}")
+```
+
+For a batch:
+
+```python
+response = client.embeddings.create(
+    model="bge-m3",
+    input=[
+        "Document one text.",
+        "Document two text.",
+        "Document three text.",
+    ],
+    encoding_format="float",
+)
+
+for item in response.data:
+    print(
+        f"Input {item.index}: "
+        f"{len(item.embedding)} dimensions"
+    )
+```
+
+`encoding_format="float"` asks the backend to return numeric arrays. Other encoding formats work only when the selected backend supports them.
+
+## Additional request fields
+
+Hivenet Router forwards the original JSON body to the backend. You can therefore include additional OpenAI-compatible fields such as:
+
+```json
+{
+  "model": "bge-m3",
+  "input": "Text to embed",
+  "encoding_format": "float",
+  "dimensions": 1024,
+  "user": "user-123"
+}
+```
+
+Hivenet Router does not interpret these optional fields.
+
+The backend decides whether it supports:
+
+- output-dimension selection
+- base64 encoding
+- token-array input
+- user identifiers
+- engine-specific extensions
+
+Unsupported fields may be ignored or rejected by the backend.
+
+## Response
+
+A successful OpenAI-compatible response resembles:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [
+        -0.029,
+        0.027,
+        -0.049
+      ],
+      "index": 0
+    }
+  ],
+  "model": "bge-m3",
+  "usage": {
+    "prompt_tokens": 11,
+    "total_tokens": 11
+  },
+  "id": "infinity-55b80c1a-c2c9-4531-a22a-243f76b4b781",
+  "created": 1776870356
+}
+```
+
+The vector above is shortened for readability.
+
+The exact response fields depend on the backend. Some backends may omit `id`, `created`, or `usage`, or may return additional fields.
+
+Hivenet Router returns the successful backend response without reshaping the embedding vectors.
+
+## No streaming support
+
+Embedding requests are synchronous.
+
+The endpoint does not use server-sent events, and the request does not accept a Hivenet Router streaming mode. The router waits for the selected backend to return the complete embedding response.
+
+For large batches, use an appropriate request timeout and keep batch size within the backend’s limits.
+
+## Authentication and model access
+
+When API authentication is enabled, send:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+An API key can limit access to particular models.
+
+A request for a model outside the key’s allowlist returns HTTP `403`:
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: bge-m3",
+    "source": "router"
+  }
+}
+```
+
+When authentication is disabled, no authorization header is required.
+
+## Quotas
+
+Embedding requests participate in request-rate quota enforcement.
+
+When a finite request quota is configured, responses may include:
+
+```text
+X-RateLimit-Remaining-Requests
+```
+
+When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
+
+<Note>
+  The current embedding path does not charge input or output tokens against the daily token quota. It records successful embedding requests with zero input and output tokens for quota accounting.
+</Note>
+
+## Routing policies
+
+Embedding agents can be selected using the same metadata and live signals as other agents.
+
+For example:
+
+```yaml
+routing_policy:
+  match:
+    engine: infinity
+    region: EU-France
+  exclude_if:
+    success_rate:
+      lt: 0.95
+  strategy: least-loaded
+```
+
+Capability filtering happens automatically before policy ranking. An embedding request cannot be routed to an agent registered as `llm` or `reranker`.
+
+You can also use fallback chains when more than one compatible embedding backend serves the same model.
+
+## Discover embedding models
+
+List the models available through the router:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "embedding")
+      | {
+          id,
+          capability,
+          agents
+        }'
+```
+
+Inspect registered embedding agents:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.capability == "embedding")
+      | {
+          peer_id,
+          model: .metadata.model,
+          engine: .metadata.engine,
+          region: .metadata.region,
+          capacity: .metadata.capacity,
+          is_healthy: .status.healthy
+        }'
+```
+
+The administration endpoint may require separate credentials depending on the router’s admin-auth configuration.
+
+## Error responses
+
+Router errors use this envelope:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "router"
+  }
+}
+```
+
+Errors produced by the backend use:
+
+```json
+{
+  "error": {
+    "code": "backend_error",
+    "message": "Backend response or explanation",
+    "source": "backend"
+  }
+}
+```
+
+Common responses include:
+
+| HTTP status | Code | Meaning |
+| --- | --- | --- |
+| `400` | `request_invalid` | Missing model, malformed JSON, or model name too long |
+| `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
+| `401` | `unauthorized` | Missing or invalid API credentials |
+| `403` | `model_forbidden` | API key cannot use the requested model |
+| `404` | `model_not_found` | No registered model matches the request |
+| `429` | `rate_limit_exceeded` | Request-rate quota exhausted |
+| `503` | `no_agents_available` | No healthy matching embedding agent |
+| `503` | `no_capacity` | Matching agents are at capacity |
+| `503` | `queue_full` | The router queue remained full |
+| `503` | `agent_disconnected` | The selected agent became unreachable |
+| `502` | `backend_error` | Backend returned an unsuccessful response |
+| `504` | `request_timeout` | The request exceeded its deadline |
+
+See [Error codes](/reference/error-codes) for the complete reference.
+
+## Troubleshooting
+
+### The model is not found
+
+List available embedding models:
+
+```bash
+curl http://localhost:8080/v1/models \
+  | jq '.data[]
+      | select(.capability == "embedding")'
+```
+
+Check that:
+
+- the agent uses `--capability embedding`
+- the requested model matches the registered model exactly
+- the agent is healthy
+- the API key may access the model
+
+### The request reaches the wrong backend type
+
+Inspect the agent registration:
+
+```bash
+curl http://localhost:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.model == "bge-m3")
+      | {
+          model: .metadata.model,
+          capability: .metadata.capability,
+          engine: .metadata.engine
+        }'
+```
+
+The capability must be:
+
+```text
+embedding
+```
+
+Use distinct model names if the same model identifier would otherwise be registered under different capabilities.
+
+### The backend rejects the input
+
+Test the backend directly:
+
+```bash
+curl -X POST \
+  http://localhost:7997/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": "Test input"
+  }'
+```
+
+A backend may reject:
+
+- empty strings
+- unsupported input formats
+- batches that are too large
+- inputs above the model’s token limit
+- unsupported optional fields
+
+### The batch response has fewer items than expected
+
+Check the backend response directly.
+
+Hivenet Router does not combine, remove, reorder, or deduplicate input strings. It returns the successful backend response as received.
+
+### Requests time out
+
+Reduce the batch size or increase the router and agent request timeout where appropriate.
+
+The agent’s backend HTTP timeout defaults to two minutes:
+
+```bash
+--http-timeout 10m
+```
+
+Also check:
+
+- model loading state
+- backend queue pressure
+- agent capacity
+- input length
+- accelerator memory
+
+### The request is rate-limited
+
+Check the returned header:
+
+```text
+X-RateLimit-Remaining-Requests
+```
+
+Review the quota assigned to the API key and the per-model quota entry when per-model quotas are enabled.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Reranking" href="/use-the-api/reranking">
+    Score and reorder documents by relevance to a query.
+  </Card>
+
+  <Card title="Models" href="/use-the-api/models">
+    Discover models, capabilities, engines, and healthy capacity.
+  </Card>
+
+  <Card title="Infinity agent" href="/deploy/agents/infinity">
+    Configure embedding and reranking models through Infinity.
+  </Card>
+</CardGroup>

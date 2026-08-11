@@ -1,0 +1,77 @@
+---
+title: "Admission control"
+description: "Understand how Hivenet Router protects router and agent capacity before work enters the inference queue."
+sidebarTitle: "Admission control"
+---
+
+Admission control rejects or briefly parks work before it overloads a router, agent, or API key. It complements routing policies: routing chooses eligible capacity, while admission control decides whether the selected path can accept the request now.
+
+## Operating modes
+
+Hivenet Router supports two admission modes:
+
+- **Reserved mode** accounts for capacity that has already been committed to active requests.
+- **Serverless mode** admits work against the capacity currently reported by the serving agents.
+
+Choose the mode that matches how your inference capacity is provisioned. Mixed fleets can use routing policies to separate pools with different operating assumptions.
+
+## Limits evaluated before admission
+
+The router evaluates the request and the currently occupied capacity before forwarding work. The checks include:
+
+- request token limits
+- request image limits
+- token-weighted occupancy budgets
+- per-key occupancy limits
+- input token-rate quotas
+- output token-rate quotas
+
+Token-weighted occupancy prevents a small number of large prompts from consuming the same budget as many small requests. Per-key budgets keep one credential from monopolizing shared capacity.
+
+## Parking and rejection
+
+When capacity may become available quickly, the router can park a request for a bounded period. The admission fraction and parking timeout are controlled by:
+
+- `HR_ADMIT_FRACTION`
+- `HR_ADMIT_PARK_TIMEOUT`
+
+If the request still cannot be admitted, the router returns an error without sending the request to an inference backend.
+
+## Admission errors
+
+Two admission-specific error codes are important to clients:
+
+| Error | Meaning | Recommended client behavior |
+| --- | --- | --- |
+| `input_too_long` | The request exceeds a configured token or image limit. | Reduce the prompt or image payload. Retrying unchanged will not help. |
+| `concurrency_limit_exceeded` | Current occupancy or a per-key concurrency budget prevents admission. | Retry with backoff and jitter, or reduce concurrent work. |
+
+Treat these errors differently. `input_too_long` requires a smaller request. `concurrency_limit_exceeded` describes temporary or policy-limited capacity.
+
+## Client guidance
+
+- Apply exponential backoff with jitter to temporary admission failures.
+- Bound retries so a saturated fleet does not receive a retry storm.
+- Track admission errors separately from backend failures.
+- Use separate API keys for workloads that require distinct occupancy or rate budgets.
+- Keep client timeouts longer than the configured parking window.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Policy gates" href="/routing/policy-gates">
+    Control which routes and models are eligible before admission.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure request, token, and occupancy limits for credentials.
+  </Card>
+
+  <Card title="Error codes" href="/reference/error-codes">
+    Handle router, agent, backend, and admission failures consistently.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Monitor capacity, occupancy, latency, and rejected work.
+  </Card>
+</CardGroup>

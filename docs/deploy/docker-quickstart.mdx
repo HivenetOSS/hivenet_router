@@ -1,0 +1,566 @@
+---
+title: "Docker quickstart"
+sidebarTitle: "Docker quickstart"
+description: "Deploy a Mycoroute router and two vLLM agents across Linux hosts with Docker, then verify routing and metrics."
+---
+
+Deploy one Mycoroute router and two vLLM agents across three Linux machines.
+
+The router receives application requests through one client-facing API. Each agent connects a vLLM backend to the router. Both agents serve the same model, allowing Mycoroute to distribute requests between them.
+
+<Note>
+  The hostnames and private IP addresses in this guide are examples. Replace them with addresses from your own network.
+</Note>
+
+## What you will deploy
+
+| Machine | Role | Example IP | GPU |
+| --- | --- | --- | --- |
+| `router-server` | Mycoroute router | `192.168.1.100` | None |
+| `gpu-eu-1` | Agent and vLLM | `192.168.1.101` | NVIDIA GPU |
+| `gpu-eu-2` | Agent and vLLM | `192.168.1.102` | NVIDIA GPU |
+
+Applications send requests to the router on port `8080`.
+
+Agents authenticate with the router over gRPC, receive the router’s libp2p connection details, and initiate the persistent connection used for registration and inference traffic.
+
+## Network requirements
+
+| Connection | Port | Purpose |
+| --- | --- | --- |
+| Clients → Router | `8080` | Client HTTP API |
+| Agents → Router | `50051` | gRPC authentication |
+| Agents → Router | `9000` | libp2p registration and communication |
+| Monitoring → Router | `2112` | Prometheus metrics |
+
+Agent hosts initiate their connections to the router and do not need to expose an inbound Mycoroute port.
+
+Keep the Prometheus endpoint restricted to your monitoring network.
+
+## Prerequisites
+
+You need:
+
+- three Ubuntu or Debian machines
+- Docker 20.10 or later on the router
+- Docker Compose 2.0 or later
+- an NVIDIA driver on each GPU machine
+- Git, OpenSSL, `curl`, `jq`, and `scp`
+- network access between the hosts on the ports listed above
+- access to the model used in this guide
+
+This guide uses Docker host networking and is intended for Linux hosts.
+
+<Steps>
+  <Step title="Prepare the router">
+    On `router-server`, clone the repository:
+
+    ```bash
+    git clone https://github.com/HiveNetCode/mycoroute.git
+    cd mycoroute
+    ```
+
+    Make sure Docker is installed and running:
+
+    ```bash
+    docker --version
+    docker compose version
+    ```
+
+    Build the router image:
+
+    ```bash
+    docker build -t mycoroute/router:latest .
+    ```
+
+    Create the persistent database directory:
+
+    ```bash
+    mkdir -p badger
+    ```
+  </Step>
+  <Step title="Prepare the GPU hosts">
+    Run these steps on both `gpu-eu-1` and `gpu-eu-2`.
+
+    Clone the repository:
+
+    ```bash
+    git clone https://github.com/HiveNetCode/mycoroute.git
+    cd mycoroute
+    ```
+
+    Run the agent-host setup script:
+
+    ```bash
+    chmod +x scripts/setup-agent-host.sh
+    
+    sudo MYCOROUTE_ROUTER_IP=192.168.1.100 \
+      ./scripts/setup-agent-host.sh
+    ```
+
+    The script:
+
+    - verifies that the NVIDIA driver is available
+    - installs Docker and the Docker Compose plugin when needed
+    - installs and configures the NVIDIA Container Toolkit
+    - checks that containers can access the GPU
+    - verifies outbound connectivity requirements for the agent host
+    - installs host packages used by inference engines that compile native extensions
+
+    If the script adds your user to the Docker group, sign out and back in before running Docker without `sudo`.
+
+    Build the agent image:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t mycoroute/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent agent identity:
+
+    ```bash
+    sudo mkdir -p /opt/mycoroute
+    sudo chown "$USER":"$USER" /opt/mycoroute
+    ```
+  </Step>
+  <Step title="Create and distribute the shared secret">
+    On `router-server`, from the repository root:
+
+    ```bash
+    openssl rand -hex 32 > jwt.secret
+    chmod 600 jwt.secret
+    ```
+
+    Copy the secret to both agent hosts:
+
+    ```bash
+    scp jwt.secret gpu-eu-1:/opt/mycoroute/jwt.secret
+    scp jwt.secret gpu-eu-2:/opt/mycoroute/jwt.secret
+    ```
+
+    On each agent host, restrict access to the file:
+
+    ```bash
+    chmod 600 /opt/mycoroute/jwt.secret
+    ```
+
+    <Warning>
+      The router and every agent must use the same JWT secret. Anyone with this secret can authenticate an agent with the router. Use your normal secret-management process in production.
+    </Warning>
+  </Step>
+  <Step title="Start the router">
+    On `router-server`, from the repository root:
+
+    ```bash
+    docker run -d \
+      --name mycoroute-router \
+      --restart unless-stopped \
+      --network host \
+      -e mycoroute_ALLOW_INSECURE_ADMIN=true \
+      -v "$PWD/jwt.secret:/jwt.secret:ro" \
+      -v "$PWD/badger:/badger" \
+      mycoroute/router:latest \
+      --jwt-secret-file /jwt.secret \
+      --http-port :8080 \
+      --grpc-port :50051 \
+      --p2p-port 9000 \
+      --p2p-listen-addr 0.0.0.0 \
+      --metrics-port :2112 \
+      --disk-db-path /badger
+    ```
+
+    The router uses host networking so its HTTP, gRPC, libp2p, and metrics interfaces bind directly to the machine.
+
+    <Warning>
+      `mycoroute_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` for this quickstart. Configure administrator API-key authentication before exposing the router to shared or untrusted networks.
+    </Warning>
+
+    Check the public liveness endpoint:
+
+    ```bash
+    curl http://localhost:8080/health
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "status": "ok"
+    }
+    ```
+
+    Check the operational health endpoint:
+
+    ```bash
+    curl http://localhost:8080/admin/health | jq .
+    ```
+
+    Before any agents register, the response should report zero agents:
+
+    ```json
+    {
+      "status": "degraded",
+      "total_agents": 0,
+      "healthy_agents": 0,
+      "queue_length": 0,
+      "agents": []
+    }
+    ```
+
+    The full response also contains a Unix timestamp.
+
+    <Note>
+      If the router is behind NAT, Docker port mapping, or a public hostname, configure `--p2p-announce-addr` with an address the agents can reach.
+    </Note>
+  </Step>
+  <Step title="Start vLLM on the first GPU host">
+    On `gpu-eu-1`:
+
+    ```bash
+    docker run -d \
+      --name vllm \
+      --restart unless-stopped \
+      --gpus all \
+      --network host \
+      vllm/vllm-openai:latest \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --max-num-seqs 32
+    ```
+
+    Wait for the model to load:
+
+    ```bash
+    docker logs -f vllm
+    ```
+
+    Check the backend health endpoint:
+
+    ```bash
+    curl http://localhost:8888/health
+    ```
+
+    A ready vLLM server returns HTTP status `200`.
+  </Step>
+  <Step title="Start the first agent">
+    On `gpu-eu-1`:
+
+    ```bash
+    docker run -d \
+      --name mycoroute-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/data \
+      mycoroute/agent:latest \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --engine vllm \
+      --backend-url http://localhost:8888 \
+      --capacity 32 \
+      --region EU-Primary \
+      --identity-path /data/agent_identity.key
+    ```
+
+    The declared capacity matches the vLLM `--max-num-seqs` value used in this example.
+
+    Check the agent logs:
+
+    ```bash
+    docker logs mycoroute-agent
+    ```
+
+    The agent waits for the backend to become healthy, discovers the model through `GET /v1/models`, authenticates with the router, and registers.
+
+    These flags are important in a multi-machine Docker deployment:
+
+    | Flag | Purpose |
+    | --- | --- |
+    | `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+    | `--identity-path` | Preserves the agent’s peer ID across restarts |
+  </Step>
+  <Step title="Start vLLM and the agent on the second GPU host">
+    On `gpu-eu-2`, start the second vLLM backend:
+
+    ```bash
+    docker run -d \
+      --name vllm \
+      --restart unless-stopped \
+      --gpus all \
+      --network host \
+      vllm/vllm-openai:latest \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --max-num-seqs 32
+    ```
+
+    Wait for the backend to become healthy:
+
+    ```bash
+    curl http://localhost:8888/health
+    ```
+
+    Then start the second agent:
+
+    ```bash
+    docker run -d \
+      --name mycoroute-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/data \
+      mycoroute/agent:latest \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --engine vllm \
+      --backend-url http://localhost:8888 \
+      --capacity 32 \
+      --region EU-Secondary \
+      --identity-path /data/agent_identity.key
+    ```
+  </Step>
+  <Step title="Verify agent registration">
+    On `router-server`:
+
+    ```bash
+    curl http://localhost:8080/admin/health | jq .
+    ```
+
+    With both agents healthy, the response should resemble:
+
+    ```json
+    {
+      "status": "healthy",
+      "total_agents": 2,
+      "healthy_agents": 2,
+      "queue_length": 0,
+      "timestamp": 1760000000,
+      "agents": [
+        {
+          "peer_id": "12D3KooW...",
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "engine": "vllm",
+          "version": "dev",
+          "capacity": 32,
+          "region": "EU-Primary",
+          "is_healthy": true,
+          "last_seen": 1760000000
+        },
+        {
+          "peer_id": "12D3KooX...",
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "engine": "vllm",
+          "version": "dev",
+          "capacity": 32,
+          "region": "EU-Secondary",
+          "is_healthy": true,
+          "last_seen": 1760000000
+        }
+      ]
+    }
+    ```
+
+    Peer IDs and timestamps will differ.
+
+    For a fuller view of routing, latency, hardware, and engine state:
+
+    ```bash
+    curl http://localhost:8080/admin/routing-table | jq .
+    ```
+  </Step>
+  <Step title="Send an inference request">
+    From a machine that can reach the router:
+
+    ```bash
+    curl -X POST http://192.168.1.100:8080/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello"
+          }
+        ]
+      }'
+    ```
+
+    The router selects one of the two agents serving the model and forwards the request to its local vLLM backend.
+
+    Client authentication is disabled by default when no auth configuration is provided. To require API keys, configure the router with an auth file and include an authorization header in requests.
+
+    ```bash
+    -H "Authorization: Bearer <api-key>"
+    ```
+
+    See [API keys](/security/api-keys) for the complete setup.
+  </Step>
+  <Step title="Observe load distribution">
+    Send ten requests in parallel:
+
+    ```bash
+    for i in {1..10}; do
+      curl -s http://192.168.1.100:8080/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "messages": [
+            {
+              "role": "user",
+              "content": "Hi"
+            }
+          ]
+        }' &
+    done
+    
+    wait
+    ```
+
+    Inspect the routing counter:
+
+    ```bash
+    curl -s http://192.168.1.100:2112/metrics \
+      | grep mycoroute_routing_requests_routed_total
+    ```
+  </Step>
+</Steps>
+
+## Port reference
+
+| Service | Host | Port | Restrict access to |
+| --- | --- | --- | --- |
+| Router HTTP API | Router | `8080` | Trusted clients |
+| Router gRPC auth | Router | `50051` | Agent hosts |
+| Router libp2p | Router | `9000` | Agent hosts |
+| Router Prometheus | Router | `2112` | Monitoring systems |
+| vLLM backend | Each agent | `8888` | Local host |
+
+Because the agent container uses host networking, it reaches vLLM at `localhost:8888`. The backend port does not need to be exposed outside the GPU machine.
+
+## Troubleshooting
+
+### An agent does not register
+
+Check the agent logs:
+
+```bash
+docker logs mycoroute-agent
+```
+
+Test the agent’s connection to the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Common causes include:
+
+- `--router-grpc` points to the wrong address
+- the router advertises a libp2p address the agent cannot reach
+- the router is not listening on `0.0.0.0`
+- the backend is not healthy
+- the router and agent use different JWT secrets
+
+### vLLM is not ready
+
+Inspect the logs:
+
+```bash
+docker logs vllm
+```
+
+Check the health endpoint:
+
+```bash
+curl http://localhost:8888/health
+```
+
+Wait for vLLM to finish loading the model before starting the agent.
+
+### The JWT secret does not match
+
+On the router and each agent host:
+
+```bash
+sha256sum /path/to/jwt.secret
+```
+
+The hash must be identical on every host.
+
+### GPU metrics are missing
+
+Check that Docker can access the GPU:
+
+```bash
+docker run --rm \
+  --gpus all \
+  nvidia/cuda:12.6.0-base-ubuntu24.04 \
+  nvidia-smi
+```
+
+Confirm that the agent container received a GPU device request:
+
+```bash
+docker inspect mycoroute-agent \
+  | grep -A5 DeviceRequests
+```
+
+### A firewall blocks traffic
+
+On the router, allow only the traffic your deployment requires.
+
+With UFW:
+
+```bash
+sudo ufw allow 8080/tcp
+sudo ufw allow from 192.168.1.101 to any port 50051 proto tcp
+sudo ufw allow from 192.168.1.102 to any port 50051 proto tcp
+sudo ufw allow from 192.168.1.101 to any port 9000 proto tcp
+sudo ufw allow from 192.168.1.102 to any port 9000 proto tcp
+sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
+```
+
+<Warning>
+  These commands are examples, not a complete network-security policy. Apply equivalent restrictions in your cloud firewall or security group.
+</Warning>
+
+## Clean up
+
+On each agent host:
+
+```bash
+docker stop mycoroute-agent vllm
+docker rm mycoroute-agent vllm
+```
+
+On the router:
+
+```bash
+docker stop mycoroute-router
+docker rm mycoroute-router
+```
+
+The BadgerDB data in the mounted `badger` directory and agent identity files in `/opt/mycoroute` remain after the containers are removed.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Docker Compose" href="/deploy/docker-compose">
+    Add Prometheus, Grafana, Loki, and Tempo using the repository’s Compose stack.
+  </Card>
+
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Configure model discovery, metrics, capacity, and multi-model deployments.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Control how Mycoroute filters, ranks, and falls back across agents.
+  </Card>
+</CardGroup>

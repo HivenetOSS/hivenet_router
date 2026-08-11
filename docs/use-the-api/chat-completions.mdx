@@ -1,0 +1,488 @@
+---
+Slug: "api/chat-completions"
+title: "Chat completions and messages"
+description: "Send OpenAI-compatible chat-completion and Anthropic Messages requests through Hivenet Router, with streaming, routing, authentication, and quota enforcement."
+sidebarTitle: "Chat completions"
+---
+
+Hivenet Router exposes OpenAI-compatible Chat Completions and Anthropic-compatible Messages endpoints through the same routing pipeline.
+
+The router reads the top-level `model` field, selects a healthy language-model agent, and forwards the original request to the same path on that agent’s backend.
+
+| API dialect | Endpoint |
+| --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` |
+| Anthropic Messages | `POST /v1/messages` |
+| Anthropic token counting | `POST /v1/messages/count_tokens` |
+
+<Note>
+  The selected backend must support the endpoint used by the client. Hivenet Router does not translate between the OpenAI and Anthropic request formats.
+</Note>
+
+## How passthrough works
+
+For each request, Hivenet Router:
+
+1. authenticates the client when API authentication is enabled
+2. applies request and token quotas when configured
+3. reads and validates the top-level `model` field
+4. checks that the API key may use that model
+5. selects a healthy `llm` agent through the routing policy
+6. forwards the original body to the same path on the selected backend
+7. returns the backend response to the client
+
+Apart from the fields needed for routing and quota estimation, Hivenet Router does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
+
+## Allowed passthrough paths
+
+Hivenet Router only forwards an explicit set of inference paths:
+
+```text
+/v1/chat/completions
+/v1/messages
+/v1/messages/count_tokens
+```
+
+Other backend paths are not exposed through the router.
+
+This prevents clients from reaching backend administration, scaling, loading, metrics, or other control-plane endpoints through the public inference API.
+
+## Request requirements
+
+Every request must contain a non-empty top-level `model` field:
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct"
+}
+```
+
+The model name:
+
+- must match a model registered by an agent
+- must not exceed 256 characters
+- must be allowed by the caller’s API key when model restrictions are enabled
+
+Malformed JSON, a missing model, or an overlong model name is rejected before routing.
+
+### Request-body size
+
+Hivenet Router limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. Requests above the configured limit are rejected with HTTP `413` before model authorization, quota accounting, queueing, or backend forwarding.
+
+Configure the limit with:
+
+```bash
+export HIVENET_ROUTER_MAX_REQUEST_BYTES=<bytes>
+```
+
+Set it to `0` to disable the built-in limit. A reverse proxy or ingress can still enforce a smaller limit.
+
+Do not depend on a particular JSON error body for `413` responses. Handle the HTTP status directly, because the rejection occurs before the normal inference-handler error path.
+
+## Request headers
+
+| Header | Required | Purpose |
+| --- | --- | --- |
+| `Content-Type: application/json` | Recommended | Identifies the JSON request body |
+| `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
+| `X-Request-ID: <uuid>` | No | Correlates requests with logs and traces |
+
+If `X-Request-ID` contains a valid UUID, Hivenet Router preserves it. If it is missing or invalid, the router creates a new UUID. The value is returned in the response.
+
+Hivenet Router may also return a W3C `traceparent` header when tracing is enabled.
+
+## OpenAI Chat Completions
+
+Send requests to:
+
+```text
+POST /v1/chat/completions
+```
+
+### Basic request
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Answer clearly and briefly."
+      },
+      {
+        "role": "user",
+        "content": "What does an inference router do?"
+      }
+    ]
+  }'
+```
+
+When authentication is enabled:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+### Fields used by Hivenet Router
+
+Hivenet Router forwards the complete request, but it reads a small number of fields for routing and quota enforcement.
+
+| Field | How Hivenet Router uses it |
+| --- | --- |
+| `model` | Selects matching agents and applies model restrictions |
+| `messages` | Estimates input-token use when token quotas are enabled |
+| `max_completion_tokens` | Checks the worst-case requested output against the daily token budget |
+| `max_tokens` | Used as a fallback when `max_completion_tokens` is absent |
+| `stream` | Enables progressive streaming through the router and agent |
+
+All other fields are passed to the backend without Hivenet Router assigning its own default values.
+
+<Note>
+  The selected backend decides which request fields, message roles, modalities, tools, and sampling values it accepts.
+</Note>
+
+### Multimodal message content
+
+Hivenet Router can parse message content supplied as plain text or as content-part arrays containing text, image URLs, or input audio.
+
+For example:
+
+```json
+{
+  "model": "vision-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is shown in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://example.com/image.jpg"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+The backend must support the requested modality. Hivenet Router routes and forwards the request but does not add vision or audio support to a text-only engine.
+
+## Non-streaming responses
+
+For a non-streaming request, Hivenet Router returns the response produced by the selected backend.
+
+A typical OpenAI-compatible response resembles:
+
+```json
+{
+  "id": "chat-123",
+  "object": "chat.completion",
+  "created": 1760000000,
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "An inference router directs requests to an available model server."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 13,
+    "total_tokens": 33
+  }
+}
+```
+
+The exact fields and values depend on the backend.
+
+If the backend omits token usage from a successful non-streaming response, Hivenet Router estimates prompt and completion tokens for accounting and audit records.
+
+## Streaming responses
+
+Set:
+
+```json
+{
+  "stream": true
+}
+```
+
+and use a client that reads server-sent events progressively.
+
+```bash
+curl -N -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count from one to five."
+      }
+    ]
+  }'
+```
+
+Hivenet Router forwards streaming chunks as they arrive from the backend rather than buffering the full response.
+
+A typical stream resembles:
+
+```text
+data: {"choices":[{"delta":{"content":"One"}}]}
+
+data: {"choices":[{"delta":{"content":", two"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+The exact event structure comes from the backend.
+
+<Note>
+  Hivenet Router can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
+</Note>
+
+## Anthropic Messages
+
+Send Anthropic-compatible requests to:
+
+```text
+POST /v1/messages
+```
+
+The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend.
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api-key>" \
+  -d '{
+    "model": "Qwen/Qwen3.6-27B",
+    "max_tokens": 256,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a haiku about routing."
+      }
+    ]
+  }'
+```
+
+The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router.
+
+Model names must match both:
+
+- the name registered by the Hivenet Router agent
+- the name accepted by the backend
+
+### Use Claude Code
+
+Point Claude Code at the router:
+
+```bash
+unset ANTHROPIC_API_KEY
+
+export ANTHROPIC_BASE_URL="https://<router-host>"
+export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
+
+claude
+```
+
+The router should be exposed through HTTPS before using it outside a trusted network.
+
+See [Claude Code](/integrations/claude-code) for the complete setup and compatibility guidance.
+
+## Count Anthropic input tokens
+
+Hivenet Router also allows:
+
+```text
+POST /v1/messages/count_tokens
+```
+
+The request uses the same top-level `model` field and is routed to a backend that supports the token-counting endpoint.
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api-key>" \
+  -d '{
+    "model": "Qwen/Qwen3.6-27B",
+    "messages": [
+      {
+        "role": "user",
+        "content": "How many tokens are in this request?"
+      }
+    ]
+  }'
+```
+
+A compatible backend returns:
+
+```json
+{
+  "input_tokens": 11
+}
+```
+
+This endpoint counts input tokens without running model inference.
+
+## Authentication and model access
+
+When API authentication is enabled, send:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+An API key can restrict access to specific models.
+
+A request for a model outside the key’s allowlist returns HTTP `403`:
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: restricted-model",
+    "source": "router"
+  }
+}
+```
+
+When authentication is disabled, requests do not need an authorization header.
+
+## Request and token quotas
+
+API keys can enforce:
+
+- requests per minute
+- daily token budgets
+- separate quotas for individual models
+
+Before routing, Hivenet Router checks the request-rate quota.
+
+When a daily token budget is configured, it also estimates the prompt and checks whether the remaining budget can cover:
+
+```text
+estimated input tokens + requested maximum output tokens
+```
+
+`max_completion_tokens` is used when present. Otherwise Hivenet Router uses `max_tokens`.
+
+The estimated input tokens are charged at admission. Actual completion tokens are charged after the backend responds.
+
+<Warning>
+  Token estimation for Anthropic-format requests is best-effort. The estimator does not fully account for every Anthropic content structure, including some top-level system instructions and non-text blocks.
+</Warning>
+
+## Rate-limit headers
+
+When a finite quota is configured, responses may include:
+
+```text
+X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
+```
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Remaining-Requests` | Requests remaining in the active per-minute bucket |
+| `X-RateLimit-Remaining-Tokens` | Tokens remaining in the active daily bucket |
+
+Unlimited quotas do not produce a remaining-value header.
+
+When a request-rate bucket is exhausted, Hivenet Router returns HTTP `429` with `X-RateLimit-Remaining-Requests: 0`.
+
+A token-budget rejection can still report a nonzero `X-RateLimit-Remaining-Tokens` value when the remaining budget is positive but too small for the estimated prompt plus requested maximum output. Post-response token rejection reports `0`.
+
+## Error responses
+
+Router errors use this envelope:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "router"
+  }
+}
+```
+
+Backend-derived errors use:
+
+```json
+{
+  "error": {
+    "code": "error_code",
+    "message": "Human-readable explanation",
+    "source": "backend"
+  }
+}
+```
+
+Common responses include:
+
+| HTTP status | Example code | Meaning |
+| --- | --- | --- |
+| `400` | `request_invalid` | Malformed request or missing model |
+| `400` | `context_length_exceeded` | Backend rejected the context length |
+| `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
+| `401` | `unauthorized` | Missing or invalid credentials |
+| `403` | `model_forbidden` | API key cannot use the requested model |
+| `404` | `model_not_found` | No registered model matches the request |
+| `429` | `rate_limit_exceeded` | Request-rate quota exhausted |
+| `429` | `token_limit_exceeded` | Daily token budget exhausted |
+| `503` | `no_agents_available` | No healthy matching agent |
+| `503` | `no_capacity` | Matching agents are at capacity |
+| `503` | `queue_full` | Router request queue remained full |
+| `504` | `request_timeout` | Request exceeded the router timeout |
+
+See [Error codes](/reference/error-codes) for the complete reference.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Embeddings" href="/use-the-api/embeddings">
+    Generate vectors through capability-specific embedding agents.
+  </Card>
+
+  <Card title="Models" href="/use-the-api/models">
+    Discover which models and capabilities are currently available.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure client authentication, model access, and quotas.
+  </Card>
+</CardGroup>

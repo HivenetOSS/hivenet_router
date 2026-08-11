@@ -1,0 +1,123 @@
+---
+title: "Mycoroute, Hivenet Inference API, and Compute with Hivenet"
+description: "Understand how Mycoroute differs from Hivenet Inference API and Compute with Hivenet, and choose the right option for your workload."
+sidebarTitle: "Mycoroute and Hivenet services"
+---
+
+Mycoroute, Hivenet Inference API, and Compute with Hivenet all support AI inference workloads, but they solve different problems.
+
+The main difference is who operates each layer.
+
+- With **Mycoroute**, you operate the routing layer and connect your own inference infrastructure.
+- With **Hivenet Inference API**, Hivenet operates the inference service behind a managed API.
+- With **Compute with Hivenet**, you rent infrastructure and decide what software to run on it.
+
+<Note>
+  These docs cover Mycoroute. Information about Hivenet Inference API and Compute with Hivenet is included here only to explain where Mycoroute fits.
+</Note>
+
+## Mycoroute
+
+Mycoroute is open-source software for routing requests across self-hosted inference backends.
+
+You deploy the router and agents yourself. You choose the inference engines, models, machines, regions, routing policies, authentication rules, fallback behavior, and monitoring setup.
+
+Mycoroute provides:
+
+- one OpenAI-compatible endpoint for several inference backends
+- routing based on model, engine, region, tags, capacity, and live metrics
+- fallback chains for unavailable or overloaded backends
+- optional fallback to external providers
+- API-key authentication, quotas, and model restrictions
+- Prometheus metrics, Grafana dashboards, and audit logs
+
+Mycoroute does not provide GPUs or host models by itself. It coordinates inference servers that you already operate.
+
+Use Mycoroute when you want to:
+
+- run inference across several machines or locations
+- combine different inference engines behind one endpoint
+- keep routing policies and operational data under your control
+- avoid depending on a hosted routing control plane
+- build a private or distributed inference setup
+
+## Hivenet Inference API
+
+Hivenet Inference API is a managed inference service.
+
+You connect your application to an API endpoint operated by Hivenet. Hivenet runs and maintains the service infrastructure behind that endpoint, so you do not need to deploy a Mycoroute router, agents, or inference engines yourself.
+
+Use Hivenet Inference API when you want to:
+
+- call hosted models through a managed API
+- avoid operating inference infrastructure
+- avoid maintaining routers, agents, and model servers
+- use a commercial service with managed operations
+
+The models, regions, service limits, and commercial terms available through Hivenet Inference API are separate from Mycoroute and may change independently.
+
+## Compute with Hivenet
+
+Compute with Hivenet provides GPU and CPU infrastructure for workloads you operate yourself.
+
+You create an instance, choose the runtime environment, and deploy the software you need. That could include an inference engine, a Mycoroute agent, a Mycoroute router, a notebook, or another application.
+
+Use Compute with Hivenet when you want to:
+
+- rent GPU or CPU infrastructure
+- control the operating system and runtime environment
+- run your own inference engine
+- deploy Mycoroute on infrastructure you manage
+- run workloads that are not covered by a managed inference API
+
+Compute with Hivenet provides the machines. You remain responsible for the software running on them.
+
+## Compare the three options
+
+|  | Mycoroute | Hivenet Inference API | Compute with Hivenet |
+| --- | --- | --- | --- |
+| What it provides | Inference routing software | Managed inference endpoint | GPU and CPU infrastructure |
+| Who operates it | You | Hivenet | You |
+| Open source | Yes | No | Not applicable |
+| Infrastructure included | No | Yes | Yes |
+| You manage inference engines | Yes | No | Yes |
+| You manage routing | Yes | No | Yes, if you deploy Mycoroute or another router |
+| Primary interface | OpenAI-compatible API from your router | Managed API endpoint | Virtual machine or compute instance |
+| Best suited to | Self-hosted and distributed inference | Managed model access | Custom infrastructure and workloads |
+
+## Using Mycoroute with Compute with Hivenet
+
+You can run Mycoroute on Compute with Hivenet in the same way you would run it on other infrastructure.
+
+A typical setup could include:
+
+1. One Compute instance running the Mycoroute router.
+2. Several GPU instances running inference engines.
+3. One Mycoroute agent beside each inference engine.
+4. Applications sending requests to the router’s OpenAI-compatible endpoint.
+
+Mycoroute can also route across a mixed environment. For example, some agents could run on your own machines while others run on Compute with Hivenet or another provider.
+
+Mycoroute does not require Hivenet infrastructure. It can run wherever its router, agents, and inference backends can communicate.
+
+## Choosing the right option
+
+Choose **Mycoroute** when you want to operate your own inference setup and need routing across several backends.
+
+Choose **Hivenet Inference API** when you want a managed endpoint and do not want to operate the underlying inference service.
+
+Choose **Compute with Hivenet** when you need infrastructure for software and workloads that you control.
+
+You can also combine them where appropriate. For example, you might run Mycoroute on your own infrastructure, use Compute with Hivenet for additional GPU capacity, and configure an external provider as a final fallback.
+
+## Continue with Mycoroute
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Deploy a router and agents, then send your first routed request.
+  </Card>
+
+  <Card title="Architecture overview" href="/getting-started/architecture-overview">
+    See how the router, agents, control plane, and data plane work together.
+  </Card>
+</CardGroup>

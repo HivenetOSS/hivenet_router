@@ -1,53 +1,173 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
+  "theme": "luma",
   "name": "Hivenet Router",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#FF9A33",
+    "light": "#FFB366",
+    "dark": "#D46E35"
   },
   "favicon": "/favicon.svg",
   "navigation": {
     "pages": [
+      "index",
+      "quickstart",
       {
-        "group": "Getting Started",
+        "group": "Getting started",
         "pages": [
-          "index",
-          "quickstart"
+          "getting-started/introduction",
+          "getting-started/architecture-overview",
+          "getting-started/why-mycoroute",
+          "getting-started/mycoroute-hivenet-inference-api-compute"
+        ]
+      },
+      {
+        "group": "Deploy",
+        "pages": [
+          "deploy/docker-quickstart",
+          "deploy/bare-metal",
+          {
+            "group": "Agent deployment",
+            "pages": [
+              "deploy/agents/vllm",
+              "deploy/agents/ollama",
+              "deploy/agents/sglang",
+              "deploy/agents/llama-cpp",
+              "deploy/agents/infinity",
+              "deploy/agents/custom-engine"
+            ]
+          },
+          "deploy/docker-compose",
+          {
+            "group": "Agents",
+            "pages": [
+              "deploy/agents/vllm",
+              "deploy/agents/ollama",
+              "deploy/agents/sglang",
+              "deploy/agents/llama-cpp",
+              "deploy/agents/infinity",
+              "deploy/agents/custom-engine"
+            ]
+          },
+          "deploy/docker-compose",
+          "deploy/bare-metal"
+        ]
+      },
+      {
+        "group": "Use the API",
+        "pages": [
+          "api/chat-completions",
+          "api/embeddings",
+          "api/reranking",
+          "api/models-list",
+          "api/admin-endpoints",
+          "api/chat-completions",
+          "api/embeddings",
+          "api/reranking",
+          "api/models",
+          "api/admin-endpoints"
+        ]
+      },
+      {
+        "group": "Routing and policies",
+        "pages": [
+          "routing/routing-concepts",
+          "routing/policy-yaml-reference",
+          "routing/policy-gates",
+          "routing/fallback-chains",
+          "routing/provider-fallback",
+          "routing/hardware-aware-routing",
+          "routing/routing-concepts",
+          "routing/policy-yaml-reference",
+          "routing/fallback-chains",
+          "routing/provider-fallback",
+          "routing/policy-gates"
+        ]
+      },
+      {
+        "group": "Security and auth",
+        "pages": [
+          "security/authentication-overview",
+          "security/api-keys",
+          "security/auth-yaml-reference",
+          "security/model-restrictions",
+          "security/key-rotation",
+          "security/authentication-overview",
+          "security/auth-yaml-reference",
+          "security/api-keys",
+          "security/model-restrictions",
+          "security/key-rotation"
+        ]
+      },
+      {
+        "group": "Observability",
+        "pages": [
+          "observability/prometheus-metrics",
+          "observability/grafana-dashboards",
+          "observability/audit-logging",
+          "observability/hardware-metrics",
+          "observability/engine-metrics",
+          "observability/observability-overview",
+          "observability/prometheus-metrics",
+          "observability/grafana-dashboards",
+          "observability/audit-logging",
+          "observability/hardware-metrics",
+          "observability/engine-metrics",
+          "observability/latency-tracking",
+          "observability/hardware-aware-routing"
+        ]
+      },
+      {
+        "group": "Integrations",
+        "pages": [
+          "integrations/overview",
+          "integrations/claude-code",
+          "integrations/opencode",
+          "integrations/pi",
+          "integrations/open-webui",
+          "integrations/using-from-code"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/detailed-architecture",
+          "reference/configuration-reference",
+          "reference/error-codes",
+          "reference/performance-characteristics",
+          "reference/rfc-6298-latency-tracking"
+        ]
+      },
+      {
+        "group": "Project",
+        "pages": [
+          "project/contributing",
+          "project/code-of-conduct",
+          "project/security-policy",
+          "project/license"
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   },
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "/images/hivenet-router-logo-light.png",
+    "dark": "/images/hivenet-router-logo-dark.png"
   },
   "navbar": {
     "links": [
       {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
+        "href": "https://github.com/HivenetOSS/hivenet_router",
+        "label": "GitHub"
+      },
+      {
+        "href": "https://github.com/HivenetOSS/hivenet_router/issues",
+        "label": "Issues"
       }
     ],
     "primary": {
       "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "label": "View on GitHub",
+      "href": "https://github.com/HivenetOSS/hivenet_router"
     }
   },
   "contextual": {
@@ -66,5 +186,6 @@
     "socials": {
       "github": "https://github.com/HivenetOSS/hivenet_router"
     }
-  }
+  },
+  "description": "Open-source routing for self-hosted and distributed AI inference."
 }

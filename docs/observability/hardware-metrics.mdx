@@ -1,0 +1,1020 @@
+---
+title: "Hardware metrics"
+description: "Understand how Hivenet Router collects, reports, and uses GPU, CPU, and system-memory metrics from agent hosts."
+sidebarTitle: "Hardware metrics"
+---
+
+Hivenet Router agents collect hardware metrics from the machines running inference backends.
+
+These metrics help you observe resource pressure, investigate performance problems, plan capacity, and exclude unsuitable agents through routing-policy gates.
+
+Hivenet Router collects:
+
+- NVIDIA GPU utilization, VRAM, temperature, and power
+- node-level CPU utilization
+- system-memory utilization and availability
+
+<Note>
+  Hardware metrics describe the complete agent host or the GPUs selected through `--gpu-devices-file`.
+
+  They do not measure only the inference process. Other workloads on the machine can affect the reported values.
+</Note>
+
+## How hardware metrics flow
+
+Each agent:
+
+1. samples the local hardware
+2. caches the latest snapshot
+3. sends that snapshot to the router through routing signals and heartbeats
+4. continues forwarding requests if a metrics collection attempt fails
+
+The router:
+
+1. stores the latest snapshot in its in-memory database
+2. exposes the values through `/admin/routing-table`
+3. refreshes the corresponding Prometheus gauges
+4. removes the series when the agent leaves the routing table
+
+Prometheus scrapes the router. It does not need to connect to every agent host.
+
+```text
+Agent host
+  │
+  ├── NVML → GPU metrics
+  ├── gopsutil → CPU and memory metrics
+  │
+  ▼
+Hivenet Router agent
+  │
+  ├── routing signals
+  └── heartbeats
+        │
+        ▼
+Hivenet Router router
+  │
+  ├── /admin/routing-table
+  └── /metrics
+```
+
+## Collection intervals
+
+The default hardware sampling interval is:
+
+```text
+2 seconds
+```
+
+Change it on the agent:
+
+```bash
+./bin/hivenet-agent \
+  --hardware-sample-interval 5s \
+  ...
+```
+
+The latest cached snapshot is sent through routing signals, which run every:
+
+```text
+500 milliseconds
+```
+
+by default.
+
+The snapshot is also included in the regular agent heartbeat, which runs every:
+
+```text
+5 seconds
+```
+
+by default.
+
+This means the router may receive the same hardware snapshot several times between hardware samples. Reducing the routing-signal interval does not make the underlying hardware readings more frequent.
+
+<Warning>
+  Very short sampling intervals increase NVML, CPU, network, storage, and Prometheus update activity.
+
+  Use an interval that reflects how quickly your routing policy needs to react rather than collecting as frequently as possible.
+</Warning>
+
+## GPU collection
+
+Hivenet Router uses the NVIDIA Management Library, or NVML, for GPU metrics.
+
+When NVML initializes successfully, the agent enumerates the visible NVIDIA devices and collects one record for each GPU.
+
+When NVML is unavailable, the agent continues with CPU and memory metrics only.
+
+Common reasons NVML may be unavailable include:
+
+- no NVIDIA GPU on the host
+- missing or incompatible NVIDIA drivers
+- a container without GPU access
+- insufficient device permissions
+- an unsupported runtime environment
+
+The agent logs:
+
+```text
+hardware: NVML unavailable
+```
+
+when it falls back to CPU and memory collection.
+
+## GPU metrics
+
+Prometheus GPU metrics use these labels:
+
+```text
+peer_id
+region
+model
+engine
+gpu_index
+gpu_id
+organization
+machine
+```
+
+`gpu_index` is the physical index reported by NVML on that host.
+
+`gpu_id` is a Hivenet Router-generated label combining the agent peer ID and GPU index:
+
+```text
+<peer-id>_<gpu-index>
+```
+
+It is not the NVIDIA GPU UUID.
+
+## GPU utilization
+
+```text
+hivenet_router_agent_gpu_utilization_percent
+```
+
+GPU utilization is the percentage of the recent NVML sampling window during which the GPU’s compute engine was active.
+
+The Prometheus value uses:
+
+```text
+0 to 100
+```
+
+Examples:
+
+```promql
+hivenet_router_agent_gpu_utilization_percent
+```
+
+Average utilization by model:
+
+```promql
+avg by (model) (
+  hivenet_router_agent_gpu_utilization_percent
+)
+```
+
+Maximum utilization on each agent:
+
+```promql
+max by (peer_id, model) (
+  hivenet_router_agent_gpu_utilization_percent
+)
+```
+
+A low value can mean spare compute capacity, but it can also mean:
+
+- the backend is waiting for input
+- the workload is memory-bound
+- requests are short or bursty
+- CPU preprocessing is the bottleneck
+- the model is loading or idle
+
+A high value can indicate saturation, but GPU utilization alone does not determine how many additional inference requests the backend can accept.
+
+Hivenet Router’s hard routing-capacity gate uses the agent’s declared capacity and active request count. Hardware values affect routing only when you configure policy gates.
+
+## VRAM metrics
+
+Hivenet Router exports:
+
+```text
+hivenet_router_agent_gpu_vram_used_bytes
+hivenet_router_agent_gpu_vram_free_bytes
+hivenet_router_agent_gpu_vram_total_bytes
+```
+
+| Metric | Meaning |
+| --- | --- |
+| `vram_used_bytes` | Device memory currently allocated |
+| `vram_free_bytes` | Device memory currently available |
+| `vram_total_bytes` | Total device-memory capacity |
+
+Show VRAM in GiB:
+
+```promql
+hivenet_router_agent_gpu_vram_used_bytes
+/
+1024
+/
+1024
+/
+1024
+```
+
+Calculate the fraction in use:
+
+```promql
+hivenet_router_agent_gpu_vram_used_bytes
+/
+clamp_min(
+  hivenet_router_agent_gpu_vram_total_bytes,
+  1
+)
+```
+
+Calculate the percentage in use:
+
+```promql
+100
+*
+hivenet_router_agent_gpu_vram_used_bytes
+/
+clamp_min(
+  hivenet_router_agent_gpu_vram_total_bytes,
+  1
+)
+```
+
+VRAM can contain:
+
+- model weights
+- KV cache
+- activations
+- CUDA runtime allocations
+- memory used by other GPU processes
+
+<Note>
+  Host-wide VRAM use and engine KV-cache utilization are different signals.
+
+  `gpu_vram_used_percent` describes total device-memory pressure.
+
+  `kv_cache_utilization` describes the inference engine’s cache allocation when that backend exposes the metric.
+</Note>
+
+## GPU temperature
+
+```text
+hivenet_router_agent_gpu_temperature_celsius
+```
+
+The value comes from the GPU’s NVML temperature sensor and is expressed in degrees Celsius.
+
+```promql
+hivenet_router_agent_gpu_temperature_celsius
+```
+
+Maximum temperature by agent:
+
+```promql
+max by (peer_id, model) (
+  hivenet_router_agent_gpu_temperature_celsius
+)
+```
+
+Temperature can help you identify:
+
+- thermal throttling
+- cooling failures
+- unusually sustained load
+- airflow problems
+- one hot device in a multi-GPU machine
+
+Do not treat one temperature threshold as correct for every GPU model, chassis, and operating environment. Use the hardware manufacturer’s guidance and your normal operating baseline.
+
+A routing gate might look like:
+
+```yaml
+exclude_if:
+  gpu_temperature_c:
+    gt: 82
+```
+
+The value above is an example, not a universal safe limit.
+
+## GPU power
+
+```text
+hivenet_router_agent_gpu_power_watts
+```
+
+NVML reports power in milliwatts. The agent converts it to watts before sending the snapshot.
+
+```promql
+hivenet_router_agent_gpu_power_watts
+```
+
+Total reported GPU power by machine:
+
+```promql
+sum by (machine) (
+  hivenet_router_agent_gpu_power_watts
+)
+```
+
+Total reported GPU power by region:
+
+```promql
+sum by (region) (
+  hivenet_router_agent_gpu_power_watts
+)
+```
+
+Power metrics can help with:
+
+- observing rack or host power demand
+- identifying idle and active GPUs
+- investigating clock or thermal behavior
+- estimating energy use over time
+
+The metric is an instantaneous reading rather than accumulated energy.
+
+Power is currently available for observability but is not a supported `exclude_if` policy field.
+
+## Multi-GPU agents
+
+A hardware snapshot contains one entry for each GPU reported by the collector.
+
+For example, an agent with GPU indices `0` and `2` produces separate Prometheus series for both indices.
+
+If the set of reported GPUs changes, the router deletes series for GPU indices that are no longer present before publishing the new snapshot.
+
+This can happen after:
+
+- changing device assignments
+- changing `--gpu-devices-file`
+- container or scheduler changes
+- GPU or MIG reconfiguration
+- restarting the agent with another visible-device set
+
+The router evaluates hardware policy gates using the most restrictive value across the reported GPUs.
+
+For multi-GPU agents, it uses the highest:
+
+- GPU temperature
+- GPU utilization
+- VRAM-used fraction
+
+For example, one hot GPU can exclude the complete agent when the policy contains a temperature gate.
+
+## Restrict metrics to assigned GPUs
+
+By default, the collector reports every NVIDIA GPU visible to the agent process.
+
+Use:
+
+```bash
+--gpu-devices-file <path>
+```
+
+when the inference engine is assigned only part of a multi-GPU host and Hivenet Router should report only those devices.
+
+The file contains NVIDIA GPU UUIDs separated by commas or line breaks.
+
+For example:
+
+```text
+GPU-2c830f2a-4b8d-4c52-a430-3f8456fb92e8
+GPU-753f916c-1ab7-44ae-a754-49a8688f9912
+```
+
+Start the agent with:
+
+```bash
+./bin/hivenet-agent \
+  --gpu-devices-file /run/hivenet-router/gpu-devices \
+  ...
+```
+
+The collector compares those values with the UUID returned by NVML and reports only matching devices.
+
+An empty file or the value:
+
+```text
+none
+```
+
+results in no GPU metrics.
+
+<Warning>
+  If the configured file does not exist when the agent starts, Hivenet Router temporarily reports all visible GPUs and retries reading the file on later samples.
+
+  Once the file has been parsed successfully, the current agent process does not reload later changes. Restart the agent after updating the file.
+</Warning>
+
+The UUIDs are used only for collection filtering. Prometheus still labels the reported devices by NVML index and the generated `gpu_id`.
+
+## GPU model metadata
+
+Routing policies can statically match:
+
+```yaml
+match:
+  gpu_model: RTX5090
+```
+
+The value comes from agent registration metadata:
+
+```bash
+--gpu-model RTX5090
+```
+
+or:
+
+```bash
+export HIVENET_ROUTER_GPU_MODEL=RTX5090
+```
+
+Hivenet Router does not currently derive this metadata automatically from NVML.
+
+Keep the value consistent across agents when policies use it.
+
+For example:
+
+```bash
+--gpu-model "NVIDIA H100"
+```
+
+and:
+
+```bash
+--gpu-model "H100"
+```
+
+are different exact-match values.
+
+## CPU usage
+
+```text
+hivenet_router_agent_cpu_usage_percent
+```
+
+The agent uses gopsutil to collect node-wide CPU utilization.
+
+The Prometheus value uses:
+
+```text
+0 to 100
+```
+
+It represents the combined utilization across the machine rather than one series per CPU core.
+
+```promql
+hivenet_router_agent_cpu_usage_percent
+```
+
+Average CPU use by engine:
+
+```promql
+avg by (engine) (
+  hivenet_router_agent_cpu_usage_percent
+)
+```
+
+Maximum CPU use by machine:
+
+```promql
+max by (machine) (
+  hivenet_router_agent_cpu_usage_percent
+)
+```
+
+High CPU utilization can affect inference through:
+
+- tokenization
+- request parsing
+- model input preprocessing
+- output processing
+- networking
+- host contention
+- CPU-only inference
+
+The collector seeds its CPU baseline when it starts so the first reported sample does not rely on an uninitialized interval.
+
+## System-memory metrics
+
+Hivenet Router exports:
+
+```text
+hivenet_router_agent_memory_used_percent
+hivenet_router_agent_memory_available_bytes
+hivenet_router_agent_memory_total_bytes
+```
+
+| Metric | Unit | Meaning |
+| --- | --- | --- |
+| `memory_used_percent` | `0`–`100` | Percentage of system RAM currently used |
+| `memory_available_bytes` | Bytes | Memory the operating system can make available |
+| `memory_total_bytes` | Bytes | Total physical system memory |
+
+Show available memory in GiB:
+
+```promql
+hivenet_router_agent_memory_available_bytes
+/
+1024
+/
+1024
+/
+1024
+```
+
+Show used memory by agent:
+
+```promql
+hivenet_router_agent_memory_used_percent
+```
+
+System-memory pressure can cause:
+
+- swapping
+- slower memory-mapped model access
+- backend instability
+- process termination by the operating system
+- reduced CPU-side preprocessing performance
+
+`available_bytes` is usually a better operational signal than a simple “free memory” value because it includes reclaimable memory where the operating system reports it.
+
+## View the current snapshot
+
+Use the routing table:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      machine: .metadata.machine,
+      hardware
+    }'
+```
+
+A shortened snapshot resembles:
+
+```json
+{
+  "hardware": {
+    "gpu": [
+      {
+        "index": 0,
+        "util_percent": 47,
+        "vram_used_bytes": 23829487616,
+        "vram_free_bytes": 1927733248,
+        "vram_total_bytes": 25757220864,
+        "temperature_c": 68,
+        "power_watts": 312.4
+      }
+    ],
+    "cpu": {
+      "usage_percent": 18.2
+    },
+    "memory": {
+      "used_percent": 63.4,
+      "available_bytes": 37490434048,
+      "total_bytes": 101247455232
+    },
+    "timestamp": "2026-04-22T15:16:46Z"
+  }
+}
+```
+
+The values above are examples.
+
+The `timestamp` is the RFC 3339 time at which the agent collected the snapshot.
+
+The hardware object may be absent before the first successful sample. After a successful collection, later failures can leave the last cached snapshot in place, so correlate suspicious values with agent logs and heartbeat freshness.
+
+A CPU-only agent still reports:
+
+- CPU
+- memory
+- an empty GPU array
+
+## Prometheus labels
+
+GPU series include:
+
+```text
+peer_id
+region
+model
+engine
+gpu_index
+gpu_id
+organization
+machine
+```
+
+CPU and memory series include:
+
+```text
+peer_id
+region
+model
+engine
+organization
+machine
+```
+
+These labels let you group hardware by model, host, team, engine, or region.
+
+They also create time-series cardinality. Keep metadata stable and bounded.
+
+Avoid using unique request, user, or timestamp values as:
+
+- `machine`
+- `organization`
+- `region`
+- model metadata
+
+## Use hardware metrics in policies
+
+Policy gates use normalized values for percentage fields.
+
+Prometheus exposes:
+
+```text
+0 to 100
+```
+
+for CPU, memory, and GPU utilization.
+
+Policy YAML uses:
+
+```text
+0.0 to 1.0
+```
+
+For example, Prometheus:
+
+```promql
+hivenet_router_agent_gpu_utilization_percent > 90
+```
+
+corresponds to:
+
+```yaml
+exclude_if:
+  gpu_util_percent:
+    gt: 0.9
+```
+
+A hardware-aware policy might use:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+
+  exclude_if:
+    gpu_temperature_c:
+      gt: 82
+
+    gpu_util_percent:
+      gt: 0.95
+
+    gpu_vram_used_percent:
+      gt: 0.9
+
+    memory_used_percent:
+      gt: 0.9
+
+    cpu_usage_percent:
+      gt: 0.9
+
+  strategy: least-loaded
+```
+
+An agent is excluded when it violates any configured gate.
+
+Missing metrics pass the gate.
+
+For example, a CPU-only agent passes a GPU-temperature gate because it reports no GPU temperature.
+
+Use a static `gpu_model`, engine, or tag match when the presence of GPU metrics is itself required.
+
+## Hardware policy fields
+
+| Policy field | Source | Unit |
+| --- | --- | --- |
+| `gpu_temperature_c` | Highest reported GPU temperature | Celsius |
+| `gpu_util_percent` | Highest reported GPU utilization | Fraction `0.0`–`1.0` |
+| `gpu_vram_used_percent` | Highest reported VRAM-used fraction | Fraction `0.0`–`1.0` |
+| `memory_used_percent` | System memory use | Fraction `0.0`–`1.0` |
+| `cpu_usage_percent` | System CPU use | Fraction `0.0`–`1.0` |
+
+The following hardware values are not currently policy fields:
+
+- GPU power
+- absolute free VRAM
+- total VRAM
+- available system-memory bytes
+- number of GPUs
+
+Use static `gpu_model` values or agent tags when routing requires a particular hardware tier.
+
+See [Hardware-aware routing](/observability/hardware-aware-routing) for policy patterns and operational guidance.
+
+## Alerting examples
+
+The thresholds below are examples. Adjust them to the hardware model and normal workload.
+
+### High GPU temperature
+
+```yaml
+groups:
+  - name: hivenet-router-hardware
+
+    rules:
+      - alert: HivenetRouterGPUHighTemperature
+
+        expr: |
+          hivenet_router_agent_gpu_temperature_celsius > 85
+
+        for: 5m
+
+        labels:
+          severity: critical
+
+        annotations:
+          summary: >-
+            High GPU temperature on {{ $labels.machine }}
+```
+
+### High VRAM use
+
+```yaml
+      - alert: HivenetRouterGPUHighVRAM
+
+        expr: |
+          (
+            hivenet_router_agent_gpu_vram_used_bytes
+            /
+            clamp_min(
+              hivenet_router_agent_gpu_vram_total_bytes,
+              1
+            )
+          ) > 0.9
+
+        for: 2m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High VRAM use on {{ $labels.machine }}
+```
+
+### High system-memory use
+
+```yaml
+      - alert: HivenetRouterHostHighMemory
+
+        expr: |
+          hivenet_router_agent_memory_used_percent > 90
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High system-memory use on {{ $labels.machine }}
+```
+
+### Missing hardware updates
+
+The hardware gauges do not currently expose a dedicated sample-age metric.
+
+Use agent heartbeat age as the nearest fleet-health indicator:
+
+```promql
+time()
+-
+(
+  hivenet_router_routing_agent_last_seen_timestamp
+  / 1000
+)
+> 15
+```
+
+A healthy heartbeat does not guarantee that the most recent hardware sample succeeded, but an overdue heartbeat indicates a broader agent-health problem.
+
+## Capacity planning
+
+Hardware metrics help you observe a workload, but they do not calculate a safe Hivenet Router `--capacity` value automatically.
+
+Capacity depends on:
+
+- model size and quantization
+- context length
+- inference-engine scheduler
+- KV-cache allocation
+- GPU count and memory
+- CPU-side work
+- batch configuration
+- latency target
+- workload mix
+
+Use a controlled load test and observe:
+
+- agent capacity utilization
+- GPU utilization
+- VRAM use
+- engine waiting requests
+- KV-cache pressure
+- TTFT and ITL
+- backend errors and preemptions
+
+Increase declared capacity gradually rather than deriving it from one hardware metric.
+
+## Troubleshooting
+
+### GPU metrics are missing
+
+Check the host:
+
+```bash
+nvidia-smi
+```
+
+Check device permissions:
+
+```bash
+ls -la /dev/nvidia*
+```
+
+Check the agent logs:
+
+<Tabs>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u hivenet-agent \
+      | grep -i "nvml\|hardware"
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker logs hivenet-agent \
+      2>&1 \
+      | grep -i "nvml\|hardware"
+    ```
+  </Tab>
+</Tabs>
+
+For Docker, confirm that the agent received GPU access:
+
+```bash
+docker inspect hivenet-agent \
+  | jq '.[0].HostConfig.DeviceRequests'
+```
+
+Test NVML inside a GPU-enabled container:
+
+```bash
+docker run --rm \
+  --gpus all \
+  nvidia/cuda:12.6.0-base-ubuntu24.04 \
+  nvidia-smi
+```
+
+The agent continues with CPU and memory metrics when NVML is unavailable.
+
+### The agent reports GPUs it should not monitor
+
+Use:
+
+```bash
+--gpu-devices-file <path>
+```
+
+with the assigned NVIDIA GPU UUIDs.
+
+Confirm the UUIDs:
+
+```bash
+nvidia-smi \
+  --query-gpu=index,uuid \
+  --format=csv
+```
+
+Restart the agent after changing a successfully loaded GPU-device file.
+
+### The GPU-device file has no effect
+
+Check that:
+
+- the file exists inside the agent’s filesystem
+- its contents use NVIDIA GPU UUIDs rather than numeric indices
+- the agent can read it
+- the agent was restarted after a previous successful load
+- the UUIDs match the values returned by NVML
+
+For a container, confirm the file is mounted:
+
+```bash
+docker inspect hivenet-agent \
+  | jq '.[0].Mounts'
+```
+
+### Values show zero for one GPU
+
+Individual NVML subqueries can fail independently.
+
+Hivenet Router keeps the GPU record and sets the failed reading to zero while preserving the other values it could collect.
+
+Check the agent log for:
+
+```text
+hardware: GPU
+```
+
+and compare with:
+
+```bash
+nvidia-smi
+```
+
+### CPU use looks wrong immediately after startup
+
+The collector seeds a CPU baseline during initialization and then reports non-blocking interval measurements.
+
+Allow at least one sampling interval and compare several readings rather than relying on one value immediately after startup.
+
+### Hardware data is present in the routing table but not Prometheus
+
+Check the router’s metrics endpoint:
+
+```bash
+curl -s \
+  http://localhost:2112/metrics \
+  | grep hivenet_router_agent_gpu
+```
+
+Then check Prometheus’s router target.
+
+The agent sends hardware data to the router; Prometheus does not scrape the agent.
+
+### Old GPU series remain after reassignment
+
+The router removes series when a reported GPU index disappears from a later snapshot or when the agent is unregistered.
+
+If an old series remains, check whether:
+
+- the original agent peer ID is still registered
+- the agent identity changed
+- Prometheus is displaying historical data within the selected time range
+- the agent has not yet sent a new filtered snapshot
+
+Use an instant query to inspect current series rather than a long-range graph.
+
+### A hardware gate does not exclude the agent
+
+Check the unit and current value.
+
+Prometheus percentages use `0` to `100`, while policy percentages use `0.0` to `1.0`.
+
+Inspect the routing table:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      hardware
+    }'
+```
+
+The metric may also be unavailable. Missing metrics pass the policy gate.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Engine metrics" href="/observability/engine-metrics">
+    Review cache, queue, latency, finish-reason, and throughput metrics from inference engines.
+  </Card>
+
+  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+    Build policies around GPU tier, thermal state, VRAM pressure, CPU, and system memory.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Query and alert on the complete Hivenet Router metric set.
+  </Card>
+</CardGroup>

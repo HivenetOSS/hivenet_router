@@ -1,0 +1,137 @@
+---
+title: "Configuration Reference"
+---
+
+Complete reference for all Router and Agent CLI flags and environment variables.
+
+> **Note on env var casing:** All environment variables use the prefix `mycoroute_` (lowercase 'h', uppercase 'LLM') — this is case-sensitive on Linux.
+
+## Router Flags
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--http-port` | `mycoroute_HTTP_PORT` | `:8080` | HTTP API port |
+| `--grpc-port` | `mycoroute_GRPC_PORT` | `:50051` | gRPC auth port |
+| `--p2p-port` | `mycoroute_P2P_PORT` | `9000` | libp2p port (no colon prefix) |
+| `--p2p-listen-addr` | — | `127.0.0.1` | libp2p bind address (`0.0.0.0` for remote agents) |
+| `--p2p-announce-addr` | — | `` | Advertised P2P address (required behind NAT/Docker) |
+| `--p2p-max-conns-per-ip` | `mycoroute_P2P_MAX_CONNS_PER_IP` | `32` | Max concurrent libp2p connections from one source IP (see note below) |
+| `--metrics-port` | `mycoroute_METRICS_PORT` | `:2112` | Prometheus metrics port |
+| `--jwt-secret-file` | `mycoroute_JWT_SECRET` | — | **Required.** JWT HMAC-SHA256 secret |
+| `--auth-config-file` | `mycoroute_AUTH_CONFIG` | `` | Path to `auth.yaml` |
+| `mycoroute_AUTH_MODE` | — | `none` | Auth mode: `none`, `api-key`, `dynamic` |
+| `--policy-file` | `mycoroute_POLICY_FILE` | `` | Routing policy YAML |
+| `--policy-model-dir` | `mycoroute_POLICY_MODEL_DIR` | `` | Per-model policies directory |
+| `--max-tries-per-step` | `mycoroute_MAX_TRIES_PER_STEP` | `3` | Default max slot attempts per policy step |
+| `--queue-size` | `mycoroute_QUEUE_SIZE` | `100` | Internal request channel size |
+| `--queue-depth` | `mycoroute_QUEUE_DEPTH` | `30` | Capacity wait queue depth per model (0 = disabled) |
+| `--request-timeout` | `mycoroute_REQUEST_TIMEOUT` | `60s` | End-to-end request timeout |
+| `mycoroute_MAX_REQUEST_BYTES` | — | `10485760` | Max `/v1/*` request body size in bytes (10 MB; 0 disables) |
+| `--session-ttl` | `mycoroute_SESSION_TTL` | `1h` | Agent session token TTL (minimum 5m) |
+| `--disk-db-path` | `mycoroute_DISK_DB_PATH` | `./badger_disk` | Persistent BadgerDB path |
+| `--disk-db-ttl` | — | `30` | diskDB entry TTL in days (0 = no expiry) |
+| `--reset-disk-db` | — | `false` | Wipe diskDB on startup (testing/migrations) |
+| `--universal-flush-interval` | — | `30s` | How often universal history is flushed to diskDB |
+| `--health-check-interval` | — | `5s` | How often health monitor runs |
+| `--unhealthy-after` | — | `15s` | Mark agent unhealthy after this without a heartbeat |
+| `--remove-after` | — | `30s` | Remove agent after this without a heartbeat |
+| `--max-concurrent` | — | `50` | Max concurrent in-flight request forwards |
+| `--heartbeat-interval` | — | `5s` | Expected heartbeat cadence sent to agents in `RouterConfig` |
+
+> **`--p2p-max-conns-per-ip` and agents behind a shared NAT.** go-libp2p's resource
+> manager caps concurrent connections from a single source IP at **8** by default.
+> When agents reach the router through one shared egress IP — e.g. a Kubernetes
+> SNAT gateway, a Docker bridge, or any NAT — they all count against that single
+> bucket, so the **9th agent's connection is accepted at TCP but reset during the
+> Noise handshake** (the agent logs `failed to negotiate security protocol: EOF`).
+> This flag raises that per-IP ceiling (default `32`). Keep it **≥ 2× the number of
+> agents behind a single egress IP**, not equal to the agent count: a restarting
+> agent briefly holds both its old (not yet timed out, see `--remove-after`) and
+> its new connection, so a fleet-wide rollout transiently needs up to ~2× the
+> slots. Agents that present distinct source IPs each get their own bucket and are
+> unaffected.
+
+### Provider API Keys (Environment Only)
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `mycoroute_OPENAI_API_KEY` | OpenAI API key for `fallback_provider: { engine: openai }` |
+| `mycoroute_ANTHROPIC_API_KEY` | Anthropic API key for `fallback_provider: { engine: anthropic }` |
+| `mycoroute_ADMIN_API_KEYS` | Comma-separated admin keys (used when `admin.mode: api-key` in auth.yaml) |
+| `mycoroute_ALLOW_INSECURE_ADMIN` | Set to `true` to start with unauthenticated `/admin/*` (admin `mode: none`). Otherwise the router refuses to start without admin auth. Dev/test only. |
+| `mycoroute_QUOTA_BACKEND` | Quota storage backend: `memory` (default) or `badger` |
+| `mycoroute_AUDIT_LOG_PATH` | Audit log file path (default `/var/log/mycoroute/audit.jsonl`); falls back to stdout if unwritable |
+
+### Logging
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `GOLOG_LOG_LEVEL` | `info` | Log level for all subsystems. Accepts a global level (`debug`, `info`, `warn`, `error`) or per-subsystem overrides: `subsystem=level,subsystem2=level2`. Available subsystems: `router`, `policy`, `metrics`, `api`, `grpc`, `p2p`, `agent`, `hardware`, `storage`, `auth`. |
+
+## Agent Flags
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| `--engine` | — | `vllm` | Backend engine: `vllm`, `ollama`, `sglang`, `llamacpp`, `infinity`, `custom` |
+| `--backend-url` | — | `http://localhost:8888` | Backend inference server URL |
+| `--model` | — | `` | Model name override (required for `--engine custom`) |
+| `--health-url` | — | `` | Health check URL (required for `--engine custom`) |
+| `--capacity` | — | `10` | Max concurrent requests |
+| `--region` | — | `UE-France` | Region label |
+| `--organization` | — | `Unknown` | Organization/cloud provider label |
+| `--machine` | — | `Unknown` | Machine name within the organization |
+| `--tags` | — | `production` | Comma-separated tags |
+| `--router-grpc` | — | `localhost:50051` | Router gRPC address |
+| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Router libp2p address |
+| `--jwt-secret-file` | `mycoroute_JWT_SECRET` | — | **Required.** JWT secret |
+| `--capability` | — | `llm` | Inference capability: `llm`, `embedding`, `reranker` |
+| `--gpu-model` | `mycoroute_GPU_MODEL` | `` | GPU hardware label for routing (e.g. `RTX4090`) |
+| `--hide-llm` | — | `false` | Exclude from `/v1/models` listing |
+| `--llm-pretty-name` | — | `` | Human-readable model display name |
+| `--llm-info` | — | `` | Short model description |
+| `--identity-path` | — | `./agent_identity.key` | Persistent libp2p identity file |
+| `--p2p-listen-port` | — | `0` | Agent libp2p listen port (0 = random; agents accept no inbound dials, so a fixed port is rarely needed). In case of multiple agents on the same host, make sure each agent is using a different port when using fixed ports |
+| `--hardware-sample-interval` | — | `2s` | GPU/CPU/memory sampling interval |
+| `--engine-sample-interval` | — | `500ms` | vLLM/SGLang /metrics scrape interval |
+| `--routing-signal-interval` | — | `500ms` | How often agent pushes metrics to router |
+| `--http-timeout` | — | `120s` | HTTP timeout for backend requests |
+| `--stream-write-timeout` | — | `60s` | Rolling per-chunk deadline for writing a streaming response to the router; a stalled write fails after this so the stream is released (0 disables) |
+| `--gpu-devices-file` | — | `` | File containing GPU UUIDs to monitor (one per line) |
+| `--version` | — | `1.0.0` | Agent version string sent in registration metadata |
+
+## Minimal Startup Examples
+
+### Router
+
+```bash
+./bin/mycoroute-router \
+  --jwt-secret-file jwt.secret \
+  --auth-config-file auth.yaml \
+  --policy-file policy.yaml
+```
+
+### Agent (vLLM)
+
+```bash
+./bin/mycoroute-agent \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --jwt-secret-file jwt.secret \
+  --router-grpc 192.168.1.100:50051 \
+  --capacity 20 \
+  --region EU-France \
+  --organization "Acme Compute" \
+  --machine gpu-worker-1
+```
+
+### Agent (Custom Engine)
+
+```bash
+./bin/mycoroute-agent \
+  --engine custom \
+  --model my-custom-model \
+  --health-url http://localhost:1234/health \
+  --backend-url http://localhost:1234 \
+  --jwt-secret-file jwt.secret \
+  --router-grpc 192.168.1.100:50051
+```

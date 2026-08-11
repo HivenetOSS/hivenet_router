@@ -1,0 +1,643 @@
+---
+title: "Custom engine agent"
+description: "Connect an OpenAI-compatible chat-completion backend to Hivenet Router using an explicit model name and health endpoint."
+sidebarTitle: "Custom engine"
+---
+
+Connect another OpenAI-compatible inference server to Hivenet Router with the `custom` engine.
+
+Use this integration when your backend is not covered by one of Hivenet Router’s built-in engine types but exposes a compatible chat-completions endpoint.
+
+<Warning>
+  The custom engine requires both `--model` and `--health-url`. It does not discover either value from the backend.
+</Warning>
+
+## Backend requirements
+
+The backend must expose:
+
+| Endpoint | Requirement |
+| --- | --- |
+| Health endpoint | A `GET` endpoint that returns HTTP `200` when the backend is ready |
+| `POST /v1/chat/completions` | An OpenAI-compatible chat-completions endpoint |
+
+The health endpoint can use any path. Pass its complete URL to `--health-url`.
+
+For example:
+
+```text
+Backend URL: http://localhost:8000
+Health URL: http://localhost:8000/health
+Chat completions: http://localhost:8000/v1/chat/completions
+```
+
+Hivenet Router forwards the original chat-completion request body and HTTP headers to the backend. It does not translate a proprietary request format into the OpenAI schema.
+
+<Note>
+  This page covers language-model agents using the default `llm` capability. Use the dedicated Infinity integration for the documented embedding and reranking workflow.
+</Note>
+
+## Before you start
+
+You need:
+
+- a running Hivenet Router router
+- an OpenAI-compatible inference backend
+- a health endpoint that returns HTTP `200`
+- network access between the agent and router
+- the Hivenet Router agent binary or Docker image
+- the same JWT secret used by the router
+- a model name that clients and the backend can use
+
+The examples use:
+
+```text
+Router IP: 192.168.1.100
+Router gRPC port: 50051
+Router libp2p port: 9000
+Agent IP: 192.168.1.101
+Backend port: 8000
+Model: meta-llama/Llama-3.1-8B-Instruct
+```
+
+Replace these values with addresses and model names from your deployment.
+
+## Start your backend
+
+The command depends on the inference server you are using.
+
+A generic example might look like:
+
+```bash
+python -m my_inference_server \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+Because the Hivenet Router agent runs beside the backend, the backend can remain bound to localhost unless another machine must reach it directly.
+
+Check the health endpoint:
+
+```bash
+curl -i http://localhost:8000/health
+```
+
+Hivenet Router considers the backend ready only when this endpoint returns HTTP `200`.
+
+Test chat completions directly:
+
+```bash
+curl -X POST \
+  http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+Confirm this request works before starting the Hivenet Router agent.
+
+## Choose the model name
+
+The custom engine does not call `/v1/models`.
+
+You must provide the model name explicitly:
+
+```bash
+--model meta-llama/Llama-3.1-8B-Instruct
+```
+
+Hivenet Router uses this value to:
+
+- register the agent
+- list the model through `GET /v1/models`
+- match incoming requests to the agent
+- label routing and observability data
+
+The request body is forwarded without replacing its `model` field. For the cleanest setup, use the same model name:
+
+1. in the agent’s `--model` value
+2. in client requests
+3. in the backend’s public API
+
+If the backend uses another internal identifier, configure an alias or compatibility layer on the backend side.
+
+## Prepare the Hivenet Router agent
+
+<Tabs>
+  <Tab title="Docker">
+    From the Hivenet Router repository, build the agent image if you have not already done so:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t mycoroute/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent identity:
+
+    ```bash
+    sudo mkdir -p /opt/mycoroute
+    sudo chown "$USER":"$USER" /opt/mycoroute
+    ```
+
+    Place the router’s JWT secret at:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Protect it:
+
+    ```bash
+    chmod 600 /opt/mycoroute/jwt.secret
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Build the agent from the Hivenet Router repository:
+
+    ```bash
+    go build -o bin/hivenet-agent ./cmd/agent/
+    ```
+
+    Place the shared JWT secret somewhere the agent can read, for example:
+
+    ```text
+    /opt/mycoroute/jwt.secret
+    ```
+
+    Create a writable directory for the persistent identity:
+
+    ```bash
+    sudo mkdir -p /var/lib/mycoroute/agent
+    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    ```
+  </Tab>
+</Tabs>
+
+## Start the agent
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name hivenet-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
+      -v /opt/mycoroute:/data \
+      mycoroute/agent:latest \
+      --engine custom \
+      --backend-url http://localhost:8000 \
+      --health-url http://localhost:8000/health \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 32 \
+      --region EU-Custom \
+      --organization ml-team \
+      --machine custom-worker-1 \
+      --identity-path /data/agent-identity.key
+    ```
+
+    Omit `--gpus all` when the backend is CPU-only or the agent does not need NVIDIA hardware metrics.
+
+    The `/data` mount preserves the agent’s peer identity across container replacement and restarts.
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/hivenet-agent \
+      --engine custom \
+      --backend-url http://localhost:8000 \
+      --health-url http://localhost:8000/health \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --capacity 32 \
+      --region EU-Custom \
+      --organization ml-team \
+      --machine custom-worker-1 \
+      --identity-path /var/lib/mycoroute/agent/identity.key
+    ```
+  </Tab>
+</Tabs>
+
+The agent waits until the configured health endpoint returns HTTP `200`. If the backend is still starting, the agent continues polling rather than exiting permanently.
+
+## Understand the custom settings
+
+| Setting | Purpose |
+| --- | --- |
+| `--engine custom` | Selects the generic OpenAI-compatible integration |
+| `--backend-url` | Base URL used for chat-completion requests |
+| `--health-url` | Complete URL used to check backend readiness |
+| `--model` | Explicit model name registered with Hivenet Router |
+| `--router-grpc` | Router endpoint used for agent authentication |
+| `--jwt-secret-file` | Shared secret used to authenticate the agent |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
+| `--region` | Region metadata available to routing policies |
+| `--organization` | Organization or infrastructure-provider metadata |
+| `--machine` | Stable machine identifier |
+| `--identity-path` | Persistent private key that keeps the peer ID stable |
+
+You can also add routing tags:
+
+```bash
+--tags custom,production,high-memory
+```
+
+## How requests are forwarded
+
+For a non-streaming request, the agent sends:
+
+```text
+POST <backend-url>/v1/chat/completions
+```
+
+It forwards the original JSON body and request headers to the backend.
+
+For example, a client request to:
+
+```text
+http://<router>/v1/chat/completions
+```
+
+is eventually forwarded to:
+
+```text
+http://localhost:8000/v1/chat/completions
+```
+
+Backend response headers and response bodies are returned through the agent and router to the client.
+
+Backend errors are also passed back through Hivenet Router. Where possible, Hivenet Router classifies common errors such as:
+
+- invalid parameters
+- context-length limits
+- backend unavailability
+- rate limits
+- general backend failures
+
+## Streaming responses
+
+The custom engine supports streaming chat completions when the backend returns an SSE response compatible with the OpenAI API.
+
+Send:
+
+```bash
+curl -N -X POST \
+  http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count from one to five."
+      }
+    ]
+  }'
+```
+
+The agent forwards response chunks as they arrive rather than buffering the full completion.
+
+The backend must provide a valid streaming response. Hivenet Router does not convert a non-streaming backend response into SSE.
+
+## Set agent capacity
+
+`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
+
+It does not configure the backend’s own scheduler, worker count, queue, or batch size.
+
+Choose a value based on:
+
+- backend concurrency
+- model size
+- available CPU, RAM, or VRAM
+- context length
+- acceptable response time
+- whether other workloads share the machine
+
+Start conservatively and test with representative traffic.
+
+When the agent reaches capacity, Hivenet Router considers another matching agent, waits if queueing is configured, or moves through the policy’s fallback chain.
+
+<Note>
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify the custom backend under sustained streaming load.
+</Note>
+
+## Verify the connection
+
+On the router, check operational health:
+
+```bash
+curl http://192.168.1.100:8080/admin/health \
+  | jq .
+```
+
+Confirm the model is visible:
+
+```bash
+curl http://192.168.1.100:8080/v1/models \
+  | jq '.data[]
+      | select(
+          .id == "meta-llama/Llama-3.1-8B-Instruct"
+        )'
+```
+
+Inspect custom agents:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.engine == "custom")'
+```
+
+Send a request through Hivenet Router:
+
+```bash
+curl -X POST \
+  http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain what an inference router does in one sentence."
+      }
+    ]
+  }'
+```
+
+## Route to custom agents
+
+Match the custom engine in a routing policy:
+
+```yaml
+routing_policy:
+  match:
+    engine: custom
+    region: EU-Custom
+  exclude_if:
+    success_rate:
+      lt: 0.95
+  strategy: least-loaded
+  max_tries: 3
+```
+
+Add another engine as a fallback:
+
+```yaml
+fallback_chain:
+  - name: vllm-backup
+    match:
+      engine: vllm
+    strategy: least-loaded
+```
+
+Custom agents participate in the same policy pipeline as other language-model agents.
+
+You can filter them using metadata such as:
+
+- model
+- engine
+- region
+- organization
+- machine
+- tags
+- GPU model
+
+You can also use universal and hardware signals such as success rate, latency, capacity, GPU pressure, CPU use, and memory use.
+
+## Available metrics
+
+The custom integration does not scrape engine-specific metrics from the backend.
+
+The following information is still available:
+
+### Routing and request metrics
+
+- routed and failed request counts
+- active requests and declared capacity
+- success and failure history
+- smoothed round-trip time
+- policy and fallback decisions
+- tenant and model labels where configured
+
+### Hardware metrics
+
+When available on the agent host:
+
+- CPU use
+- system memory use
+- GPU utilization
+- VRAM use
+- GPU temperature
+- GPU power
+
+Engine-specific fields such as KV cache utilization, backend queue size, time to first token, and inter-token latency are not populated by the custom integration.
+
+View the agent through the router:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.engine == "custom")'
+```
+
+Inspect relevant Prometheus metrics:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep 'engine="custom"'
+```
+
+## Troubleshooting
+
+### The agent reports that `--model` is required
+
+The custom engine cannot discover models.
+
+Start the agent with:
+
+```bash
+--model <model-name>
+```
+
+### The agent reports that `--health-url` is required
+
+Provide the complete health endpoint:
+
+```bash
+--health-url http://localhost:8000/health
+```
+
+This is separate from `--backend-url`.
+
+### The backend never becomes ready
+
+Test the exact URL passed to `--health-url`:
+
+```bash
+curl -i http://localhost:8000/health
+```
+
+The endpoint must return HTTP `200`. Redirects, authentication challenges, and other status codes are treated as unhealthy.
+
+### Direct requests work, but routed requests fail
+
+Test the exact OpenAI-compatible path:
+
+```bash
+curl -X POST \
+  http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+Common causes include:
+
+- the backend uses another path
+- the backend expects a proprietary request schema
+- the model name differs
+- the backend requires credentials that are not present in the client request
+- the backend does not support the requested field or streaming mode
+
+### The model is visible but requests do not route
+
+Check the model value in all three places:
+
+```text
+Agent --model
+Client request body
+Backend model identifier
+```
+
+The agent’s registered model must match the client request.
+
+Inspect the routing table:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.engine == "custom")
+      | {
+          model: .metadata.model,
+          capability: .metadata.capability,
+          healthy: .status.healthy,
+          active_requests: .status.active_requests,
+          capacity: .metadata.capacity
+        }'
+```
+
+### The agent does not register
+
+Check the logs:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker logs hivenet-agent
+    ```
+  </Tab>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u hivenet-agent \
+      -n 100 \
+      --no-pager
+    ```
+  </Tab>
+</Tabs>
+
+Test connectivity from the agent to the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Check that:
+
+- the router and agent use the same JWT secret
+- the backend health endpoint returns HTTP `200`
+- the router’s libp2p interface is reachable
+- the router advertises a libp2p address the agent can reach
+
+### Streaming is buffered or incomplete
+
+Test the backend directly with `curl -N`.
+
+Confirm that it returns a streaming content type and flushes chunks as they are generated.
+
+Hivenet Router can relay an SSE stream, but it cannot correct buffering introduced by the backend or an intermediate proxy.
+
+### Requests time out
+
+The backend HTTP timeout defaults to two minutes.
+
+Increase it for longer requests:
+
+```bash
+--http-timeout 10m
+```
+
+For streaming responses, the rolling stream-write timeout is configured separately:
+
+```bash
+--stream-write-timeout 2m
+```
+
+Also check the backend’s own timeout, queue, and concurrency settings.
+
+### The peer ID changes after restart
+
+Make sure `--identity-path` points to persistent storage.
+
+For Docker:
+
+```bash
+docker inspect hivenet-agent \
+  | jq '.[0].Mounts'
+```
+
+For bare metal:
+
+```bash
+ls -l /var/lib/mycoroute/agent/identity.key
+```
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Chat completions" href="/use-the-api/chat-completions">
+    Review the supported request, response, and streaming behavior.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    Learn how custom agents participate in routing and fallback.
+  </Card>
+
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Understand the system and GPU signals collected from agent hosts.
+  </Card>
+</CardGroup>

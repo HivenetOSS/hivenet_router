@@ -1,0 +1,496 @@
+---
+title: "Key rotation"
+description: "Rotate client, administrator, agent, and provider credentials with the least possible disruption."
+sidebarTitle: "Key rotation"
+---
+
+Hivenet Router uses separate credentials for clients, administrators, agents, and external providers. Rotate each credential according to how it is loaded, applied, and persisted.
+
+| Credential | Source | Overlap supported? | Apply with |
+| --- | --- | --- | --- |
+| Static client key | `auth.yaml` | Yes | `SIGHUP` |
+| Dynamic client key | Administration API | Yes, with separate key IDs | Immediate registry mutation |
+| Administrator key | `HIVENET_ROUTER_ADMIN_API_KEYS` | Yes | Router restart in normal deployments |
+| Agent JWT secret | File or `HIVENET_ROUTER_JWT_SECRET` | No built-in dual-secret support | Coordinated router and agent restart |
+| OpenAI or Anthropic key | Router environment | At the provider account, not inside Hivenet Router | Router restart |
+
+<Warning>
+  Do not reuse one value for several credential roles.
+
+  Client, administrator, agent, and provider credentials grant different privileges and require different rotation procedures.
+</Warning>
+
+## Rotation principles
+
+For a planned rotation:
+
+1. Generate a new high-entropy value.
+2. Store it in the intended secret manager before deployment.
+3. Add the new credential while the old one still works, when overlap is supported.
+4. Verify the new credential through the real request path.
+5. Move every client, operator, or service to the new value.
+6. Remove or revoke the old credential.
+7. Confirm that the old value no longer authenticates.
+8. Record the time, owner, scope, and verification result.
+
+For an active compromise, revoke or disable the exposed credential first when continued access creates more risk than interruption.
+
+## Rotate a static client key
+
+Static client keys are stored as SHA-256 hashes in `auth.yaml`. The safest rotation keeps both entries active for a short overlap period.
+
+### 1. Generate the replacement
+
+```bash
+./bin/hivenet-router \
+  keygen \
+  --tenant acme-corp
+```
+
+Store the raw key securely. Copy the generated hash and YAML entry into `auth.yaml`.
+
+Use the exact lowercase hash printed by the generator or `sha256sum`.
+
+### 2. Keep both keys temporarily
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<old-key-sha256>"
+      key_preview: "sk-...old"
+
+      metadata:
+        name: "Acme production, old"
+        owner: "acme-corp"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+
+    - key_hash: "<new-key-sha256>"
+      key_preview: "sk-...new"
+
+      metadata:
+        name: "Acme production, new"
+        owner: "acme-corp"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+
+admin:
+  mode: api-key
+```
+
+Using the same owner preserves one shared quota bucket during the overlap. Use different owners only when the two credentials should have independent quota accounting.
+
+Keep the model restrictions and quotas aligned unless the rotation is also an intentional access change.
+
+### 3. Reload the file
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+For Docker Compose:
+
+```bash
+docker compose kill \
+  --signal SIGHUP \
+  router
+```
+
+Hivenet Router validates the replacement provider before swapping it in. A failed reload leaves the previous provider active.
+
+<Warning>
+  A successful static-auth reload rebuilds the in-memory quota limiter.
+
+  Request-per-minute buckets reset. With the `memory` quota backend, current daily token usage is also lost. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
+</Warning>
+
+### 4. Test the new key
+
+```bash
+curl \
+  -H "Authorization: Bearer <new-client-key>" \
+  http://localhost:8080/v1/models
+```
+
+Also test an inference request and confirm:
+
+- the intended models are visible
+- the intended model can be invoked
+- quotas are correct
+- audit records use the expected owner; static keys do not populate a stable `key_id`
+
+### 5. Move applications to the new key
+
+Update every application, job, SDK, proxy, and secret reference that uses the old value.
+
+Keep the overlap only as long as necessary. Two active credentials increase the number of values that can be exposed.
+
+### 6. Remove the old entry
+
+Delete the old key from `auth.yaml`, send `SIGHUP` again, and verify that it now returns:
+
+```text
+401 unauthorized
+```
+
+## Rotate a dynamic client key
+
+Dynamic keys live in the in-memory registry and take effect immediately after a successful administration API mutation.
+
+### Safer overlap with two IDs
+
+Create a second registry entry with a new ID and hash:
+
+```text
+Old ID: acme-prod
+New ID: acme-prod-2026-08
+```
+
+Use a version that sorts after the current registry version:
+
+```bash
+curl -X PUT \
+  http://localhost:8080/admin/api-keys/acme-prod-2026-08 \
+  -H "Authorization: Bearer <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "rev_00000042",
+    "key_hash": "<new-key-sha256>",
+    "key_preview": "sk-...new",
+    "owner": "acme-corp",
+    "name": "Acme production, August rotation",
+    "enabled": true,
+    "allowed_models": [
+      "meta-llama/Llama-3.1-8B-Instruct"
+    ],
+    "quota": {
+      "requests_per_minute": 100,
+      "tokens_per_day": 500000
+    }
+  }'
+```
+
+Move the application to the new raw key, verify it, then delete the old ID with a newer version:
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer <admin-key>" \
+  "http://localhost:8080/admin/api-keys/acme-prod?version=rev_00000043"
+```
+
+Keys with the same owner share quota buckets, including during the overlap.
+
+### Immediate replacement under one ID
+
+Updating an existing ID with a new hash removes the old hash mapping immediately.
+
+This is useful for emergency revocation, but it does not provide an overlap period. Applications still using the old raw key begin receiving `401` as soon as the mutation succeeds.
+
+<Warning>
+  Dynamic versions are compared lexicographically.
+
+  Lower versions are rejected. Equal versions are accepted, so use a strictly newer version for every distinct intended change. Do not reuse one version string for different registry contents.
+</Warning>
+
+### Restart behavior
+
+Dynamic registry state is memory-only. After a router restart, repopulate the complete current registry before expecting client authentication to work.
+
+Use:
+
+```text
+POST /admin/api-keys/replace
+```
+
+Then confirm the result through:
+
+```text
+GET /admin/api-keys/version
+```
+
+## Rotate administrator keys
+
+Administrator keys come from the comma-separated environment variable:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+Use an overlap period:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="<old-admin-key>,<new-admin-key>"
+```
+
+Then:
+
+1. Restart or recreate the router so the process receives both values.
+2. Test the new key against `/admin/health`.
+3. Update operators and control services.
+4. Change the environment to contain only the new key.
+5. Restart or recreate the router again.
+6. Verify that the old key returns `401`.
+
+```bash
+curl \
+  -H "Authorization: Bearer <new-admin-key>" \
+  http://localhost:8080/admin/health
+```
+
+<Note>
+  Hivenet Router can rebuild the administrator provider on `SIGHUP`, but it reads the environment of the already running process.
+
+  Editing a systemd `EnvironmentFile`, Docker `.env` file, Kubernetes Secret, or shell configuration does not change that process environment. In normal deployments, restart or recreate the router after changing `HIVENET_ROUTER_ADMIN_API_KEYS`.
+</Note>
+
+Admin-key rotation restarts the current single router process. Queued and in-flight requests are not durably recovered after a router restart.
+
+## Rotate the agent JWT secret
+
+The router and every agent use one shared secret for:
+
+- HMAC-SHA256 agent JWTs
+- the deterministic gRPC TLS identity pinned by agents
+
+Changing the secret changes both authentication and router identity.
+
+Hivenet Router does not currently support two active agent secrets at the same time.
+
+When `--jwt-secret-file` is configured, it takes precedence over `HIVENET_ROUTER_JWT_SECRET`. Rotate the source each process actually loads.
+
+<Danger>
+  Agent-secret rotation requires a coordinated maintenance operation.
+
+  A router using the new secret cannot authenticate agents still using the old secret. An agent using the new secret cannot authenticate with a router still using the old one.
+</Danger>
+
+### Planned rotation
+
+1. Generate the replacement:
+   ```bash
+   openssl rand -hex 32 > jwt.secret.new
+   chmod 600 jwt.secret.new
+   ```
+2. Distribute the new file securely to the router and every agent host without restarting the running processes.
+3. Confirm the deployed file hashes without printing the secret:
+   ```bash
+   sha256sum /etc/hivenet-router/jwt.secret.new
+   ```
+4. Drain or pause client traffic when interruption is unacceptable.
+5. Replace the configured secret file on the router and agents.
+6. Restart the router.
+7. Restart all agents promptly so they load the new secret and reconnect.
+8. Verify agent registration through `/admin/health` and `/admin/routing-table`.
+9. Resume traffic after sufficient capacity is healthy.
+10. Remove old secret material from hosts and deployment systems according to your retention policy.
+
+The router restart removes its in-memory agent sessions. Agents that have not restarted still use the old secret and fail authentication until they load the replacement.
+
+### Higher-availability option
+
+When the deployment cannot tolerate this control-plane interruption, build a separate replacement deployment with its own router, secret, and agent fleet, validate it, then move client traffic to it.
+
+The current single-router architecture does not provide an in-place zero-downtime dual-secret rotation.
+
+### Rollback
+
+Keep the old secret protected until the new fleet is verified.
+
+To roll back, restore the old value on the router and every agent and restart them again. Do not leave hosts on different secret generations.
+
+## Rotate provider API keys
+
+Provider fallback credentials are read by the router at startup:
+
+```text
+HIVENET_ROUTER_OPENAI_API_KEY
+HIVENET_ROUTER_ANTHROPIC_API_KEY
+```
+
+A policy reload does not reload these credentials.
+
+The router uses one credential for each provider at a time. Any overlap is created in the provider account: keep the old provider key valid while the router switches to and verifies the new one.
+
+For a planned provider rotation:
+
+1. Create the new credential in the provider account.
+2. Update the router secret or environment.
+3. Restart the router.
+4. Force a controlled provider-fallback request.
+5. Confirm the expected provider, model, usage, and audit result.
+6. Revoke the old provider credential in the provider account.
+
+Keep the old credential valid until the new one has been tested, when the provider supports overlapping credentials.
+
+Provider fallback can incur external charges and send request content outside the local deployment. Perform the verification with a controlled, non-sensitive request.
+
+## Respond to a suspected compromise
+
+| Credential | Immediate action |
+| --- | --- |
+| Static client key | Remove its entry and reload `auth.yaml` |
+| Dynamic client key | Set `enabled: false`, replace its hash, or delete its ID |
+| Administrator key | Restrict admin network access, replace the environment value, and restart the router |
+| Agent JWT secret | Block untrusted agent access where possible, distribute a new secret, and perform a coordinated restart |
+| Provider key | Revoke it at the provider, replace the router value, and restart |
+
+After containment:
+
+- inspect audit records and authentication metrics
+- identify affected tenants, models, and time ranges
+- review unexpected dynamic-registry or policy changes after an admin-key exposure
+- inspect registered agents after an agent-secret exposure
+- review provider usage and billing after a provider-key exposure
+- rotate related credentials only when there is a plausible path to their compromise
+
+## Verify a completed rotation
+
+### Client key
+
+```bash
+curl \
+  -H "Authorization: Bearer <new-client-key>" \
+  http://localhost:8080/v1/models
+```
+
+Confirm that the old value returns `401` after revocation.
+
+### Administrator key
+
+```bash
+curl \
+  -H "Authorization: Bearer <new-admin-key>" \
+  http://localhost:8080/admin/health
+```
+
+### Agent secret
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-key>" \
+  http://localhost:8080/admin/health \
+  | jq '{
+      total_agents,
+      healthy_agents
+    }'
+```
+
+### Provider key
+
+Use a temporary policy or controlled condition that exhausts local routing, then confirm:
+
+```json
+{
+  "processed_by": "provider:openai"
+}
+```
+
+or:
+
+```json
+{
+  "processed_by": "provider:anthropic"
+}
+```
+
+## Troubleshooting
+
+### The new static key returns `401`
+
+Check that:
+
+- the application sends the raw key, not its SHA-256 hash
+- the hash in `auth.yaml` was generated from the exact raw value
+- the successful `SIGHUP` reload appears in router logs
+- the key has not already expired
+- the request reaches the intended router
+
+### The old static key still works
+
+Confirm that its entry was removed from the file that the running router actually loads, then send `SIGHUP` again.
+
+A failed reload leaves the previous provider active.
+
+### A dynamic mutation returns `409 stale version`
+
+Read the current version:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-key>" \
+  http://localhost:8080/admin/api-keys/version \
+  | jq .
+```
+
+Retry with a value that sorts after the current version.
+
+### The new administrator key returns `401`
+
+The running process probably still has the old environment.
+
+Restart or recreate the router after updating `HIVENET_ROUTER_ADMIN_API_KEYS`.
+
+### Agents do not reconnect after secret rotation
+
+Check that:
+
+- the router and every agent loaded the same new secret
+- the secret contains at least 32 bytes
+- agents can reach the router’s gRPC and libp2p ports
+- all affected processes were restarted
+- no host still references an older secret file or secret version
+
+Compare secret files by hash without printing their contents.
+
+### Provider fallback fails after rotation
+
+Confirm that:
+
+- the router was restarted
+- the active policy still declares the provider
+- the new credential can access the configured provider model
+- provider billing or project limits permit the request
+- the test request uses the supported non-streaming fallback path
+
+## Rotation checklist
+
+- identify the credential type and every consumer
+- choose overlap or immediate revocation
+- generate and store the replacement securely
+- preserve model restrictions and quota ownership for client keys
+- use a strictly newer dynamic registry version
+- account for router restarts where required
+- account for quota-reset behavior during static-auth reloads
+- test the new credential before removing the old one when risk allows
+- verify that the old credential no longer authenticates
+- check audit records and metrics after the change
+- remove temporary overlap values and files
+- document the outcome and next scheduled rotation
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="API keys" href="/security/api-keys">
+    Review static and dynamic client-key configuration and persistence.
+  </Card>
+
+  <Card title="Authentication overview" href="/security/authentication-overview">
+    Understand the separate trust boundaries behind each credential.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Correlate credential use, denials, tenants, models, and request outcomes.
+  </Card>
+</CardGroup>
