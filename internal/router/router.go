@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/config"
@@ -565,6 +566,7 @@ func (r *Router) startHTTPServer() {
 		resetMetrics,
 		r.agents.CountHealthyByModel,
 		r, // RegistrationFeed — Router implements SubscribeRegistration
+		admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout),
 	)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {

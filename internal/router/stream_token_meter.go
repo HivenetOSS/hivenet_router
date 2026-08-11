@@ -35,11 +35,40 @@ type SSETokenMeter struct {
 	haveUsage       bool
 	usagePrompt     int
 	usageCompletion int
+
+	// onContent, when set, is called with each streamed delta's content as it is
+	// parsed. It lets the occupancy budget grow an undeclared request's footprint
+	// live, before the stream's total is known. Never called after the stream ends.
+	onContent func(delta string)
 }
 
 // NewSSETokenMeter returns an empty meter ready to be wired into an io.TeeReader.
 func NewSSETokenMeter() *SSETokenMeter {
 	return &SSETokenMeter{}
+}
+
+// NewGrowthObserver returns an SSE content observer that grows res as output
+// streams. It charges the increase in floor(cumulativeBytes/4) rather than
+// summing floor(len(delta)/4) per chunk: the per-chunk form drops up to ~1 token
+// on every delta, so a stream split into many small pieces would badly
+// under-count its footprint. res must be non-nil.
+func NewGrowthObserver(res domain.Reservation) func(delta string) {
+	var bytesSoFar, tokensSoFar int
+	return func(delta string) {
+		bytesSoFar += len(delta)
+		tokens := bytesSoFar / 4
+		if tokens > tokensSoFar {
+			res.Grow(tokens - tokensSoFar)
+			tokensSoFar = tokens
+		}
+	}
+}
+
+// SetContentObserver registers a callback invoked with each streamed delta's
+// content as it is parsed. Pass nil to clear. Set it before the meter starts
+// receiving bytes.
+func (m *SSETokenMeter) SetContentObserver(fn func(delta string)) {
+	m.onContent = fn
 }
 
 // Write implements io.Writer. It never returns an error so that the TeeReader
@@ -98,6 +127,9 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 	for _, ch := range c.Choices {
 		if ch.Delta.Content != "" {
 			m.content.WriteString(ch.Delta.Content)
+			if m.onContent != nil {
+				m.onContent(ch.Delta.Content)
+			}
 		}
 	}
 }
