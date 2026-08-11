@@ -1,183 +1,807 @@
 ---
-title: "Audit Logging"
+title: "Audit logging"
+description: "Record structured request metadata, route audit files through Promtail and Loki, and correlate requests with logs and traces."
+sidebarTitle: "Audit logging"
 ---
 
-Mycoroute writes structured audit logs for every request, enabling request tracing and compliance.
+Hivenet Router writes one structured JSON audit record after each HTTP request completes.
 
-## Log Format
+Audit records help operators investigate request outcomes, tenant activity, latency, model use, authentication failures, routing errors, and token consumption without storing prompt or response content.
 
-Each request is logged as a single JSON line to `/var/log/mycoroute/audit.jsonl`:
+<Warning>
+  Audit records still contain potentially sensitive metadata, including tenant identifiers, model names, source IP addresses, and request timing.
+
+  Protect the files, restrict Loki and Grafana access, and define retention according to your organization’s legal and operational requirements.
+</Warning>
+
+## What Hivenet Router audits
+
+The audit middleware covers HTTP requests handled by the router, including:
+
+- inference requests under `/v1/*`
+- model-discovery requests
+- administration requests under `/admin/*`
+- authentication and quota failures
+- successful and unsuccessful backend responses
+
+Hivenet Router deliberately skips:
+
+- `GET /health` liveness probes
+- CORS `OPTIONS` preflight requests
+
+These high-frequency infrastructure requests do not carry useful inference or tenant information.
+
+## Audit record format
+
+The default file is:
+
+```text
+/var/log/mycoroute/audit.jsonl
+```
+
+Each request produces one JSON object on one line:
 
 ```json
 {
   "log_type": "audit",
   "level": "info",
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "request_id": "req-abc123",
+  "request_id": "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a",
   "tenant_id": "acme-corp",
+  "key_id": "acme-prod",
   "model": "meta-llama/Llama-3.1-8B-Instruct",
   "status_code": 200,
   "latency_ms": 1523,
   "input_tokens": 15,
   "output_tokens": 42,
-  "agent_id": "12D3Koo0...",
+  "agent_id": "12D3KooW...",
   "error_code": "",
   "source_ip": "10.0.0.5",
-  "ts": "2026-04-22T12:00:00.000+02:00"
+  "ts": "2026-07-27T16:20:10.123+02:00"
 }
 ```
 
-`level` is `"info"` for 2xx/3xx responses and `"error"` for 4xx/5xx.
+The timestamp and values above are examples.
 
-## What Is Logged
+## Audit fields
 
 | Field | Description |
-|-------|-------------|
-| `log_type` | Always `"audit"` |
-| `level` | `"info"` (success) or `"error"` (4xx/5xx) |
-| `trace_id` | OpenTelemetry trace ID (empty if tracing disabled) |
-| `request_id` | From `X-Request-ID` header, or generated UUID |
-| `tenant_id` | From API key `metadata.owner`; empty if auth disabled |
-| `model` | Model name from request body |
-| `status_code` | HTTP response status (integer) |
-| `latency_ms` | End-to-end latency in milliseconds |
-| `input_tokens` | Prompt tokens from response `usage` |
-| `output_tokens` | Completion tokens from response `usage` |
-| `agent_id` | Peer ID of the selected agent |
-| `error_code` | Domain error code (see below); empty on success |
-| `source_ip` | Client IP address |
-| `ts` | Request start time (CET/CEST timezone) |
+| --- | --- |
+| `log_type` | Always `audit` |
+| `level` | `info` below HTTP `400`; `error` for HTTP `400` and above |
+| `trace_id` | OpenTelemetry trace ID; empty when no valid trace is active |
+| `request_id` | Valid client-supplied UUID or a generated UUID |
+| `tenant_id` | Authenticated key owner; `default` in no-auth mode; empty for failures before identity resolution |
+| `key_id` | Dynamic key-registry ID; normally empty for static keys and no-auth traffic |
+| `model` | Top-level request model when the handler could read it |
+| `status_code` | Final HTTP response status |
+| `latency_ms` | Time from request entry until the response completes |
+| `input_tokens` | Input-token count available to the request handler |
+| `output_tokens` | Output-token count available to the request handler |
+| `agent_id` | Selected agent peer ID or provider marker; empty when no dispatch occurred |
+| `error_code` | Hivenet Router domain error code; empty for successful responses |
+| `source_ip` | Client IP resolved by Gin |
+| `ts` | Request start time in the `Europe/Rome` time zone, including the active UTC offset |
 
-## What Is NOT Logged
+### Request IDs
 
-- **Request body** — No prompt content
-- **Response body** — No completion content
-- **Authorization header** — Bearer tokens excluded
-- **HTTP method / path** — Not recorded per-line; visible in router access logs
+Hivenet Router accepts an incoming:
 
-## Error Codes
-
-| Code | HTTP Status | Cause |
-|------|-------------|-------|
-| `request_invalid` | 400 | Malformed JSON or missing required field |
-| `context_length_exceeded` | 400 | Input exceeds model's maximum context window (backend) |
-| `invalid_parameter` | 400 | Invalid inference parameter value (backend) |
-| `unauthorized` | 401 | Missing or invalid API key |
-| `model_forbidden` | 403 | Key not authorized for the requested model |
-| `model_not_found` | 404 | No agent serves the requested model |
-| `rate_limit_exceeded` | 429 | Requests-per-minute bucket exhausted |
-| `token_limit_exceeded` | 429 | Daily token budget exhausted |
-| `no_agents_available` | 503 | All registered agents are unhealthy |
-| `no_capacity` | 503 | All healthy agents are at full concurrency capacity |
-| `agent_disconnected` | 503 | Agent became unreachable during the request |
-| `backend_unavailable` | 503 | Inference engine not ready (model still loading) |
-| `queue_full` | 503 | Router request queue at capacity |
-| `backend_error` | 502 | Unexpected error from the inference engine |
-| `request_timeout` | 504 | Request exceeded `--request-timeout` |
-
-## Log Location
-
-Default: `/var/log/mycoroute/audit.jsonl`
-
-Configure with `mycoroute_AUDIT_LOG_PATH`:
-
-```bash
-export mycoroute_AUDIT_LOG_PATH=/custom/path/audit.jsonl
-./bin/mycoroute-router ...
+```text
+X-Request-ID
 ```
 
-Falls back to stdout if the directory cannot be created (useful in local development).
+only when its value is a valid UUID.
 
-## Loki + Promtail Pipeline
+A valid UUID is preserved:
 
-### Promtail Configuration
+```bash
+curl \
+  -H "X-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
+  http://localhost:8080/v1/models
+```
+
+An absent, empty, or invalid value is replaced with a new UUID v4.
+
+The selected value is:
+
+- returned in the `X-Request-ID` response header
+- stored in the audit record
+- attached to the active trace span
+
+This prevents arbitrary request-ID text from being injected into audit records.
+
+### Trace IDs
+
+When OpenTelemetry tracing is active, `trace_id` contains the current span’s trace ID.
+
+Hivenet Router also returns a W3C:
+
+```text
+traceparent
+```
+
+response header when a valid trace context exists.
+
+Use either identifier to move between:
+
+- an application request
+- the JSONL audit record
+- Loki logs
+- a Tempo trace
+
+When tracing is disabled or unavailable:
+
+```json
+{
+  "trace_id": ""
+}
+```
+
+### Tenant and key identity
+
+For authenticated client requests:
+
+```text
+tenant_id
+```
+
+comes from the key’s owner.
+
+For dynamic keys:
+
+```text
+key_id
+```
+
+contains the stable registry entry ID.
+
+Static keys do not currently have a stable key ID, so their audit records normally contain:
+
+```json
+{
+  "key_id": ""
+}
+```
+
+In no-auth mode, successful API requests use:
+
+```json
+{
+  "tenant_id": "default",
+  "key_id": ""
+}
+```
+
+Authentication failures happen before Hivenet Router can resolve a tenant or key, so those fields remain empty.
+
+<Note>
+  Audit records and Prometheus labels use different empty-key conventions.
+
+  Static and no-auth audit records normally use an empty `key_id`, while tenant metrics use `key_id="anonymous"` for those requests.
+</Note>
+
+### Agent and provider identity
+
+For a successful local inference request:
+
+```text
+agent_id
+```
+
+contains the selected agent’s libp2p peer ID.
+
+For external provider fallback, the value may identify the provider instead:
+
+```text
+provider:openai
+```
+
+or:
+
+```text
+provider:anthropic
+```
+
+The field remains empty when the request fails before an agent or provider is selected.
+
+### Token fields
+
+For successful non-streaming chat requests, Hivenet Router records the usage available from the completed response.
+
+For streaming chat requests, Hivenet Router updates the audit values after the stream closes and the token meter has finished.
+
+Embedding and reranking requests currently record:
+
+```json
+{
+  "input_tokens": 0,
+  "output_tokens": 0
+}
+```
+
+Requests rejected before inference may also contain zero token values.
+
+<Note>
+  Audit token values describe what Hivenet Router could account for during that request. Their precision depends on the backend response and the request type.
+</Note>
+
+## What is not logged
+
+The dedicated audit record does not include:
+
+- prompt or message content
+- response or completion content
+- request body
+- response body
+- authorization header
+- raw API keys
+- provider credentials
+- complete HTTP headers
+- HTTP method
+- request path
+
+Hivenet Router’s separate application log records method, path, status, latency, and client IP, but deliberately excludes the authorization header.
+
+<Warning>
+  Metadata-only logging reduces content exposure but does not make the records anonymous.
+
+  A model name, tenant ID, source IP, request time, or token count may still be personal, confidential, or commercially sensitive.
+</Warning>
+
+## Error codes
+
+When a request handler provides a specific Hivenet Router domain code, the audit record preserves it.
+
+Common inference codes include:
+
+| Error code | Typical HTTP status | Meaning |
+| --- | --: | --- |
+| `request_invalid` | `400` | Malformed request or missing required data |
+| `context_length_exceeded` | `400` | Backend rejected the context length |
+| `invalid_parameter` | `400` | Backend rejected an inference parameter |
+| `unauthorized` | `401` | Missing or invalid credentials |
+| `model_forbidden` | `403` | Key cannot use the requested model |
+| `model_not_found` | `404` | Requested model is unavailable or hidden |
+| `rate_limit_exceeded` | `429` | Request-rate quota or undeclared per-model quota |
+| `token_limit_exceeded` | `429` | Daily token budget exhausted |
+| `backend_error` | `500` or `502` | Internal, backend, provider, or response-format failure |
+| `no_agents_available` | `503` | No healthy matching agent |
+| `no_capacity` | `503` | Matching agents are full |
+| `agent_disconnected` | `503` | Selected agent became unreachable |
+| `backend_unavailable` | `503` | Inference backend was not ready |
+| `queue_full` | `503` | The router’s global pending-request channel remained full during the enqueue window |
+| `request_timeout` | `504` | Request exceeded its deadline |
+
+When no more specific domain code was attached, the middleware derives a fallback code from the HTTP status:
+
+| HTTP status | Fallback audit code |
+| --: | --- |
+| `400` | `request_invalid` |
+| `401` | `unauthorized` |
+| `403` | `model_forbidden` |
+| `404` | `model_not_found` |
+| `429` | `rate_limit_exceeded` |
+| `503` | `no_agents_available` |
+| `504` | `request_timeout` |
+| Other error status | `backend_error` |
+
+An oversized `/v1/*` request can be rejected with HTTP `413` before the normal inference-handler error path. In that case, treat `status_code` as authoritative; the audit `error_code` may be a broad status-derived value rather than a dedicated request-size code.
+
+Some administration endpoints return simpler endpoint-specific errors without attaching a domain code. Their audit record may therefore contain the broader status-derived value.
+
+See [Error codes](/reference/error-codes) for the inference error reference.
+
+## Configure the file path
+
+Set the case-sensitive environment variable:
+
+```bash
+export HIVENET_ROUTER_AUDIT_LOG_PATH=/custom/path/audit.jsonl
+```
+
+Then start the router:
+
+```bash
+./bin/hivenet-router \
+  ...
+```
+
+The parent directory is created automatically when possible.
+
+The file is opened for append when the router process starts.
+
+<Note>
+  Restart the router after changing `HIVENET_ROUTER_AUDIT_LOG_PATH`. The audit logger does not reopen the file dynamically after an environment change.
+</Note>
+
+## Fallback to stdout
+
+If Hivenet Router cannot create the directory or open the file, the router still starts and writes audit JSON to standard output.
+
+It also writes an explanatory message to standard error:
+
+```text
+audit: cannot open <path>: <error> — falling back to stdout
+```
+
+This is useful for local development, but it can mix structured audit entries with application logs and change the expected Promtail pipeline.
+
+Check startup logs whenever the audit file remains empty.
+
+## Bare-metal permissions
+
+Create a protected directory for a service running as `mycoroute`:
+
+```bash
+sudo install -d \
+  -o mycoroute \
+  -g mycoroute \
+  -m 0750 \
+  /var/log/mycoroute
+```
+
+Set the environment variable in the router service:
+
+```ini
+[Service]
+Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
+```
+
+Hivenet Router creates the file when it starts.
+
+Its final permissions are affected by the process umask. With the hardened systemd unit from the bare-metal guide:
+
+```ini
+UMask=0027
+```
+
+the requested file mode is reduced accordingly.
+
+Check the result:
+
+```bash
+sudo ls -l \
+  /var/log/mycoroute/audit.jsonl
+```
+
+## Docker Compose pipeline
+
+The repository’s Compose stack already connects the router’s audit file to Promtail.
+
+The router writes to a named volume:
 
 ```yaml
-# /etc/promtail/config.yaml
-server:
-  http_listen_port: 9080
-
-positions:
-  filename: /tmp/positions.yaml
-
-clients:
-  - url: http://loki:3100/loki/api/v1/push
-
-scrape_configs:
-  - job_name: mycoroute
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: router
-          __path__: /var/log/mycoroute/audit.jsonl
-    pipeline_stages:
-      - json:
-          expressions:
-            level: level
-            model: model
-            tenant_id: tenant_id
-            status_code: status_code
-      - labels:
-          level:
-          model:
-          tenant_id:
+router:
+  volumes:
+    - audit_logs:/var/log/mycoroute
 ```
 
-### Loki Query Examples
+Promtail mounts the same volume read-only:
 
-```logql
-# All audit entries
-{job="router"} | json
-
-# Failed requests (4xx/5xx)
-{job="router"} | json | level = "error"
-
-# By model
-{job="router"} | json | model = "meta-llama/Llama-3.1-8B-Instruct"
-
-# By tenant
-{job="router"} | json | tenant_id = "acme-corp"
-
-# High latency (>5s)
-{job="router"} | json | latency_ms > 5000
-
-# Specific request
-{job="router"} | json | request_id = "req-abc123"
+```yaml
+promtail:
+  volumes:
+    - audit_logs:/var/log/mycoroute:ro
 ```
 
-### Aggregation Queries
+The volume declaration is:
 
-```logql
-# Error rate by model (last hour)
-sum by (model) (
-  count_over_time({job="router"} | json | level = "error" [1h])
-) /
-sum by (model) (
-  count_over_time({job="router"} | json [1h])
-)
-
-# Token usage by tenant (last day)
-sum by (tenant_id) (
-  sum_over_time({job="router"} | json | unwrap output_tokens [1d])
-)
-
-# Average latency by tenant (last hour)
-avg by (tenant_id) (
-  avg_over_time({job="router"} | json | unwrap latency_ms [1h])
-)
+```yaml
+volumes:
+  audit_logs:
 ```
 
-## Grafana Audit Dashboard
-
-The pre-configured audit dashboard is available at `http://localhost:3000/d/mycoroute-audit/`. See [Grafana Dashboards](/observability/grafana-dashboards) for provisioning and customization.
-
-## Retention Policy
-
-Configure log rotation:
+Start the full stack:
 
 ```bash
-# /etc/logrotate.d/mycoroute
+docker compose up -d --build
+```
+
+Check that the router writes records:
+
+```bash
+docker compose exec router \
+  tail -n 5 \
+  /var/log/mycoroute/audit.jsonl
+```
+
+Check Promtail:
+
+```bash
+docker compose logs promtail \
+  | tail -100
+```
+
+Check Loki readiness:
+
+```bash
+docker compose exec grafana \
+  wget -qO- \
+  http://loki:3100/ready
+```
+
+## Promtail configuration
+
+The repository separates application and audit logs into two jobs.
+
+The audit job reads only the JSONL file:
+
+```yaml
+- job_name: hivenet-router-audit
+
+  static_configs:
+    - targets:
+        - localhost
+
+      labels:
+        job: mycoroute
+        log_type: audit
+        __path__: /var/log/mycoroute/audit.jsonl
+
+  pipeline_stages:
+    - json:
+        expressions:
+          tenant_id: tenant_id
+          status_code: status_code
+          model: model
+          error_code: error_code
+          level: level
+
+    - labels:
+        tenant_id:
+        status_code:
+        model:
+        error_code:
+        level:
+```
+
+The resulting Loki stream selector is:
+
+```logql
+{job="mycoroute", log_type="audit"}
+```
+
+Promtail promotes these JSON fields to labels:
+
+- `tenant_id`
+- `status_code`
+- `model`
+- `error_code`
+- `level`
+
+Other fields remain available through query-time JSON parsing.
+
+### Label-cardinality guidance
+
+Tenant and model labels are useful for dashboards, but they increase the number of Loki streams.
+
+For a larger deployment, review whether these should remain indexed labels:
+
+```text
+tenant_id
+model
+```
+
+High numbers of tenants, models, or frequently changing label values can increase Loki memory and storage use.
+
+A lower-cardinality alternative is to label only stable fields such as:
+
+```text
+job
+log_type
+level
+status_code
+```
+
+and parse tenant and model at query time with:
+
+```logql
+| json
+```
+
+Any pipeline change also requires corresponding dashboard-variable and query updates.
+
+## Query audit records
+
+### All audit records
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+```
+
+### Errors
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | status_code >= 400
+```
+
+You can also use the promoted label:
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  level="error"
+}
+```
+
+### One tenant
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  tenant_id="acme-corp"
+}
+  | json
+```
+
+### One model
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  model="meta-llama/Llama-3.1-8B-Instruct"
+}
+  | json
+```
+
+### One request ID
+
+`request_id` is not a Loki label, so parse the JSON field:
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | request_id =
+      "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a"
+```
+
+### One trace
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | trace_id =
+      "4bf92f3577b34da6a3ce929d0e0e4736"
+```
+
+### Slow requests
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | latency_ms > 5000
+```
+
+### Authentication failures
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  error_code="unauthorized"
+}
+  | json
+```
+
+### Model-access failures
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  error_code="model_forbidden"
+}
+  | json
+```
+
+### Provider fallback requests
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | agent_id =~ "provider:.*"
+```
+
+## Aggregate audit data
+
+### Request rate by status
+
+```logql
+sum by (status_code) (
+  rate(
+    {
+      job="mycoroute",
+      log_type="audit"
+    }[5m]
+  )
+)
+```
+
+Because `status_code` is a promoted label in the repository configuration, it remains available to the aggregation.
+
+### Error rate
+
+```logql
+sum(
+  rate(
+    {
+      job="mycoroute",
+      log_type="audit",
+      level="error"
+    }[5m]
+  )
+)
+/
+sum(
+  rate(
+    {
+      job="mycoroute",
+      log_type="audit"
+    }[5m]
+  )
+)
+```
+
+### Requests by model
+
+```logql
+sum by (model) (
+  count_over_time(
+    {
+      job="mycoroute",
+      log_type="audit"
+    }[1h]
+  )
+)
+```
+
+### Output tokens by tenant
+
+```logql
+sum by (tenant_id) (
+  sum_over_time(
+    {
+      job="mycoroute",
+      log_type="audit"
+    }
+      | json
+      | unwrap output_tokens
+      | __error__ = ""
+    [1d]
+  )
+)
+```
+
+### Average latency by tenant
+
+```logql
+avg by (tenant_id) (
+  avg_over_time(
+    {
+      job="mycoroute",
+      log_type="audit"
+    }
+      | json
+      | unwrap latency_ms
+      | __error__ = ""
+    [1h]
+  )
+)
+```
+
+### P95 latency
+
+```logql
+quantile_over_time(
+  0.95,
+  {
+    job="mycoroute",
+    log_type="audit"
+  }
+    | json
+    | unwrap latency_ms
+    | __error__ = ""
+  [5m]
+)
+```
+
+## Use the Grafana audit dashboard
+
+The provisioned dashboard is available at:
+
+```text
+http://<router-host>:3000/d/mycoroute-audit/
+```
+
+It includes:
+
+- recent request records
+- request rate by status
+- P95 latency
+- top models
+- error rate
+
+Filters are available for:
+
+- tenant ID
+- status code
+- model
+- error code
+
+See [Grafana dashboards](/observability/grafana-dashboards) for provisioning and troubleshooting.
+
+## Correlate logs and traces
+
+A practical investigation flow is:
+
+1. Obtain the request’s `X-Request-ID` or `traceparent` response header.
+2. Search the audit logs for `request_id` or `trace_id`.
+3. Inspect the status, tenant, model, agent, latency, and error code.
+4. Open the matching trace in Tempo.
+5. Review router application logs for the same request ID.
+6. Inspect Prometheus metrics for the selected agent and model.
+
+For example:
+
+```logql
+{job="mycoroute", log_type="audit"}
+  | json
+  | request_id =
+      "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a"
+```
+
+The audit record provides the trace ID:
+
+```json
+{
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+}
+```
+
+Use that value in Grafana Explore with the Tempo data source.
+
+## Source IP and proxies
+
+The `source_ip` field comes from Gin’s client-IP resolution.
+
+Its accuracy depends on:
+
+- whether the router is reached directly
+- which reverse proxies are trusted
+- whether forwarding headers are replaced or preserved
+- whether clients can send spoofed forwarding headers
+
+Do not treat `source_ip` as a verified user or tenant identity.
+
+When Hivenet Router sits behind a proxy:
+
+- restrict direct access to the router
+- configure the proxy to replace untrusted forwarding headers
+- review Gin’s trusted-proxy behavior for your deployment
+- test the value recorded in the audit file
+
+Use authenticated tenant and key information for authorization and accountability.
+
+## Retention and rotation
+
+Hivenet Router opens the audit file when the process starts and keeps the file descriptor open.
+
+A rotation method that renames the file and creates a new one can leave the router writing to the renamed file until restart.
+
+For a simple bare-metal setup, use `copytruncate`:
+
+```text
+/etc/logrotate.d/mycoroute
+```
+
+```conf
 /var/log/mycoroute/audit.jsonl {
     daily
     rotate 30
@@ -185,59 +809,208 @@ Configure log rotation:
     delaycompress
     missingok
     notifempty
-    create 0644 root root
+    copytruncate
 }
 ```
 
-## Compliance Use Cases
+<Warning>
+  `copytruncate` has a small race window in which lines written during the copy and truncate operation can be lost.
 
-### GDPR
+  For stricter audit requirements, use a log-shipping and retention design that avoids local copy-and-truncate rotation, or restart the router as part of a controlled rename-based rotation.
+</Warning>
 
-- Logs request metadata without content (no prompts, no completions)
-- Tracks tenant activity for data processing records
-- `source_ip` can be anonymised at Loki ingest if required
+The repository’s Loki configuration uses filesystem storage and does not set an explicit production retention period.
 
-### SOC 2
+For a production deployment, configure and test:
 
-- Complete request audit trail with `request_id` and `trace_id`
-- Authentication failure tracking via `error_code: "unauthorized"`
-- `tenant_id` links every request to an authorised key owner
+- Loki retention
+- local audit-file retention
+- backup requirements
+- deletion workflows
+- access controls
+- storage capacity monitoring
 
-### Internal Auditing
+Deleting the Docker `loki_data` volume removes the stored Loki data.
 
-- Usage and cost allocation by `tenant_id` and `model`
-- Performance analysis via `latency_ms`
+## Privacy and governance
 
-## Examples
+Audit logging can support operational investigations and evidence collection, but it does not by itself establish compliance with any law or standard.
 
-### Find All Requests for a Tenant
+Before production use, decide:
 
-```logql
-{job="router"} | json | tenant_id = "acme-corp"
+- which teams may access audit data
+- how long records are retained
+- whether source IP addresses should be stored
+- whether tenant and model names reveal sensitive information
+- how deletion and access requests are handled
+- whether records must be exported to a separate security system
+- how clock, integrity, backup, and incident procedures are controlled
+
+Hivenet Router does not log prompt and response bodies in the dedicated audit record, but other components in the request path may have their own logging behavior.
+
+Review:
+
+- reverse proxies
+- inference backends
+- client applications
+- provider APIs
+- container logging
+- observability agents
+
+as part of the complete data-flow assessment.
+
+## Troubleshooting
+
+### The audit file does not exist
+
+Check the configured path:
+
+```bash
+echo "$HIVENET_ROUTER_AUDIT_LOG_PATH"
 ```
 
-### Identify Slow Requests
+Check the router logs for:
 
-```logql
-{job="router"} | json | latency_ms > 10000
+```text
+audit: cannot create log dir
 ```
 
-### Token Usage by Model
+or:
 
-```logql
-sum by (model) (
-  sum_over_time({job="router"} | json | unwrap output_tokens [1d])
-)
+```text
+audit: cannot open
 ```
 
-### Detect Error Spikes
+Confirm that the router process can create the directory and file.
 
-```logql
-sum(rate({job="router"} | json | level = "error" [5m]))
+For systemd:
+
+```bash
+sudo -u mycoroute \
+  touch /var/log/mycoroute/test-write
 ```
 
-## See Also
+Remove the test file afterward:
 
-- [Prometheus Metrics](/observability/prometheus-metrics) - Metrics export
-- [Grafana Dashboards](/observability/grafana-dashboards) - Visual dashboards
-- [Error Codes](/reference/error-codes) - Complete error code reference
+```bash
+sudo rm \
+  /var/log/mycoroute/test-write
+```
+
+### Audit JSON appears in application stdout
+
+The file could not be opened, so Hivenet Router fell back to stdout.
+
+Correct the path or permissions, then restart the router.
+
+### Promtail does not ingest records
+
+Check that the shared file is visible:
+
+```bash
+docker compose exec promtail \
+  tail -n 5 \
+  /var/log/mycoroute/audit.jsonl
+```
+
+Inspect Promtail logs:
+
+```bash
+docker compose logs promtail \
+  | tail -100
+```
+
+Check its positions file and Loki connection.
+
+### Loki has no audit stream
+
+Query the labels API:
+
+```bash
+docker compose exec grafana \
+  wget -qO- \
+  http://loki:3100/loki/use-the-api/v1/labels
+```
+
+Then query the stream:
+
+```bash
+docker compose exec grafana \
+  wget -qO- \
+  'http://loki:3100/loki/use-the-api/v1/query?query=%7Bjob%3D%22mycoroute%22%2Clog_type%3D%22audit%22%7D' \
+  | head
+```
+
+Check that Promtail uses:
+
+```text
+job="mycoroute"
+log_type="audit"
+```
+
+rather than values from the older example configuration.
+
+### A field is empty
+
+The field may not apply to that request.
+
+Examples:
+
+- auth failure: empty tenant and key
+- model-list request: empty model
+- pre-routing rejection: empty agent ID
+- no tracing: empty trace ID
+- static key: empty key ID
+- embedding or reranking: zero token counts
+
+### The request ID was replaced
+
+Hivenet Router accepts only valid UUIDs in `X-Request-ID`.
+
+Use a UUID such as:
+
+```text
+8b9e4a6d-dfb4-4b95-bada-319e7e5b878a
+```
+
+Other values are replaced with a generated UUID.
+
+### The source IP is unexpected
+
+Check the proxy path and forwarding headers.
+
+The recorded value may be the proxy address or a header-derived address, depending on how the router is reached and configured.
+
+### Token totals are zero
+
+Possible causes include:
+
+- the request failed before inference
+- it was an embedding or reranking request
+- the backend did not report usage
+- streaming usage could not be measured
+- the handler did not have token information for that route
+
+Compare the audit record with the backend response and Prometheus tenant-token metrics.
+
+### Records continue in a rotated file
+
+The router keeps the audit file open.
+
+Use `copytruncate`, or restart the router after a rename-based rotation so it opens the new path.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Review the GPU, CPU, and memory data reported by agents.
+  </Card>
+
+  <Card title="Engine metrics" href="/observability/engine-metrics">
+    Understand cache, queue, latency, and throughput metrics by backend.
+  </Card>
+
+  <Card title="Error codes" href="/reference/error-codes">
+    Review the structured errors recorded in audit entries.
+  </Card>
+</CardGroup>

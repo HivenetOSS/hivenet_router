@@ -1,151 +1,914 @@
 ---
-title: "Model Restrictions"
+title: "Model restrictions"
+description: "Limit each API key to specific models and keep model discovery, inference access, and quotas aligned across tenants."
+sidebarTitle: "Model restrictions"
 ---
 
-Configure per-key model access control to enforce least privilege and isolate tenants.
+Model restrictions control which registered models an API key can discover and invoke.
 
-## Access Control Modes
+Use them to apply least privilege, isolate tenants, separate application workloads, and prevent a credential intended for one model from reaching the rest of the inference fleet.
 
-### Full Access
+Model names are matched exactly and are case-sensitive.
 
-Empty models array grants access to all registered models:
+## Restriction methods
 
-```yaml
-api:
-  mode: "api-key"
-  keys:
-    - key_hash: "..."
-      key_preview: "sk-...abc"
-      metadata:
-        name: "Full Access"
-        owner: "acme-corp"
-      models: []  # Empty = all models
-```
+Hivenet Router supports two ways to define model access:
 
-### Restricted Access
+| Key type | Field | Use |
+| --- | --- | --- |
+| Static key | `models` | Explicit model allowlist in `auth.yaml` |
+| Dynamic key | `allowed_models` | Explicit model allowlist in the dynamic registry |
+| Static or dynamic key | `quota.per_model` | Strict model enumeration with a separate quota for each model |
 
-Specify allowed models explicitly:
+`quota.per_model` is both a quota configuration and a model allowlist.
 
-```yaml
-keys:
-  - key_hash: "..."
-    key_preview: "sk-...def"
-    metadata:
-      name: "Beta Tester"
-      owner: "beta-testers"
-    models:
-      - "meta-llama/Llama-3.1-8B-Instruct"
-      - "mistralai/Mistral-7B-Instruct-v0.3"
-```
+<Warning>
+  Do not use the agent’s `--hide-llm` setting as an authorization control. It is registration metadata and does not replace API-key model restrictions.
+</Warning>
 
-### Single Model
+<Note>
+  For predictable behavior, use either an explicit allowlist or `quota.per_model` on one key.
 
-Restrict to a single model:
+  Avoid defining different model sets in both places. A single source of truth is easier to review and less likely to produce inconsistent access expectations.
+</Note>
 
-```yaml
-keys:
-  - key_hash: "..."
-    key_preview: "sk-...ghi"
-    metadata:
-      name: "Embeddings Service"
-      owner: "search-team"
-    models:
-      - "BAAI/bge-m3"  # Embeddings only
-```
+## Full model access
 
-## Use Cases
+An empty or omitted allowlist grants access to every registered model, provided that `quota.per_model` is not configured.
 
-### Multi-Tenant Isolation
-
-Isolate different tenants to their own models:
+### Static key
 
 ```yaml
 api:
-  mode: "api-key"
+  mode: api-key
+
   keys:
-    # Tenant A - Llama models
-    - key_hash: "..."
-      key_preview: "sk-...aaa"
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...full"
+
       metadata:
-        name: "Tenant A"
-        owner: "tenant-a"
+        name: "Platform administrator"
+        owner: "platform-team"
+
+      models: []
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+```
+
+You may also omit `models`:
+
+```yaml
+metadata:
+  name: "Platform administrator"
+  owner: "platform-team"
+
+quota:
+  requests_per_minute: 100
+  tokens_per_day: 500000
+```
+
+### Dynamic key
+
+```json
+{
+  "allowed_models": []
+}
+```
+
+or omit `allowed_models`.
+
+<Warning>
+  An unrestricted key can invoke models registered after the key was created.
+
+  Use an explicit allowlist when newly deployed models should require a separate access decision.
+</Warning>
+
+## Explicit allowlist
+
+List every model the key may use.
+
+### Static key
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...chat"
+
+      metadata:
+        name: "Chat application"
+        owner: "chat-service"
+
       models:
         - "meta-llama/Llama-3.1-8B-Instruct"
-        - "meta-llama/Llama-3.1-70B-Instruct"
-
-    # Tenant B - Mistral models
-    - key_hash: "..."
-      key_preview: "sk-...bbb"
-      metadata:
-        name: "Tenant B"
-        owner: "tenant-b"
-      models:
         - "mistralai/Mistral-7B-Instruct-v0.3"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
 ```
 
-### Service Isolation
+### Dynamic key
 
-Restrict internal services to specific model types:
+```json
+{
+  "allowed_models": [
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "mistralai/Mistral-7B-Instruct-v0.3"
+  ]
+}
+```
+
+The names must match the model IDs reported by Hivenet Router:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/models \
+  | jq -r '.data[].id'
+```
+
+This value:
+
+```text
+meta-llama/Llama-3.1-8B-Instruct
+```
+
+does not match:
+
+```text
+meta-llama/llama-3.1-8b-instruct
+```
+
+## Restrict a key to one model
 
 ```yaml
-keys:
-  # Chat service
-  - key_hash: "..."
-    metadata:
-      name: "Chat Service"
-      owner: "chat-service"
-    models:
-      - "meta-llama/Llama-3.1-8B-Instruct"
+api:
+  mode: api-key
 
-  # Embeddings service
-  - key_hash: "..."
-    metadata:
-      name: "Embeddings Service"
-      owner: "embeddings-service"
-    models:
-      - "BAAI/bge-m3"
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...embed"
 
-  # Reranking service
-  - key_hash: "..."
-    metadata:
-      name: "Reranking Service"
-      owner: "rerank-service"
-    models:
-      - "BAAI/bge-reranker-v2-m3"
+      metadata:
+        name: "Embedding service"
+        owner: "search-team"
+
+      models:
+        - "BAAI/bge-m3"
+
+      quota:
+        requests_per_minute: 500
+        tokens_per_day: 0
 ```
 
-## Access Denied Response
+The key can discover and invoke only:
 
-When a key requests a model not in its whitelist:
+```text
+BAAI/bge-m3
+```
+
+It cannot use a chat or reranking model unless that model is also listed.
+
+## Use per-model quotas as the allowlist
+
+When a key uses `quota.per_model`, every permitted model must appear in that map.
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...multi"
+
+      metadata:
+        name: "Multi-model application"
+        owner: "application-a"
+
+      quota:
+        per_model:
+          meta-llama/Llama-3.1-8B-Instruct:
+            requests_per_minute_per_replica: 20
+            tokens_per_day: 1000000
+
+          BAAI/bge-m3:
+            requests_per_minute_per_replica: 100
+            tokens_per_day: 0
+```
+
+The key can use only:
+
+```text
+meta-llama/Llama-3.1-8B-Instruct
+BAAI/bge-m3
+```
+
+There is no wildcard or implicit unrestricted fallback.
+
+Every entry must contain both fields:
+
+```yaml
+requests_per_minute_per_replica: 0
+tokens_per_day: 0
+```
+
+Use `0` when a particular limit should be unlimited.
+
+<Warning>
+  Do not add a model to a separate `models` or `allowed_models` list and omit it from `quota.per_model`.
+
+  The per-model map is the authoritative model set for discovery and quota admission.
+</Warning>
+
+## How discovery is filtered
+
+Model restrictions apply to:
+
+```text
+GET /v1/models
+GET /v1/models/{model}
+```
+
+### List models
+
+A restricted key sees only its permitted models:
+
+```bash
+curl \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  http://localhost:8080/v1/models \
+  | jq -r '.data[].id'
+```
+
+For example:
+
+```text
+BAAI/bge-m3
+```
+
+Other registered models are omitted from the response.
+
+### Get one model
+
+When a key requests details for a model it cannot use:
+
+```bash
+curl \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  "http://localhost:8080/v1/models/restricted-model"
+```
+
+Hivenet Router returns HTTP `404`:
 
 ```json
 {
   "error": {
-    "code": "model_forbidden",
-    "message": "your API key does not have access to model: meta-llama/Llama-3.1-8B-Instruct",
+    "code": "model_not_found",
+    "message": "No agents registered for model: restricted-model",
     "source": "router"
   }
 }
 ```
 
-HTTP Status: 403
+The response is deliberately identical to the response for an unknown model.
 
-## Monitoring
+This prevents a restricted tenant from using the detail endpoint to discover model names assigned to another tenant.
 
-### Requests by Tenant and Model
+## Operator discovery is unfiltered
 
-```promql
-sum by (tenant_id, model) (rate(mycoroute_routing_requests_routed_total[1h]))
+The administration catalog always shows every registered model:
+
+```text
+GET /admin/models
+GET /admin/models/{model}
 ```
 
-### Access Denied Events
+For example:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/models \
+  | jq -r '.data[].id'
+```
+
+Use the admin catalog when diagnosing whether a model:
+
+- is registered
+- is hidden only from a particular key
+- has healthy agents
+- has the expected capability and engine
+
+Client and administration credentials are separate.
+
+## Inference access errors
+
+The response depends on which restriction mechanism rejects the request.
+
+### Explicit allowlist rejection
+
+A request outside `models` or `allowed_models` returns HTTP `403`:
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: restricted-model",
+    "source": "router"
+  }
+}
+```
+
+For example:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "restricted-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+### Missing per-model quota entry
+
+When `quota.per_model` is configured and the requested model is absent from the map, quota admission returns HTTP `429`:
+
+```json
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "no quota declared for model restricted-model on this API key",
+    "source": "router"
+  }
+}
+```
+
+This is a strict-enumeration failure rather than a depleted request-rate bucket.
+
+The model is also hidden from the client model catalog.
+
+## Restrictions apply before routing
+
+Hivenet Router checks model access before selecting an agent.
+
+A disallowed request does not:
+
+- enter the routing queue
+- consume backend capacity
+- try fallback agents
+- reach an external provider
+- expose whether a healthy backend exists
+
+This keeps access control independent of fleet state.
+
+## Provider fallback
+
+Provider fallback authorizes the model originally requested by the client.
+
+For example:
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct"
+}
+```
+
+may be permitted by the key and later fall back to:
+
+```yaml
+fallback_provider:
+  engine: openai
+  model: "<provider-model>"
+```
+
+The key needs permission for:
+
+```text
+meta-llama/Llama-3.1-8B-Instruct
+```
+
+It does not need the external provider model in its Hivenet Router allowlist.
+
+Quota and audit records remain associated with the original requested model.
+
+<Warning>
+  Allowing one local model may permit its configured external fallback path.
+
+  Review provider fallback policies together with model-access rules.
+</Warning>
+
+## Capability and model restrictions
+
+Model restrictions use model names. They do not independently restrict capabilities or endpoints.
+
+For example, a key allowed to use:
+
+```text
+shared-model
+```
+
+can call any compatible endpoint for which an agent registers that exact model name and the required capability.
+
+Avoid registering the same public model name under several capabilities.
+
+Prefer names that make the workload clear:
+
+```text
+BAAI/bge-m3
+BAAI/bge-reranker-v2-m3
+meta-llama/Llama-3.1-8B-Instruct
+```
+
+This keeps model discovery, access control, quotas, and routing unambiguous.
+
+## Multi-tenant isolation
+
+Give each tenant its own key and model set.
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<tenant-a-hash>"
+      key_preview: "sk-...aaa"
+
+      metadata:
+        name: "Tenant A production"
+        owner: "tenant-a"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+        - "meta-llama/Llama-3.1-70B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 1000000
+
+    - key_hash: "<tenant-b-hash>"
+      key_preview: "sk-...bbb"
+
+      metadata:
+        name: "Tenant B production"
+        owner: "tenant-b"
+
+      models:
+        - "mistralai/Mistral-7B-Instruct-v0.3"
+
+      quota:
+        requests_per_minute: 50
+        tokens_per_day: 500000
+```
+
+Tenant A cannot discover or invoke Tenant B’s Mistral model.
+
+Tenant B cannot discover or invoke Tenant A’s Llama models.
+
+<Note>
+  Model restrictions isolate API access. They do not create separate router processes, storage databases, logs, or physical infrastructure.
+
+  Use separate deployments when tenants require stronger operational or infrastructure isolation.
+</Note>
+
+## Service isolation
+
+Restrict internal services to the workload they need.
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<chat-service-hash>"
+
+      metadata:
+        name: "Chat service"
+        owner: "chat-service"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 200
+        tokens_per_day: 1000000
+
+    - key_hash: "<embedding-service-hash>"
+
+      metadata:
+        name: "Embedding service"
+        owner: "embedding-service"
+
+      models:
+        - "BAAI/bge-m3"
+
+      quota:
+        requests_per_minute: 1000
+        tokens_per_day: 0
+
+    - key_hash: "<reranking-service-hash>"
+
+      metadata:
+        name: "Reranking service"
+        owner: "reranking-service"
+
+      models:
+        - "BAAI/bge-reranker-v2-m3"
+
+      quota:
+        requests_per_minute: 500
+        tokens_per_day: 0
+```
+
+A compromised embedding-service key cannot call the chat model merely because both are available through the same router.
+
+## Environment separation
+
+Use distinct keys and explicit model lists for development, staging, and production workloads.
+
+```yaml
+keys:
+  - key_hash: "<staging-hash>"
+
+    metadata:
+      name: "Staging application"
+      owner: "application-staging"
+
+    models:
+      - "staging/llama-8b"
+
+  - key_hash: "<production-hash>"
+
+    metadata:
+      name: "Production application"
+      owner: "application-production"
+
+    models:
+      - "production/llama-8b"
+```
+
+This is easiest when the registered model names themselves clearly distinguish environments.
+
+Model restrictions cannot distinguish two deployments that register the same model ID.
+
+Use separate model names, tags with separate routers, or separate Hivenet Router deployments when that distinction matters.
+
+## Share models without sharing quotas
+
+Two keys may use the same model while keeping independent quota state.
+
+Give them different owners:
+
+```yaml
+keys:
+  - key_hash: "<application-a-hash>"
+
+    metadata:
+      name: "Application A"
+      owner: "application-a"
+
+    models:
+      - "shared-model"
+
+    quota:
+      requests_per_minute: 100
+      tokens_per_day: 500000
+
+  - key_hash: "<application-b-hash>"
+
+    metadata:
+      name: "Application B"
+      owner: "application-b"
+
+    models:
+      - "shared-model"
+
+    quota:
+      requests_per_minute: 50
+      tokens_per_day: 200000
+```
+
+Keys with the same owner share quota buckets.
+
+Use one owner only when shared quota accounting is intentional.
+
+## Update static restrictions
+
+Edit `auth.yaml`, then send `SIGHUP`:
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+For Docker Compose:
+
+```bash
+docker compose kill \
+  --signal SIGHUP \
+  router
+```
+
+Hivenet Router validates the complete updated file before replacing the active static-key provider.
+
+When validation fails, the previous model restrictions remain active.
+
+Changing from static to dynamic key mode requires a router restart.
+
+## Update dynamic restrictions
+
+Update the key through:
+
+```text
+PUT /admin/api-keys/{id}
+```
+
+For example:
+
+```bash
+curl -X PUT \
+  http://localhost:8080/admin/api-keys/application-a \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "rev_00000012",
+    "key_hash": "<sha256-hash>",
+    "key_preview": "sk-...app",
+    "owner": "application-a",
+    "name": "Application A",
+    "enabled": true,
+    "allowed_models": [
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "BAAI/bge-m3"
+    ],
+    "quota": {
+      "requests_per_minute": 100,
+      "tokens_per_day": 500000
+    }
+  }'
+```
+
+The update replaces the complete entry. Include every field that should remain present.
+
+The new model restrictions take effect after the registry mutation succeeds.
+
+## Test a restricted key
+
+### Check discovery
+
+```bash
+curl \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  http://localhost:8080/v1/models \
+  | jq -r '.data[].id'
+```
+
+Confirm that only intended models appear.
+
+### Check an allowed request
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+### Check a denied request
+
+```bash
+curl -i -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "restricted-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+Confirm the expected `403` or `429` based on the key’s restriction type.
+
+### Check detail privacy
+
+```bash
+curl -i \
+  -H "Authorization: Bearer <restricted-api-key>" \
+  "http://localhost:8080/v1/models/restricted-model"
+```
+
+Confirm that the endpoint returns `404`.
+
+## Monitor denied access
+
+Audit logs provide the clearest view of explicit model-access failures.
+
+With Loki:
 
 ```logql
-{job="router"} | json | error_code = "model_forbidden"
+{
+  job="hivenet-router",
+  log_type="audit",
+  error_code="model_forbidden"
+}
+  | json
 ```
 
-## See Also
+Group denied requests by tenant and model:
 
-- [auth.yaml Reference](/security/auth-yaml-reference) - Configuration schema
-- [API Keys](/security/api-keys) - Key creation and management
-- [Audit Logging](/observability/audit-logging) - Usage tracking
+```logql
+sum by (tenant_id, model) (
+  count_over_time(
+    {
+      job="hivenet-router",
+      log_type="audit",
+      error_code="model_forbidden"
+    }[1h]
+  )
+)
+```
+
+These queries capture explicit `models` or `allowed_models` denials. A model missing from `quota.per_model` is recorded as `rate_limit_exceeded`, the same broad code used for RPM exhaustion. Use the request ID and router logs when you need to distinguish those two cases.
+
+Inspect successful routed traffic by tenant and model:
+
+```promql
+sum by (tenant_id, model) (
+  rate(
+    hivenet_router_routing_requests_routed_total[1h]
+  )
+)
+```
+
+Inspect all failed or rejected tenant requests:
+
+```promql
+sum by (tenant_id, key_id, model) (
+  rate(
+    hivenet_router_tenant_requests_failed_total[5m]
+  )
+)
+```
+
+The failed-request metric includes other failure types. Use audit logs when you need to distinguish model restrictions from quota, routing, or backend errors.
+
+## Security guidance
+
+- Give every application its own key.
+- Use explicit allowlists for production credentials.
+- Keep model names stable after granting access.
+- Review provider fallback with the original model permission.
+- Use separate owners when quota buckets should be independent.
+- Avoid sharing one model name across capabilities.
+- Test discovery and inference after every restriction change.
+- Use the admin catalog for operator diagnosis.
+- Audit and alert on repeated `model_forbidden` events.
+- Use separate router deployments when logical filtering is not strong enough.
+
+## Troubleshooting
+
+### A key sees every model
+
+Check whether its model list is empty or omitted:
+
+```yaml
+models: []
+```
+
+or:
+
+```json
+{
+  "allowed_models": []
+}
+```
+
+An empty allowlist means unrestricted access.
+
+Also check whether you edited the correct key and router environment.
+
+### A permitted model is missing
+
+Compare the configured name with the operator catalog:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/models \
+  | jq -r '.data[].id'
+```
+
+Check capitalization, slashes, punctuation, and model aliases.
+
+If `quota.per_model` is present, confirm that the model has an entry there.
+
+### The list endpoint hides a model, but the admin endpoint shows it
+
+The client key is restricted.
+
+Review:
+
+- `models`
+- `allowed_models`
+- `quota.per_model`
+
+This is expected tenant-filtering behavior.
+
+### Inference returns `403 model_forbidden`
+
+The key uses an explicit allowlist and the requested model is not permitted.
+
+Add the exact model name or use an unrestricted list when that is intentional.
+
+### Inference returns `429` for an unlisted model
+
+The key uses `quota.per_model`.
+
+Add a complete quota entry for the model:
+
+```yaml
+quota:
+  per_model:
+    model-name:
+      requests_per_minute_per_replica: 0
+      tokens_per_day: 0
+```
+
+Both fields are required even when they are unlimited.
+
+### A model is allowed but the request still fails
+
+Model authorization succeeded. Check the later routing stages:
+
+- registered capability
+- agent health
+- available capacity
+- routing-policy filters
+- backend compatibility
+- request validity
+
+Use:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | select(.metadata.model == "<model>")'
+```
+
+### A changed static restriction does not take effect
+
+Send `SIGHUP` and inspect the router logs:
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+A validation failure leaves the previous configuration active.
+
+### A dynamic restriction disappears after restart
+
+Dynamic key state is memory-only.
+
+Repopulate the registry through the administration API after every router restart.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Key rotation" href="/security/key-rotation">
+    Replace client, administrator, agent, and provider credentials safely.
+  </Card>
+
+  <Card title="Models" href="/api/models">
+    Understand filtered client discovery and the unfiltered operator catalog.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Track owners, keys, models, denials, and request outcomes.
+  </Card>
+</CardGroup>

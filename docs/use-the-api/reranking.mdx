@@ -6,7 +6,7 @@ sidebarTitle: "Reranking"
 
 Send a query and a set of candidate documents to a reranking model, then receive the documents ordered by relevance.
 
-Mycoroute routes these requests to agents registered with the `reranker` capability.
+Hivenet Router routes these requests to agents registered with the `reranker` capability.
 
 ```text
 POST /v1/rerank
@@ -18,7 +18,7 @@ POST /v1/rerank
 
 ## How reranking requests are routed
 
-For each request, Mycoroute:
+For each request, Hivenet Router:
 
 1. authenticates the client when API authentication is enabled
 2. applies the configured request-rate quota
@@ -63,7 +63,7 @@ A typical request contains:
 | `documents` | Array of strings | Yes | None | Candidate documents to score |
 | `top_n` | Integer | No | All documents | Maximum number of results to return |
 
-Mycoroute validates the `model` field. The backend validates the other fields.
+Hivenet Router validates the `model` field. The backend validates the other fields.
 
 The model name must:
 
@@ -73,9 +73,9 @@ The model name must:
 
 ### Request-body size
 
-Mycoroute limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. The complete query and document array count toward this limit.
+Hivenet Router limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. The complete query and document array count toward this limit.
 
-Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `mycoroute_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A reverse proxy or ingress may enforce a smaller limit.
+Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `HIVENET_ROUTER_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A reverse proxy or ingress may enforce a smaller limit.
 
 Reduce the number or size of documents when a request receives `413`. Do not depend on a particular JSON error body for this early rejection.
 
@@ -154,7 +154,7 @@ A successful response resembles:
 | `model` | Model that produced the ranking |
 | `usage` | Token information when provided by the backend |
 
-The exact fields depend on the backend. Mycoroute returns the successful response without changing result scores or ordering.
+The exact fields depend on the backend. Hivenet Router returns the successful response without changing result scores or ordering.
 
 <Note>
   Use the `index` field to recover the original document. Do not assume that `document` will contain the text.
@@ -259,9 +259,9 @@ This preserves the metadata held by the search system while using the reranker�
 
 ## Additional request fields
 
-Mycoroute forwards the original JSON request to the backend.
+Hivenet Router forwards the original JSON request to the backend.
 
-You can include additional fields supported by the selected reranking service, but Mycoroute does not interpret or normalize them.
+You can include additional fields supported by the selected reranking service, but Hivenet Router does not interpret or normalize them.
 
 For example:
 
@@ -286,7 +286,7 @@ Unsupported fields may be ignored or rejected.
 
 Reranking requests are synchronous.
 
-Mycoroute waits for the selected backend to score the documents and return the complete result set. The endpoint does not use server-sent events.
+Hivenet Router waits for the selected backend to score the documents and return the complete result set. The endpoint does not use server-sent events.
 
 For large candidate sets, keep the batch within the backend’s limits and configure an appropriate request timeout.
 
@@ -324,7 +324,7 @@ When a finite request quota is configured, responses may include:
 X-RateLimit-Remaining-Requests
 ```
 
-When the request-rate quota is exhausted, Mycoroute returns HTTP `429`.
+When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
 
 <Note>
   The current reranking path does not charge query or document tokens against the daily token quota. Successful reranking requests are recorded with zero input and output tokens for quota accounting.
@@ -332,7 +332,7 @@ When the request-rate quota is exhausted, Mycoroute returns HTTP `429`.
 
 ## Routing policies
 
-Reranking agents use the same routing pipeline as other Mycoroute workloads.
+Reranking agents use the same routing pipeline as other Hivenet Router workloads.
 
 For example:
 
@@ -392,7 +392,7 @@ Start the agent with:
 --capability reranker
 ```
 
-Mycoroute accepts the reranker capability with:
+Hivenet Router accepts the reranker capability with:
 
 - Infinity
 - vLLM
@@ -407,7 +407,7 @@ POST /v1/rerank
 ```
 
 <Warning>
-  Ollama does not expose the required reranking endpoint. Mycoroute rejects an agent started with both `--engine ollama` and `--capability reranker`.
+  Ollama does not expose the required reranking endpoint. Hivenet Router rejects an agent started with both `--engine ollama` and `--capability reranker`.
 </Warning>
 
 For the documented Infinity setup, see [Infinity agent](/deploy/agents/infinity).
@@ -443,7 +443,7 @@ Common responses include:
 | HTTP status | Code | Meaning |
 | --- | --- | --- |
 | `400` | `request_invalid` | Missing model, malformed JSON, or model name too long |
-| `413` | Not guaranteed | Request body exceeds `mycoroute_MAX_REQUEST_BYTES` |
+| `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid API credentials |
 | `403` | `model_forbidden` | API key cannot use the requested model |
 | `404` | `model_not_found` | No registered model matches the request |
@@ -577,7 +577,7 @@ Review the API key’s request-rate quota and any per-model quota configuration.
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Models" href="/api/models">
+  <Card title="Models" href="/use-the-api/models">
     Discover available models, capabilities, engines, and healthy capacity.
   </Card>
 

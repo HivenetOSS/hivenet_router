@@ -1,158 +1,581 @@
 ---
-title: "Contributing to Mycoroute"
+title: "Contributing"
+description: "Set up a Hivenet Router development environment, run the required checks, update generated code, and submit focused pull requests."
+sidebarTitle: "Contributing"
 ---
 
-# Contributing to Mycoroute
+Contributions to Hivenet Router are welcome, including bug reports, feature proposals, documentation improvements, tests, and code changes.
 
-Thanks for your interest in improving Mycoroute! This guide covers how to build,
-test, and submit changes. By participating you agree to abide by our
-[Code of Conduct](/project/code-of-conduct).
+The repository’s root [`CONTRIBUTING.md`](https://github.com/HiveNetCode/mycoroute/blob/main/CONTRIBUTING.md) file is the canonical contribution guide. This page summarizes the workflow and provides additional context for common changes.
 
-## Ways to contribute
+By participating in the project, you agree to follow the [Code of conduct](/project/code-of-conduct).
 
-- **Report bugs** — open an issue with clear reproduction steps, the version/commit,
-  and relevant router/agent logs.
-- **Request features** — open an issue describing the use case before writing code,
-  so we can agree on the approach.
-- **Improve docs** — documentation lives under [`docs/`](https://github.com/HivenetOSS/hivenet_router/blob/main/docs); fixes and clarifications
-  are always welcome.
-- **Send pull requests** — see below.
+<CardGroup cols={2}>
+  <Card title="Report a bug" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Share a reproducible problem with the affected version, configuration, and relevant logs.
+  </Card>
 
-## Development setup
+  <Card title="Propose a feature" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Describe the use case and expected behavior before investing in a substantial implementation.
+  </Card>
 
-Mycoroute is a single Go module. You need **Go 1.25+**.
+  <Card title="Improve the documentation" href="https://github.com/HiveNetCode/mycoroute/tree/main/docs">
+    Correct stale commands, clarify behavior, improve examples, or add missing troubleshooting guidance.
+  </Card>
+
+  <Card title="Open a pull request" href="https://github.com/HiveNetCode/mycoroute/pulls">
+    Submit a focused change with tests, verification details, and a clear explanation of the problem it solves.
+  </Card>
+</CardGroup>
+
+## Development requirements
+
+Hivenet Router is one Go module.
+
+The current `go.mod` requires:
+
+```text
+Go 1.25.5
+```
+
+Use Go 1.25.5 or a compatible later release.
+
+Check the installed version:
 
 ```bash
-git clone https://github.com/mycoroute/mycoroute.git
+go version
+```
+
+Clone the repository:
+
+```bash
+git clone \
+  https://github.com/HiveNetCode/mycoroute.git
+
 cd mycoroute
-go build ./...          # build everything
-go build -o bin/mycoroute-router ./cmd/router/
-go build -o bin/mycoroute-agent  ./cmd/agent/
 ```
 
-## Running the tests
+Build the complete module:
 
 ```bash
-go test ./...                                   # full suite
-go test -count=1 ./...                          # force a fresh (uncached) run
-go test -coverpkg=./internal/...,./proto ./...  # with coverage
+go build ./...
 ```
 
-Tests live under [`test/`](https://github.com/HivenetOSS/hivenet_router/blob/main/test) as black-box packages (`package <pkg>_test`) that
-import `mycoroute/internal/...`. When adding a feature, add tests alongside it and
-prefer table-driven cases with a short doc comment explaining the scenario.
-
-## Code style
-
-- Run `gofmt -w` (or `go fmt ./...`), `go vet ./...`, and `golangci-lint run` before
-  committing — the same checks run in CI and must pass. Lint config lives in `.golangci.yml`.
-- CI also runs `govulncheck ./...` to catch known vulnerabilities in dependencies; you can
-  run it locally with `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`.
-- Match the surrounding code: naming, comment density, and idioms.
-- Keep changes focused; unrelated refactors belong in a separate PR.
-
-### Regenerating protobuf
-
-The gRPC/protobuf Go files in `proto/` are generated — **edit `proto/auth.proto`, not
-the `*.pb.go` files**, then regenerate (requires `protoc`, `protoc-gen-go`,
-`protoc-gen-go-grpc`):
+Build the router and agent binaries:
 
 ```bash
-protoc --go_out=. --go_opt=paths=source_relative \
-       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-       proto/auth.proto
+mkdir -p bin
+
+go build \
+  -o bin/hivenet-router \
+  ./cmd/router/
+
+go build \
+  -o bin/hivenet-agent \
+  ./cmd/agent/
 ```
 
-## Pull request process
+The generated binaries are placed under:
 
-1. Create a topic branch off `main` (`feat/…`, `fix/…`, `docs/…`). External contributors
-   should fork first; maintainers can branch directly in the repo.
-2. Make your change with tests; ensure `go build ./...`, `go vet ./...`,
-   `golangci-lint run`, and `go test ./...` all pass locally.
-   Sign off every commit (`git commit -s`) — see [Sign-off (DCO)](#sign-off-dco) below.
-3. Open the PR and fill in the description template that appears — what changed, why,
-   and how you verified it.
-4. Keep the branch up to date with `main` and respond to review feedback.
-
-Before a PR can be merged, GitHub enforces two gates automatically:
-
-- **CI must be green** — the `test` job (build, vet, `go test ./... -race`) has to pass.
-- **Review required** — at least one approval from the maintainer pool defined in
-  [`.github/CODEOWNERS`](https://github.com/HivenetOSS/hivenet_router/blob/main/.github/CODEOWNERS). New commits dismiss stale approvals.
-
-## Dependencies
-
-Dependencies are kept current by **Dependabot**, configured in
-[`.github/dependabot.yml`](https://github.com/HivenetOSS/hivenet_router/blob/main/.github/dependabot.yml): weekly, grouped PRs for Go modules and GitHub
-Actions. Two deliberate choices shape how we handle them:
-
-- **We merge them manually — there is no auto-merge.** Tests catch accidental breakage, but only a
-  human review gate catches a *malicious* release, so every dependency PR goes through the same
-  CODEOWNER review + green CI as any other change.
-- **Security vs. routine.** Security updates are fast-tracked — Dependabot opens them immediately.
-  Routine version bumps sit behind a cooldown (patch 3d / minor 5d / major 7d) so a bad release has
-  time to be caught before we adopt it. GitHub Actions are pinned to a **full commit SHA** (with a
-  `# vX` comment), so a repointed tag can't silently change what runs in CI.
-
-When reviewing a dependency PR, do a quick **smell test** before approving:
-
-- Skim the changelog / diff — does it match the version bump?
-- Watch for a **maintainer or ownership change** on the package.
-- Watch for **new network calls, or install / `postinstall` scripts**.
-- Be suspicious of an **oversized diff for a "patch"** bump.
-- Confirm CI is green, including `govulncheck` and `license-check`.
-
-## Releases
-
-Images are published to Docker Hub as `<namespace>/router` and `<namespace>/agent`:
-
-- **Nightly** — every merge into `main` rebuilds and pushes `:nightly` and
-  `:nightly-<shortsha>`.
-- **Stable** — a maintainer publishes a GitHub Release with a `vX.Y.Z` tag, which builds
-  and pushes `:vX.Y.Z`, `:vX.Y`, and `:latest`.
-
-## Reporting security issues
-
-**Do not open a public issue for security vulnerabilities.** See [`SECURITY.md`](/project/security-policy)
-— email the maintainers at mycoroute@antimatter.com with details and we will coordinate a fix
-and disclosure.
-
-## Sign-off (DCO)
-
-Instead of a CLA, Mycoroute uses the Developer Certificate of Origin (DCO) — see
-the [`DCO`](https://github.com/HivenetOSS/hivenet_router/blob/main/DCO) file. It is a lightweight statement that you wrote the
-contribution, or otherwise have the right to submit it under the project's license. You certify it by adding
-a `Signed-off-by` line to each commit — do this automatically with the `-s` flag:
-
-```bash
-git commit -s -m "fix: correct heartbeat backoff"
+```text
+bin/
 ```
 
-This appends a trailer using your `git` name and email, which must be real:
+which is excluded from Git.
 
-```
-Signed-off-by: Jane Doe <jane@example.com>
-```
+## Repository structure
 
-Every commit in a pull request must be signed off; a DCO check runs in CI and
-blocks the merge if any commit is missing the trailer. To fix an existing branch:
+The main implementation areas are:
 
-```bash
-git rebase --signoff main      # sign off all commits on the branch
-git push --force-with-lease
-```
+| Path | Purpose |
+| --- | --- |
+| `cmd/router/` | Router entry point and process startup |
+| `cmd/agent/` | Agent entry point and process startup |
+| `internal/use-the-api/` | HTTP routes, handlers, middleware, and audit behavior |
+| `internal/auth/` | Client, administrator, agent, and quota authentication |
+| `internal/router/` | Agent registry, request processing, forwarding, and queueing |
+| `internal/policy/` | Routing policies, gates, fallback chains, and selection |
+| `internal/agent/` | Agent lifecycle, backend adapters, and request proxying |
+| `internal/storage/` | In-memory and persistent BadgerDB state |
+| `internal/metrics/` | Prometheus metrics and persisted agent history |
+| `internal/provider/` | External provider fallback |
+| `internal/transport/` | gRPC and libp2p transport |
+| `proto/` | Agent-authentication protobuf source and generated Go code |
+| `test/` | Most black-box package tests and shared test utilities |
+| `docs/` | Mintlify documentation source |
+| `scripts/` | Setup, benchmark, load, and comparison scripts |
 
-## License
-
-By contributing, you agree that your contributions will be licensed under the
-[Apache License 2.0](LICENSE), the same license as the project. New source files
-should carry the standard two-line SPDX header used throughout the tree:
+Most tests live under `test/` and use external packages such as:
 
 ```go
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
+package router_test
 ```
 
-This is enforced by `golangci-lint` (the `goheader` linter), so a new `.go`
-file without it fails the `lint` check. Generated files (e.g. `*.pb.go`) are
-exempt automatically.
+This exercises exported behavior without depending on internal implementation details.
+
+A small number of focused white-box tests live beside the implementation when they need access to an unexported helper.
+
+## Run the tests
+
+Run the complete test suite:
+
+```bash
+go test ./...
+```
+
+Force a fresh run without cached test results:
+
+```bash
+go test \
+  -count=1 \
+  ./...
+```
+
+Run with coverage across the internal and protobuf packages:
+
+```bash
+go test \
+  -coverpkg=./internal/...,./proto \
+  ./...
+```
+
+Run one package:
+
+```bash
+go test \
+  ./test/router
+```
+
+Run one test by name:
+
+```bash
+go test \
+  ./test/router \
+  -run TestName
+```
+
+Use verbose output while diagnosing a failure:
+
+```bash
+go test \
+  -v \
+  ./test/router \
+  -run TestName
+```
+
+## Add tests with a change
+
+A behavior change should normally include tests covering:
+
+- the expected path
+- invalid input
+- boundary conditions
+- failure behavior
+- relevant precedence rules
+- regression scenarios
+
+Prefer table-driven tests when several inputs should produce related outcomes:
+
+```go
+func TestExample(t *testing.T) {
+    cases := []struct {
+        name string
+        input string
+        want string
+    }{
+        {
+            name: "first case",
+            input: "value",
+            want: "result",
+        },
+    }
+
+    for _, tc := range cases {
+        t.Run(tc.name, func(t *testing.T) {
+            got := example(tc.input)
+
+            if got != tc.want {
+                t.Fatalf(
+                    "example(%q) = %q, want %q",
+                    tc.input,
+                    got,
+                    tc.want,
+                )
+            }
+        })
+    }
+}
+```
+
+Keep each test focused on behavior that would help a future contributor understand why the case matters.
+
+Use a white-box test only when testing an unexported behavior directly is clearer than expanding the production API solely for testing.
+
+## Format and check the code
+
+Before opening a pull request, run:
+
+```bash
+go fmt ./...
+go vet ./...
+go test ./...
+go build ./...
+```
+
+`go fmt ./...` updates Go source files in place.
+
+Review the resulting diff:
+
+```bash
+git diff
+```
+
+Check for accidental changes:
+
+```bash
+git status --short
+```
+
+Match the surrounding code’s:
+
+- naming
+- error handling
+- comment density
+- logging style
+- package boundaries
+- concurrency patterns
+
+Keep the change focused. Move unrelated cleanup or refactoring into a separate pull request.
+
+## Update dependencies carefully
+
+After intentionally changing module dependencies:
+
+```bash
+go mod tidy
+```
+
+Review both:
+
+```text
+go.mod
+go.sum
+```
+
+Do not run `go mod tidy` as unrelated cleanup in a pull request that does not change dependencies.
+
+A dependency change should explain:
+
+- why the dependency is needed
+- why the selected version is appropriate
+- whether it changes compatibility or runtime behavior
+- whether it introduces a security or licensing concern
+
+## Regenerate protobuf code
+
+The generated files are:
+
+```text
+proto/auth.pb.go
+proto/auth_grpc.pb.go
+```
+
+Do not edit them manually.
+
+Edit the source definition instead:
+
+```text
+proto/auth.proto
+```
+
+Install:
+
+- `protoc`
+- `protoc-gen-go`
+- `protoc-gen-go-grpc`
+
+Then regenerate:
+
+```bash
+protoc \
+  --go_out=. \
+  --go_opt=paths=source_relative \
+  --go-grpc_out=. \
+  --go-grpc_opt=paths=source_relative \
+  proto/auth.proto
+```
+
+Run formatting and tests afterward:
+
+```bash
+go fmt ./...
+go test ./...
+```
+
+Review the generated diff carefully.
+
+Generated output can change when contributors use different protobuf compiler or plugin versions. Avoid unrelated generated-file churn.
+
+<Warning>
+  Do not change only the generated `*.pb.go` files.
+
+  Those edits will be overwritten the next time `proto/auth.proto` is regenerated.
+</Warning>
+
+## Improve the documentation
+
+Documentation lives under:
+
+```text
+docs/
+```
+
+Useful documentation contributions include:
+
+- correcting behavior that changed in the implementation
+- replacing stale commands or defaults
+- clarifying API and configuration boundaries
+- documenting edge cases
+- improving navigation
+- adding verified troubleshooting steps
+- fixing broken links
+- correcting examples that no longer match the code
+
+When editing an existing technical page:
+
+1. Treat the current implementation as the source of truth.
+2. Preserve exact commands, flags, endpoints, schemas, and units.
+3. Distinguish verified behavior from guidance or interpretation.
+4. Do not add product claims that the repository does not support.
+5. Update related pages when one behavior affects several guides.
+6. Check internal links and sidebar placement.
+
+When documentation and code disagree, verify the relevant implementation before deciding which one needs to change.
+
+## Report a bug
+
+Open a GitHub issue and include:
+
+- the Hivenet Router release or commit
+- operating system and deployment method
+- whether the problem affects the router, agent, or both
+- inference engine and version
+- exact model ID and capability
+- relevant configuration with secrets removed
+- clear reproduction steps
+- expected behavior
+- actual behavior
+- relevant logs
+- `X-Request-ID` when one request demonstrates the problem
+
+A useful report separates:
+
+- client behavior
+- router behavior
+- agent behavior
+- inference-backend behavior
+
+This makes it easier to identify the failing layer.
+
+<Warning>
+  Remove secrets and sensitive data before attaching configuration or logs.
+
+  Do not include:
+
+  - client API keys
+  - administrator keys
+  - agent JWT secrets
+  - provider credentials
+  - private prompts
+  - customer data
+</Warning>
+
+## Propose a feature
+
+Open an issue before beginning a substantial feature.
+
+Describe:
+
+- the user or operator problem
+- the intended use case
+- current behavior
+- expected behavior
+- API or configuration changes
+- persistence implications
+- authentication and security implications
+- compatibility concerns
+- operational trade-offs
+
+A proposal is more useful when it explains the problem rather than presenting one implementation as the only acceptable solution.
+
+Discussing the approach first reduces the risk of building a large change that conflicts with the project’s architecture or scope.
+
+## Create a branch
+
+Fork the repository, then create a topic branch from the current `main` branch.
+
+```bash
+git switch main
+git pull --ff-only
+git switch -c feat/short-description
+```
+
+Use a prefix that reflects the change:
+
+```text
+feat/
+fix/
+docs/
+```
+
+Examples:
+
+```text
+feat/per-model-health-gate
+fix/streaming-token-accounting
+docs/clarify-agent-addresses
+```
+
+Keep one coherent change on each branch.
+
+## Prepare the pull request
+
+Before opening the pull request:
+
+```bash
+go fmt ./...
+go vet ./...
+go test ./...
+go build ./...
+```
+
+Then update the branch with the latest `main` when necessary.
+
+A useful pull request description explains:
+
+- what changed
+- why the change is needed
+- how the behavior works
+- how it was tested
+- any compatibility or migration impact
+- any remaining limitation
+- related issues
+
+For example:
+
+```text
+What changed
+
+Added ...
+
+Why
+
+The previous behavior ...
+
+Verification
+
+- go test ./...
+- go vet ./...
+- manual request against ...
+```
+
+Include screenshots only when they help explain:
+
+- documentation rendering
+- dashboards
+- user-interface integrations
+- another visual change
+
+Do not use screenshots as the only evidence for API or routing behavior.
+
+## Review feedback
+
+Review may ask for:
+
+- clearer behavior boundaries
+- additional tests
+- smaller changes
+- compatibility handling
+- documentation updates
+- removal of unrelated refactoring
+
+Respond to feedback directly and update the branch rather than opening a replacement pull request for the same work.
+
+When you disagree with a suggestion, explain the technical trade-off and provide supporting evidence.
+
+## Report a security issue privately
+
+<Danger>
+  Do not open a public GitHub issue for a suspected vulnerability.
+</Danger>
+
+Email:
+
+```text
+support@hivenet.com
+```
+
+Include:
+
+- affected component and version
+- reproduction steps
+- expected security boundary
+- observed behavior
+- potential impact
+- any temporary mitigation
+
+Do not include production credentials unless the maintainers explicitly request them through an appropriate secure channel.
+
+The maintainers will coordinate investigation, remediation, and disclosure.
+
+## License for contributions
+
+Hivenet Router is licensed under the Apache License 2.0.
+
+By contributing, you agree that your contribution will be licensed under the same terms.
+
+Read the complete [License](/project/license) before submitting a contribution.
+
+## Contribution checklist
+
+Before submitting:
+
+- the change has one clear purpose
+- new behavior has appropriate tests
+- existing tests pass
+- Go source is formatted
+- `go vet ./...` passes
+- the complete module builds
+- generated files were updated from their source
+- documentation reflects externally visible changes
+- secrets and sensitive data were removed
+- the pull request explains the reason and verification
+- the branch is based on a current `main`
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Canonical contribution guide" href="https://github.com/HiveNetCode/mycoroute/blob/main/CONTRIBUTING.md">
+    Read the authoritative repository version of the contribution instructions.
+  </Card>
+
+  <Card title="Code of conduct" href="/project/code-of-conduct">
+    Review the standards applying to project participation.
+  </Card>
+
+  <Card title="License" href="/project/license">
+    Review the Apache License 2.0 terms applying to contributions.
+  </Card>
+
+  <Card title="GitHub issues" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Report bugs and discuss feature proposals.
+  </Card>
+
+  <Card title="Pull requests" href="https://github.com/HiveNetCode/mycoroute/pulls">
+    Review current work or submit a focused change.
+  </Card>
+
+  <Card title="Detailed architecture" href="/reference/detailed-architecture">
+    Understand the components and request paths affected by a code change.
+  </Card>
+</CardGroup>

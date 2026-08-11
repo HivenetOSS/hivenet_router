@@ -1,11 +1,11 @@
 ---
 Slug: "api/chat-completions"
 title: "Chat completions and messages"
-description: "Send OpenAI-compatible chat-completion and Anthropic Messages requests through Mycoroute, with streaming, routing, authentication, and quota enforcement."
+description: "Send OpenAI-compatible chat-completion and Anthropic Messages requests through Hivenet Router, with streaming, routing, authentication, and quota enforcement."
 sidebarTitle: "Chat completions"
 ---
 
-Mycoroute exposes OpenAI-compatible Chat Completions and Anthropic-compatible Messages endpoints through the same routing pipeline.
+Hivenet Router exposes OpenAI-compatible Chat Completions and Anthropic-compatible Messages endpoints through the same routing pipeline.
 
 The router reads the top-level `model` field, selects a healthy language-model agent, and forwards the original request to the same path on that agent’s backend.
 
@@ -16,12 +16,12 @@ The router reads the top-level `model` field, selects a healthy language-model a
 | Anthropic token counting | `POST /v1/messages/count_tokens` |
 
 <Note>
-  The selected backend must support the endpoint used by the client. Mycoroute does not translate between the OpenAI and Anthropic request formats.
+  The selected backend must support the endpoint used by the client. Hivenet Router does not translate between the OpenAI and Anthropic request formats.
 </Note>
 
 ## How passthrough works
 
-For each request, Mycoroute:
+For each request, Hivenet Router:
 
 1. authenticates the client when API authentication is enabled
 2. applies request and token quotas when configured
@@ -31,11 +31,11 @@ For each request, Mycoroute:
 6. forwards the original body to the same path on the selected backend
 7. returns the backend response to the client
 
-Apart from the fields needed for routing and quota estimation, Mycoroute does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
+Apart from the fields needed for routing and quota estimation, Hivenet Router does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
 
 ## Allowed passthrough paths
 
-Mycoroute only forwards an explicit set of inference paths:
+Hivenet Router only forwards an explicit set of inference paths:
 
 ```text
 /v1/chat/completions
@@ -67,12 +67,12 @@ Malformed JSON, a missing model, or an overlong model name is rejected before ro
 
 ### Request-body size
 
-Mycoroute limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. Requests above the configured limit are rejected with HTTP `413` before model authorization, quota accounting, queueing, or backend forwarding.
+Hivenet Router limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. Requests above the configured limit are rejected with HTTP `413` before model authorization, quota accounting, queueing, or backend forwarding.
 
 Configure the limit with:
 
 ```bash
-export mycoroute_MAX_REQUEST_BYTES=<bytes>
+export HIVENET_ROUTER_MAX_REQUEST_BYTES=<bytes>
 ```
 
 Set it to `0` to disable the built-in limit. A reverse proxy or ingress can still enforce a smaller limit.
@@ -87,9 +87,9 @@ Do not depend on a particular JSON error body for `413` responses. Handle the HT
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Request-ID: <uuid>` | No | Correlates requests with logs and traces |
 
-If `X-Request-ID` contains a valid UUID, Mycoroute preserves it. If it is missing or invalid, the router creates a new UUID. The value is returned in the response.
+If `X-Request-ID` contains a valid UUID, Hivenet Router preserves it. If it is missing or invalid, the router creates a new UUID. The value is returned in the response.
 
-Mycoroute may also return a W3C `traceparent` header when tracing is enabled.
+Hivenet Router may also return a W3C `traceparent` header when tracing is enabled.
 
 ## OpenAI Chat Completions
 
@@ -138,11 +138,11 @@ curl -X POST \
   }'
 ```
 
-### Fields used by Mycoroute
+### Fields used by Hivenet Router
 
-Mycoroute forwards the complete request, but it reads a small number of fields for routing and quota enforcement.
+Hivenet Router forwards the complete request, but it reads a small number of fields for routing and quota enforcement.
 
-| Field | How Mycoroute uses it |
+| Field | How Hivenet Router uses it |
 | --- | --- |
 | `model` | Selects matching agents and applies model restrictions |
 | `messages` | Estimates input-token use when token quotas are enabled |
@@ -150,7 +150,7 @@ Mycoroute forwards the complete request, but it reads a small number of fields f
 | `max_tokens` | Used as a fallback when `max_completion_tokens` is absent |
 | `stream` | Enables progressive streaming through the router and agent |
 
-All other fields are passed to the backend without Mycoroute assigning its own default values.
+All other fields are passed to the backend without Hivenet Router assigning its own default values.
 
 <Note>
   The selected backend decides which request fields, message roles, modalities, tools, and sampling values it accepts.
@@ -158,7 +158,7 @@ All other fields are passed to the backend without Mycoroute assigning its own d
 
 ### Multimodal message content
 
-Mycoroute can parse message content supplied as plain text or as content-part arrays containing text, image URLs, or input audio.
+Hivenet Router can parse message content supplied as plain text or as content-part arrays containing text, image URLs, or input audio.
 
 For example:
 
@@ -185,11 +185,11 @@ For example:
 }
 ```
 
-The backend must support the requested modality. Mycoroute routes and forwards the request but does not add vision or audio support to a text-only engine.
+The backend must support the requested modality. Hivenet Router routes and forwards the request but does not add vision or audio support to a text-only engine.
 
 ## Non-streaming responses
 
-For a non-streaming request, Mycoroute returns the response produced by the selected backend.
+For a non-streaming request, Hivenet Router returns the response produced by the selected backend.
 
 A typical OpenAI-compatible response resembles:
 
@@ -219,7 +219,7 @@ A typical OpenAI-compatible response resembles:
 
 The exact fields and values depend on the backend.
 
-If the backend omits token usage from a successful non-streaming response, Mycoroute estimates prompt and completion tokens for accounting and audit records.
+If the backend omits token usage from a successful non-streaming response, Hivenet Router estimates prompt and completion tokens for accounting and audit records.
 
 ## Streaming responses
 
@@ -249,7 +249,7 @@ curl -N -X POST \
   }'
 ```
 
-Mycoroute forwards streaming chunks as they arrive from the backend rather than buffering the full response.
+Hivenet Router forwards streaming chunks as they arrive from the backend rather than buffering the full response.
 
 A typical stream resembles:
 
@@ -266,7 +266,7 @@ data: [DONE]
 The exact event structure comes from the backend.
 
 <Note>
-  Mycoroute can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
+  Hivenet Router can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
 </Note>
 
 ## Anthropic Messages
@@ -296,11 +296,11 @@ curl -X POST \
   }'
 ```
 
-The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Mycoroute.
+The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router.
 
 Model names must match both:
 
-- the name registered by the Mycoroute agent
+- the name registered by the Hivenet Router agent
 - the name accepted by the backend
 
 ### Use Claude Code
@@ -324,7 +324,7 @@ See [Claude Code](/integrations/claude-code) for the complete setup and compatib
 
 ## Count Anthropic input tokens
 
-Mycoroute also allows:
+Hivenet Router also allows:
 
 ```text
 POST /v1/messages/count_tokens
@@ -390,7 +390,7 @@ API keys can enforce:
 - daily token budgets
 - separate quotas for individual models
 
-Before routing, Mycoroute checks the request-rate quota.
+Before routing, Hivenet Router checks the request-rate quota.
 
 When a daily token budget is configured, it also estimates the prompt and checks whether the remaining budget can cover:
 
@@ -398,7 +398,7 @@ When a daily token budget is configured, it also estimates the prompt and checks
 estimated input tokens + requested maximum output tokens
 ```
 
-`max_completion_tokens` is used when present. Otherwise Mycoroute uses `max_tokens`.
+`max_completion_tokens` is used when present. Otherwise Hivenet Router uses `max_tokens`.
 
 The estimated input tokens are charged at admission. Actual completion tokens are charged after the backend responds.
 
@@ -422,7 +422,7 @@ X-RateLimit-Remaining-Tokens
 
 Unlimited quotas do not produce a remaining-value header.
 
-When a request-rate bucket is exhausted, Mycoroute returns HTTP `429` with `X-RateLimit-Remaining-Requests: 0`.
+When a request-rate bucket is exhausted, Hivenet Router returns HTTP `429` with `X-RateLimit-Remaining-Requests: 0`.
 
 A token-budget rejection can still report a nonzero `X-RateLimit-Remaining-Tokens` value when the remaining budget is positive but too small for the estimated prompt plus requested maximum output. Post-response token rejection reports `0`.
 
@@ -458,7 +458,7 @@ Common responses include:
 | --- | --- | --- |
 | `400` | `request_invalid` | Malformed request or missing model |
 | `400` | `context_length_exceeded` | Backend rejected the context length |
-| `413` | Not guaranteed | Request body exceeds `mycoroute_MAX_REQUEST_BYTES` |
+| `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid credentials |
 | `403` | `model_forbidden` | API key cannot use the requested model |
 | `404` | `model_not_found` | No registered model matches the request |
@@ -474,11 +474,11 @@ See [Error codes](/reference/error-codes) for the complete reference.
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Embeddings" href="/api/embeddings">
+  <Card title="Embeddings" href="/use-the-api/embeddings">
     Generate vectors through capability-specific embedding agents.
   </Card>
 
-  <Card title="Models" href="/api/models">
+  <Card title="Models" href="/use-the-api/models">
     Discover which models and capabilities are currently available.
   </Card>
 

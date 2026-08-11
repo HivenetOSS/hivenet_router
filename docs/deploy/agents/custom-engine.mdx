@@ -1,12 +1,12 @@
 ---
 title: "Custom engine agent"
-description: "Connect an OpenAI-compatible chat-completion backend to Mycoroute using an explicit model name and health endpoint."
+description: "Connect an OpenAI-compatible chat-completion backend to Hivenet Router using an explicit model name and health endpoint."
 sidebarTitle: "Custom engine"
 ---
 
-Connect another OpenAI-compatible inference server to Mycoroute with the `custom` engine.
+Connect another OpenAI-compatible inference server to Hivenet Router with the `custom` engine.
 
-Use this integration when your backend is not covered by one of Mycoroute’s built-in engine types but exposes a compatible chat-completions endpoint.
+Use this integration when your backend is not covered by one of Hivenet Router’s built-in engine types but exposes a compatible chat-completions endpoint.
 
 <Warning>
   The custom engine requires both `--model` and `--health-url`. It does not discover either value from the backend.
@@ -31,7 +31,7 @@ Health URL: http://localhost:8000/health
 Chat completions: http://localhost:8000/v1/chat/completions
 ```
 
-Mycoroute forwards the original chat-completion request body and HTTP headers to the backend. It does not translate a proprietary request format into the OpenAI schema.
+Hivenet Router forwards the original chat-completion request body and HTTP headers to the backend. It does not translate a proprietary request format into the OpenAI schema.
 
 <Note>
   This page covers language-model agents using the default `llm` capability. Use the dedicated Infinity integration for the documented embedding and reranking workflow.
@@ -41,11 +41,11 @@ Mycoroute forwards the original chat-completion request body and HTTP headers to
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - an OpenAI-compatible inference backend
 - a health endpoint that returns HTTP `200`
 - network access between the agent and router
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 - a model name that clients and the backend can use
 
@@ -75,7 +75,7 @@ python -m my_inference_server \
   --port 8000
 ```
 
-Because the Mycoroute agent runs beside the backend, the backend can remain bound to localhost unless another machine must reach it directly.
+Because the Hivenet Router agent runs beside the backend, the backend can remain bound to localhost unless another machine must reach it directly.
 
 Check the health endpoint:
 
@@ -83,7 +83,7 @@ Check the health endpoint:
 curl -i http://localhost:8000/health
 ```
 
-Mycoroute considers the backend ready only when this endpoint returns HTTP `200`.
+Hivenet Router considers the backend ready only when this endpoint returns HTTP `200`.
 
 Test chat completions directly:
 
@@ -102,7 +102,7 @@ curl -X POST \
   }'
 ```
 
-Confirm this request works before starting the Mycoroute agent.
+Confirm this request works before starting the Hivenet Router agent.
 
 ## Choose the model name
 
@@ -114,7 +114,7 @@ You must provide the model name explicitly:
 --model meta-llama/Llama-3.1-8B-Instruct
 ```
 
-Mycoroute uses this value to:
+Hivenet Router uses this value to:
 
 - register the agent
 - list the model through `GET /v1/models`
@@ -129,11 +129,11 @@ The request body is forwarded without replacing its `model` field. For the clean
 
 If the backend uses another internal identifier, configure an alias or compatibility layer on the backend side.
 
-## Prepare the Mycoroute agent
+## Prepare the Hivenet Router agent
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -162,10 +162,10 @@ If the backend uses another internal identifier, configure an alias or compatibi
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the shared JWT secret somewhere the agent can read, for example:
@@ -189,7 +189,7 @@ If the backend uses another internal identifier, configure an alias or compatibi
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -215,7 +215,7 @@ If the backend uses another internal identifier, configure an alias or compatibi
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine custom \
       --backend-url http://localhost:8000 \
       --health-url http://localhost:8000/health \
@@ -240,10 +240,10 @@ The agent waits until the configured health endpoint returns HTTP `200`. If the 
 | `--engine custom` | Selects the generic OpenAI-compatible integration |
 | `--backend-url` | Base URL used for chat-completion requests |
 | `--health-url` | Complete URL used to check backend readiness |
-| `--model` | Explicit model name registered with Mycoroute |
+| `--model` | Explicit model name registered with Hivenet Router |
 | `--router-grpc` | Router endpoint used for agent authentication |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Mycoroute may assign |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -279,7 +279,7 @@ http://localhost:8000/v1/chat/completions
 
 Backend response headers and response bodies are returned through the agent and router to the client.
 
-Backend errors are also passed back through Mycoroute. Where possible, Mycoroute classifies common errors such as:
+Backend errors are also passed back through Hivenet Router. Where possible, Hivenet Router classifies common errors such as:
 
 - invalid parameters
 - context-length limits
@@ -311,11 +311,11 @@ curl -N -X POST \
 
 The agent forwards response chunks as they arrive rather than buffering the full completion.
 
-The backend must provide a valid streaming response. Mycoroute does not convert a non-streaming backend response into SSE.
+The backend must provide a valid streaming response. Hivenet Router does not convert a non-streaming backend response into SSE.
 
 ## Set agent capacity
 
-`--capacity` controls how many concurrent requests Mycoroute may assign to the agent.
+`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
 
 It does not configure the backend’s own scheduler, worker count, queue, or batch size.
 
@@ -330,10 +330,10 @@ Choose a value based on:
 
 Start conservatively and test with representative traffic.
 
-When the agent reaches capacity, Mycoroute considers another matching agent, waits if queueing is configured, or moves through the policy’s fallback chain.
+When the agent reaches capacity, Hivenet Router considers another matching agent, waits if queueing is configured, or moves through the policy’s fallback chain.
 
 <Note>
-  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify the custom backend under sustained streaming load.
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify the custom backend under sustained streaming load.
 </Note>
 
 ## Verify the connection
@@ -363,7 +363,7 @@ curl http://192.168.1.100:8080/admin/routing-table \
       | select(.metadata.engine == "custom")'
 ```
 
-Send a request through Mycoroute:
+Send a request through Hivenet Router:
 
 ```bash
 curl -X POST \
@@ -556,13 +556,13 @@ Check the logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
   </Tab>
   <Tab title="systemd">
     ```bash
     sudo journalctl \
-      -u mycoroute-agent \
+      -u hivenet-agent \
       -n 100 \
       --no-pager
     ```
@@ -589,7 +589,7 @@ Test the backend directly with `curl -N`.
 
 Confirm that it returns a streaming content type and flushes chunks as they are generated.
 
-Mycoroute can relay an SSE stream, but it cannot correct buffering introduced by the backend or an intermediate proxy.
+Hivenet Router can relay an SSE stream, but it cannot correct buffering introduced by the backend or an intermediate proxy.
 
 ### Requests time out
 
@@ -616,7 +616,7 @@ Make sure `--identity-path` points to persistent storage.
 For Docker:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].Mounts'
 ```
 
@@ -629,7 +629,7 @@ ls -l /var/lib/mycoroute/agent/identity.key
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Chat completions" href="/api/chat-completions">
+  <Card title="Chat completions" href="/use-the-api/chat-completions">
     Review the supported request, response, and streaming behavior.
   </Card>
 

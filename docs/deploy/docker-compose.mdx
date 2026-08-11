@@ -1,17 +1,17 @@
 ---
 title: "Docker Compose"
-description: "Use Docker Compose to run the Mycoroute router with its full observability stack, then connect agents from separate inference hosts."
+description: "Use Docker Compose to run the Hivenet Router router with its full observability stack, then connect agents from separate inference hosts."
 sidebarTitle: "Docker Compose"
 ---
 
-Use Docker Compose to run the Mycoroute router with its full observability stack, then connect agents from separate inference hosts.
+Use Docker Compose to run the Hivenet Router router with its full observability stack, then connect agents from separate inference hosts.
 
 The repository includes two Compose files:
 
 | File | Run it on | What it starts |
 | --- | --- | --- |
 | `docker-compose.yml` | Router host | Router, Prometheus, Grafana, Tempo, Loki, and Promtail |
-| `docker-compose.agent.yml` | Each inference host | One Mycoroute agent |
+| `docker-compose.agent.yml` | Each inference host | One Hivenet Router agent |
 
 The router Compose file does not start an inference backend or agent. Run the agent Compose file separately on each host where an inference engine is available.
 
@@ -21,7 +21,7 @@ The router host runs:
 
 | Service | Purpose | Exposed port |
 | --- | --- | --- |
-| Mycoroute router | API, agent authentication, and request routing | `8888`, `8902`, `8903` |
+| Hivenet Router router | API, agent authentication, and request routing | `8888`, `8902`, `8903` |
 | Prometheus | Metrics collection | Internal only |
 | Grafana | Dashboards and data exploration | `3000` |
 | Tempo | Distributed tracing | Internal only |
@@ -32,7 +32,7 @@ Each inference host runs:
 
 | Service | Purpose | Exposed port |
 | --- | --- | --- |
-| Mycoroute agent | Connects the backend to the router | Outbound connection only |
+| Hivenet Router agent | Connects the backend to the router | Outbound connection only |
 | Inference backend | Runs the model | Host-local, `8888` in this guide |
 
 Prometheus scrapes the router’s metrics endpoint. Agents push their hardware, engine, latency, and routing signals to the router, so Prometheus does not need direct access to every agent host.
@@ -74,19 +74,19 @@ The current Compose files contain a `changeme` placeholder for the router-agent 
 Before starting the stack, change this line in both `docker-compose.yml` and `docker-compose.agent.yml`:
 
 ```yaml
-- mycoroute_JWT_SECRET=changeme
+- HIVENET_ROUTER_JWT_SECRET=changeme
 ```
 
 Replace it with:
 
 ```yaml
-- mycoroute_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
+- HIVENET_ROUTER_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
 ```
 
 The names use different capitalization deliberately:
 
 - `MYCOROUTE_JWT_SECRET` is the host-side variable read by Docker Compose.
-- `mycoroute_JWT_SECRET` is the environment variable read inside the Mycoroute container.
+- `HIVENET_ROUTER_JWT_SECRET` is the environment variable read inside the Hivenet Router container.
 
 Create a `.env` file on the router host:
 
@@ -109,7 +109,7 @@ For this local walkthrough, add the following environment value to the router se
 
 ```yaml
 environment:
-  - mycoroute_ALLOW_INSECURE_ADMIN=true
+  - HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
 ```
 
 <Warning>
@@ -301,7 +301,7 @@ Repeat these steps on every machine that runs an inference backend.
     Make the same JWT substitution in `docker-compose.agent.yml`:
 
     ```yaml
-    - mycoroute_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
+    - HIVENET_ROUTER_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
     ```
   </Step>
   <Step title="Update and start the agent">
@@ -338,7 +338,7 @@ Repeat these steps on every machine that runs an inference backend.
     - `AGENT_CAPACITY` with the concurrency the backend can support
     - `MACHINE` with a stable machine identifier
 
-    The agent authenticates through gRPC, receives the router’s libp2p connection details, and initiates the persistent transport connection. It needs outbound access to router ports `8902` and `8903`; it does not expose an inbound Mycoroute port.
+    The agent authenticates through gRPC, receives the router’s libp2p connection details, and initiates the persistent transport connection. It needs outbound access to router ports `8902` and `8903`; it does not expose an inbound Hivenet Router port.
   </Step>
   <Step title="Check the agent">
     Inspect the agent logs:
@@ -405,7 +405,7 @@ The router mounts the repository’s `policies` directory at:
 /app/policies
 ```
 
-Mycoroute uses least-loaded routing without a policy file by default.
+Hivenet Router uses least-loaded routing without a policy file by default.
 
 To use one global policy, add these values to the router’s `command` list in `docker-compose.yml`:
 
@@ -460,8 +460,8 @@ For runtime-managed keys, add these container environment variables to the route
 
 ```yaml
 environment:
-  - mycoroute_AUTH_MODE=dynamic
-  - mycoroute_ADMIN_API_KEYS=${MYCOROUTE_ADMIN_API_KEYS:?Set MYCOROUTE_ADMIN_API_KEYS}
+  - HIVENET_ROUTER_AUTH_MODE=dynamic
+  - HIVENET_ROUTER_ADMIN_API_KEYS=${MYCOROUTE_ADMIN_API_KEYS:?Set MYCOROUTE_ADMIN_API_KEYS}
 ```
 
 Add the corresponding host-side value to `.env`:
@@ -481,7 +481,7 @@ Quota counters use in-memory storage by default and reset when the router restar
 To persist daily token counters in BadgerDB, add:
 
 ```yaml
-- mycoroute_QUOTA_BACKEND=badger
+- HIVENET_ROUTER_QUOTA_BACKEND=badger
 ```
 
 to the router environment.
@@ -542,26 +542,26 @@ http://localhost:9090
 Active agents:
 
 ```promql
-count(mycoroute_routing_agent_info)
+count(hivenet_router_routing_agent_info)
 ```
 
 Request routing rate:
 
 ```promql
-rate(mycoroute_routing_requests_routed_total[5m])
+rate(hivenet_router_routing_requests_routed_total[5m])
 ```
 
 Failed routing rate:
 
 ```promql
-rate(mycoroute_routing_requests_failed_total[5m])
+rate(hivenet_router_routing_requests_failed_total[5m])
 ```
 
 Smoothed round-trip time by model:
 
 ```promql
 avg by (model) (
-  mycoroute_agent_srtt_ms
+  hivenet_router_agent_srtt_ms
 )
 ```
 
@@ -606,7 +606,7 @@ Back up the router database:
 
 ```bash
 docker run --rm \
-  -v mycoroute_badger_data:/data:ro \
+  -v hivenet_router_badger_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/badger-$(date +%Y%m%d).tar.gz -C /data .
@@ -616,7 +616,7 @@ Back up Prometheus:
 
 ```bash
 docker run --rm \
-  -v mycoroute_prometheus_data:/data:ro \
+  -v hivenet_router_prometheus_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/prometheus-$(date +%Y%m%d).tar.gz -C /data .
@@ -626,7 +626,7 @@ Back up Grafana:
 
 ```bash
 docker run --rm \
-  -v mycoroute_grafana_data:/data:ro \
+  -v hivenet_router_grafana_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/grafana-$(date +%Y%m%d).tar.gz -C /data .
@@ -650,7 +650,7 @@ Clear the existing contents and restore the archive:
 
 ```bash
 docker run --rm \
-  -v mycoroute_badger_data:/data \
+  -v hivenet_router_badger_data:/data \
   -v "$PWD/backup:/backup:ro" \
   alpine \
   sh -c 'rm -rf /data/* && tar xzf /backup/badger-<date>.tar.gz -C /data'
@@ -702,7 +702,7 @@ Inspect Prometheus targets:
 
 ```bash
 docker compose exec prometheus \
-  wget -qO- http://localhost:9090/api/v1/targets \
+  wget -qO- http://localhost:9090/use-the-api/v1/targets \
   | jq '.data.activeTargets[] | {
       job: .labels.job,
       health: .health,
@@ -720,12 +720,12 @@ docker compose exec prometheus \
 
 ### Grafana has no metrics
 
-Confirm that Prometheus contains Mycoroute data:
+Confirm that Prometheus contains Hivenet Router data:
 
 ```bash
 docker compose exec prometheus \
   wget -qO- \
-  'http://localhost:9090/api/v1/query?query=mycoroute_routing_agent_info' \
+  'http://localhost:9090/use-the-api/v1/query?query=hivenet_router_routing_agent_info' \
   | jq .
 ```
 

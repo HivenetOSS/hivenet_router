@@ -1,0 +1,1125 @@
+---
+title: "Hardware-aware routing"
+description: "Route across hardware tiers and exclude agents under GPU, memory, CPU, cache, thermal, or latency pressure."
+sidebarTitle: "Hardware-aware routing"
+---
+
+Hardware-aware routing lets Hivenet Router prefer particular infrastructure and avoid agents under resource pressure.
+
+It combines two kinds of information:
+
+- static metadata that describes the intended hardware tier
+- live metrics that describe the current state of the agent host and inference engine
+
+```text
+Static preference
+  gpu_model, tags, region
+          │
+          ▼
+Live protection
+  temperature, utilization, VRAM,
+  CPU, memory, cache, latency
+          │
+          ▼
+least-loaded ranking
+```
+
+<Note>
+  Hivenet Router does not automatically calculate the fastest, cheapest, or most energy-efficient hardware.
+
+  You define the hardware tiers and operational limits. Hivenet Router applies those rules to the metadata and metrics reported by agents.
+</Note>
+
+## Static and dynamic hardware signals
+
+| Mechanism | Policy section | Purpose |
+| --- | --- | --- |
+| GPU model | `match.gpu_model` | Select an operator-defined GPU tier |
+| Tags | `match.tags` | Describe VRAM class, workload, cost tier, or operational role |
+| Region | `match.region` | Prefer an operator-defined location |
+| GPU temperature | `exclude_if.gpu_temperature_c` | Avoid overheated agents |
+| GPU utilization | `exclude_if.gpu_util_percent` | Avoid highly active GPUs |
+| VRAM utilization | `exclude_if.gpu_vram_used_percent` | Preserve device-memory headroom |
+| CPU utilization | `exclude_if.cpu_usage_percent` | Avoid CPU-saturated hosts |
+| System memory | `exclude_if.memory_used_percent` | Avoid hosts under RAM pressure |
+| Engine cache | `exclude_if.kv_cache_utilization` | Avoid inference-cache pressure |
+| Engine queue | `exclude_if.waiting_requests` | Avoid backends with queued work |
+| SRTT | `exclude_if.srtt` | Avoid agents with high observed request latency |
+| TTFT and ITL | `exclude_if.*_ttft_seconds`, `exclude_if.*_itl_seconds` | Avoid degraded generation latency |
+
+The static fields describe what an agent is.
+
+The dynamic fields describe how it is behaving now.
+
+## Configure GPU metadata
+
+The hardware-specific static match field is:
+
+```yaml
+gpu_model:
+```
+
+Set the value when starting the agent:
+
+```bash
+./bin/hivenet-agent \
+  --gpu-model "NVIDIA H100" \
+  ...
+```
+
+The environment-variable equivalent is:
+
+```bash
+export HIVENET_ROUTER_GPU_MODEL="NVIDIA H100"
+```
+
+Hivenet Router does not currently derive this registration value from NVML.
+
+The operator is responsible for assigning it consistently.
+
+<Warning>
+  `gpu_model` matching is exact and case-sensitive.
+
+  These values are different:
+
+  ```text
+  NVIDIA H100
+  H100
+  nvidia h100
+  ```
+</Warning>
+
+Check the registered value:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      machine: .metadata.machine,
+      gpu_model: .metadata.gpu_model
+    }'
+```
+
+## Prefer a GPU tier
+
+Use the primary policy for the preferred tier and fallback steps for acceptable alternatives.
+
+```yaml
+routing_policy:
+  match:
+    gpu_model: "NVIDIA H100"
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: a100-tier
+
+    match:
+      gpu_model: "NVIDIA A100"
+
+    strategy: least-loaded
+
+  - name: a10-tier
+
+    match:
+      gpu_model: "NVIDIA A10"
+
+    strategy: least-loaded
+```
+
+This policy prefers:
+
+1. H100 agents
+2. A100 agents
+3. A10 agents
+
+Every agent must still:
+
+- serve the requested model
+- serve the required capability
+- be healthy
+- have free declared capacity
+
+A hardware tier does not override the normal routing constraints.
+
+## Represent VRAM tiers
+
+Hivenet Router cannot statically match total VRAM or require an absolute number of free bytes.
+
+This is not supported:
+
+```yaml
+match:
+  vram_gb: 80
+```
+
+The live VRAM gate uses a fraction of each device’s total VRAM:
+
+```yaml
+exclude_if:
+  gpu_vram_used_percent:
+    gt: 0.9
+```
+
+It does not tell the policy whether the device has 24 GB, 40 GB, or 80 GB in total.
+
+### Use operator-defined tags
+
+When total VRAM matters, describe the tier explicitly:
+
+```bash
+./bin/hivenet-agent \
+  --gpu-model "NVIDIA A100" \
+  --tags production,vram-80gb \
+  ...
+```
+
+Then match it:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - vram-80gb
+
+  strategy: least-loaded
+```
+
+This is safer than assuming one GPU model always has one memory size. Hardware families may contain several VRAM variants.
+
+<Note>
+  Every tag listed in a policy must exist on the agent.
+
+  Tag matching uses AND logic.
+</Note>
+
+## Thermal-aware routing
+
+Exclude agents above your chosen temperature threshold:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+
+  exclude_if:
+    gpu_temperature_c:
+      gt: 80
+
+  strategy: least-loaded
+```
+
+The threshold is in degrees Celsius.
+
+The appropriate value depends on:
+
+- GPU model
+- cooling design
+- ambient temperature
+- normal operating range
+- throttling behavior
+- hardware policy
+
+Do not copy one thermal limit across unrelated hardware without testing.
+
+### Use graduated thermal limits
+
+A fallback step can retain hotter agents as a last local option:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - production
+
+  exclude_if:
+    gpu_temperature_c:
+      gt: 75
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: relaxed-thermal
+
+    match:
+      tags:
+        - production
+
+    exclude_if:
+      gpu_temperature_c:
+        gt: 82
+
+    strategy: least-loaded
+```
+
+This policy:
+
+1. prefers agents below or equal to 75°C
+2. falls back to agents below or equal to 82°C
+3. exhausts the local chain when every agent exceeds the relaxed limit
+
+<Warning>
+  The fallback may intentionally send traffic to hardware that the primary policy considered too hot.
+
+  Use the relaxed threshold only when continued service is preferable to rejecting or externally falling back.
+</Warning>
+
+## Protect VRAM and engine cache
+
+Host-level VRAM and engine KV cache describe different kinds of pressure.
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+
+  exclude_if:
+    gpu_vram_used_percent:
+      gt: 0.9
+
+    kv_cache_utilization:
+      gt: 0.85
+
+  strategy: least-loaded
+```
+
+| Signal | What it describes |
+| --- | --- |
+| `gpu_vram_used_percent` | Total device memory used by every process and allocation |
+| `kv_cache_utilization` | Fraction of the inference engine’s allocated KV cache in use |
+
+A backend can have:
+
+- high total VRAM use but moderate KV-cache pressure
+- low host-wide VRAM use but a nearly full engine cache
+- pressure in both layers
+
+Using both signals gives a better picture than treating them as interchangeable.
+
+## Avoid highly utilized GPUs
+
+```yaml
+routing_policy:
+  exclude_if:
+    gpu_util_percent:
+      gt: 0.95
+
+  strategy: least-loaded
+```
+
+Policy utilization values use fractions:
+
+```text
+0.95 = 95%
+```
+
+Prometheus exposes the corresponding hardware value on a `0` to `100` scale:
+
+```promql
+hivenet_router_agent_gpu_utilization_percent > 95
+```
+
+<Note>
+  GPU utilization and Hivenet Router capacity are independent signals.
+
+  The hard capacity gate uses:
+
+  ```text
+  active requests >= declared capacity
+  ```
+
+  A GPU can be highly utilized before the agent reaches capacity, or lightly utilized while every declared request slot is occupied.
+
+  For streaming requests, Hivenet Router currently releases the declared capacity slot when response headers arrive while backend generation continues. Use engine running and waiting requests, KV-cache pressure, TTFT, and ITL alongside capacity-based gates for streaming-heavy workloads.
+</Note>
+
+## Avoid host CPU and memory pressure
+
+Inference backends can depend on CPU and system memory for:
+
+- tokenization
+- request parsing
+- input preprocessing
+- model loading
+- memory-mapped files
+- network processing
+- CPU offloading
+
+Use node-level gates:
+
+```yaml
+routing_policy:
+  exclude_if:
+    cpu_usage_percent:
+      gt: 0.9
+
+    memory_used_percent:
+      gt: 0.9
+
+  strategy: least-loaded
+```
+
+These values use fractions from `0.0` to `1.0`.
+
+The metrics describe the whole host, not only the inference process.
+
+Other workloads on the same machine can therefore exclude the agent.
+
+## Multi-GPU agents
+
+When an agent reports several GPUs, Hivenet Router evaluates the highest value across the reported devices for:
+
+- temperature
+- compute utilization
+- VRAM-used fraction
+
+For example:
+
+| GPU | Temperature | VRAM use |
+| --- | --: | --: |
+| GPU 0 | 68°C | 61% |
+| GPU 1 | 84°C | 72% |
+
+This policy:
+
+```yaml
+exclude_if:
+  gpu_temperature_c:
+    gt: 82
+```
+
+excludes the complete agent because GPU 1 is above the threshold.
+
+This conservative behavior is useful when one unhealthy or overloaded GPU can affect the complete multi-GPU backend.
+
+Use `--gpu-devices-file` when the agent should report only the devices assigned to its inference engine.
+
+## Missing metrics pass
+
+A hardware gate is skipped when its metric is unavailable for an agent.
+
+For example:
+
+```yaml
+exclude_if:
+  gpu_temperature_c:
+    gt: 82
+```
+
+does not exclude:
+
+- a CPU-only agent
+- an agent without working NVML
+- an agent that has not yet reported a hardware snapshot
+
+<Warning>
+  Missing data passes the gate.
+
+  A GPU gate alone does not guarantee that traffic goes only to GPU agents with working hardware telemetry.
+</Warning>
+
+When metric availability is required, combine the gate with known static metadata:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - gpu
+      - hardware-metrics-enabled
+
+  exclude_if:
+    gpu_temperature_c:
+      gt: 82
+
+  strategy: least-loaded
+```
+
+The tags remain operator assertions. Hivenet Router does not verify that the labels accurately describe the machine.
+
+## Hardware does not change ranking
+
+The only implemented ranking strategy is:
+
+```yaml
+strategy: least-loaded
+```
+
+Hivenet Router does not currently support strategies such as:
+
+```text
+coolest-gpu
+lowest-vram
+lowest-power
+highest-throughput
+lowest-srtt
+```
+
+Hardware and latency values can exclude agents. They do not sort the survivors.
+
+For example:
+
+```yaml
+exclude_if:
+  gpu_temperature_c:
+    gt: 80
+```
+
+removes agents above 80°C.
+
+The remaining agents are still ranked by:
+
+```text
+active requests / declared capacity
+```
+
+Use fallback steps to express ordered hardware preferences.
+
+## Real-time inference
+
+A real-time policy can combine a preferred hardware tier with latency and pressure gates:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - realtime
+    gpu_model: "NVIDIA H100"
+    engine: vllm
+
+  exclude_if:
+    srtt:
+      gt: 200
+
+    p90_ttft_seconds:
+      gt: 0.5
+
+    waiting_requests:
+      gt: 0
+
+    gpu_temperature_c:
+      gt: 80
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: relaxed-realtime
+
+    match:
+      tags:
+        - realtime
+      engine: vllm
+
+    exclude_if:
+      srtt:
+        gt: 750
+
+      waiting_requests:
+        gt: 5
+
+      gpu_temperature_c:
+        gt: 84
+
+    strategy: least-loaded
+```
+
+Units are:
+
+| Field | Unit |
+| --- | --- |
+| `srtt` | Milliseconds |
+| `p90_ttft_seconds` | Seconds |
+| `gpu_temperature_c` | Celsius |
+
+SRTT and TTFT are different:
+
+- SRTT is measured by Hivenet Router across the router-agent-backend request path.
+- TTFT is reported by the inference engine.
+
+Use both only after establishing representative baselines for the workload.
+
+## Batch inference
+
+Batch workloads may favor high-memory agents and tolerate more queueing or latency.
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - batch
+      - vram-80gb
+
+  exclude_if:
+    gpu_vram_used_percent:
+      gt: 0.8
+
+    memory_used_percent:
+      gt: 0.9
+
+  strategy: least-loaded
+```
+
+The tag expresses the static VRAM tier.
+
+The gates preserve device and host-memory headroom.
+
+A batch policy may tolerate backend queues that would be unsuitable for interactive traffic:
+
+```yaml
+exclude_if:
+  waiting_requests:
+    gt: 20
+```
+
+Choose the threshold from actual throughput and completion-time requirements.
+
+## Prefer a lower-cost tier
+
+Hivenet Router does not know GPU prices, contracts, or operating costs.
+
+Represent the intended economic preference through operator-defined metadata:
+
+```bash
+./bin/hivenet-agent \
+  --tags production,cost-tier-low \
+  ...
+```
+
+Then build an ordered chain:
+
+```yaml
+routing_policy:
+  match:
+    tags:
+      - cost-tier-low
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: standard-tier
+
+    match:
+      tags:
+        - cost-tier-standard
+
+    strategy: least-loaded
+
+  - name: premium-tier
+
+    match:
+      tags:
+        - cost-tier-premium
+
+    strategy: least-loaded
+```
+
+This expresses your own cost classification without hard-coding assumptions about which GPU is cheaper.
+
+<Note>
+  The tags do not affect billing.
+
+  They are routing metadata maintained by the operator.
+</Note>
+
+## Route by location or energy policy
+
+Hivenet Router does not measure:
+
+- electricity source
+- carbon intensity
+- renewable-energy share
+- water use
+- facility efficiency
+
+Do not infer those properties from a broad region name.
+
+When your organization has verified location or facility data, express it through controlled metadata:
+
+```bash
+./bin/hivenet-agent \
+  --region "EU-France" \
+  --tags production,approved-energy-site \
+  ...
+```
+
+Then match it:
+
+```yaml
+routing_policy:
+  match:
+    region: "EU-France"
+    tags:
+      - approved-energy-site
+
+  strategy: least-loaded
+```
+
+This routes according to the metadata you supplied. Hivenet Router does not independently verify the environmental claim or update it from a live carbon-intensity source.
+
+## Power-aware monitoring
+
+GPU power is available through Prometheus:
+
+```text
+hivenet_router_agent_gpu_power_watts
+```
+
+Total current GPU power by machine:
+
+```promql
+sum by (machine) (
+  hivenet_router_agent_gpu_power_watts
+)
+```
+
+Power by region:
+
+```promql
+sum by (region) (
+  hivenet_router_agent_gpu_power_watts
+)
+```
+
+Power is not currently a valid `exclude_if` field.
+
+This is not supported:
+
+```yaml
+exclude_if:
+  gpu_power_watts:
+    gt: 350
+```
+
+A ratio such as requests per watt can be useful as a rough dashboard signal:
+
+```promql
+sum(
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+/
+clamp_min(
+  sum(
+    hivenet_router_agent_gpu_power_watts
+  ),
+  1
+)
+```
+
+<Warning>
+  This ratio is not a complete energy-efficiency measure.
+
+  It mixes routed-request rate with instantaneous power and does not account for prompt size, output length, model quality, idle power, CPU use, or completed work.
+</Warning>
+
+## Combine hardware and engine state
+
+A production policy can protect several layers at once:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+    tags:
+      - production
+      - high-memory
+
+  exclude_if:
+    capacity_utilization:
+      gte: 0.8
+
+    kv_cache_utilization:
+      gt: 0.85
+
+    waiting_requests:
+      gt: 5
+
+    gpu_temperature_c:
+      gt: 82
+
+    gpu_util_percent:
+      gt: 0.95
+
+    gpu_vram_used_percent:
+      gt: 0.9
+
+    memory_used_percent:
+      gt: 0.9
+
+    cpu_usage_percent:
+      gt: 0.9
+
+    srtt:
+      gt: 750
+
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: relaxed-production
+
+    match:
+      engine: vllm
+      tags:
+        - production
+
+    exclude_if:
+      kv_cache_utilization:
+        gt: 0.95
+
+      waiting_requests:
+        gt: 20
+
+      gpu_temperature_c:
+        gt: 86
+
+      memory_used_percent:
+        gt: 0.95
+
+      srtt:
+        gt: 2000
+
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-local-agent
+
+    match: {}
+
+    strategy: least-loaded
+    max_tries: 2
+```
+
+An agent is excluded when it violates any field in one `exclude_if` block.
+
+A long list of gates can drain the candidate pool more often than expected. Add rules gradually and monitor which gate exhausts each step.
+
+## Monitor hardware-aware routing
+
+### Current GPU state
+
+```promql
+hivenet_router_agent_gpu_utilization_percent
+```
+
+```promql
+100
+*
+hivenet_router_agent_gpu_vram_used_bytes
+/
+clamp_min(
+  hivenet_router_agent_gpu_vram_total_bytes,
+  1
+)
+```
+
+```promql
+hivenet_router_agent_gpu_temperature_celsius
+```
+
+### Current host state
+
+```promql
+hivenet_router_agent_cpu_usage_percent
+```
+
+```promql
+hivenet_router_agent_memory_used_percent
+```
+
+### Engine pressure
+
+```promql
+hivenet_router_agent_engine_kv_cache_utilization
+```
+
+```promql
+hivenet_router_agent_engine_waiting_requests
+```
+
+### Routing outcomes
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_primary_routed_total[5m]
+  )
+)
+```
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_fallback_routed_total[5m]
+  )
+)
+```
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_policy_exhausted_total[5m]
+  )
+)
+```
+
+A rising fallback or exhaustion rate after adding hardware gates may mean:
+
+- thresholds are too strict
+- hardware metrics are genuinely degraded
+- static metadata is inconsistent
+- the preferred tier lacks capacity
+- one metric is behaving differently from your assumption
+
+## Diagnose an excluded agent
+
+Inspect the current snapshot:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      machine: .metadata.machine,
+      gpu_model: .metadata.gpu_model,
+      tags: .metadata.tags,
+      status: .status,
+      engine: .engine,
+      hardware: .hardware,
+      latency: {
+        srtt_ms: .universal.srtt_ms,
+        success_rate: .universal.success_rate
+      }
+    }'
+```
+
+Enable detailed policy logs:
+
+```bash
+export GOLOG_LOG_LEVEL="policy=debug,router=debug"
+```
+
+A policy-exhaustion record identifies which gate removed the candidates.
+
+For example:
+
+```text
+routing_policy:
+gate[7] exclude_if [
+  gpu_temperature_c=1,
+  gpu_vram_used_percent=2
+]
+```
+
+This indicates that one candidate violated the temperature gate and two violated the VRAM gate.
+
+## Test a policy safely
+
+A practical test sequence is:
+
+1. Record current hardware and engine values.
+2. Add one gate whose threshold should pass.
+3. Reload the policy.
+4. Send representative traffic.
+5. Confirm primary routing continues.
+6. Lower the threshold in a controlled environment.
+7. Confirm that the intended fallback step receives traffic.
+8. Inspect fallback and exhaustion metrics.
+9. Restore the production threshold.
+10. Add the next gate only after the first behaves as expected.
+
+Avoid introducing many hardware gates at the same time. When the policy drains, it becomes harder to identify which assumption was wrong.
+
+## Capacity remains operator-defined
+
+Hivenet Router does not derive agent capacity from:
+
+- total VRAM
+- free VRAM
+- GPU count
+- model parameters
+- KV-cache size
+- power limit
+
+The agent’s:
+
+```bash
+--capacity
+```
+
+remains an operator-set concurrency limit.
+
+Do not rely on a general formula such as:
+
+```text
+free VRAM / estimated KV cache per request
+```
+
+as the only capacity calculation. Real capacity depends on:
+
+- model architecture
+- quantization
+- context distribution
+- engine implementation
+- batching and scheduler settings
+- tensor parallelism
+- prefix reuse
+- CPU work
+- latency objectives
+- workload mix
+
+Benchmark representative traffic and raise capacity gradually while observing engine queues, cache pressure, TTFT, ITL, hardware use, and failures.
+
+## Design guidance
+
+### Prefer explicit metadata
+
+Use stable tags for operational facts such as:
+
+```text
+vram-80gb
+cost-tier-low
+approved-energy-site
+interactive
+batch
+```
+
+Do not overload broad labels such as `region` or `gpu_model` with several unrelated meanings.
+
+### Keep policy and monitoring separate
+
+A routing gate decides whether an agent should receive the current request.
+
+An alert decides whether an operator should investigate.
+
+The appropriate thresholds may differ.
+
+For example:
+
+- route away from a GPU briefly above 82°C
+- alert only when it remains above 85°C for five minutes
+
+### Use relaxed fallbacks deliberately
+
+A relaxed step accepts a condition that the primary step rejected.
+
+Document why that compromise is acceptable.
+
+### Avoid false precision
+
+Hardware values are sampled periodically and may be slightly stale by the time a request is routed.
+
+Use thresholds with practical headroom rather than treating a single decimal point as a precise safety boundary.
+
+## Troubleshooting
+
+### A GPU-tier policy matches nothing
+
+Check the registered metadata:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq -r '.agents[].metadata.gpu_model'
+```
+
+Check exact spelling, capitalization, and whitespace.
+
+Hivenet Router does not populate `gpu_model` automatically.
+
+### A VRAM requirement cannot be expressed
+
+Hivenet Router does not support an absolute VRAM match.
+
+Use an operator-defined tag such as:
+
+```text
+vram-80gb
+```
+
+or a carefully standardized `gpu_model` value.
+
+Use `gpu_vram_used_percent` only for live pressure, not total device capacity.
+
+### A hardware gate does not exclude an agent
+
+The metric may be missing.
+
+Check the routing-table hardware object.
+
+Also verify the units:
+
+| Prometheus | Policy |
+| --- | --- |
+| `95` | `0.95` |
+| `82°C` | `82` |
+
+Missing metrics pass.
+
+### One hot GPU excludes a multi-GPU agent
+
+This is expected.
+
+Hivenet Router uses the highest temperature, utilization, and VRAM fraction across the GPUs reported by the agent.
+
+Restrict collection with `--gpu-devices-file` if the agent should represent only a subset of the host’s devices.
+
+### Power cannot be used in `exclude_if`
+
+GPU power is currently an observability metric only.
+
+Use static hardware metadata, tags, or one of the supported dynamic gate fields.
+
+### The preferred tier is skipped
+
+Check the earlier hard constraints:
+
+- requested model
+- capability
+- agent health
+- static metadata
+- previous failures
+- declared capacity
+
+A hardware match does not make an agent eligible when it fails one of those checks.
+
+### Fallback traffic rises after adding gates
+
+Inspect:
+
+- policy-exhaustion logs
+- current metric distributions
+- missing-metric behavior
+- preferred-tier capacity
+- threshold units
+- whether one agent reports a persistent outlier
+
+Relax one condition at a time rather than removing the complete policy.
+
+### Hardware data appears stale
+
+Check agent logs for collection errors and confirm the latest heartbeat.
+
+The current system does not expose a dedicated hardware-snapshot age metric.
+
+A healthy heartbeat does not prove that every recent hardware sample succeeded.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Query the live hardware, engine, latency, capacity, and routing signals used in these policies.
+  </Card>
+
+  <Card title="Policy gates" href="/routing/policy-gates">
+    Review the exact evaluation behavior and all supported gate fields.
+  </Card>
+
+  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+    Understand how GPU, CPU, memory, temperature, and power values are collected.
+  </Card>
+</CardGroup>

@@ -1,0 +1,192 @@
+---
+title: "Project overview"
+description: "Find Hivenet Router’s source code, canonical project files, contribution workflow, community standards, and Apache 2.0 license."
+sidebarTitle: "Overview"
+---
+
+Hivenet Router is open-source software maintained by Hivenet.
+
+The source code, issue tracker, pull requests, and canonical project files live in the Hivenet Router GitHub repository. This documentation site explains how to deploy, configure, operate, and integrate Hivenet Router.
+
+<Note>
+  The repository’s root `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `LICENSE` files are the authoritative versions.
+
+  The Project pages in this documentation summarize and link to those files rather than creating competing copies.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="GitHub repository" href="https://github.com/HiveNetCode/mycoroute">
+    Browse the source code, branches, commits, issues, and pull requests.
+  </Card>
+
+  <Card title="Repository README" href="https://github.com/HiveNetCode/mycoroute/blob/main/README.md">
+    Read the repository-level introduction, build example, feature summary, and source navigation.
+  </Card>
+
+  <Card title="Contributing" href="/project/contributing">
+    Learn how to report bugs, propose features, improve documentation, run tests, and submit a pull request.
+  </Card>
+
+  <Card title="Code of conduct" href="/project/code-of-conduct">
+    Review the standards expected when participating in the project community.
+  </Card>
+
+  <Card title="License" href="/project/license">
+    Understand how the Apache License 2.0 applies to using, modifying, and distributing Hivenet Router.
+  </Card>
+
+  <Card title="Issues and pull requests" href="https://github.com/HiveNetCode/mycoroute/issues">
+    Report reproducible problems, discuss concrete proposals, and follow work in progress.
+  </Card>
+</CardGroup>
+
+## Canonical project files
+
+| File | Purpose |
+| --- | --- |
+| `README.md` | Repository introduction, feature summary, architecture, quickstart, and links into the documentation |
+| `CONTRIBUTING.md` | Development setup, test commands, code standards, pull request process, and security-reporting instructions |
+| `CODE_OF_CONDUCT.md` | Participation standards, unacceptable behavior, enforcement, and reporting |
+| `LICENSE` | Complete Apache License 2.0 terms applying to the project |
+
+Changes to those documents should be made in their root repository files.
+
+The corresponding Mintlify pages summarize those sources and point readers to the canonical files whenever complete or legally authoritative wording matters.
+
+## Documentation and repository boundaries
+
+Use this documentation site for:
+
+- deployment and operations
+- API behavior
+- authentication and authorization
+- routing policies
+- integrations
+- observability
+- configuration and troubleshooting
+
+Use the repository for:
+
+- source code
+- project-level build instructions
+- development and test workflows
+- issues and feature proposals
+- pull request review
+- complete legal and community-governance files
+
+Documentation source also lives under:
+
+```text
+/docs
+```
+
+in the main repository. Documentation changes therefore follow the same issue and pull request process as code changes.
+
+## Report a bug
+
+Open a GitHub issue with enough information for another contributor to reproduce the problem.
+
+Include:
+
+- the Hivenet Router release or commit
+- whether the problem affects the router, agent, or both
+- the inference engine and version
+- relevant configuration with secrets removed
+- reproduction steps
+- expected and actual behavior
+- relevant router, agent, or backend logs
+- the request ID when the problem involves one API request
+
+Do not include:
+
+- API keys
+- agent JWT secrets
+- provider credentials
+- private prompts or customer data
+- unredacted internal addresses when they are sensitive
+
+## Propose a feature
+
+Open an issue describing the use case before investing in a substantial implementation.
+
+Explain:
+
+- the problem being solved
+- who experiences it
+- why the current behavior is insufficient
+- the expected API or operational behavior
+- relevant constraints and trade-offs
+- whether the proposal changes compatibility, configuration, security, or persistence
+
+Discussing the approach first reduces the risk of producing a large change that does not fit the project’s architecture or scope.
+
+## Improve the documentation
+
+Documentation corrections and clarifications are welcome.
+
+Useful contributions include:
+
+- correcting stale commands or defaults
+- documenting verified behavior
+- improving examples
+- clarifying error and edge-case behavior
+- fixing broken links
+- improving navigation
+- adding missing troubleshooting steps
+
+Preserve the project’s technical contract when editing an existing page. Commands, flags, endpoints, schemas, and behavior should remain grounded in the current implementation.
+
+When documentation and code disagree, verify the current code before changing the documentation or implementation.
+
+## Report a security issue
+
+<Danger>
+  Do not report a suspected security vulnerability through a public GitHub issue.
+</Danger>
+
+Send the details privately to:
+
+```text
+support@hivenet.com
+```
+
+Include enough information to reproduce and assess the problem, while avoiding unnecessary exposure of production credentials or personal data.
+
+The maintainers will coordinate investigation, remediation, and disclosure.
+
+## Relationship to Hivenet
+
+Hivenet Router is maintained by Hivenet, but it remains a distinct open-source project.
+
+It is not:
+
+- Hivenet Inference API
+- Compute with Hivenet
+- a hosted inference service
+- an inference engine
+
+Hivenet Router is the routing layer you can deploy and operate yourself.
+
+See [Hivenet Router, Hivenet Inference API, and Compute with Hivenet](/getting-started/mycoroute-hivenet-inference-api-compute) for the complete product boundaries.
+
+## Participate responsibly
+
+By participating in the repository, issue tracker, reviews, discussions, or other project spaces, contributors agree to follow the project’s Code of Conduct.
+
+Contributions submitted for inclusion in Hivenet Router are licensed under the same Apache License 2.0 as the project.
+
+Read the complete canonical files before contributing:
+
+<CardGroup cols={3}>
+  <Card title="Contributing" href="/project/contributing">
+    Review the development and pull request workflow.
+  </Card>
+
+  <Card title="Code of conduct" href="/project/code-of-conduct">
+    Review participation and enforcement standards.
+  </Card>
+
+  <Card title="License" href="/project/license">
+    Review the project’s licensing terms.
+  </Card>
+</CardGroup>

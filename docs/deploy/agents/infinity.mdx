@@ -1,12 +1,12 @@
 ---
 title: "Infinity agent"
-description: "Connect Infinity embedding and reranking models to Mycoroute by running one capability-specific agent for each model."
+description: "Connect Infinity embedding and reranking models to Hivenet Router by running one capability-specific agent for each model."
 sidebarTitle: "Infinity"
 ---
 
-Connect an Infinity server to Mycoroute for embedding and reranking workloads.
+Connect an Infinity server to Hivenet Router for embedding and reranking workloads.
 
-Infinity can serve several models from one process. Mycoroute connects to that process through separate agents, with one agent representing one model and one capability.
+Infinity can serve several models from one process. Hivenet Router connects to that process through separate agents, with one agent representing one model and one capability.
 
 <Warning>
   The Infinity integration does not support chat completions. Start each agent with either `--capability embedding` or `--capability reranker`.
@@ -16,11 +16,11 @@ Infinity can serve several models from one process. Mycoroute connects to that p
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - Infinity installed or available as a Docker image
 - one or more embedding or reranking models
 - network access between the agent host and router
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 - an NVIDIA GPU if you want CUDA inference and GPU metrics
 
@@ -45,7 +45,7 @@ Replace these values with addresses and models from your deployment.
 
 ## Start Infinity
 
-Mycoroute expects Infinity to expose:
+Hivenet Router expects Infinity to expose:
 
 ```text
 GET /health
@@ -54,7 +54,7 @@ POST /v1/embeddings
 POST /v1/rerank
 ```
 
-Set `INFINITY_URL_PREFIX=/v1` so the inference and model endpoints use the paths expected by Mycoroute.
+Set `INFINITY_URL_PREFIX=/v1` so the inference and model endpoints use the paths expected by Hivenet Router.
 
 <Tabs>
   <Tab title="Docker">
@@ -172,7 +172,7 @@ For example:
 --served-model-name bge-m3
 ```
 
-The Mycoroute agent and API clients use:
+The Hivenet Router agent and API clients use:
 
 ```text
 bge-m3
@@ -184,7 +184,7 @@ They do not need to use the original Hugging Face model ID.
   The order of repeated `--served-model-name` values must match the order of the corresponding `--model-id` values.
 </Note>
 
-## Prepare the Mycoroute agents
+## Prepare the Hivenet Router agents
 
 You need two agents for this example:
 
@@ -195,7 +195,7 @@ Both agents connect to the same Infinity process.
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -224,10 +224,10 @@ Both agents connect to the same Infinity process.
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the shared JWT secret somewhere the agents can read, for example:
@@ -284,7 +284,7 @@ POST /v1/embeddings
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine infinity \
       --capability embedding \
       --model bge-m3 \
@@ -332,7 +332,7 @@ POST /v1/rerank
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine infinity \
       --capability reranker \
       --model bge-reranker-large \
@@ -356,9 +356,9 @@ The agents can share the same `--backend-url`. They initiate their own connectio
 
 ## Understand capabilities
 
-Mycoroute uses the agent capability to separate different kinds of inference traffic.
+Hivenet Router uses the agent capability to separate different kinds of inference traffic.
 
-| Capability | Mycoroute endpoint | Infinity endpoint |
+| Capability | Hivenet Router endpoint | Infinity endpoint |
 | --- | --- | --- |
 | `embedding` | `POST /v1/embeddings` | `POST /v1/embeddings` |
 | `reranker` | `POST /v1/rerank` | `POST /v1/rerank` |
@@ -367,11 +367,11 @@ The router filters agents by capability before applying the rest of the routing 
 
 An embedding request cannot be sent to a reranking agent, even if both agents use Infinity or share the same backend process.
 
-Do not leave the default capability of `llm` on an Infinity agent. Infinity rejects chat-completion requests, and Mycoroute reports a structured invalid-request error.
+Do not leave the default capability of `llm` on an Infinity agent. Infinity rejects chat-completion requests, and Hivenet Router reports a structured invalid-request error.
 
 ## Set agent capacity
 
-`--capacity` controls how many concurrent requests Mycoroute may assign to an agent.
+`--capacity` controls how many concurrent requests Hivenet Router may assign to an agent.
 
 It does not change Infinity’s batching or scheduler settings.
 
@@ -394,7 +394,7 @@ Treat these as starting points. The appropriate value depends on:
 Because both agents share one Infinity process and one set of hardware resources, their capacities are not independent physical limits. Test the combined workload before raising either value.
 
 <Note>
-  For streaming-capable workloads, Mycoroute releases an agent capacity slot when response headers arrive, while backend work can continue. Infinity embeddings and reranking are normally non-streaming, but the same `--capacity` value remains a routing-admission setting rather than a direct backend scheduler limit.
+  For streaming-capable workloads, Hivenet Router releases an agent capacity slot when response headers arrive, while backend work can continue. Infinity embeddings and reranking are normally non-streaming, but the same `--capacity` value remains a routing-admission setting rather than a direct backend scheduler limit.
 </Note>
 
 ## Verify both agents
@@ -516,7 +516,7 @@ The `index` value points to the document’s position in the original input arra
 
 ## Routing behavior
 
-Mycoroute routes embedding and reranking requests through the same policy pipeline used for language-model requests:
+Hivenet Router routes embedding and reranking requests through the same policy pipeline used for language-model requests:
 
 1. Filter by model.
 2. Filter by capability.
@@ -544,7 +544,7 @@ Capability filtering is automatic. You do not need a policy rule to prevent embe
 
 The Infinity integration does not currently scrape engine-specific metrics from the Infinity backend.
 
-Mycoroute still exposes:
+Hivenet Router still exposes:
 
 - registered agent state
 - capability and model metadata
@@ -560,7 +560,7 @@ Embedding request rate:
 
 ```promql
 rate(
-  mycoroute_routing_requests_routed_total{
+  hivenet_router_routing_requests_routed_total{
     engine="infinity",
     model="bge-m3"
   }[5m]
@@ -571,7 +571,7 @@ Reranking request rate:
 
 ```promql
 rate(
-  mycoroute_routing_requests_routed_total{
+  hivenet_router_routing_requests_routed_total{
     engine="infinity",
     model="bge-reranker-large"
   }[5m]
@@ -581,7 +581,7 @@ rate(
 Smoothed round-trip time:
 
 ```promql
-mycoroute_agent_srtt_ms{
+hivenet_router_agent_srtt_ms{
   engine="infinity"
 }
 ```
@@ -610,7 +610,7 @@ docker inspect infinity \
   | jq '.[0].Config.Env'
 ```
 
-Without the prefix, Infinity serves its API at different paths from those expected by Mycoroute.
+Without the prefix, Infinity serves its API at different paths from those expected by Hivenet Router.
 
 Restart Infinity after changing the setting.
 
@@ -693,7 +693,7 @@ Check its logs:
   <Tab title="systemd">
     ```bash
     sudo journalctl \
-      -u mycoroute-agent \
+      -u hivenet-agent \
       -n 100 \
       --no-pager
     ```
@@ -771,14 +771,14 @@ The agents continue to operate without NVML. They report CPU and memory metrics 
 
 <CardGroup cols={3}>
   <Card title="Custom engine agent" href="/deploy/agents/custom-engine">
-    Connect another OpenAI-compatible backend to Mycoroute.
+    Connect another OpenAI-compatible backend to Hivenet Router.
   </Card>
 
-  <Card title="Embeddings" href="/api/embeddings">
+  <Card title="Embeddings" href="/use-the-api/embeddings">
     Review the embedding request and response format.
   </Card>
 
-  <Card title="Reranking" href="/api/reranking">
+  <Card title="Reranking" href="/use-the-api/reranking">
     Review reranking fields, examples, and response ordering.
   </Card>
 </CardGroup>

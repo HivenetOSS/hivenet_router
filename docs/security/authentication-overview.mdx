@@ -1,183 +1,681 @@
 ---
-title: "Authentication Overview"
+title: "Authentication overview"
+sidebarTitle: "Authentication overview"
+description: "Understand how Hivenet Router authenticates agents, API clients, and administrators across separate trust boundaries."
 ---
 
-Mycoroute implements a dual authentication system: JWT tokens for agents and API keys for clients.
+Hivenet Router authenticates three kinds of access separately:
 
-## Authentication Flow
+- agents joining the inference network
+- clients calling `/v1/*` endpoints
+- operators calling `/admin/*` endpoints
 
-![Mycoroute Authentication Flow](../images/Auth.png)
+Agent authentication is always required. Client authentication may be disabled for local development. Administrator authentication is secure by default: the router refuses to start with unauthenticated `/admin/*` endpoints unless `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` is set explicitly.
 
-## Agent Authentication
+![Auth](/images/Auth.png "Auth")
 
-Agents authenticate via gRPC before joining the network.
+## Authentication boundaries
 
-### Authentication Process
+| Access | Authentication | Required by default |
+| --- | --- | --- |
+| Agent → Router | JWT over pinned TLS, followed by a session token | Yes |
+| Client → `/v1/*` | None, static API keys, or dynamic API keys | No |
+| Operator → `/admin/*` | Static admin API keys, or an explicit insecure development override | Yes, unless `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` is set |
 
-1. **Agent generates a JWT token** signed with the shared HMAC-SHA256 secret
-2. **Agent connects** to the router gRPC port (default :50051) over TLS derived from the same secret
-3. **Agent sends `AuthRequest`** with the JWT token as credentials and its metadata
-4. **Router validates** the JWT signature and extracts the agent identity
-5. **Router creates a session token** and returns it along with the router's P2P address
-6. **Agent registers** via libp2p HTTP using the session token
+<Warning>
+  When no client authentication configuration is provided, `/v1/*` is accessible to any client that can reach the router.
 
-### JWT Configuration
+  `/admin/*` does not become public automatically. The router refuses insecure administrator mode unless `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` is set explicitly. Use that override only in an isolated development environment.
+</Warning>
 
-```bash
-# Generate shared JWT secret
-openssl rand -base64 32 > jwt_secret.txt
+Agent authentication is separate from the two HTTP authentication surfaces. Setting the client API to `none` does not disable router-agent authentication.
 
-# Router
-./bin/mycoroute-router --jwt-secret-file jwt_secret.txt
+## Agent authentication
 
-# Agent
-./bin/mycoroute-agent --jwt-secret-file jwt_secret.txt --router-grpc localhost:50051
-```
+Every agent must authenticate before it can register with the router.
 
-### Session Token
+The router and every agent share one high-entropy secret. Hivenet Router uses that secret for two related purposes:
 
-- **Validity:** 1 hour (default; configure with `--session-ttl`, must be greater than 5m)
-- **Usage:** Bearer token for libp2p HTTP registration
-- **Renewal:** Agent re-authenticates before expiration
+- signing and validating agent JWTs
+- deriving the gRPC TLS identity used during authentication
 
-## Client Authentication
+The secret must contain at least 32 bytes.
 
-Clients authenticate using API keys created via the `keygen` workflow.
-
-### API Key Creation
+Generate one:
 
 ```bash
-# Generate API key
-./bin/mycoroute-router keygen --tenant acme-corp
-
-# Output:
-# sk-mycoroute-<base58 ~44 chars, e.g. sk-mycoroute-3yHt7Kp2...>
+openssl rand -hex 32 > jwt.secret
+chmod 600 jwt.secret
 ```
 
-### API Key Usage
+Use the same file on the router:
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-mycoroute-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+./bin/hivenet-router \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
+  ...
 ```
 
-### Key Format
+and every agent:
 
-- **Prefix:** `sk-mycoroute-` (Mycoroute secret key)
-- **Storage:** SHA-256 hashed in `auth.yaml`
-- **Matching:** Constant-time comparison to prevent timing attacks
+```bash
+./bin/hivenet-agent \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
+  ...
+```
 
-## Security Features
+You can also provide the value through the case-sensitive environment variable:
 
-### JWT Validation
+```bash
+export HIVENET_ROUTER_JWT_SECRET="<shared-secret>"
+```
 
-- **Algorithm:** HS256 (HMAC-SHA256)
-- **Scope:** Used only on the gRPC auth path (agent registration); not on the hot HTTP request path
+<Warning>
+  Anyone who obtains this secret can authenticate an agent and derive the gRPC server identity.
 
-### API Key Security
+  Distribute it through your normal secrets-management system and restrict access on every host.
+</Warning>
 
-- **Hashing:** SHA-256 (hex-encoded); only the hash is stored, never the raw key
-- **Comparison:** Constant-time to prevent timing attacks
-- **Restrictions:** Per-key model access control
-- **Revocation:** Hot reload via SIGHUP (static mode) or admin API (dynamic mode)
+## Agent authentication flow
 
-## Authentication Modes
+An agent joins the network in two stages.
 
-The router supports three authentication modes for `/v1/*` endpoints, controlled by `auth.yaml` or the `mycoroute_AUTH_MODE` environment variable:
+### 1. Authenticate over gRPC
 
-| Mode | Description | Key Source |
-|------|-------------|------------|
-| `none` | No authentication (default when no auth.yaml is configured) | — |
-| `api-key` | Keys loaded from `auth.yaml`, reloaded on SIGHUP | `auth.yaml` file on disk |
-| `dynamic` | Mutable in-memory registry, managed by machines service via admin API | Admin HTTP endpoints |
+The agent:
 
-### Setting the Mode
+1. creates a JWT signed with HMAC-SHA256
+2. includes its libp2p peer ID as the JWT subject
+3. connects to the router’s gRPC authentication endpoint
+4. verifies the router’s pinned TLS public key
+5. sends the JWT and its agent metadata
 
-**Via auth.yaml** (recommended when a config file is used):
+The router:
+
+1. verifies the JWT signature
+2. validates its issuer, issue time, expiry, and subject
+3. validates required agent metadata
+4. creates a random session token
+5. returns the session token, router libp2p addresses, and runtime configuration
+
+The gRPC endpoint uses TLS 1.3.
+
+Hivenet Router deterministically derives an Ed25519 certificate and public key from the shared JWT secret using HKDF-SHA256. The agent pins that public key, so the deployment does not need a separate certificate authority or pre-distributed gRPC certificate files.
+
+A router and agent using different secrets fail the TLS identity check before registration.
+
+### 2. Register over libp2p
+
+After gRPC authentication, the agent connects to the router’s libp2p endpoint and presents the session token.
+
+The router links:
+
+- the authenticated agent identity
+- the agent’s libp2p peer ID
+- its registered model and metadata
+- the short-lived session
+
+Router-agent traffic then uses libp2p with Noise encryption.
+
+## Agent metadata validation
+
+The router rejects authentication when required metadata is missing or invalid.
+
+Required fields include:
+
+- model
+- positive capacity
+- agent version
+- engine
+- region
+- organization
+
+Other metadata can include:
+
+- capability
+- machine identifier
+- tags
+- GPU model
+- display name and model description
+
+If metadata validation fails, the agent receives an unsuccessful gRPC authentication response and does not register.
+
+## Agent sessions
+
+The session token is separate from the initial JWT.
+
+| Setting | Default |
+| --- | --- |
+| Session lifetime | 1 hour |
+| Reauthentication margin | 5 minutes before expiry |
+| Retry after failed renewal | 30 seconds |
+
+Configure the router session lifetime:
+
+```bash
+--session-ttl 2h
+```
+
+or:
+
+```bash
+export HIVENET_ROUTER_SESSION_TTL=2h
+```
+
+The value must be greater than five minutes.
+
+The agent reads the session lifetime returned by the router and reauthenticates five minutes before expiry. After receiving a new session token, it registers that token against the same libp2p peer ID without interrupting normal heartbeats and routing signals.
+
+If renewal fails, the agent retries after 30 seconds.
+
+## Client API authentication
+
+Client authentication protects the `/v1/*` endpoints, including:
+
+- chat completions and messages
+- embeddings
+- reranking
+- model discovery
+
+Hivenet Router supports three client-authentication modes.
+
+| Mode | Key source | Persistence | Best suited to |
+| --- | --- | --- | --- |
+| `none` | No keys | Not applicable | Local development |
+| `api-key` | `auth.yaml` | File on disk | Static deployments |
+| `dynamic` | Administration API | Memory only | External control services |
+
+### No authentication
+
+When no `auth.yaml` is configured and `HIVENET_ROUTER_AUTH_MODE` is unset, the client API uses:
+
+```text
+none
+```
+
+Requests do not require an `Authorization` header.
+
+The authenticated tenant is recorded internally as:
+
+```text
+default
+```
+
+Use this only on a protected local or private network.
+
+### Static API keys
+
+Static mode loads hashed API keys from `auth.yaml`.
+
 ```yaml
 api:
-  mode: "api-key"  # or "none"
+  mode: api-key
+
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...KJ4"
+
+      metadata:
+        name: "Acme production key"
+        owner: "acme-corp"
+        description: ""
+        created_at: "27-07-2026"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+
+admin:
+  mode: api-key
 ```
 
-**Via environment variable** (when no auth.yaml is provided):
+Generate a key and the matching YAML entry:
+
 ```bash
-export mycoroute_AUTH_MODE=dynamic
+./bin/hivenet-router \
+  keygen \
+  --tenant acme-corp
 ```
 
-When both are set, `auth.yaml` takes precedence for the api section.
+The command prints:
 
-### Dynamic Mode Details
+- the raw client key, shown once
+- its SHA-256 hash
+- a masked preview
+- a ready-to-paste `auth.yaml` entry
 
-In dynamic mode, the router starts with an empty key registry. The machines service bootstraps keys at runtime via `POST /admin/api-keys/replace`. All state is in-memory — no `auth.yaml` is needed, and SIGHUP does not affect the key registry.
+The generated key begins with:
 
-**Admin authentication is mandatory in dynamic mode.** Because the `/admin/api-keys/*` endpoints *are* the key-management surface, leaving them public would defeat the purpose. The router automatically elevates `admin.mode` to `api-key` and requires `mycoroute_ADMIN_API_KEYS` to be set; missing this env var fails startup. This auto-elevation is dynamic-mode only — static and `none` deployments are unchanged.
+```text
+sk-hivenet-
+```
 
-See [API Keys — Dynamic Key Mode](/security/api-keys#dynamic-key-mode) and [Admin Endpoints — API Key Management](/api/admin-endpoints#api-key-management) for full details.
+Store the raw value securely. Hivenet Router stores and compares only its SHA-256 hash.
 
-### Network Security
+Start the router with the file:
 
-- **gRPC:** TLS always enabled — certificate deterministically derived from the shared JWT secret via HKDF-SHA256 + Ed25519; no external PKI needed
-- **libp2p:** Noise encryption (built-in)
-- **HTTP:** TLS via reverse proxy (nginx, traefik) for production
+```bash
+./bin/hivenet-router \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  ...
+```
 
-## Authentication Failure Handling
+Send the raw key as a bearer token:
 
-### Invalid JWT
+```bash
+curl \
+  -H "Authorization: Bearer sk-hivenet-..." \
+  http://localhost:8080/v1/models
+```
+
+Static API keys can define:
+
+- tenant identity
+- human-readable metadata
+- expiration
+- model restrictions
+- request-rate limits
+- daily token limits
+- per-model quotas
+
+Send `SIGHUP` after changing `auth.yaml`:
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+Hivenet Router validates the updated file before replacing the active static-key provider.
+
+<Note>
+  A successful authentication reload rebuilds in-memory quota state. Request-rate buckets reset. Daily token usage also resets with the `memory` quota backend, while the `badger` backend preserves and restores daily token state.
+</Note>
+
+### Dynamic API keys
+
+Dynamic mode uses an in-memory key registry managed through protected administration endpoints.
+
+Enable it when no `auth.yaml` is provided:
+
+```bash
+export HIVENET_ROUTER_AUTH_MODE=dynamic
+export HIVENET_ROUTER_ADMIN_API_KEYS="<admin-key>"
+```
+
+The registry starts empty. An external control service must add or replace client keys through:
+
+```text
+PUT    /admin/api-keys/{id}
+DELETE /admin/api-keys/{id}
+POST   /admin/api-keys/replace
+```
+
+Dynamic entries contain SHA-256 key hashes rather than plaintext client keys.
+
+The registry is not persisted. It must be repopulated after every router restart.
+
+<Warning>
+  Administration authentication is mandatory in dynamic mode.
+
+  Hivenet Router refuses to start without `HIVENET_ROUTER_ADMIN_API_KEYS`, because the administration endpoints control the client-key registry itself.
+</Warning>
+
+See [Admin endpoints](/api/admin-endpoints) for the dynamic registry API.
+
+## Client request format
+
+Send the raw client key in the standard bearer header:
+
+```text
+Authorization: Bearer <api-key>
+```
+
+For example:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-hivenet-..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+Hivenet Router also accepts the raw token without the `Bearer` prefix, but the standard bearer format is recommended for clients and proxies.
+
+## What successful authentication provides
+
+After a client key is authenticated, Hivenet Router adds its resolved access information to the request context.
+
+This includes:
+
+- tenant or owner ID
+- dynamic key ID, when applicable
+- masked key preview
+- allowed models
+- quota configuration
+
+Downstream middleware and handlers use these values for:
+
+- model authorization
+- request-rate enforcement
+- token-budget enforcement
+- tenant metrics
+- audit records
+
+Authentication confirms the key. Separate authorization and quota checks decide whether the request may use the selected model and capacity.
+
+## Model access control
+
+A client key can be limited to specific models.
+
+For static keys:
+
+```yaml
+models:
+  - "meta-llama/Llama-3.1-8B-Instruct"
+  - "BAAI/bge-m3"
+```
+
+An empty model list grants access to all registered models unless a per-model quota configuration defines a narrower set.
+
+A request for a disallowed model returns HTTP `403`:
 
 ```json
 {
   "error": {
-    "code": "agent_auth_failed",
-    "message": "Agent authentication failed",
-    "details": {
-      "reason": "Invalid signature"
-    }
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: restricted-model",
+    "source": "router"
   }
 }
 ```
 
-### Invalid API Key
+The model catalog is also filtered to the models visible to the calling key.
+
+When `quota.per_model` is configured, its model names become the effective allowlist. A model missing from that map is hidden from discovery and rejected for inference with HTTP `429 rate_limit_exceeded`, rather than `403 model_forbidden`.
+
+See [Model restrictions](/security/model-restrictions) for the complete behavior.
+
+## Administration authentication
+
+Administration authentication protects `/admin/*`.
+
+Configure it separately in `auth.yaml`:
+
+```yaml
+api:
+  mode: api-key
+  keys:
+    # Client keys
+
+admin:
+  mode: api-key
+```
+
+Raw admin keys come from:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="first-admin-key,second-admin-key"
+```
+
+The values are comma-separated.
+
+Hivenet Router hashes them at startup for request comparison. They are not added to `auth.yaml`.
+
+Changing a systemd environment file, Docker `.env` file, Kubernetes Secret, or shell configuration does not change the environment of an already running router. Restart or recreate the router after changing `HIVENET_ROUTER_ADMIN_API_KEYS`.
+
+Use an admin key:
+
+```bash
+curl \
+  -H "Authorization: Bearer first-admin-key" \
+  http://localhost:8080/admin/health
+```
+
+Use different credentials for the client and administration surfaces.
+
+<Warning>
+  Client API keys do not automatically grant administration access, and admin keys do not automatically act as client API keys.
+</Warning>
+
+When `admin.mode` is `none`, the router refuses to start unless you also set:
+
+```bash
+export HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+```
+
+That override makes the administration API accessible to any network client that can reach it. Use it only for isolated development and testing.
+
+## Configuration precedence
+
+When an auth configuration file is provided:
+
+```bash
+--auth-config-file /etc/hivenet-router/auth.yaml
+```
+
+the file controls the API and admin sections.
+
+The client API can otherwise use:
+
+```bash
+HIVENET_ROUTER_AUTH_MODE
+```
+
+when no auth file is configured.
+
+In practical terms:
+
+| Configuration | Result |
+| --- | --- |
+| No file and no env mode | Client auth defaults to `none`; router startup fails for insecure admin unless the explicit override is set |
+| `auth.yaml` present | File controls both sections |
+| No file and `HIVENET_ROUTER_AUTH_MODE=dynamic` | Dynamic client auth; admin auth forced to `api-key` |
+| File plus `HIVENET_ROUTER_AUTH_MODE` | The file’s `api.mode` takes precedence |
+
+Invalid modes, empty required key lists, malformed hashes, duplicate hashes, invalid expiry dates, or invalid quotas prevent the router from starting or reloading the configuration.
+
+## Authentication failures
+
+Missing, malformed, expired, and unknown client or admin credentials receive the same response.
+
+```text
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="hivenet-router"
+```
 
 ```json
 {
   "error": {
     "code": "unauthorized",
-    "message": "Invalid API key",
-    "details": {
-      "key_prefix": "sk-mycoroute-xxxx"
-    }
+    "message": "unauthorized",
+    "source": "router"
   }
 }
 ```
 
-### Model Access Denied
+Hivenet Router deliberately does not reveal whether:
 
-```json
-{
-  "error": {
-    "code": "model_access_denied",
-    "message": "API key not authorized for model",
-    "details": {
-      "model": "meta-llama/Llama-3.1-8B-Instruct",
-      "allowed_models": ["mistralai/Mistral-7B-Instruct-v0.3"]
-    }
-  }
-}
+- the header was missing
+- the key was unknown
+- the key had expired
+- the key was disabled
+
+This reduces information leakage to unauthenticated callers.
+
+Agent-authentication failures are reported to the agent through the gRPC authentication response and router logs rather than through the public HTTP error envelope.
+
+## Transport security
+
+Hivenet Router protects different network paths differently.
+
+| Path | Transport protection |
+| --- | --- |
+| Agent → Router gRPC authentication | TLS 1.3 with a pinned key derived from the JWT secret |
+| Router ↔ Agent libp2p traffic | Noise encryption |
+| Client → Router HTTP API | No built-in TLS termination |
+
+For production client traffic, place Hivenet Router behind a reverse proxy, ingress, or load balancer that provides HTTPS.
+
+For example:
+
+```text
+Client
+  ↓ HTTPS
+Reverse proxy
+  ↓ private HTTP
+Hivenet Router router
 ```
 
-## Best Practices
+Authentication does not replace network security. Restrict:
 
-1. **Rotate secrets** - Periodically rotate JWT secrets and API keys
-2. **Least privilege** - Grant API keys only required model access
-3. **Monitor usage** - Track authentication failures and anomalies
-4. **Use TLS** - Encrypt all network traffic in production
-5. **Secure secrets** - Store secrets in vaults (HashiCorp Vault, AWS Secrets Manager)
+- gRPC and router libp2p ports to agent hosts
+- administration endpoints to operators or management networks
+- Prometheus endpoints to monitoring systems
 
-## See Also
+## Secret responsibilities
 
-- [API Keys](/security/api-keys) - Key creation and management
-- [auth.yaml Reference](/security/auth-yaml-reference) - Complete configuration schema
-- [Model Restrictions](/security/model-restrictions) - Access control configuration
-- [Key Rotation](/security/key-rotation) - Rotation procedures
+| Secret | Shared with | Used for |
+| --- | --- | --- |
+| Agent JWT secret | Router and every agent | Agent JWT validation and gRPC TLS identity |
+| Client API key | One or more applications | `/v1/*` authentication, model access, and quotas |
+| Admin API key | Operators and control services | `/admin/*` authentication |
+| Provider API key | Router only | OpenAI or Anthropic fallback |
+
+Do not reuse one value for several roles.
+
+Compromise has different consequences:
+
+- the agent secret allows unauthorized agents to join
+- a client key allows requests within that key’s permissions and quotas
+- an admin key allows operational access and possibly key-registry changes
+- a provider key allows billable external-provider use
+
+## Recommended production baseline
+
+1. Generate a strong shared agent secret.
+2. Store it through a secrets manager on the router and agents.
+3. Enable static or dynamic authentication for `/v1/*`.
+4. Enable administration API-key authentication.
+5. Use distinct client, admin, agent, and provider credentials.
+6. Restrict each port at the network layer.
+7. terminate client-facing HTTPS before the router.
+8. Apply least-privilege model access and quotas.
+9. Enable audit logging and authentication metrics.
+10. Define and test a rotation process.
+
+## Troubleshooting
+
+### An agent reports a TLS key mismatch
+
+The router and agent are using different JWT secrets.
+
+Compare their secret files without printing their contents:
+
+```bash
+sha256sum /etc/hivenet-router/jwt.secret
+```
+
+The hashes must match.
+
+Restart the affected process after correcting the secret.
+
+### The router rejects the agent metadata
+
+Check the agent logs for the field named in the rejection.
+
+Required values include:
+
+- model
+- positive capacity
+- version
+- engine
+- region
+- organization
+
+### A client receives `401 unauthorized`
+
+Check that:
+
+- the correct key is being sent
+- the header uses the expected value
+- the router loaded the intended auth configuration
+- the static key has not expired
+- a dynamic key is enabled and present after the latest router restart
+- the request is reaching the intended router environment
+
+Do not expect the response to distinguish these cases. Check operator logs and configuration.
+
+### A valid client key receives `403 model_forbidden`
+
+Authentication succeeded, but the key may not use the requested model.
+
+Review:
+
+- `models` for static keys
+- `allowed_models` for dynamic keys
+- `quota.per_model`
+- exact model spelling and capitalization
+
+### Administration requests receive `401`
+
+Client and administration credentials are separate.
+
+Confirm that:
+
+```yaml
+admin:
+  mode: api-key
+```
+
+and that the submitted value appears in:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+Restart the router after changing the environment variable.
+
+### Static changes do not take effect
+
+Send `SIGHUP`:
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+Then inspect the router logs for parsing or validation errors.
+
+Dynamic registry entries are not reloaded from `auth.yaml`.
+
+### Dynamic keys disappear
+
+The dynamic registry is stored in memory.
+
+Repopulate it through the administration API after every router restart.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="API keys" href="/security/api-keys">
+    Generate, configure, manage, and revoke static and dynamic client keys.
+  </Card>
+
+  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+    Review the complete static authentication and quota schema.
+  </Card>
+
+  <Card title="Key rotation" href="/security/key-rotation">
+    Rotate agent, client, administrator, and provider credentials safely.
+  </Card>
+</CardGroup>

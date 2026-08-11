@@ -4,9 +4,9 @@ description: "Generate vector embeddings through capability-specific agents, wit
 sidebarTitle: "Embeddings"
 ---
 
-Send text to an embedding model through Mycoroute and receive vector representations for search, retrieval, clustering, classification, and other similarity-based tasks.
+Send text to an embedding model through Hivenet Router and receive vector representations for search, retrieval, clustering, classification, and other similarity-based tasks.
 
-Mycoroute routes embedding requests to agents registered with the `embedding` capability.
+Hivenet Router routes embedding requests to agents registered with the `embedding` capability.
 
 ```text
 POST /v1/embeddings
@@ -18,7 +18,7 @@ POST /v1/embeddings
 
 ## How embedding requests are routed
 
-For each request, Mycoroute:
+For each request, Hivenet Router:
 
 1. authenticates the client when API authentication is enabled
 2. applies the configured request-rate quota
@@ -29,7 +29,7 @@ For each request, Mycoroute:
 7. forwards the original request to `POST /v1/embeddings` on the selected backend
 8. returns the backend response to the client
 
-The embedding request uses the same routing pipeline as other Mycoroute workloads. Static filters, dynamic gates, fallback chains, and least-loaded routing can all apply.
+The embedding request uses the same routing pipeline as other Hivenet Router workloads. Static filters, dynamic gates, fallback chains, and least-loaded routing can all apply.
 
 ## Request headers
 
@@ -39,7 +39,7 @@ The embedding request uses the same routing pipeline as other Mycoroute workload
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Request-ID: <uuid>` | No | Correlates the request with logs and traces |
 
-If `X-Request-ID` is absent or is not a valid UUID, Mycoroute generates one and returns it in the response.
+If `X-Request-ID` is absent or is not a valid UUID, Hivenet Router generates one and returns it in the response.
 
 ## Request body
 
@@ -63,13 +63,13 @@ The model name must:
 - be allowed by the caller’s API key when model restrictions are enabled
 - contain no more than 256 characters
 
-Mycoroute validates the `model` field. The selected backend validates the input content, batch size, token limits, and any optional embedding parameters.
+Hivenet Router validates the `model` field. The selected backend validates the input content, batch size, token limits, and any optional embedding parameters.
 
 ### Request-body size
 
-Mycoroute limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. This limit includes the complete JSON body, so large embedding batches can reach it before the backend’s own batch or token limits.
+Hivenet Router limits `/v1/*` request bodies to `10485760` bytes, or 10 MiB, by default. This limit includes the complete JSON body, so large embedding batches can reach it before the backend’s own batch or token limits.
 
-Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `mycoroute_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A proxy or ingress may still enforce a smaller limit.
+Requests above the configured limit receive HTTP `413` before routing. Configure the limit with `HIVENET_ROUTER_MAX_REQUEST_BYTES`, or set it to `0` to disable the built-in check. A proxy or ingress may still enforce a smaller limit.
 
 Handle HTTP `413` by reducing the batch or input size. Do not depend on a specific JSON error envelope for this early rejection.
 
@@ -119,7 +119,7 @@ curl -X POST \
 A compatible backend returns one embedding for each input. The `index` field identifies the position of the corresponding input in the original array.
 
 <Warning>
-  Batch-size and token limits are defined by the selected backend and model. Mycoroute does not split an oversized batch into smaller requests.
+  Batch-size and token limits are defined by the selected backend and model. Hivenet Router does not split an oversized batch into smaller requests.
 </Warning>
 
 ## Use the OpenAI Python client
@@ -129,7 +129,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="sk-mycoroute-...",
+    api_key="sk-hivenet-...",
 )
 
 response = client.embeddings.create(
@@ -167,7 +167,7 @@ for item in response.data:
 
 ## Additional request fields
 
-Mycoroute forwards the original JSON body to the backend. You can therefore include additional OpenAI-compatible fields such as:
+Hivenet Router forwards the original JSON body to the backend. You can therefore include additional OpenAI-compatible fields such as:
 
 ```json
 {
@@ -179,7 +179,7 @@ Mycoroute forwards the original JSON body to the backend. You can therefore incl
 }
 ```
 
-Mycoroute does not interpret these optional fields.
+Hivenet Router does not interpret these optional fields.
 
 The backend decides whether it supports:
 
@@ -223,13 +223,13 @@ The vector above is shortened for readability.
 
 The exact response fields depend on the backend. Some backends may omit `id`, `created`, or `usage`, or may return additional fields.
 
-Mycoroute returns the successful backend response without reshaping the embedding vectors.
+Hivenet Router returns the successful backend response without reshaping the embedding vectors.
 
 ## No streaming support
 
 Embedding requests are synchronous.
 
-The endpoint does not use server-sent events, and the request does not accept a Mycoroute streaming mode. The router waits for the selected backend to return the complete embedding response.
+The endpoint does not use server-sent events, and the request does not accept a Hivenet Router streaming mode. The router waits for the selected backend to return the complete embedding response.
 
 For large batches, use an appropriate request timeout and keep batch size within the backend’s limits.
 
@@ -267,7 +267,7 @@ When a finite request quota is configured, responses may include:
 X-RateLimit-Remaining-Requests
 ```
 
-When the request-rate quota is exhausted, Mycoroute returns HTTP `429`.
+When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
 
 <Note>
   The current embedding path does not charge input or output tokens against the daily token quota. It records successful embedding requests with zero input and output tokens for quota accounting.
@@ -358,7 +358,7 @@ Common responses include:
 | HTTP status | Code | Meaning |
 | --- | --- | --- |
 | `400` | `request_invalid` | Missing model, malformed JSON, or model name too long |
-| `413` | Not guaranteed | Request body exceeds `mycoroute_MAX_REQUEST_BYTES` |
+| `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid API credentials |
 | `403` | `model_forbidden` | API key cannot use the requested model |
 | `404` | `model_not_found` | No registered model matches the request |
@@ -440,7 +440,7 @@ A backend may reject:
 
 Check the backend response directly.
 
-Mycoroute does not combine, remove, reorder, or deduplicate input strings. It returns the successful backend response as received.
+Hivenet Router does not combine, remove, reorder, or deduplicate input strings. It returns the successful backend response as received.
 
 ### Requests time out
 
@@ -473,11 +473,11 @@ Review the quota assigned to the API key and the per-model quota entry when per-
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Reranking" href="/api/reranking">
+  <Card title="Reranking" href="/use-the-api/reranking">
     Score and reorder documents by relevance to a query.
   </Card>
 
-  <Card title="Models" href="/api/models">
+  <Card title="Models" href="/use-the-api/models">
     Discover models, capabilities, engines, and healthy capacity.
   </Card>
 

@@ -25,7 +25,6 @@
         "group": "Deploy",
         "pages": [
           "deploy/docker-quickstart",
-          "deploy/docker-compose",
           "deploy/bare-metal",
           {
             "group": "Agent deployment",
@@ -50,6 +49,7 @@
               "deploy/agents/custom-engine"
             ]
           },
+          "deploy/docker-compose",
           "deploy/bare-metal"
         ]
       },
@@ -76,7 +76,12 @@
           "routing/policy-gates",
           "routing/fallback-chains",
           "routing/provider-fallback",
-          "routing/hardware-aware-routing"
+          "routing/hardware-aware-routing",
+          "routing/routing-concepts",
+          "routing/policy-yaml-reference",
+          "routing/fallback-chains",
+          "routing/provider-fallback",
+          "routing/policy-gates"
         ]
       },
       {
@@ -85,6 +90,11 @@
           "security/authentication-overview",
           "security/api-keys",
           "security/auth-yaml-reference",
+          "security/model-restrictions",
+          "security/key-rotation",
+          "security/authentication-overview",
+          "security/auth-yaml-reference",
+          "security/api-keys",
           "security/model-restrictions",
           "security/key-rotation"
         ]
@@ -96,7 +106,15 @@
           "observability/grafana-dashboards",
           "observability/audit-logging",
           "observability/hardware-metrics",
-          "observability/engine-metrics"
+          "observability/engine-metrics",
+          "observability/observability-overview",
+          "observability/prometheus-metrics",
+          "observability/grafana-dashboards",
+          "observability/audit-logging",
+          "observability/hardware-metrics",
+          "observability/engine-metrics",
+          "observability/latency-tracking",
+          "observability/hardware-aware-routing"
         ]
       },
       {

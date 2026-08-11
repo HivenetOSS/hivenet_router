@@ -4,7 +4,7 @@ description: "List models available to the current API key and inspect their cap
 sidebarTitle: "Models"
 ---
 
-Discover which models are currently registered with Mycoroute and available to the calling API key.
+Discover which models are currently registered with Hivenet Router and available to the calling API key.
 
 ```text
 GET /v1/models
@@ -297,7 +297,7 @@ Each agent registers one capability.
 Agents can add a display name and description:
 
 ```bash
-mycoroute-agent \
+hivenet-agent \
   --model openai/gpt-oss-20b \
   --llm-pretty-name "Balanced · GPT OSS 20B" \
   --llm-info "Good balance between speed and quality." \
@@ -313,7 +313,7 @@ These values appear as:
 }
 ```
 
-When several agents serve the same model, Mycoroute uses the first non-empty value found for each field.
+When several agents serve the same model, Hivenet Router uses the first non-empty value found for each field.
 
 Keep these values consistent across agents serving the same model.
 
@@ -321,7 +321,7 @@ Keep these values consistent across agents serving the same model.
 
 `GET /v1/models` returns the catalog visible to the calling API key.
 
-Mycoroute determines that catalog in this order:
+Hivenet Router determines that catalog in this order:
 
 1. When the key has `quota.per_model`, only models declared in that map are visible.
 2. Otherwise, when the key has a non-empty `allowed_models` list, only those models are visible.
@@ -349,7 +349,7 @@ This filtering keeps discovery aligned with the models the key can invoke.
 
 ## Restricted models return 404
 
-When a caller requests detail for a model outside its allowed set, Mycoroute returns HTTP `404`, not `403`.
+When a caller requests detail for a model outside its allowed set, Hivenet Router returns HTTP `404`, not `403`.
 
 ```json
 {
@@ -367,7 +367,7 @@ This prevents one tenant from using the endpoint to discover model names assigne
 
 ## Use the OpenAI Python client
 
-The OpenAI Python client can list the models exposed by Mycoroute:
+The OpenAI Python client can list the models exposed by Hivenet Router:
 
 ```python
 from openai import OpenAI
@@ -383,7 +383,7 @@ for model in models.data:
     print(model.id)
 ```
 
-Use raw HTTP when you need Mycoroute-specific fields such as agent counts, engines, regions, and capabilities:
+Use raw HTTP when you need Hivenet Router-specific fields such as agent counts, engines, regions, and capabilities:
 
 ```python
 from typing import Any
@@ -433,7 +433,7 @@ The response shape matches the public endpoint, but the admin view does not appl
 
 Admin authentication is configured separately from inference API authentication.
 
-See [Admin endpoints](/api/admin-endpoints) for the complete operator reference.
+See [Admin endpoints](/use-the-api/admin-endpoints) for the complete operator reference.
 
 ## Empty and unhealthy catalogs
 
@@ -566,7 +566,7 @@ Make sure every agent serving the model uses the same:
 --llm-info
 ```
 
-Mycoroute uses the first non-empty values found while aggregating the catalog.
+Hivenet Router uses the first non-empty values found while aggregating the catalog.
 
 ### Capacity looks higher than available capacity
 
@@ -584,7 +584,7 @@ Use `/admin/routing-table` for live state.
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Admin endpoints" href="/api/admin-endpoints">
+  <Card title="Admin endpoints" href="/use-the-api/admin-endpoints">
     Inspect the complete operator catalog, routing table, storage, policies, and API keys.
   </Card>
 

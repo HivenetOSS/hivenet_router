@@ -1,0 +1,1463 @@
+---
+title: "Use from code"
+description: "Call Hivenet Router from Python, JavaScript, official SDKs, LangChain, or direct HTTP, with streaming, tools, embeddings, reranking, errors, and production controls."
+sidebarTitle: "Use from code"
+---
+
+Use Hivenet Router from your own scripts, applications, services, and frameworks through standard HTTP APIs and existing SDKs.
+
+Hivenet Router does not require a dedicated client library. Point a compatible client at the router, provide a Hivenet Router API key, and use an exact model ID registered by an agent.
+
+| Workload | Endpoint | Suggested client |
+| --- | --- | --- |
+| OpenAI-format chat | `POST /v1/chat/completions` | OpenAI Python or JavaScript SDK |
+| Anthropic-format chat | `POST /v1/messages` | Anthropic Python or TypeScript SDK |
+| Anthropic token counting | `POST /v1/messages/count_tokens` | Anthropic SDK |
+| Embeddings | `POST /v1/embeddings` | OpenAI SDK or direct HTTP |
+| Reranking | `POST /v1/rerank` | Direct HTTP |
+| Model discovery | `GET /v1/models` | SDK or direct HTTP |
+
+<Warning>
+  Hivenet Router does not expose the OpenAI Responses API:
+
+  ```text
+  POST /v1/responses
+  ```
+
+  Call Chat Completions explicitly and configure frameworks not to switch to the Responses API automatically.
+</Warning>
+
+## Prerequisites
+
+You need:
+
+- a reachable Hivenet Router router
+- a Hivenet Router client API key
+- an exact model ID visible to that key
+- a healthy agent with the required capability
+- a backend that accepts the request format your client sends
+- HTTPS when the router is reached over an untrusted network
+
+Current releases of the official OpenAI SDKs require:
+
+- Python 3.9 or later
+- Node.js 20 LTS or a later supported non-EOL release
+
+Check the installed SDK version’s runtime requirements when upgrading.
+
+## Set the connection values
+
+Use the router’s root URL without a trailing `/v1`:
+
+```bash
+export MYCOROUTE_URL="https://router.example.com"
+export MYCOROUTE_API_KEY="<mycoroute-api-key>"
+export MYCOROUTE_MODEL="<registered-model-id>"
+```
+
+The examples construct the endpoint appropriate to each SDK:
+
+- OpenAI-compatible clients use `${MYCOROUTE_URL}/v1`
+- Anthropic-compatible clients use `MYCOROUTE_URL`
+
+Do not store the raw key in source control.
+
+## Discover available models
+
+Query the catalog with the same key your application will use:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  "$MYCOROUTE_URL/v1/models" \
+  | jq -r '.data[] | [
+      .id,
+      .capability,
+      .agents.healthy
+    ] | @tsv'
+```
+
+The response is filtered by the key’s model access.
+
+Use one of the returned IDs exactly as shown. Model matching is case-sensitive.
+
+## Test with curl
+
+Before debugging an SDK, test the router directly.
+
+### Non-streaming chat
+
+```bash
+curl -X POST \
+  "$MYCOROUTE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"$MYCOROUTE_MODEL\",
+    \"messages\": [
+      {
+        \"role\": \"user\",
+        \"content\": \"Reply with one short sentence.\"
+      }
+    ],
+    \"max_tokens\": 64
+  }"
+```
+
+### Streaming chat
+
+```bash
+curl -N -X POST \
+  "$MYCOROUTE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"$MYCOROUTE_MODEL\",
+    \"messages\": [
+      {
+        \"role\": \"user\",
+        \"content\": \"Count from one to five.\"
+      }
+    ],
+    \"stream\": true,
+    \"max_tokens\": 64
+  }"
+```
+
+Output should arrive incrementally.
+
+A successful request confirms:
+
+- authentication
+- model access
+- routing
+- agent connectivity
+- backend compatibility
+- response forwarding
+
+## Python with the OpenAI SDK
+
+Install the SDK:
+
+```bash
+python -m pip install openai
+```
+
+Create a client:
+
+```python
+import os
+
+from openai import OpenAI
+
+router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+api_key = os.environ["MYCOROUTE_API_KEY"]
+model = os.environ["MYCOROUTE_MODEL"]
+
+client = OpenAI(
+    base_url=f"{router_url}/v1",
+    api_key=api_key,
+    max_retries=0,
+)
+```
+
+This guide disables automatic SDK retries so one application operation produces one request to Hivenet Router.
+
+Add an intentional retry policy later when your application can safely handle duplicate attempts.
+
+### Non-streaming chat
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=[
+        {
+            "role": "system",
+            "content": "Answer clearly and concisely.",
+        },
+        {
+            "role": "user",
+            "content": "Explain HTTP/2 in one sentence.",
+        },
+    ],
+    max_tokens=128,
+)
+
+print(response.choices[0].message.content)
+
+if response.usage is not None:
+    print(
+        "Tokens:",
+        response.usage.prompt_tokens,
+        "input,",
+        response.usage.completion_tokens,
+        "output",
+    )
+```
+
+The backend determines which roles, parameters, and content types it supports.
+
+Hivenet Router forwards the original request rather than adapting unsupported fields.
+
+### Streaming
+
+```python
+stream = client.chat.completions.create(
+    model=model,
+    messages=[
+        {
+            "role": "user",
+            "content": "Count from one to ten, one number per line.",
+        }
+    ],
+    max_tokens=128,
+    stream=True,
+)
+
+for chunk in stream:
+    if not chunk.choices:
+        continue
+
+    text = chunk.choices[0].delta.content
+    if text:
+        print(text, end="", flush=True)
+
+print()
+```
+
+When the backend supports final streaming usage, request it with:
+
+```python
+stream_options={"include_usage": True}
+```
+
+Do not require this field unless you have tested it against the deployed backend.
+
+Hivenet Router can still meter streamed output when the backend does not return a final usage chunk.
+
+### Async requests
+
+```python
+import asyncio
+import os
+
+from openai import AsyncOpenAI
+
+
+async def main() -> None:
+    router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+
+    async with AsyncOpenAI(
+        base_url=f"{router_url}/v1",
+        api_key=os.environ["MYCOROUTE_API_KEY"],
+        max_retries=0,
+    ) as client:
+        response = await client.chat.completions.create(
+            model=os.environ["MYCOROUTE_MODEL"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Reply with the word connected.",
+                }
+            ],
+            max_tokens=32,
+        )
+
+        print(response.choices[0].message.content)
+
+
+asyncio.run(main())
+```
+
+Use bounded concurrency in services rather than starting an unlimited number of requests.
+
+For example:
+
+```python
+import asyncio
+
+semaphore = asyncio.Semaphore(8)
+
+
+async def ask(client: AsyncOpenAI, prompt: str) -> str:
+    async with semaphore:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            max_tokens=128,
+        )
+
+        return response.choices[0].message.content or ""
+```
+
+Hivenet Router also applies its own declared agent capacity and queue limits. Client-side bounds prevent one application from filling the router queue unnecessarily.
+
+## Tool calling in Python
+
+The backend must return structured OpenAI-format tool calls.
+
+A complete local tool loop can look like:
+
+```python
+import json
+
+
+def count_words(text: str) -> dict[str, int]:
+    return {
+        "word_count": len(text.split()),
+    }
+
+
+messages = [
+    {
+        "role": "user",
+        "content": "Use the tool to count the words in: Hivenet Router routes inference requests.",
+    }
+]
+
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    max_tokens=256,
+    tools=[
+        {
+            "type": "function",
+            "function": {
+                "name": "count_words",
+                "description": "Count the words in a piece of text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                        }
+                    },
+                    "required": [
+                        "text",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ],
+    tool_choice="auto",
+)
+
+message = response.choices[0].message
+
+if not message.tool_calls:
+    raise RuntimeError(
+        "The model did not return a structured tool call."
+    )
+
+assistant_tool_calls = []
+
+for call in message.tool_calls:
+    assistant_tool_calls.append(
+        {
+            "id": call.id,
+            "type": call.type,
+            "function": {
+                "name": call.function.name,
+                "arguments": call.function.arguments,
+            },
+        }
+    )
+
+messages.append(
+    {
+        "role": "assistant",
+        "content": message.content,
+        "tool_calls": assistant_tool_calls,
+    }
+)
+
+for call in message.tool_calls:
+    arguments = json.loads(call.function.arguments)
+
+    if call.function.name != "count_words":
+        raise ValueError(
+            f"Unknown tool: {call.function.name}"
+        )
+
+    result = count_words(arguments["text"])
+
+    messages.append(
+        {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(result),
+        }
+    )
+
+final_response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    max_tokens=128,
+)
+
+print(final_response.choices[0].message.content)
+```
+
+<Warning>
+  Never execute a model-selected tool only because its name appears in the response.
+
+  Validate:
+
+  - the tool name
+  - every argument
+  - user permissions
+  - allowed paths and resources
+  - command or network boundaries
+</Warning>
+
+For vLLM, structured tool calls normally require:
+
+```bash
+--enable-auto-tool-choice
+--tool-call-parser <model-specific-parser>
+```
+
+When the model describes a tool call in plain text, correct the model, chat template, or backend parser. Hivenet Router does not convert plain text into `tool_calls`.
+
+## Embeddings in Python
+
+Use the same OpenAI client:
+
+```python
+response = client.embeddings.create(
+    model="<embedding-model-id>",
+    input=[
+        "Hivenet Router routes inference requests.",
+        "Embedding vectors represent semantic meaning.",
+    ],
+)
+
+for item in response.data:
+    print(
+        item.index,
+        len(item.embedding),
+    )
+```
+
+The selected model must be registered with:
+
+```text
+capability: embedding
+```
+
+A model registered only as an LLM cannot serve `/v1/embeddings`.
+
+## Reranking in Python
+
+The OpenAI SDK does not define a standard `/v1/rerank` method.
+
+Call it directly with `httpx`:
+
+```bash
+python -m pip install httpx
+```
+
+```python
+import os
+
+import httpx
+
+router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+api_key = os.environ["MYCOROUTE_API_KEY"]
+
+documents = [
+    "Paris is the capital of France.",
+    "Berlin is the capital of Germany.",
+    "France is in Western Europe.",
+]
+
+response = httpx.post(
+    f"{router_url}/v1/rerank",
+    headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "model": "<reranker-model-id>",
+        "query": "What is the capital of France?",
+        "documents": documents,
+        "top_n": 2,
+    },
+    timeout=60.0,
+)
+
+response.raise_for_status()
+payload = response.json()
+
+for result in payload["results"]:
+    index = result["index"]
+
+    print(
+        result["relevance_score"],
+        documents[index],
+    )
+```
+
+The response’s `document` field may be `null`.
+
+Use `index` to map each result back to the original input document.
+
+The model must be registered with:
+
+```text
+capability: reranker
+```
+
+## JavaScript and TypeScript with the OpenAI SDK
+
+Install the SDK:
+
+```bash
+npm install openai
+```
+
+Create a server-side client:
+
+```js
+import OpenAI from "openai";
+
+const routerURL = process.env.MYCOROUTE_URL?.replace(/\/+$/, "");
+const apiKey = process.env.MYCOROUTE_API_KEY;
+const model = process.env.MYCOROUTE_MODEL;
+
+if (!routerURL || !apiKey || !model) {
+  throw new Error(
+    "MYCOROUTE_URL, MYCOROUTE_API_KEY, and MYCOROUTE_MODEL are required.",
+  );
+}
+
+const client = new OpenAI({
+  baseURL: `${routerURL}/v1`,
+  apiKey,
+  maxRetries: 0,
+});
+```
+
+### Non-streaming chat
+
+```js
+const response = await client.chat.completions.create({
+  model,
+  messages: [
+    {
+      role: "user",
+      content: "Reply with the word connected.",
+    },
+  ],
+  max_tokens: 32,
+});
+
+console.log(response.choices[0]?.message?.content);
+```
+
+### Streaming
+
+```js
+const stream = await client.chat.completions.create({
+  model,
+  messages: [
+    {
+      role: "user",
+      content: "Count from one to five.",
+    },
+  ],
+  max_tokens: 64,
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  const text = chunk.choices[0]?.delta?.content;
+
+  if (text) {
+    process.stdout.write(text);
+  }
+}
+
+process.stdout.write("\n");
+```
+
+### Embeddings
+
+```js
+const response = await client.embeddings.create({
+  model: "<embedding-model-id>",
+  input: [
+    "Hivenet Router routes inference requests.",
+    "Embedding vectors represent semantic meaning.",
+  ],
+});
+
+for (const item of response.data) {
+  console.log(
+    item.index,
+    item.embedding.length,
+  );
+}
+```
+
+### Reranking
+
+Use the built-in `fetch` available in current Node.js releases:
+
+```js
+const documents = [
+  "Paris is the capital of France.",
+  "Berlin is the capital of Germany.",
+  "France is in Western Europe.",
+];
+
+const response = await fetch(
+  `${routerURL}/v1/rerank`,
+  {
+    method: "POST",
+
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+
+    body: JSON.stringify({
+      model: "<reranker-model-id>",
+      query: "What is the capital of France?",
+      documents,
+      top_n: 2,
+    }),
+  },
+);
+
+if (!response.ok) {
+  throw new Error(
+    `Reranking failed: ${response.status} ${await response.text()}`,
+  );
+}
+
+const payload = await response.json();
+
+for (const result of payload.results) {
+  console.log(
+    result.relevance_score,
+    documents[result.index],
+  );
+}
+```
+
+## Do not expose the key in browser code
+
+Use the JavaScript SDK from:
+
+- a backend service
+- a serverless function
+- a protected worker
+- another trusted server runtime
+
+Do not put a Hivenet Router API key in:
+
+- browser JavaScript
+- a public mobile bundle
+- a committed frontend environment file
+- HTML or client-visible configuration
+
+A user who can inspect the application can extract a client-side bearer key and use its complete model access and quota.
+
+Place your own authenticated application endpoint between the browser and Hivenet Router.
+
+## Python with the Anthropic SDK
+
+Use this path only when the selected backend implements:
+
+```text
+POST /v1/messages
+```
+
+Install the SDK:
+
+```bash
+python -m pip install anthropic
+```
+
+Create the client with bearer authentication:
+
+```python
+import os
+
+from anthropic import Anthropic
+
+router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+
+client = Anthropic(
+    base_url=router_url,
+    api_key=None,
+    auth_token=os.environ["MYCOROUTE_API_KEY"],
+    max_retries=0,
+)
+```
+
+Use the router root without `/v1`. The SDK appends `/v1/messages`.
+
+```python
+message = client.messages.create(
+    model=os.environ["MYCOROUTE_MODEL"],
+    max_tokens=128,
+    system="Answer clearly and concisely.",
+    messages=[
+        {
+            "role": "user",
+            "content": "Explain HTTP/2 in one sentence.",
+        }
+    ],
+)
+
+for block in message.content:
+    if block.type == "text":
+        print(block.text)
+```
+
+The `auth_token` parameter sends:
+
+```http
+Authorization: Bearer <mycoroute-api-key>
+```
+
+This matches Hivenet Router client authentication.
+
+Do not use only `api_key`, which sends the credential in:
+
+```http
+X-Api-Key
+```
+
+Hivenet Router does not authenticate client requests from that header.
+
+### Count Anthropic-format tokens
+
+When the backend supports the endpoint:
+
+```python
+result = client.messages.count_tokens(
+    model=os.environ["MYCOROUTE_MODEL"],
+    system="Answer clearly and concisely.",
+    messages=[
+        {
+            "role": "user",
+            "content": "Count the tokens in this request.",
+        }
+    ],
+)
+
+print(result.input_tokens)
+```
+
+Hivenet Router forwards the request to:
+
+```text
+POST /v1/messages/count_tokens
+```
+
+It does not calculate the Anthropic token count itself.
+
+## TypeScript with the Anthropic SDK
+
+Install the package:
+
+```bash
+npm install @anthropic-ai/sdk
+```
+
+```js
+import Anthropic from "@anthropic-ai/sdk";
+
+const routerURL = process.env.MYCOROUTE_URL?.replace(/\/+$/, "");
+const apiKey = process.env.MYCOROUTE_API_KEY;
+const model = process.env.MYCOROUTE_MODEL;
+
+if (!routerURL || !apiKey || !model) {
+  throw new Error(
+    "MYCOROUTE_URL, MYCOROUTE_API_KEY, and MYCOROUTE_MODEL are required.",
+  );
+}
+
+const client = new Anthropic({
+  baseURL: routerURL,
+  apiKey: null,
+  authToken: apiKey,
+  maxRetries: 0,
+});
+
+const message = await client.messages.create({
+  model,
+  max_tokens: 128,
+  messages: [
+    {
+      role: "user",
+      content: "Reply with the word connected.",
+    },
+  ],
+});
+
+for (const block of message.content) {
+  if (block.type === "text") {
+    console.log(block.text);
+  }
+}
+```
+
+Setting:
+
+```js
+apiKey: null
+```
+
+prevents an unrelated `ANTHROPIC_API_KEY` environment value from adding an `X-Api-Key` header alongside the Hivenet Router bearer token.
+
+## LangChain
+
+Install the current integration package:
+
+```bash
+python -m pip install langchain-openai
+```
+
+Configure Chat Completions explicitly:
+
+```python
+import os
+
+from langchain_openai import ChatOpenAI
+
+router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+
+chat_model = ChatOpenAI(
+    model=os.environ["MYCOROUTE_MODEL"],
+    base_url=f"{router_url}/v1",
+    api_key=os.environ["MYCOROUTE_API_KEY"],
+    use_responses_api=False,
+    max_retries=0,
+    max_tokens=256,
+)
+
+response = chat_model.invoke(
+    "Explain what Hivenet Router does in one sentence."
+)
+
+print(response.content)
+```
+
+<Warning>
+  Set:
+
+  ```python
+  use_responses_api=False
+  ```
+
+  Hivenet Router does not expose `/v1/responses`. Current LangChain releases can infer the Responses API from model names or invocation parameters unless the choice is explicit.
+</Warning>
+
+LangChain’s `ChatOpenAI` targets the standard OpenAI schema.
+
+Backend-specific response fields outside that schema may not be preserved by LangChain even when Hivenet Router forwards them successfully.
+
+## Read request IDs and quota headers
+
+Hivenet Router returns:
+
+```text
+X-Request-ID
+```
+
+on every HTTP response.
+
+It also returns quota headers when a finite quota applies:
+
+```text
+X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
+```
+
+Unlimited quota values are omitted rather than returned as `-1`.
+
+### Python
+
+```python
+raw_response = client.chat.completions.with_raw_response.create(
+    model=model,
+    messages=[
+        {
+            "role": "user",
+            "content": "Reply with the word connected.",
+        }
+    ],
+    max_tokens=32,
+)
+
+print(
+    "Request ID:",
+    raw_response.headers.get("x-request-id"),
+)
+
+print(
+    "Remaining requests:",
+    raw_response.headers.get(
+        "x-ratelimit-remaining-requests"
+    ),
+)
+
+print(
+    "Remaining tokens:",
+    raw_response.headers.get(
+        "x-ratelimit-remaining-tokens"
+    ),
+)
+
+response = raw_response.parse()
+
+print(response.choices[0].message.content)
+```
+
+### JavaScript
+
+```js
+const { data, response } =
+  await client.chat.completions
+    .create({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: "Reply with the word connected.",
+        },
+      ],
+      max_tokens: 32,
+    })
+    .withResponse();
+
+console.log(
+  "Request ID:",
+  response.headers.get("x-request-id"),
+);
+
+console.log(
+  "Remaining requests:",
+  response.headers.get(
+    "x-ratelimit-remaining-requests",
+  ),
+);
+
+console.log(
+  "Remaining tokens:",
+  response.headers.get(
+    "x-ratelimit-remaining-tokens",
+  ),
+);
+
+console.log(
+  data.choices[0]?.message?.content,
+);
+```
+
+Log the request ID with your application operation so it can be correlated with:
+
+- Hivenet Router audit records
+- router and agent logs
+- OpenTelemetry traces
+- support investigations
+
+A client-supplied `X-Request-ID` is preserved only when it is a valid UUID. Hivenet Router replaces other values with a generated UUID.
+
+## Handle Hivenet Router errors
+
+Most inference errors use the structured envelope below. A request body larger than `HIVENET_ROUTER_MAX_REQUEST_BYTES` is rejected earlier with HTTP `413`, before the normal inference-handler error path, so clients should also handle an ordinary HTTP response without a Hivenet Router error code.
+
+Hivenet Router returns errors in this envelope:
+
+```json
+{
+  "error": {
+    "code": "no_agents_available",
+    "message": "No healthy agents available",
+    "source": "router"
+  }
+}
+```
+
+The SDK maps the HTTP status to its general exception type.
+
+Inspect the response body for the Hivenet Router-specific error code.
+
+```python
+import openai
+
+try:
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Hello",
+            }
+        ],
+        max_tokens=64,
+    )
+
+except openai.APIStatusError as exc:
+    body = exc.body if isinstance(exc.body, dict) else {}
+    router_error = body.get("error", {})
+
+    print(
+        "Status:",
+        exc.status_code,
+    )
+
+    print(
+        "Request ID:",
+        exc.request_id,
+    )
+
+    print(
+        "Hivenet Router code:",
+        router_error.get("code"),
+    )
+
+    print(
+        "Message:",
+        router_error.get("message"),
+    )
+
+    print(
+        "Source:",
+        router_error.get("source"),
+    )
+
+    raise
+```
+
+Use the structured `error.code` rather than matching error-message text.
+
+Common codes include:
+
+| Code | Meaning |
+| --- | --- |
+| `unauthorized` | Missing or invalid client key |
+| `model_forbidden` | The key cannot use the requested model |
+| `model_not_found` | The model is unavailable or hidden |
+| `request_invalid` | Malformed request |
+| `invalid_parameter` | Backend rejected a request parameter |
+| `context_length_exceeded` | Prompt or requested output exceeds the context limit |
+| `rate_limit_exceeded` | Request-rate quota exceeded or no per-model quota declared |
+| `token_limit_exceeded` | Daily token budget exhausted |
+| `no_agents_available` | No healthy eligible agent |
+| `no_capacity` | Eligible agents have no free capacity |
+| `backend_error` | Backend returned an unexpected error |
+| `request_timeout` | Hivenet Router’s request deadline expired |
+
+See [Error codes](/reference/error-codes) for the complete reference.
+
+## Timeouts
+
+Hivenet Router’s default request deadline is:
+
+```text
+60 seconds
+```
+
+A client timeout cannot extend that deadline.
+
+For a router using its default, set the client timeout slightly above 60 seconds so Hivenet Router can return its structured `504 request_timeout` response before the SDK terminates the connection locally.
+
+For example:
+
+```python
+client = OpenAI(
+    base_url=f"{router_url}/v1",
+    api_key=api_key,
+    timeout=75.0,
+    max_retries=0,
+)
+```
+
+When the router is configured with a five-minute deadline:
+
+```bash
+./bin/hivenet-router \
+  --request-timeout 5m \
+  ...
+```
+
+the client also needs a deadline long enough to receive that response.
+
+Check the actual backend before increasing timeouts. A long timeout does not correct:
+
+- a backend that failed to start
+- an exhausted GPU
+- a stalled stream
+- a broken tool parser
+- an unreachable agent
+
+## Retries
+
+Current OpenAI and Anthropic SDKs retry selected failures automatically by default, including some combinations of:
+
+- connection errors
+- timeouts
+- HTTP `408`
+- HTTP `409`
+- HTTP `429`
+- HTTP `5xx`
+
+This can turn one application action into several Hivenet Router requests.
+
+Retries may:
+
+- consume additional request quota
+- repeat prompt-token admission
+- create several audit entries
+- increase load while the fleet is already unavailable
+- duplicate an operation after an ambiguous network failure
+
+The examples use:
+
+```text
+max_retries=0
+maxRetries: 0
+```
+
+so retry behavior remains under application control.
+
+When retries are appropriate:
+
+1. retry only selected transient codes
+2. use exponential backoff and jitter
+3. set a maximum attempt count
+4. respect the application deadline
+5. avoid retrying malformed requests
+6. consider whether the operation can safely run twice
+
+Hivenet Router does not currently deduplicate repeated requests by `X-Request-ID`.
+
+## Quota behavior in applications
+
+### Request quotas
+
+`X-RateLimit-Remaining-Requests` describes the remaining capacity in the applicable request-rate bucket.
+
+For per-model quotas, the effective limit is based on:
+
+```text
+requests per minute per replica
+× healthy replicas
+```
+
+### Token admission
+
+Before a chat request is queued, Hivenet Router checks whether this worst case fits inside the remaining daily budget:
+
+```text
+estimated input tokens
++ requested maximum output
+```
+
+A request with:
+
+```json
+{
+  "max_tokens": 16000
+}
+```
+
+can therefore be rejected even when the model would probably produce only a short response.
+
+Choose a realistic output limit rather than always sending the backend maximum.
+
+### Embeddings and reranking
+
+Embedding and reranking requests currently participate in request-rate quotas.
+
+They do not currently charge their input against the chat token-per-day budget.
+
+## Headers and trust boundaries
+
+Hivenet Router preserves the original client request headers when forwarding an inference request through the selected agent to the backend, except for transport-specific adjustments such as `Content-Length`.
+
+This supports:
+
+- request correlation
+- backend feature headers
+- tracing
+- client-specific compatibility fields
+
+It also means you should not attach unrelated secrets to a Hivenet Router request.
+
+<Warning>
+  Treat the router, selected agent, and inference backend as one trusted request path.
+
+  The backend may receive the Hivenet Router `Authorization` header and other custom client headers.
+</Warning>
+
+Do not send:
+
+- database credentials
+- unrelated service tokens
+- user session cookies
+- private headers intended only for the router
+
+unless the backend is explicitly trusted to receive them.
+
+## Production guidance
+
+- Give each service its own Hivenet Router API key.
+- Keep credentials in a secret manager or protected runtime environment.
+- Restrict each key to the models the service needs.
+- Set realistic request and token quotas.
+- Use bounded client concurrency.
+- Configure explicit timeouts and retry behavior.
+- Log Hivenet Router request IDs.
+- Validate all model-generated tool arguments.
+- Keep the key out of browser and mobile bundles.
+- Preserve SSE streaming through reverse proxies.
+- Test the exact backend features your application uses.
+- Monitor requests, failures, latency, and quotas by tenant.
+- Rotate keys without sharing one credential across unrelated services.
+
+## Troubleshooting
+
+### The SDK returns `401 Unauthorized`
+
+Check that:
+
+- the raw client key is being used
+- the key has not expired
+- the key is not a SHA-256 hash
+- the environment variable reached the process
+- the reverse proxy preserves `Authorization`
+
+Test the same key with:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  "$MYCOROUTE_URL/v1/models"
+```
+
+### The Anthropic SDK returns `401`
+
+Use:
+
+```text
+auth_token
+```
+
+in Python or:
+
+```text
+authToken
+```
+
+in TypeScript.
+
+Using only `api_key` or `apiKey` sends `X-Api-Key`, which Hivenet Router does not accept for client authentication.
+
+### A request goes to `/v1/responses`
+
+Call:
+
+```text
+client.chat.completions.create
+```
+
+rather than:
+
+```text
+client.responses.create
+```
+
+For LangChain, set:
+
+```python
+use_responses_api=False
+```
+
+### The endpoint returns a plain `404`
+
+Check the base URL.
+
+| Client | Base URL |
+| --- | --- |
+| OpenAI SDK | `https://router.example.com/v1` |
+| Anthropic SDK | `https://router.example.com` |
+| Reranking HTTP call | `https://router.example.com/v1/rerank` |
+
+Do not duplicate or omit `/v1`.
+
+### Hivenet Router returns `model_not_found`
+
+Compare the application model with:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  "$MYCOROUTE_URL/v1/models" \
+  | jq -r '.data[].id'
+```
+
+Check:
+
+- capitalization
+- slashes and punctuation
+- agent registration
+- model capability
+- API-key access
+- agent health
+
+### Text works but tool calls are missing
+
+Check:
+
+- model tool support
+- backend tool parser
+- backend chat template
+- structured `tool_calls` in the raw response
+- tool use while streaming
+- model compliance with the supplied schema
+
+The problem is usually in the model or backend rather than the SDK or router.
+
+### Streaming arrives only at the end
+
+Test the router with streaming curl.
+
+When curl streams but the application does not, check the SDK code.
+
+When neither streams, check:
+
+- backend SSE behavior
+- Hivenet Router agent version
+- reverse-proxy buffering
+- proxy read and idle timeouts
+- response `Content-Type`
+
+### Streaming usage is missing
+
+The backend may not support:
+
+```json
+{
+  "stream_options": {
+    "include_usage": true
+  }
+}
+```
+
+Remove the field or handle a missing final usage chunk.
+
+Hivenet Router’s own stream meter can still record usage for quotas, audit data, and metrics.
+
+### A single request receives `429`
+
+Inspect the error code.
+
+| Code | Likely cause |
+| --- | --- |
+| `rate_limit_exceeded` | RPM bucket exhausted or no per-model quota declared |
+| `token_limit_exceeded` | Daily token budget cannot admit the requested worst case |
+
+Also inspect:
+
+```text
+X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
+```
+
+### The SDK makes more requests than expected
+
+Check its retry configuration.
+
+The official SDKs retry selected failures by default. Set retries to zero while diagnosing:
+
+```python
+max_retries=0
+```
+
+```js
+maxRetries: 0
+```
+
+### Hivenet Router returns `503`
+
+Check the specific error code:
+
+- `no_agents_available`
+- `no_capacity`
+- `agent_disconnected`
+- `backend_unavailable`
+- `queue_full`
+
+Then inspect:
+
+```text
+GET /admin/health
+GET /admin/routing-table
+```
+
+### Hivenet Router returns `504 request_timeout`
+
+The router deadline expired.
+
+Check:
+
+- backend readiness
+- model loading
+- prompt size
+- requested output
+- engine waiting requests
+- router-side queueing
+- client and proxy deadlines
+
+### The reranker response has no document text
+
+This is expected for backends that return:
+
+```json
+{
+  "document": null
+}
+```
+
+Use the result’s `index` to retrieve the original input document.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+    Review the OpenAI and Anthropic request paths, forwarding, streaming, and headers.
+  </Card>
+
+  <Card title="Embeddings" href="/use-the-api/embeddings">
+    Review embedding request and response behavior.
+  </Card>
+
+  <Card title="Reranking" href="/use-the-api/reranking">
+    Review reranking schemas, capabilities, and responses.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure service-specific access, quotas, expiration, and rotation.
+  </Card>
+
+  <Card title="Error codes" href="/reference/error-codes">
+    Handle Hivenet Router’s structured router and backend failures.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Correlate application requests with tenants, models, agents, and traces.
+  </Card>
+</CardGroup>

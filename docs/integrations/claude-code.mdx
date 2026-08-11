@@ -1,246 +1,1038 @@
 ---
-title: "Using Claude Code with Mycoroute"
+title: "Claude Code"
+description: "Connect Claude Code to Hivenet Router through the Anthropic Messages API and configure authentication, model aliases, streaming, and tool use."
+sidebarTitle: "Claude Code"
 ---
 
-This guide shows how to point [Claude Code](https://docs.claude.com/en/docs/claude-code) at a Mycoroute router so it runs against your own models (e.g. served by vLLM) instead of Anthropic's hosted API. The setup uses the router's Anthropic-compatible `/v1/messages` endpoint — see [Inference Endpoints](/api/chat-completions) for the underlying API.
+Claude Code can use Hivenet Router as an Anthropic-format inference gateway.
 
-> **Snapshot date — last verified 2026-06-09.**
-> Some of the workarounds below (Claude Code version pin, vLLM upgrade path) exist because of bugs in **specific** versions of Claude Code and vLLM at the time of writing. **Re-verify them** before applying — once newer Claude Code releases drop the inline `system` role *and* the agent fleet runs a vLLM build with [PR #44283](https://github.com/vllm-project/vllm/pull/44283), the pin and the related troubleshooting steps become unnecessary. Each time-sensitive section is dated inline.
+Claude Code sends requests to the router’s:
 
-## What you get
+```text
+POST /v1/messages
+```
 
-- Claude Code's full UX — chat, file editing, slash commands, tools — against any model in your fleet.
-- Auth, quotas, audit logging, and routing inherited from the router (no Anthropic account required).
-- Independent of the backend: any agent serving `/v1/messages` answers, including Qwen, Llama, etc.
+endpoint. Hivenet Router authenticates the client, checks model access and quotas, selects an eligible `llm` agent, and forwards the original request to the backend at the same path.
+
+```mermaid
+flowchart LR
+    C[Claude Code]
+    R[Hivenet Router router]
+    A[Selected LLM agent]
+    E[Anthropic-compatible backend]
+
+    C -->|POST /v1/messages| R
+    R -->|Route by model and policy| A
+    A -->|POST /v1/messages| E
+    E -->|Anthropic response or SSE stream| A
+    A --> R
+    R --> C
+```
+
+<Warning>
+  Hivenet Router does not translate OpenAI Chat Completions into the Anthropic Messages format.
+
+  The inference backend must serve `/v1/messages` itself. The model and backend must also support the tool-calling behavior Claude Code needs.
+
+  Anthropic documents how Claude Code connects to gateways, but does not provide support for running Claude Code against non-Claude models through them.
+</Warning>
 
 ## Prerequisites
 
-- A reachable Mycoroute router with at least one `llm` agent registered.
-- The agent's backend must serve `/v1/messages` natively (vLLM does, started with `--served-model-name <name>`).
-- A Mycoroute API key with access to the model(s) you plan to use.
-- Node.js — see [Common prerequisites — Node.js](/integrations/overview#common-prerequisites--nodejs) for version guidance and the `nvm` per-version trap (relevant if you upgrade Node, your pinned Claude Code disappears).
+Before configuring Claude Code, you need:
 
----
+- a reachable Hivenet Router router
+- a Hivenet Router client API key
+- at least one healthy agent registered with the `llm` capability
+- a backend that implements the Anthropic Messages API
+- a model with reliable structured tool calling
+- HTTPS when the router is reached over an untrusted network
 
-## Step 1 — Install Claude Code (pinned)
+The backend should support:
 
-> **⚠ Critical version pin — as of 2026-06-09.** Claude Code **≥ 2.1.154** sends a non-standard inline `system` role inside the `messages` array (part of its context-management feature). vLLM's `/v1/messages` strictly validates roles as `user`/`assistant` only, so newer Claude Code is rejected with a `400 literal_error` on every call. **Pin to 2.1.153** (the last good version *at the time of writing*) until either:
->
-> - your vLLM build includes [vllm PR #44283](https://github.com/vllm-project/vllm/pull/44283) (merged 2026-06-02), **or**
-> - the router normalizes inline `system` roles in the passthrough, **or**
-> - a newer Claude Code release reverts the inline-role behavior.
->
-> Before pinning, **re-check** [vllm/vllm-project issue #44000](https://github.com/vllm-project/vllm/issues/44000) and the [Claude Code changelog](https://docs.claude.com/en/release-notes/claude-code) — if either side has shipped a fix that covers your stack, the pin is no longer needed.
+```text
+POST /v1/messages
+POST /v1/messages/count_tokens
+```
+
+Token counting is optional in the Claude Code gateway protocol, but implementing it gives Claude Code exact context measurements and avoids relying on local estimates.
+
+## Prepare a compatible backend
+
+vLLM supports the Anthropic Messages API and can serve tool-capable open models to Claude Code.
+
+A typical command resembles:
 
 ```bash
-npm install -g @anthropic-ai/claude-code@2.1.153
-
-# Belt + braces — Claude Code has TWO updaters and DISABLE_AUTOUPDATER alone is
-# not enough on every version (the in-process one will silently bump you to the
-# latest release behind your back, putting you back in the bug zone).
-export DISABLE_AUTOUPDATER=1
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+vllm serve <model-source> \
+  --host 0.0.0.0 \
+  --port 8888 \
+  --served-model-name mycoroute-code-model \
+  --enable-auto-tool-choice \
+  --tool-call-parser <model-specific-parser>
 ```
 
-Make those exports permanent (e.g. add to `~/.bashrc`) so the pin survives across shells.
+Replace:
 
-Verify the pin is actually holding:
+```text
+<model-source>
+```
+
+with the model you are loading, and:
+
+```text
+<model-specific-parser>
+```
+
+with the tool-call parser required by that model.
+
+Tool-call configuration differs by model family. Check that the selected parser is supported by the exact model and vLLM version you deploy.
+
+### Use a stable served-model alias
+
+Prefer a short, stable alias for the model Claude Code will request:
+
+```text
+mycoroute-code-model
+```
+
+Current vLLM guidance recommends avoiding slash-containing Hugging Face IDs in this integration path.
+
+The alias also separates the client-facing model name from the underlying model repository:
 
 ```bash
-claude doctor
-# Expect:  Currently running: 2.1.153
-# If it shows 2.1.16x, the auto-updater overrode the pin — reinstall 2.1.153
-# and consider chmod -w on the install path as a last resort:
-#   chmod -w "$(npm root -g)/@anthropic-ai/claude-code/bin/claude.exe"
+vllm serve Qwen/<model-repository> \
+  --served-model-name mycoroute-code-model \
+  ...
 ```
 
-> **Why this matters.** A session that starts on a "safe" 2.1.153 binary can fail mid-conversation if the updater swaps it under you. The next request that includes an inline `system` turn (typical once Claude Code summarises context) lands as a 400 at vLLM, and via the router's `prev_failures` gate it can transiently bench every agent serving the model.
-
----
-
-## Step 2 — Configure auth and base URL
-
-Set the environment variables that point Claude Code at your router and map the model aliases.
+Make the Hivenet Router agent register the same value:
 
 ```bash
-export ANTHROPIC_BASE_URL="https://<router-host>"
-export ANTHROPIC_AUTH_TOKEN="<your-mycoroute-api-key>"
-
-# Map the three aliases Claude Code uses internally. ALL THREE are required —
-# the HAIKU alias is called in the background for titles/summaries, not optional.
-export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen/Qwen3.6-27B"
+./bin/hivenet-agent \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --model mycoroute-code-model \
+  --router-grpc <router-host>:50051 \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret
 ```
 
-> **Use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY`.**
-> Claude Code's precedence sends `ANTHROPIC_AUTH_TOKEN` as `Authorization: Bearer …`, which matches what the router accepts. `ANTHROPIC_API_KEY` is sent as `x-api-key` and triggers an interactive approval prompt at startup; if you ever answer **No** (the default "(recommended)"), Claude Code persists that decision in `~/.claude.json` under `customApiKeyResponses.rejected` and silently refuses the key on every subsequent run — with **no further prompt**. `ANTHROPIC_AUTH_TOKEN` bypasses that prompt entirely.
+The value must match across:
 
----
+- vLLM’s `--served-model-name`
+- the Hivenet Router agent’s registered model
+- the Claude Code model mapping
+- the API key’s model restrictions or per-model quotas
 
-## Step 3 — Sign out of claude.ai (if needed)
+## Test the backend directly
 
-If you've ever run `claude /login`, Claude Code holds a claude.ai OAuth session that overrides your environment variables and ignores `ANTHROPIC_BASE_URL`. You will see:
-
-```
-⚠ Both claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected
-```
-
-Fix it:
+Before adding Hivenet Router or Claude Code to the path, confirm that the backend accepts an Anthropic-format request:
 
 ```bash
-claude /logout      # drops the claude.ai session
-```
-
-After this, **never run `/login` again** — that recreates the conflict and Claude Code will quietly start talking to claude.ai instead of your router.
-
----
-
-## Step 4 — Start it
-
-```bash
-claude
-```
-
-Send "hello". You should get a response from the model you mapped to OPUS.
-
----
-
-## Verifying without Claude Code
-
-Before fighting the client, prove the router path works with `curl`. This isolates the router/agent/backend chain from any client-side issue.
-
-```bash
-# OpenAI-style endpoint
-curl -s https://<router-host>/v1/chat/completions \
-  -H "Authorization: Bearer <api-key>" \
+curl -X POST \
+  http://localhost:8888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3.6-27B","max_tokens":64,
-       "messages":[{"role":"user","content":"hi"}]}'
-
-# Anthropic Messages endpoint (what Claude Code uses)
-curl -s https://<router-host>/v1/messages \
-  -H "Authorization: Bearer <api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3.6-27B","max_tokens":64,
-       "messages":[{"role":"user","content":"hi"}]}'
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with one short sentence."
+      }
+    ]
+  }'
 ```
 
-> **`max_tokens` is required on `/v1/messages`** (Anthropic spec); it is optional on `/v1/chat/completions`. Omitting it returns a `400` from the backend, which the router currently surfaces as `no_agents_available` (see [Known limitations](#known-limitations)).
+The response should use the Anthropic Messages format rather than the OpenAI Chat Completions format.
 
-Discover what models the router actually serves:
+Test token counting as well:
 
 ```bash
-curl -s https://<router-host>/v1/models \
-  -H "Authorization: Bearer <api-key>"
+curl -X POST \
+  http://localhost:8888/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count the tokens in this request."
+      }
+    ]
+  }'
 ```
 
-Use whatever names appear there in the `ANTHROPIC_DEFAULT_*_MODEL` env vars — case- and slash-sensitive.
-
----
-
-## Making the configuration persistent
-
-To avoid re-exporting in every terminal, put the env block in a project-local `.claude/settings.json`:
+A successful response resembles:
 
 ```json
 {
+  "input_tokens": 10
+}
+```
+
+The exact count depends on the tokenizer.
+
+## Test the Hivenet Router path
+
+List the models visible to the Claude Code API key:
+
+```bash
+curl \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  https://router.example.com/v1/models \
+  | jq -r '.data[].id'
+```
+
+Confirm that the list contains:
+
+```text
+mycoroute-code-model
+```
+
+Then test the Messages endpoint through Hivenet Router:
+
+```bash
+curl -X POST \
+  https://router.example.com/v1/messages \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with one short sentence."
+      }
+    ]
+  }'
+```
+
+This verifies:
+
+- client authentication
+- model access
+- routing
+- agent connectivity
+- backend Messages support
+- response forwarding
+
+<Note>
+  `max_tokens` is required by the Anthropic Messages request format.
+
+  A hand-written request without it may be rejected by the backend even though the equivalent Chat Completions request succeeds.
+</Note>
+
+## Install Claude Code
+
+<Tabs>
+  <Tab title="macOS, Linux, or WSL">
+    ```bash
+    curl -fsSL https://claude.ai/install.sh \
+      | bash
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    irm https://claude.ai/install.ps1 \
+      | iex
+    ```
+  </Tab>
+</Tabs>
+
+Verify the installation:
+
+```bash
+claude --version
+```
+
+Use current Claude Code and inference-backend releases.
+
+Pin a client or backend version only after reproducing a specific compatibility regression in your deployment. Treat old version pins from earlier setup notes as historical workarounds rather than permanent requirements.
+
+## Configure Claude Code
+
+Set the router URL, client credential, and model aliases before launching Claude Code:
+
+```bash
+unset ANTHROPIC_API_KEY
+
+export ANTHROPIC_BASE_URL="https://router.example.com"
+export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+
+export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+
+claude --model sonnet
+```
+
+Do not add `/v1` to the base URL.
+
+Correct:
+
+```text
+https://router.example.com
+```
+
+Incorrect:
+
+```text
+https://router.example.com/v1
+```
+
+Claude Code appends:
+
+```text
+/v1/messages
+```
+
+itself. Including `/v1` in the configured base URL can produce:
+
+```text
+/v1/v1/messages
+```
+
+## Use the bearer-token variable
+
+Use:
+
+```text
+ANTHROPIC_AUTH_TOKEN
+```
+
+for a Hivenet Router client key.
+
+Claude Code sends it as:
+
+```http
+Authorization: Bearer <mycoroute-api-key>
+```
+
+This is the authentication header Hivenet Router accepts.
+
+Do not use only:
+
+```text
+ANTHROPIC_API_KEY
+```
+
+Claude Code sends that value as:
+
+```http
+x-api-key: <value>
+```
+
+Hivenet Router client authentication does not read `x-api-key`.
+
+Unsetting `ANTHROPIC_API_KEY` also prevents an unrelated Anthropic API key from taking part in credential selection:
+
+```bash
+unset ANTHROPIC_API_KEY
+```
+
+<Note>
+  You do not normally need to sign out of an existing claude.ai account.
+
+  `ANTHROPIC_AUTH_TOKEN` takes precedence while it is set. The saved login remains available and becomes active again after you remove the gateway variables.
+
+  Run `/logout` only when you deliberately want to remove the saved login or Claude Code reports an unresolved authentication conflict.
+</Note>
+
+## Map the model aliases
+
+Claude Code uses built-in model aliases for different kinds of work.
+
+| Alias | Environment variable | Typical use |
+| --- | --- | --- |
+| `fable` | `ANTHROPIC_DEFAULT_FABLE_MODEL` | Long or difficult tasks where available |
+| `opus` | `ANTHROPIC_DEFAULT_OPUS_MODEL` | Complex reasoning and planning |
+| `sonnet` | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Main coding work |
+| `haiku` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Faster and background tasks |
+
+You may map every alias to one model:
+
+```bash
+export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+```
+
+Or map them to different Hivenet Router models:
+
+```bash
+export ANTHROPIC_DEFAULT_FABLE_MODEL="code-model-large"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="code-model-large"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="code-model-standard"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="code-model-fast"
+```
+
+Every mapped model must:
+
+- appear in `/v1/models` for the client key
+- be registered by a healthy `llm` agent
+- support the request features Claude Code sends
+- be included in the key’s model restrictions or per-model quotas
+
+Map `haiku` even when you intend to work mainly through `sonnet` or `opus`. Claude Code can use the Haiku alias for background functionality.
+
+## Verify the active configuration
+
+Start Claude Code:
+
+```bash
+claude --model sonnet
+```
+
+Then run:
+
+```text
+/status
+```
+
+Confirm that the status view shows:
+
+- the Hivenet Router address as the Anthropic base URL
+- `ANTHROPIC_AUTH_TOKEN` as the active credential source
+- the intended model or model alias
+
+If the Hivenet Router URL is missing, the environment variables did not reach that Claude Code process.
+
+This commonly happens when:
+
+- Claude Code was started from another terminal
+- an editor was launched before the variables were exported
+- a settings file overrides the shell value
+- a wrapper or background process uses another environment
+
+## Test the coding workflow
+
+Start with a simple prompt:
+
+```text
+Read the current directory and tell me what kind of project this is.
+```
+
+Then test a harmless tool action:
+
+```text
+Create a file named mycoroute-test.txt containing the word connected.
+```
+
+Confirm that Claude Code:
+
+1. proposes or invokes the appropriate file tool
+2. receives a structured tool response from the model
+3. creates the expected file
+4. continues the conversation after the tool result
+
+A model that produces good text but cannot emit the expected structured tool calls is not sufficient for Claude Code.
+
+Remove the test file afterward:
+
+```bash
+rm mycoroute-test.txt
+```
+
+## Make the configuration persistent
+
+Claude Code supports several settings scopes.
+
+| File | Scope | Suitable for credentials? |
+| --- | --- | --- |
+| `~/.claude/settings.json` | All projects for one user | Yes, but stored as plaintext |
+| `.claude/settings.local.json` | One project for one user | Yes, when ignored by Git |
+| `.claude/settings.json` | Shared project configuration | No |
+
+A user-wide configuration can look like:
+
+```json
+{
+  "model": "sonnet",
   "env": {
-    "ANTHROPIC_BASE_URL": "https://<router-host>",
-    "ANTHROPIC_AUTH_TOKEN": "<your-mycoroute-api-key>",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen/Qwen3.6-27B",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen/Qwen3.6-35B-A3B",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen/Qwen3.6-27B",
-    "DISABLE_AUTOUPDATER": "1"
+    "ANTHROPIC_BASE_URL": "https://router.example.com",
+    "ANTHROPIC_AUTH_TOKEN": "<mycoroute-api-key>",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mycoroute-code-model"
   }
 }
 ```
 
-> **Do not commit a settings file containing your API key.** Add `.claude/settings.json` to `.gitignore`, or use Claude Code's `apiKeyHelper` to fetch the token dynamically from a secret store.
+<Warning>
+  Do not put a Hivenet Router API key in the shared:
 
----
+  ```text
+  .claude/settings.json
+  ```
 
-## Running Claude Code against both Mycoroute and Anthropic
+  file.
 
-Claude Code resolves its endpoint **once at startup** — you cannot switch backends inside a running session. The `/model` slash command only swaps between OPUS / SONNET / HAIKU *aliases*, all against the same base URL. To use both providers, run two sessions with two shell launchers:
+  That file is intended for source control. Use a user setting, `.claude/settings.local.json`, shell environment, or credential helper instead.
+</Warning>
+
+Settings-file environment values take precedence over matching values exported by the shell.
+
+Use `/status` to confirm which value is active.
+
+## Use a credential helper
+
+For short-lived or externally managed keys, configure:
+
+```json
+{
+  "apiKeyHelper": "~/bin/get-mycoroute-key.sh",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://router.example.com",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mycoroute-code-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mycoroute-code-model"
+  }
+}
+```
+
+The helper must print the current raw Hivenet Router key to standard output.
+
+Claude Code sends a helper-generated credential in both:
+
+```http
+Authorization: Bearer <value>
+x-api-key: <value>
+```
+
+Hivenet Router uses the `Authorization` header.
+
+By default, Claude Code caches the helper result for five minutes and runs it again after an HTTP `401`.
+
+Change the cache period with:
+
+```bash
+export CLAUDE_CODE_API_KEY_HELPER_TTL_MS=900000
+```
+
+The value is in milliseconds.
+
+<Note>
+  `ANTHROPIC_AUTH_TOKEN` has higher credential precedence than `apiKeyHelper`.
+
+  Remove the static token when the helper should become authoritative.
+</Note>
+
+## Add a custom model to the picker
+
+The alias mappings are the simplest way to expose Hivenet Router models.
+
+You can also add one explicit custom entry:
+
+```bash
+export ANTHROPIC_CUSTOM_MODEL_OPTION="mycoroute-code-model"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Hivenet Router code model"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Served through Hivenet Router"
+```
+
+Restart Claude Code, then open:
+
+```text
+/model
+```
+
+The custom entry appears alongside the built-in aliases.
+
+### Gateway model discovery
+
+Claude Code can optionally query:
+
+```text
+GET /v1/models?limit=1000
+```
+
+at startup:
+
+```bash
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+```
+
+However, current Claude Code discovery ignores returned IDs that do not begin with:
+
+```text
+claude
+anthropic
+```
+
+Typical open-model IDs therefore do not appear automatically.
+
+Use alias mappings or `ANTHROPIC_CUSTOM_MODEL_OPTION` instead of renaming an open model to imply that it is a Claude model.
+
+<Note>
+  Do not combine gateway model discovery with:
+
+  ```text
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  ```
+
+  The nonessential-traffic setting disables discovery.
+</Note>
+
+## Restricted-egress environments
+
+Claude Code can make non-inference requests outside the configured gateway path for update checks, telemetry, release information, and other auxiliary behavior.
+
+On a network that permits access only to Hivenet Router, set:
+
+```bash
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+```
+
+This is optional and should not be part of the default configuration.
+
+It also:
+
+- disables automatic updates
+- disables gateway model discovery
+- suppresses the fast-mode availability check
+- leaves some WebFetch safety traffic subject to separate settings
+
+Plan another update process before enabling it permanently.
+
+## Request and header behavior
+
+Claude Code sends Anthropic-format requests, including evolving:
+
+- `anthropic-version` headers
+- `anthropic-beta` headers
+- tool schemas
+- system content
+- context-management fields
+- reasoning and output-configuration fields
+
+Hivenet Router forwards the original request body and headers through the selected agent to the backend.
+
+The backend must understand the fields that arrive.
+
+<Warning>
+  Do not place an intermediary between Hivenet Router and the backend that removes unfamiliar `anthropic-*` headers or request fields.
+
+  Claude Code adds capabilities over time. A fixed allowlist of observed headers can break a later Claude Code release.
+</Warning>
+
+## Streaming
+
+Claude Code expects server-sent events to arrive progressively.
+
+The complete path must preserve streaming:
+
+```text
+Claude Code
+  → reverse proxy
+  → Hivenet Router router
+  → Hivenet Router agent
+  → inference backend
+```
+
+When output appears only after the model finishes, check:
+
+- whether the backend returns `text/event-stream`
+- whether the agent is current
+- whether the reverse proxy buffers responses
+- whether proxy timeouts are long enough
+- whether the client requested streaming
+
+For Nginx, the inference route commonly needs buffering disabled:
+
+```nginx
+proxy_buffering off;
+proxy_cache off;
+```
+
+The exact reverse-proxy configuration depends on your deployment.
+
+## Compatibility with new Claude Code features
+
+Claude Code may send fields that an older or non-Anthropic backend does not support.
+
+Common failures include backend errors naming:
+
+```text
+thinking
+adaptive
+context_management
+output_config
+strict
+defer_loading
+```
+
+The preferred fix is to update the backend and use a model integration that supports the request.
+
+For diagnosis, you can temporarily disable adaptive thinking:
+
+```bash
+export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+```
+
+You can also disable experimental beta capabilities:
+
+```bash
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+```
+
+These variables remove capabilities from the client request. They do not make an incompatible model support tools or other missing behavior.
+
+Use them as targeted compatibility controls rather than permanent defaults.
+
+<Warning>
+  Claude Code can automatically recover from some upstream capability rejections only when it receives the original error wording.
+
+  Hivenet Router currently preserves structured Hivenet Router errors but can wrap an unstructured backend error. When a new client field causes a backend `400`, inspect the backend log directly rather than relying only on the final router response.
+</Warning>
+
+## Use Hivenet Router and Anthropic side by side
+
+A saved claude.ai login can remain on the machine.
+
+Create a launcher for Hivenet Router:
 
 ```bash
 #!/usr/bin/env bash
-# ~/bin/claude-gpt — point Claude Code at your Mycoroute router
+
 unset ANTHROPIC_API_KEY
-export ANTHROPIC_BASE_URL="https://<router-host>"
-export ANTHROPIC_AUTH_TOKEN="<your-mycoroute-api-key>"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="Qwen/Qwen3.6-27B"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="Qwen/Qwen3.6-35B-A3B"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="Qwen/Qwen3.6-27B"
-export DISABLE_AUTOUPDATER=1
-exec claude "$@"
+
+export ANTHROPIC_BASE_URL="https://router.example.com"
+export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+
+export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+
+exec claude --model sonnet "$@"
 ```
+
+Save it as:
+
+```text
+~/bin/claude-mycoroute
+```
+
+and make it executable:
 
 ```bash
-#!/usr/bin/env bash
-# ~/bin/claude-real — Anthropic-hosted (claude.ai or Anthropic API key)
-unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
-      ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
-# For the Anthropic API instead of a claude.ai login, also:
-#   export ANTHROPIC_API_KEY="sk-ant-..."
-exec claude "$@"
+chmod +x \
+  ~/bin/claude-mycoroute
 ```
 
-Make both executable (`chmod +x`) and run them from separate terminals. Each session is independent — memory, history, tools, billing.
+For a normal Anthropic session, start Claude Code without the Hivenet Router variables:
 
----
+```bash
+env \
+  -u ANTHROPIC_BASE_URL \
+  -u ANTHROPIC_AUTH_TOKEN \
+  -u ANTHROPIC_DEFAULT_FABLE_MODEL \
+  -u ANTHROPIC_DEFAULT_OPUS_MODEL \
+  -u ANTHROPIC_DEFAULT_SONNET_MODEL \
+  -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
+  claude
+```
+
+The saved claude.ai login becomes active again.
+
+## Observe Claude Code traffic
+
+Audit records identify the tenant, model, selected agent, status, and request duration.
+
+Search one tenant in Loki:
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  tenant_id="claude-code"
+}
+  | json
+```
+
+Inspect requests by model:
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  model="mycoroute-code-model"
+}
+  | json
+```
+
+Request rate:
+
+```promql
+sum by (tenant_id, model) (
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+```
+
+Give Claude Code its own client key when you need its traffic separated from other applications.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Both claude.ai and ANTHROPIC_API_KEY set · auth may not work` | A `claude.ai` OAuth session is overriding your env vars | `claude /logout` and don't run `/login` again |
-| Retry loop, no requests visible in router logs | Claude Code is talking to `claude.ai`, not your router | Same as above — log out of `claude.ai` |
-| Router logs `401 POST /v1/messages` | Token not sent, or sent as `x-api-key` and silently rejected by the persisted approval state | Use `ANTHROPIC_AUTH_TOKEN` (Bearer), not `ANTHROPIC_API_KEY` |
-| Router logs `503 no_agents_available` after at least one prior success | Backend rejected Claude Code's payload as 400; the agent got benched by the `prev_failures` gate | Pin Claude Code 2.1.153 (Step 1) **and** `docker restart` the affected agent containers to clear the gate |
-| vLLM log shows `literal_error … role … 'Input should be user or assistant'`, `input: 'system'` | Claude Code ≥ 2.1.154 inline `system` role bug | Pin Claude Code 2.1.153, **or** upgrade vLLM past [PR #44283](https://github.com/vllm-project/vllm/pull/44283) |
-| Claude Code never shows the API-key approval prompt | You answered "No" previously and it's persisted in `~/.claude.json` | Edit `~/.claude.json` and remove your key suffix from `customApiKeyResponses.rejected`, **or** switch to `ANTHROPIC_AUTH_TOKEN` |
-| `model_not_found` from router | Your alias points at a model no agent serves | `curl /v1/models` to see what's registered; update the env var to a real name |
-| Streaming arrives only at the end of the response | Old agent image without the SSE-flush fix | Bump the agent image to one that flushes per chunk |
+### Claude Code opens the login screen
 
-### Reading the right logs
+The gateway credential did not reach the process.
 
-- **Router**: `docker logs gpt-router 2>&1 | grep -iE "messages|policy|no eligible"`
-- **Agent (proxy)**: `docker logs mycoroute-agent-<model> 2>&1 | tail -40`
-- **Backend (vLLM)**: `docker logs vllm-<model> 2>&1 | tail -40` — the **400 with `literal_error`** lives here, not in the agent log.
-
-### Quick isolation curl (bypasses the router entirely)
+Check:
 
 ```bash
-ssh <gpu-host> 'curl -s http://localhost:8888/v1/messages \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"<model-id>\",\"max_tokens\":32,\
-       \"messages\":[{\"role\":\"system\",\"content\":\"x\"},\
-                     {\"role\":\"user\",\"content\":\"hi\"}]}"'
+echo "$ANTHROPIC_BASE_URL"
+echo "${ANTHROPIC_AUTH_TOKEN:+set}"
 ```
 
-If this 400s with `Input should be 'user' or 'assistant'`, your vLLM has the role bug — pin Claude Code or upgrade vLLM.
+Then start Claude Code from the same shell.
 
----
+Run `/status` after it opens.
 
-## Known limitations
+### `/status` shows no Anthropic base URL
 
-> The version-specific items below were accurate **on 2026-06-09**. Re-verify them against the current Claude Code and vLLM releases before relying on them.
+Claude Code is not using the Hivenet Router endpoint.
 
-- **vLLM ≤ 0.20.x** rejects Claude Code's inline `system` role *(time-bound: vLLM PR #44283 merged 2026-06-02 fixes this on vLLM `main`; a build that carries it removes the limitation)*. Until your fleet's vLLM build includes that fix, either pin Claude Code 2.1.153 or normalize the role server-side.
-- **Claude Code ≥ 2.1.154 sends the offending inline role** *(time-bound: as of 2026-06-09 still present through the latest 2.1.16x releases)*. Check the [Claude Code release notes](https://docs.claude.com/en/release-notes/claude-code) before assuming a pin is still needed.
-- **`max_tokens` is required** on `/v1/messages` (Anthropic spec, not time-bound). Claude Code always sends it; hand-written curls must too.
-- **Backend 4xx responses currently bench the agent** via the router's `prev_failures` gate (router behaviour, not time-bound to Claude Code/vLLM). A malformed client can transiently take all agents serving a model offline. Mitigation: pin Claude Code; the durable fix is a router-side change to distinguish backend 4xx from agent failures.
-- **No in-session backend switching** (Claude Code architecture, not time-bound). Claude Code reads `ANTHROPIC_BASE_URL` once at startup; use two launchers as shown above to keep Mycoroute and Anthropic side-by-side.
+Check for:
 
----
+- a missing environment variable
+- a settings-file override
+- an editor or launcher with another environment
+- a misspelled variable name
 
-## See also
+### Requests return `401`
 
-- [Integrations Overview](/integrations/overview) — when to use Claude Code vs OpenCode vs your own integration.
-- [Inference Endpoints](/api/chat-completions) — `/v1/chat/completions` and `/v1/messages` reference, including the passthrough mechanism.
-- [auth.yaml Reference](/security/auth-yaml-reference) — API keys, quotas, token budget enforcement.
-- [Claude Code authentication](https://code.claude.com/docs/en/authentication) — upstream reference for `ANTHROPIC_AUTH_TOKEN` vs `ANTHROPIC_API_KEY`.
-- [Claude Code LLM gateway guide](https://code.claude.com/docs/en/llm-gateway) — upstream guidance for pointing Claude Code at a gateway/proxy.
-- [vLLM Claude Code integration](https://docs.vllm.ai/en/stable/serving/integrations/claude_code/) — backend-side configuration.
+Use:
+
+```text
+ANTHROPIC_AUTH_TOKEN
+```
+
+rather than only:
+
+```text
+ANTHROPIC_API_KEY
+```
+
+Confirm that the raw Hivenet Router client key is being sent, not its SHA-256 hash.
+
+Test it directly:
+
+```bash
+curl \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  https://router.example.com/v1/models
+```
+
+### Requests return a plain `404`
+
+Check the base URL.
+
+It should not end in:
+
+```text
+/v1
+```
+
+Also confirm that the request reaches:
+
+```text
+/v1/messages
+```
+
+rather than an unsupported path.
+
+### The router returns `model_not_found`
+
+Compare the configured alias with:
+
+```bash
+curl \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  https://router.example.com/v1/models \
+  | jq -r '.data[].id'
+```
+
+Check:
+
+- capitalization
+- punctuation
+- served-model alias
+- agent `--model`
+- API-key model access
+- agent health
+
+### The backend returns `404` for `/v1/messages`
+
+The backend does not implement the Anthropic Messages endpoint.
+
+A backend that supports only:
+
+```text
+/v1/chat/completions
+```
+
+cannot serve Claude Code through the current Hivenet Router passthrough.
+
+Use an Anthropic-compatible backend or another coding client that speaks OpenAI Chat Completions.
+
+### Text works but tools fail
+
+Check that:
+
+- the model supports structured tool calls
+- vLLM uses `--enable-auto-tool-choice`
+- the selected `--tool-call-parser` matches the model
+- the backend returns Anthropic-format tool-use blocks
+- the model follows tool schemas reliably
+
+Test the backend directly to isolate it from Hivenet Router.
+
+### The backend rejects `system` messages
+
+Upgrade the backend and test the current Claude Code request against it directly.
+
+Do not begin by pinning an old Claude Code release. First confirm whether the backend’s current Anthropic Messages implementation accepts the system-content shape the client sends.
+
+### The backend rejects `thinking` or `adaptive`
+
+Update the backend first.
+
+As a compatibility test:
+
+```bash
+export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+```
+
+Restart Claude Code after changing the variable.
+
+### The backend rejects beta fields
+
+As a temporary diagnostic:
+
+```bash
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+```
+
+This may disable context management and newer tool features.
+
+### Claude Code retries and Hivenet Router later reports no eligible agent
+
+Inspect the backend’s first error.
+
+A backend rejection that Hivenet Router treats as retryable can cause the request session to try other agents and exclude agents that already failed.
+
+Check:
+
+<Tabs>
+  <Tab title="Router">
+    ```bash
+    docker compose logs router \
+      | grep -iE "messages|policy|failed|exhaust"
+    ```
+  </Tab>
+  <Tab title="Agent">
+    ```bash
+    docker compose logs <agent-service> \
+      | tail -100
+    ```
+  </Tab>
+  <Tab title="vLLM">
+    ```bash
+    docker compose logs <vllm-service> \
+      | tail -100
+    ```
+  </Tab>
+</Tabs>
+
+The most useful validation message often appears in the backend log.
+
+### Streaming arrives only after completion
+
+Check:
+
+- backend SSE behavior
+- Hivenet Router agent version
+- reverse-proxy buffering
+- proxy read and idle timeouts
+- response `Content-Type`
+
+Test the backend and router separately with streaming curl requests.
+
+### Token counting fails
+
+Test the backend directly:
+
+```bash
+curl -i -X POST \
+  http://localhost:8888/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+Claude Code can estimate context locally when token counting is unavailable, but backend support gives more accurate results.
+
+### The model picker does not show Hivenet Router models
+
+Use the mapped aliases:
+
+```text
+/model sonnet
+/model opus
+/model haiku
+/model fable
+```
+
+Or configure:
+
+```text
+ANTHROPIC_CUSTOM_MODEL_OPTION
+```
+
+Gateway discovery ignores typical open-model IDs that do not begin with `claude` or `anthropic`.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="OpenCode" href="/integrations/open-code">
+    Connect a coding agent through OpenAI Chat Completions.
+  </Card>
+
+  <Card title="Use from code" href="/integrations/use-from-code">
+    Call Hivenet Router from SDKs, scripts, and custom applications.
+  </Card>
+
+  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+    Review the Anthropic and OpenAI inference paths.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure model access, quotas, expiration, and credential rotation.
+  </Card>
+
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Deploy and register the backend serving Claude Code requests.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Investigate Claude Code requests by tenant, model, status, and agent.
+  </Card>
+</CardGroup>

@@ -1,410 +1,1232 @@
 ---
-title: "Engine Metrics"
+title: "Engine metrics"
+description: "Understand how Hivenet Router collects cache, queue, latency, request-shape, finish-reason, and throughput metrics from supported inference engines."
+sidebarTitle: "Engine metrics"
 ---
 
-Mycoroute scrapes the inference engine's `/metrics` endpoint every 500 ms (configurable via `--engine-sample-interval`) and forwards the results to the router inside each routing-signal push. The router re-exports the data as Prometheus metrics under the `mycoroute_agent_engine_*` namespace.
+Hivenet Router agents collect operational metrics from supported inference engines and send them to the router.
 
-Pointer fields in `BackendMetrics` are `nil` when an engine does not expose a particular metric — the router never emits a false-zero series in that case.
+These metrics describe the state of the backend scheduler and model-serving process, including:
 
-## Metric Availability by Engine
+- KV-cache pressure
+- running and waiting requests
+- request preemptions
+- time to first token
+- inter-token latency
+- prompt and generation lengths
+- completion finish reasons
+- llama.cpp token throughput
+
+The router exposes the latest values through Prometheus. A subset is also available through the administration routing table.
+
+<Note>
+  Engine metrics describe the inference backend.
+
+  They are separate from Hivenet Router’s universal request metrics and the host-level GPU, CPU, and memory metrics collected by the agent.
+</Note>
+
+## How engine metrics flow
+
+For a supported engine, the agent:
+
+1. requests the backend’s `/metrics` endpoint
+2. extracts the metrics Hivenet Router understands
+3. caches the latest successful snapshot
+4. sends that snapshot through routing signals and heartbeats
+5. continues serving requests when a metrics scrape fails
+
+The router:
+
+1. stores the current engine snapshot
+2. exposes scalar values through `/admin/routing-table`
+3. publishes Prometheus gauges, counters, and histograms
+4. makes supported scalar fields available to routing-policy gates
+
+```text
+Inference engine
+  │
+  │ GET /metrics
+  ▼
+Hivenet Router agent
+  │
+  │ routing signals and heartbeats
+  ▼
+Hivenet Router router
+  │
+  ├── /admin/routing-table
+  └── /metrics
+```
+
+Prometheus scrapes the router rather than every inference host.
+
+## Collection interval
+
+The default engine scrape interval is:
+
+```text
+500 milliseconds
+```
+
+Change it on the agent:
+
+```bash
+./bin/hivenet-agent \
+  --engine-sample-interval 1s \
+  ...
+```
+
+Each scrape has a five-second timeout.
+
+The default routing-signal interval is also:
+
+```text
+500 milliseconds
+```
+
+This lets a newly collected snapshot reach the router without an additional heartbeat delay.
+
+If the routing-signal interval is shorter than the engine scrape interval, the agent may send the same cached snapshot more than once.
+
+## Scrape failures and stale values
+
+Engine metric failures do not stop inference routing.
+
+If a scrape fails:
+
+- the agent keeps the previous successful snapshot
+- routing signals continue carrying that cached data
+- the agent logs one warning when scraping changes from working to failing
+- it logs a recovery message after a later successful scrape
+- request forwarding continues
+
+The warning resembles:
+
+```text
+Engine metrics scrape started failing — routing signals will carry stale data
+```
+
+<Warning>
+  A previously reported metric may remain at its last successful value while scraping is failing.
+
+  The current metric set does not include a dedicated engine-snapshot age gauge. Correlate suspicious values with agent logs, backend health, and heartbeat freshness.
+</Warning>
+
+A metric that an engine has never reported is absent rather than emitted as zero.
+
+When an agent disconnects and is removed from the router, Hivenet Router removes its engine series.
+
+## Engine support
+
+The current implementation collects engine metrics from:
+
+- vLLM
+- SGLang
+- llama.cpp
+
+The following integrations do not currently provide engine-specific metrics:
+
+- Ollama
+- Infinity
+- custom engines
+
+They still report Hivenet Router request history, latency, capacity, and available host hardware metrics.
+
+## Metric availability
 
 | Metric | vLLM | SGLang | llama.cpp |
-|--------|------|--------|-----------|
-| `kv_cache_utilization` | ✓ | ✓ | ✓ |
-| `running_requests` | ✓ | ✓ | ✓ |
-| `waiting_requests` | ✓ | ✓ | ✓ |
-| `preemptions_total` | ✓ | — | — |
-| `avg_ttft_seconds` | ✓ | ✓ | ✓ |
-| `p90_ttft_seconds` | ✓ | ✓ | ✓ |
-| `ttft_seconds` histogram | ✓ | ✓ | ✓ |
-| `avg_itl_seconds` | ✓ | — | ✓ |
-| `p90_itl_seconds` | ✓ | — | ✓ |
-| `itl_seconds` histogram | ✓ | — | ✓ |
-| `request_prompt_tokens` histogram | ✓ | — | — |
-| `request_generation_tokens` histogram | ✓ | — | — |
-| `request_success_total` (finish reason) | ✓ | — | — |
-| `predicted_tps` | — | — | ✓ |
-| `prompt_tps` | — | — | ✓ |
+| --- | --- | --- | --- |
+| KV-cache utilization | Yes | Yes | Yes |
+| Running requests | Yes | Yes | Yes |
+| Waiting requests | Yes | Yes | Yes |
+| Preemptions | Yes | No | No |
+| Average TTFT | Yes | Yes | Yes |
+| P90 TTFT | Yes | Yes | Yes |
+| Raw TTFT histogram | Yes | No | No |
+| Average ITL | Yes | No | Yes |
+| P90 ITL | Yes | No | Yes |
+| Raw ITL histogram | Yes | No | No |
+| Prompt-length histogram | Yes | No | No |
+| Generation-length histogram | Yes | No | No |
+| Finish reasons | Yes | No | No |
+| Generation throughput | No | No | Yes |
+| Prompt throughput | No | No | Yes |
 
-Requires `--metrics` for llama.cpp and `--enable-metrics` for SGLang at server launch.
+<Note>
+  SGLang and llama.cpp expose histogram data that Hivenet Router uses to calculate their local average and P90 scalar values.
 
----
+  In the current implementation, raw histogram snapshots are re-exported through Prometheus only for vLLM.
+</Note>
 
-## KV Cache Utilization
+## Enable backend metrics
 
-**What it measures:** The fraction of the pre-allocated GPU KV-cache currently in use (0.0–1.0). The KV-cache holds the key/value attention states for every active request. When it fills up, the engine must evict (preempt) in-flight requests to free space, causing latency spikes. This is the single most important saturation signal for routing.
+<Tabs>
+  <Tab title="vLLM">
+    vLLM exposes its Prometheus endpoint without an additional Hivenet Router-specific flag.
 
-**Source:** `vllm:kv_cache_usage_perc` · `sglang:token_usage` · `llamacpp:kv_cache_usage_ratio`
+    Check it:
 
-```promql
-# KV cache usage by agent
-mycoroute_agent_engine_kv_cache_utilization{peer_id="12D3Koo0..."}
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
+  </Tab>
+  <Tab title="SGLang">
+    Start SGLang with:
 
-# Agents with high KV cache pressure (>85%)
-mycoroute_agent_engine_kv_cache_utilization > 0.85
+    ```bash
+    --enable-metrics
+    ```
 
-# Average by region
-avg by (region) (mycoroute_agent_engine_kv_cache_utilization)
+    For example:
+
+    ```bash
+    python3 -m sglang.launch_server \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 3000 \
+      --enable-metrics
+    ```
+
+    Check it:
+
+    ```bash
+    curl http://localhost:3000/metrics \
+      | head
+    ```
+  </Tab>
+  <Tab title="llama.cpp">
+    Start llama.cpp with:
+
+    ```bash
+    --metrics
+    ```
+
+    For example:
+
+    ```bash
+    llama-server \
+      -m /path/to/model.gguf \
+      -a "llama-3.1-8b" \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --metrics
+    ```
+
+    Check it:
+
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
+  </Tab>
+</Tabs>
+
+A missing or disabled backend metrics endpoint does not prevent the agent from registering and forwarding requests.
+
+## Prometheus labels
+
+Engine metrics use:
+
+```text
+peer_id
+model
+engine
+organization
+machine
 ```
 
-**Interpretation:**
+as their common labels.
 
-| Range | Status | Action |
-|-------|--------|--------|
-| 0–60% | Healthy | Can accept more requests |
-| 60–85% | Moderate pressure | Monitor closely |
-| 85–95% | High pressure | Risk of preemptions |
-| >95% | Critical | Severe preemptions expected |
-
----
-
-## Request Queue
-
-**What it measures:** Two complementary counts that describe where requests are in the engine pipeline.
-
-- **Running requests** — requests that the engine is actively processing (GPU is working on them). This directly maps to batch size and GPU utilization.
-- **Waiting requests** — requests held in the scheduler queue, waiting for a slot in the running batch. Non-zero means the engine is saturated and new arrivals are being buffered. Route away from agents with a growing waiting count.
-
-**Source:** `vllm:num_requests_running` / `vllm:num_requests_waiting` · `sglang:num_running_reqs` / `sglang:num_queue_reqs` · `llamacpp:requests_processing` / `llamacpp:requests_deferred`
+For example:
 
 ```promql
-# Running requests
-mycoroute_agent_engine_running_requests{peer_id="12D3Koo0..."}
-
-# Waiting requests
-mycoroute_agent_engine_waiting_requests{peer_id="12D3Koo0..."}
-
-# Total queue depth
-mycoroute_agent_engine_running_requests + mycoroute_agent_engine_waiting_requests
+hivenet_router_agent_engine_waiting_requests{
+  model="meta-llama/Llama-3.1-8B-Instruct",
+  engine="vllm"
+}
 ```
 
----
+These labels let you compare values by:
+
+- agent
+- model
+- engine
+- organization
+- machine
+
+Keep agent metadata stable to avoid unnecessary time-series cardinality.
+
+## View the current engine snapshot
+
+Use the administration routing table:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      engine_name: .metadata.engine,
+      engine_metrics: .engine
+    }'
+```
+
+A vLLM agent may resemble:
+
+```json
+{
+  "peer_id": "12D3KooW...",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "engine_name": "vllm",
+  "engine_metrics": {
+    "kv_cache_utilization": 0.42,
+    "running_requests": 5,
+    "waiting_requests": 0,
+    "preemptions_total": 2,
+    "avg_ttft_seconds": 0.118,
+    "p90_ttft_seconds": 0.231,
+    "avg_itl_seconds": 0.008,
+    "p90_itl_seconds": 0.015
+  }
+}
+```
+
+The values above are examples.
+
+The `engine` object is omitted when the router has not received an engine snapshot for that agent.
+
+The routing table currently exposes scalar engine values. Raw histograms, finish-reason counters, and llama.cpp throughput gauges are available through Prometheus.
+
+## KV-cache utilization
+
+```text
+hivenet_router_agent_engine_kv_cache_utilization
+```
+
+KV-cache utilization is the fraction of the engine’s preallocated KV or token cache currently in use.
+
+The range is:
+
+```text
+0.0 to 1.0
+```
+
+Backend sources are:
+
+| Backend | Source metric |
+| --- | --- |
+| vLLM | `vllm:kv_cache_usage_perc` |
+| SGLang | `sglang:token_usage` |
+| llama.cpp | `llamacpp:kv_cache_usage_ratio` |
+
+View current cache use:
+
+```promql
+hivenet_router_agent_engine_kv_cache_utilization
+```
+
+Find agents above 85%:
+
+```promql
+hivenet_router_agent_engine_kv_cache_utilization > 0.85
+```
+
+Average by model and engine:
+
+```promql
+avg by (model, engine) (
+  hivenet_router_agent_engine_kv_cache_utilization
+)
+```
+
+High cache utilization can lead to:
+
+- request preemption
+- recomputation
+- latency spikes
+- reduced throughput
+- backend instability under additional load
+
+The operational meaning of a particular value depends on the engine, model, context lengths, scheduler, and workload.
+
+Avoid treating one threshold as universal across every deployment.
+
+## Running requests
+
+```text
+hivenet_router_agent_engine_running_requests
+```
+
+This is the number of requests currently being processed by the inference engine.
+
+Backend sources are:
+
+| Backend | Source metric |
+| --- | --- |
+| vLLM | `vllm:num_requests_running` |
+| SGLang | `sglang:num_running_reqs` |
+| llama.cpp | `llamacpp:requests_processing` |
+
+View running requests:
+
+```promql
+hivenet_router_agent_engine_running_requests
+```
+
+Total by model:
+
+```promql
+sum by (model) (
+  hivenet_router_agent_engine_running_requests
+)
+```
+
+Running requests describe the engine scheduler.
+
+They are not necessarily identical to the Hivenet Router agent’s:
+
+```text
+active_requests
+```
+
+The two values are observed at different layers and times.
+
+For example:
+
+- the agent may have accepted a request that has not entered the engine’s running batch yet
+- a long streaming generation can continue after Hivenet Router releases its declared capacity slot when response headers arrive
+- a backend may continue work briefly after a client disconnects
+- collection and routing snapshots may arrive at slightly different times
+
+## Waiting requests
+
+```text
+hivenet_router_agent_engine_waiting_requests
+```
+
+Waiting requests are queued inside the inference-engine scheduler.
+
+Backend sources are:
+
+| Backend | Source metric |
+| --- | --- |
+| vLLM | `vllm:num_requests_waiting` |
+| SGLang | `sglang:num_queue_reqs` |
+| llama.cpp | `llamacpp:requests_deferred` |
+
+View backend queues:
+
+```promql
+hivenet_router_agent_engine_waiting_requests
+```
+
+Find agents with queued requests:
+
+```promql
+hivenet_router_agent_engine_waiting_requests > 0
+```
+
+Total waiting work by model:
+
+```promql
+sum by (model) (
+  hivenet_router_agent_engine_waiting_requests
+)
+```
+
+A growing waiting count normally means the backend has accepted more work than it can process immediately.
+
+This can increase:
+
+- time to first token
+- request latency
+- timeout risk
+- cache pressure
+
+It is separate from Hivenet Router’s per-model capacity wait queue. One queue lives inside the inference engine; the other lives in the router before an agent is selected.
 
 ## Preemptions
 
-**What it measures:** The cumulative number of requests that the engine has evicted from the GPU mid-flight due to KV-cache pressure. A preempted request is paused, its KV-cache state is swapped out (or recomputed), and it restarts from scratch — causing a visible latency spike for that user. A rising preemption rate is a leading indicator that `kv_cache_utilization` is too high.
-
-**Source:** `vllm:num_preemptions_total` (vLLM only — SGLang and llama.cpp have no preemption mechanism)
-
-```promql
-# Cumulative preemption count (gauge, resets on engine restart)
-mycoroute_agent_engine_preemptions_total{peer_id="12D3Koo0..."}
-
-# Preemption rate (events/sec over 5-minute window)
-rate(mycoroute_agent_engine_preemptions_total[5m])
-
-# Agents with high preemption rate
-rate(mycoroute_agent_engine_preemptions_total[5m]) > 0.1
+```text
+hivenet_router_agent_engine_preemptions_total
 ```
 
-**Impact:** Preemptions cause latency spikes and reduced throughput. A non-zero rate alongside high `kv_cache_utilization` confirms KV-cache thrashing.
+vLLM reports a cumulative count of requests preempted because of scheduler and KV-cache pressure.
 
----
+Hivenet Router exports the backend’s latest cumulative value as a Prometheus **gauge**, even though its name ends in `_total`.
 
-## Time to First Token (TTFT)
+Backend source:
 
-**What it measures:** How long it takes from when a request enters the engine until the first output token is generated. This is the latency a user perceives as "waiting for the response to start". High TTFT is typically caused by a large waiting queue, long prompt prefill, or a cold model load.
-
-Three complementary series are exported:
-
-| Metric | Description |
-|--------|-------------|
-| `mycoroute_agent_engine_avg_ttft_seconds` | Running average (histogram sum / count) |
-| `mycoroute_agent_engine_p90_ttft_seconds` | 90th-percentile scalar — used directly by the routing policy evaluator |
-| `mycoroute_agent_engine_ttft_seconds` | Full histogram — use `histogram_quantile()` for correct fleet-wide percentiles |
-
-**Source:** `vllm:time_to_first_token_seconds` · `sglang:time_to_first_token_seconds` · `llamacpp:time_to_first_token_seconds`
-
-```promql
-# Average TTFT
-mycoroute_agent_engine_avg_ttft_seconds{peer_id="12D3Koo0..."}
-
-# P90 TTFT (per-peer scalar)
-mycoroute_agent_engine_p90_ttft_seconds{peer_id="12D3Koo0..."}
-
-# Fleet-wide P90 TTFT (correct aggregation over the histogram)
-histogram_quantile(0.9, sum by (le) (rate(mycoroute_agent_engine_ttft_seconds_bucket[5m])))
+```text
+vllm:num_preemptions_total
 ```
 
-**Targets:**
-
-| Metric | Target | Warning |
-|--------|--------|---------|
-| Avg TTFT | < 100 ms | > 200 ms |
-| P90 TTFT | < 200 ms | > 500 ms |
-
----
-
-## Inter-Token Latency (ITL)
-
-**What it measures:** The time between consecutive output tokens during the generation (decode) phase. This determines the perceived streaming speed — a high ITL means the response appears to pause or stutter mid-generation. High ITL is usually caused by GPU compute saturation or a very large running batch.
-
-Three complementary series are exported:
-
-| Metric | Description |
-|--------|-------------|
-| `mycoroute_agent_engine_avg_itl_seconds` | Running average (histogram sum / count) |
-| `mycoroute_agent_engine_p90_itl_seconds` | 90th-percentile scalar |
-| `mycoroute_agent_engine_itl_seconds` | Full histogram |
-
-**Source:** `vllm:inter_token_latency_seconds` · `llamacpp:time_per_output_token_seconds`
-*(SGLang does not expose an ITL histogram — these metrics will be absent for SGLang agents.)*
+View the current cumulative value:
 
 ```promql
-# Average ITL
-mycoroute_agent_engine_avg_itl_seconds{peer_id="12D3Koo0..."}
-
-# P90 ITL (per-peer scalar)
-mycoroute_agent_engine_p90_itl_seconds{peer_id="12D3Koo0..."}
-
-# Fleet-wide P90 ITL
-histogram_quantile(0.9, sum by (le) (rate(mycoroute_agent_engine_itl_seconds_bucket[5m])))
+hivenet_router_agent_engine_preemptions_total
 ```
 
-**Targets:**
-
-| Metric | Target | Warning |
-|--------|--------|---------|
-| Avg ITL | < 20 ms | > 50 ms |
-| P90 ITL | < 50 ms | > 100 ms |
-
----
-
-## Request Shape Histograms (vLLM only)
-
-**What they measure:** The distribution of request sizes, split into two dimensions:
-
-- **Prompt tokens** — how many input tokens the model received. Large prompts (long system prompts, RAG context) consume more KV-cache and increase TTFT.
-- **Generation tokens** — how many output tokens the model produced. Longer generations hold KV-cache slots longer, reducing available capacity for concurrent requests.
-
-These histograms drive the workload-shape heatmap panels on the Inference Engine dashboard.
-
-**Source:** `vllm:request_prompt_tokens` · `vllm:request_generation_tokens`
+Detect growth over a period:
 
 ```promql
-# Average prompt length (tokens)
-histogram_quantile(0.5, sum by (le) (rate(mycoroute_agent_engine_request_prompt_tokens_bucket[5m])))
-
-# P90 generation length (tokens)
-histogram_quantile(0.9, sum by (le) (rate(mycoroute_agent_engine_request_generation_tokens_bucket[5m])))
+delta(
+  hivenet_router_agent_engine_preemptions_total[5m]
+) > 0
 ```
 
----
-
-## Request Finish Reasons (vLLM only)
-
-**What it measures:** How requests completed on the engine, broken down by finish reason. A `stop` finish means the model produced a natural end-of-sequence token. A `length` finish means the request hit the `max_tokens` limit before the model finished. An `abort` finish means the request was cancelled (client disconnect, timeout, or preemption). Tracking this breakdown reveals whether capacity limits are truncating responses or clients are abandoning slow requests.
-
-**Source:** `vllm:request_success_total{finished_reason=...}`
+Show increases by agent:
 
 ```promql
-# Request completion rate by finish reason
-rate(mycoroute_agent_engine_request_success_total[5m])
-
-# Abort rate (client disconnects / timeouts)
-rate(mycoroute_agent_engine_request_success_total{finished_reason="abort"}[5m])
-
-# Length-truncation rate (max_tokens hit)
-rate(mycoroute_agent_engine_request_success_total{finished_reason="length"}[5m])
+sum by (peer_id, model) (
+  clamp_min(
+    delta(
+      hivenet_router_agent_engine_preemptions_total[5m]
+    ),
+    0
+  )
+)
 ```
 
----
+<Warning>
+  Treat this metric as a gauge containing the backend’s latest cumulative value.
 
-## Token Throughput (llama.cpp only)
+  It may fall when vLLM restarts. Ordinary counter assumptions do not fully apply.
+</Warning>
 
-**What they measure:** Real-time token processing rates measured over the last second:
+A rising value together with high KV-cache utilization is evidence of cache pressure.
 
-- **`predicted_tps`** — how many output tokens per second the engine is generating (decode throughput). Higher is better; a drop here under stable load indicates GPU contention.
-- **`prompt_tps`** — how many prompt tokens per second the engine is ingesting (prefill throughput). Useful for diagnosing slow prefill on long-context requests.
+## Time to first token
 
-**Source:** `llamacpp:predicted_tokens_seconds` · `llamacpp:prompt_tokens_seconds`
-*(These metrics are unique to llama.cpp — they are absent for vLLM and SGLang agents.)*
+Time to first token, or TTFT, is the time between a request entering the inference engine and the first output token becoming available.
+
+Hivenet Router exposes two per-agent gauges:
+
+```text
+hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_router_agent_engine_p90_ttft_seconds
+```
+
+Both are measured in seconds.
+
+### Average TTFT
 
 ```promql
-# Token generation throughput (tokens/sec)
-mycoroute_agent_engine_predicted_tps{peer_id="12D3Koo0..."}
-
-# Prompt ingestion throughput (tokens/sec)
-mycoroute_agent_engine_prompt_tps{peer_id="12D3Koo0..."}
-
-# Average generation throughput by engine
-avg by (engine) (mycoroute_agent_engine_predicted_tps)
+hivenet_router_agent_engine_avg_ttft_seconds
 ```
 
----
+This is calculated from the backend histogram’s cumulative sum and count.
 
-## Engine-Specific Routing
+### P90 TTFT
 
-### Exclude Overloaded Agents
+```promql
+hivenet_router_agent_engine_p90_ttft_seconds
+```
+
+The agent estimates this value from the backend histogram buckets.
+
+Hivenet Router keeps it as a scalar because routing policies need to read a current value directly during agent selection.
+
+### Raw TTFT histogram
+
+For vLLM agents, Hivenet Router also exports:
+
+```text
+hivenet_router_agent_engine_ttft_seconds
+```
+
+Prometheus exposes:
+
+```text
+hivenet_router_agent_engine_ttft_seconds_bucket
+hivenet_router_agent_engine_ttft_seconds_sum
+hivenet_router_agent_engine_ttft_seconds_count
+```
+
+Fleet-wide P90 for vLLM:
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+P90 by model:
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le, model) (
+    rate(
+      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+<Note>
+  Do not average per-agent P90 gauges to calculate a fleet-wide P90.
+
+  Use the raw histogram buckets where they are available.
+</Note>
+
+High TTFT can result from:
+
+- a waiting scheduler queue
+- long prompt prefill
+- cold model loading
+- CPU-side input processing
+- GPU contention
+- cache pressure
+- large running batches
+
+Establish a baseline for each model and workload rather than copying a generic target.
+
+## Inter-token latency
+
+Inter-token latency, or ITL, is the time between generated output tokens during the decode phase.
+
+Hivenet Router exposes:
+
+```text
+hivenet_router_agent_engine_avg_itl_seconds
+hivenet_router_agent_engine_p90_itl_seconds
+```
+
+for:
+
+- vLLM
+- llama.cpp
+
+SGLang does not currently supply ITL through this integration.
+
+Average ITL:
+
+```promql
+hivenet_router_agent_engine_avg_itl_seconds
+```
+
+P90 ITL:
+
+```promql
+hivenet_router_agent_engine_p90_itl_seconds
+```
+
+For vLLM, Hivenet Router also exports the raw histogram:
+
+```text
+hivenet_router_agent_engine_itl_seconds
+```
+
+Fleet-wide vLLM P90:
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_itl_seconds_bucket[5m]
+    )
+  )
+)
+```
+
+High ITL can make streamed output feel slow or uneven.
+
+Possible causes include:
+
+- compute saturation
+- large running batches
+- long contexts
+- contention from other GPU workloads
+- memory pressure
+- backend configuration
+
+## Prompt-length histogram
+
+vLLM supplies a histogram of prompt sizes:
+
+```text
+hivenet_router_agent_engine_request_prompt_tokens
+```
+
+Prometheus exposes:
+
+```text
+hivenet_router_agent_engine_request_prompt_tokens_bucket
+hivenet_router_agent_engine_request_prompt_tokens_sum
+hivenet_router_agent_engine_request_prompt_tokens_count
+```
+
+P50 prompt length:
+
+```promql
+histogram_quantile(
+  0.50,
+  sum by (le) (
+    rate(
+      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+    )
+  )
+)
+```
+
+P90 by model:
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le, model) (
+    rate(
+      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+    )
+  )
+)
+```
+
+Long prompts can increase:
+
+- prefill time
+- TTFT
+- KV-cache use
+- memory pressure
+- per-request cost
+
+## Generation-length histogram
+
+vLLM also supplies a distribution of generated output lengths:
+
+```text
+hivenet_router_agent_engine_request_generation_tokens
+```
+
+P90 generation length:
+
+```promql
+histogram_quantile(
+  0.90,
+  sum by (le, model) (
+    rate(
+      hivenet_router_agent_engine_request_generation_tokens_bucket[5m]
+    )
+  )
+)
+```
+
+Long generations:
+
+- occupy scheduler capacity for longer
+- retain KV-cache allocations
+- increase output-token use
+- can reduce effective concurrency
+
+Use prompt and generation histograms together to understand the shape of the workload rather than relying only on request counts.
+
+## Finish reasons
+
+vLLM reports cumulative completion counts grouped by finish reason.
+
+Hivenet Router converts changes between backend snapshots into the counter:
+
+```text
+hivenet_router_agent_engine_request_success_total
+```
+
+Additional label:
+
+```text
+finished_reason
+```
+
+Common values include:
+
+```text
+stop
+length
+abort
+```
+
+Completion rate by reason:
+
+```promql
+sum by (finished_reason) (
+  rate(
+    hivenet_router_agent_engine_request_success_total[5m]
+  )
+)
+```
+
+Length-limited completions:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_agent_engine_request_success_total{
+      finished_reason="length"
+    }[5m]
+  )
+)
+```
+
+Aborted completions:
+
+```promql
+sum by (model) (
+  rate(
+    hivenet_router_agent_engine_request_success_total{
+      finished_reason="abort"
+    }[5m]
+  )
+)
+```
+
+Unlike the preemption gauge, this is a Hivenet Router Prometheus counter.
+
+The first snapshot establishes a baseline. Hivenet Router counts changes observed after it begins tracking that agent rather than importing the engine’s complete earlier lifetime count.
+
+If the backend count decreases after a restart, Hivenet Router treats the new value as post-restart activity.
+
+## llama.cpp token throughput
+
+llama.cpp exposes two current throughput gauges:
+
+```text
+hivenet_router_agent_engine_predicted_tps
+hivenet_router_agent_engine_prompt_tps
+```
+
+### Generation throughput
+
+```text
+hivenet_router_agent_engine_predicted_tps
+```
+
+This is the backend’s recent generated-token rate.
+
+```promql
+hivenet_router_agent_engine_predicted_tps
+```
+
+Average by model:
+
+```promql
+avg by (model) (
+  hivenet_router_agent_engine_predicted_tps
+)
+```
+
+### Prompt throughput
+
+```text
+hivenet_router_agent_engine_prompt_tps
+```
+
+This is the backend’s recent prompt-ingestion rate.
+
+```promql
+hivenet_router_agent_engine_prompt_tps
+```
+
+These values are currently available through Prometheus but not through the administration routing-table response.
+
+A falling throughput value can indicate contention or a changed workload, but interpret it alongside:
+
+- request sizes
+- active and waiting requests
+- GPU use
+- context length
+- batch configuration
+- model quantization
+
+## Use engine metrics in routing policies
+
+The supported engine metric gates are:
+
+```text
+kv_cache_utilization
+running_requests
+waiting_requests
+avg_ttft_seconds
+p90_ttft_seconds
+avg_itl_seconds
+p90_itl_seconds
+```
+
+For example:
 
 ```yaml
 routing_policy:
   match:
-    engine: "vllm"
+    engine: vllm
+
   exclude_if:
-    kv_cache_utilization: { gt: 0.85 }
-    waiting_requests: { gt: 20 }
-  strategy: "least-loaded"
+    kv_cache_utilization:
+      gt: 0.85
+
+    waiting_requests:
+      gt: 5
+
+    p90_ttft_seconds:
+      gt: 0.5
+
+  strategy: least-loaded
 ```
 
-### Preemption-Aware Routing
+Preemptions, finish reasons, request-shape histograms, and token-throughput values are available for monitoring but are not current policy-gate fields.
+
+### Missing metrics pass
+
+When an agent does not expose a selected field, Hivenet Router skips that gate for the agent.
+
+For example:
+
+```yaml
+exclude_if:
+  avg_itl_seconds:
+    gt: 0.05
+```
+
+does not exclude an SGLang agent because SGLang does not report ITL through this integration.
+
+<Warning>
+  Combine engine-specific gates with a static engine or metadata match when the metric must be present.
+
+  Missing data does not fail the gate.
+</Warning>
+
+## Practical routing patterns
+
+### Avoid cache pressure
 
 ```yaml
 routing_policy:
   match:
-    engine: "vllm"
+    engine: vllm
+
   exclude_if:
-    kv_cache_utilization: { gt: 0.80 }
-  strategy: "least-loaded"
+    kv_cache_utilization:
+      gt: 0.85
+
+  strategy: least-loaded
 ```
 
-### TTFT-Optimized Routing
+### Avoid backend queues
+
+```yaml
+routing_policy:
+  exclude_if:
+    waiting_requests:
+      gt: 5
+
+  strategy: least-loaded
+```
+
+### Protect TTFT
+
+```yaml
+routing_policy:
+  exclude_if:
+    p90_ttft_seconds:
+      gt: 0.5
+
+  strategy: least-loaded
+```
+
+### Use a relaxed fallback
 
 ```yaml
 routing_policy:
   match:
-    engine: "vllm"
+    engine: vllm
+
   exclude_if:
-    p90_ttft_seconds: { gt: 0.2 }
-  strategy: "least-loaded"
+    kv_cache_utilization:
+      gt: 0.85
+    waiting_requests:
+      gt: 5
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: relaxed-vllm
+
+    match:
+      engine: vllm
+
+    exclude_if:
+      kv_cache_utilization:
+        gt: 0.95
+      waiting_requests:
+        gt: 20
+
+    strategy: least-loaded
 ```
 
----
+This lets Hivenet Router prefer low-pressure agents while retaining a controlled local fallback under heavier load.
 
-## Monitoring Dashboards
+## Grafana
 
-### Engine Health Panel
+The provisioned router dashboard includes engine panels for:
 
-```promql
-# KV cache heatmap
-mycoroute_agent_engine_kv_cache_utilization
+- KV-cache utilization
+- running and waiting requests
+- preemptions
+- average and P90 TTFT
+- average and P90 ITL
+- llama.cpp prompt and generation throughput
 
-# Queue depth by agent
-mycoroute_agent_engine_waiting_requests
+Blank values may mean:
 
-# Preemption rate trend
-rate(mycoroute_agent_engine_preemptions_total[5m])
-```
+- the backend does not support the metric
+- backend metrics are not enabled
+- no observations exist yet
+- the agent has not completed a successful scrape
+- dashboard filters exclude the series
 
-### Latency Panel
+See [Grafana dashboards](/observability/grafana-dashboards) for provisioning and dashboard behavior.
 
-```promql
-# Fleet-wide P90 TTFT
-histogram_quantile(0.9, sum by (le) (rate(mycoroute_agent_engine_ttft_seconds_bucket[5m])))
+## Alerting examples
 
-# Fleet-wide P90 ITL
-histogram_quantile(0.9, sum by (le) (rate(mycoroute_agent_engine_itl_seconds_bucket[5m])))
+The thresholds below are examples. Establish appropriate limits from your models, hardware, and service objectives.
 
-# Per-peer P90 TTFT trend
-mycoroute_agent_engine_p90_ttft_seconds
-
-# Per-peer P90 ITL trend
-mycoroute_agent_engine_p90_itl_seconds
-```
-
----
-
-## Alerting Rules
-
-### High KV Cache
+### KV-cache pressure
 
 ```yaml
-- alert: HighKVCache
-  expr: mycoroute_agent_engine_kv_cache_utilization > 0.9
-  for: 2m
-  labels:
-    severity: warning
-  annotations:
-    summary: "High KV cache usage on {{ $labels.peer_id }}"
+groups:
+  - name: hivenet-router-engine
+
+    rules:
+      - alert: HivenetRouterKVCachePressure
+
+        expr: |
+          hivenet_router_agent_engine_kv_cache_utilization > 0.90
+
+        for: 2m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High KV-cache use on {{ $labels.peer_id }}
 ```
 
-### High Preemption Rate
+### Backend queue growth
 
 ```yaml
-- alert: HighPreemptionRate
-  expr: rate(mycoroute_agent_engine_preemptions_total[5m]) > 0.2
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "High preemption rate on {{ $labels.peer_id }}"
+      - alert: HivenetRouterEngineQueue
+
+        expr: |
+          hivenet_router_agent_engine_waiting_requests > 10
+
+        for: 2m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            Backend queue on {{ $labels.peer_id }}
 ```
 
-### TTFT Degradation
+### TTFT degradation
 
 ```yaml
-- alert: TTFTDegradation
-  expr: mycoroute_agent_engine_p90_ttft_seconds > 0.5
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "TTFT degradation detected on {{ $labels.peer_id }}"
+      - alert: HivenetRouterTTFTDegradation
+
+        expr: |
+          hivenet_router_agent_engine_p90_ttft_seconds > 0.5
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High P90 TTFT on {{ $labels.peer_id }}
 ```
 
----
+### vLLM preemptions increasing
+
+```yaml
+      - alert: HivenetRouterVLLMPreemptions
+
+        expr: |
+          clamp_min(
+            delta(
+              hivenet_router_agent_engine_preemptions_total[5m]
+            ),
+            0
+          ) > 0
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            vLLM preemptions are increasing on {{ $labels.peer_id }}
+```
 
 ## Troubleshooting
 
-### High Preemptions
+### No engine metrics appear
 
-**Cause:** KV-cache pressure — running batch is too large for the available KV-cache allocation.
+Check whether the selected engine supports metrics:
 
-**Diagnosis:**
-
-```promql
-mycoroute_agent_engine_kv_cache_utilization > 0.9
-rate(mycoroute_agent_engine_preemptions_total[5m]) > 0.1
+```text
+vllm
+sglang
+llamacpp
 ```
 
-**Resolution:** Lower the routing gate threshold so the agent is excluded sooner:
-
-```yaml
-exclude_if:
-  kv_cache_utilization: { gt: 0.80 }
-```
-
-### High TTFT
-
-**Cause:** Queue buildup (many waiting requests) or cold model loading.
-
-**Diagnosis:**
-
-```promql
-mycoroute_agent_engine_waiting_requests > 10
-mycoroute_agent_engine_avg_ttft_seconds > 0.5
-```
-
-**Resolution:**
-
-```yaml
-exclude_if:
-  waiting_requests: { gt: 5 }
-  p90_ttft_seconds: { gt: 0.3 }
-```
-
-### Missing Metrics for llama.cpp
-
-Ensure the server is started with `--metrics`:
+Then check the backend directly:
 
 ```bash
-./llama-server -m model.gguf -a "ModelAlias" --host 0.0.0.0 --port 8888 --metrics
+curl -i \
+  http://localhost:<backend-port>/metrics
 ```
 
-### Missing Metrics for SGLang
+Inspect the agent logs:
 
-Ensure the server is started with `--enable-metrics`:
+<Tabs>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u hivenet-agent \
+      | grep -i "engine metrics"
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker logs hivenet-agent \
+      2>&1 \
+      | grep -i "engine metrics"
+    ```
+  </Tab>
+</Tabs>
+
+### SGLang metrics are missing
+
+Start SGLang with:
 
 ```bash
-python -m sglang.launch_server --model-path meta-llama/Llama-3-8B-Instruct --enable-metrics
+--enable-metrics
 ```
 
----
+Restart SGLang, then check:
 
-## See Also
+```bash
+curl http://localhost:3000/metrics \
+  | head
+```
 
-- [Hardware Metrics](/observability/hardware-metrics) - GPU/system metrics
-- [RFC 6298 Latency Tracking](/reference/rfc-6298-latency-tracking) - Network RTT metrics
-- [Prometheus Metrics](/observability/prometheus-metrics) - Complete reference
-- [vLLM Deployment](/deploy/agents/vllm) - vLLM setup
-- [llama.cpp Deployment](/deploy/agents/llama-cpp) - llama.cpp setup
+### llama.cpp metrics are missing
+
+Start llama.cpp with:
+
+```bash
+--metrics
+```
+
+Restart the server, then check:
+
+```bash
+curl http://localhost:8888/metrics \
+  | head
+```
+
+### Values appear stale
+
+Check the agent logs for:
+
+```text
+Engine metrics scrape started failing
+```
+
+Test the backend metrics endpoint locally.
+
+The agent deliberately retains its latest successful snapshot during a scrape failure.
+
+Restarting the agent clears its local cache, but the better fix is to restore the backend metrics endpoint.
+
+### TTFT or ITL is absent
+
+The backend may not expose that metric, or it may not have recorded any observations yet.
+
+Check:
+
+- engine type
+- backend metrics configuration
+- whether requests have completed
+- whether the expected histogram exists on the backend
+
+SGLang does not provide ITL through the current integration.
+
+### Raw histogram queries are empty
+
+The current Hivenet Router implementation re-exports raw engine histograms from vLLM.
+
+SGLang and llama.cpp currently supply scalar average and P90 values but not raw histogram series through the router.
+
+Filter for vLLM:
+
+```promql
+hivenet_router_agent_engine_ttft_seconds_count{
+  engine="vllm"
+}
+```
+
+### Preemption calculations become negative
+
+The backend cumulative value can reset when vLLM restarts.
+
+Use:
+
+```promql
+clamp_min(
+  delta(
+    hivenet_router_agent_engine_preemptions_total[5m]
+  ),
+  0
+)
+```
+
+rather than treating the series as a normal Prometheus counter.
+
+### Engine values exist but policy gates do not behave as expected
+
+Check:
+
+- policy field spelling
+- units
+- current routing-table value
+- whether the agent passes earlier routing gates
+- whether the metric is missing rather than zero
+- whether cached data is stale after scrape failure
+
+Policy utilization fields use fractions rather than percentages.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Latency tracking" href="/observability/latency-tracking">
+    Understand Hivenet Router’s RFC 6298 SRTT and RTTVAR measurements.
+  </Card>
+
+  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+    Combine engine pressure with GPU, CPU, memory, and hardware-tier policies.
+  </Card>
+
+  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+    Explore the provisioned engine tables and time-series panels.
+  </Card>
+</CardGroup>

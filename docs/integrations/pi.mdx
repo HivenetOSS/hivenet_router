@@ -1,122 +1,254 @@
 ---
-title: "Using pi with Mycoroute"
+title: "Pi"
+description: "Connect the Pi coding agent to Hivenet Router through OpenAI Chat Completions and configure models, authentication, tools, security, and compatibility."
+sidebarTitle: "Pi"
 ---
 
-This guide shows how to point [pi](https://github.com/earendil-works/pi) — an open-source coding agent (similar in spirit to Claude Code and OpenCode) — at a Mycoroute router. pi has first-class support for custom HTTP endpoints, so the integration is straightforward: pick the OpenAI-compatible API path and pi's underlying SDK handles `baseURL` + `Authorization: Bearer` for you.
+Pi can use Hivenet Router as a custom OpenAI-compatible model provider.
 
-> **Snapshot date — last verified 2026-06-09** (against `pi-coding-agent@0.79.0`).
-> No time-bound caveats apply today; pi natively supports the router as shipped. Items in [Known limitations](#known-limitations) are tagged *time-bound* when relevant.
+Pi sends requests to:
 
-## What you get
+```text
+POST /v1/chat/completions
+```
 
-- A coding agent (chat + file edits + tool calls) against any model in your fleet, with **no version-pinning workarounds**.
-- Auth, quotas, and audit logging inherited from the router.
-- OpenAI dialect end-to-end — your vLLM agents serve it natively, no schema translation.
-- **No "background model" alias** to map — pi reuses the active model for compaction (unlike Claude Code's HAIKU or OpenCode's `small_model`), so there is no hidden second endpoint that might leak to a hosted provider.
+Hivenet Router authenticates the request, checks model access and quotas, selects an eligible `llm` agent, and forwards the request to its inference backend.
+
+```mermaid
+flowchart LR
+    P[Pi]
+    R[Hivenet Router router]
+    A[Selected LLM agent]
+    E[OpenAI-compatible backend]
+
+    P -->|POST /v1/chat/completions| R
+    R -->|Model and policy routing| A
+    A -->|POST /v1/chat/completions| E
+    E -->|Response stream| A
+    A --> R
+    R --> P
+```
+
+<Warning>
+  Pi’s built-in tools can read, create, edit, and delete files and run shell commands with the permissions of the operating-system user that started Pi.
+
+  Pi does not provide a built-in approval system or security sandbox. Use a dedicated account, container, virtual machine, or another execution boundary when the project or environment requires stronger isolation.
+</Warning>
 
 ## Prerequisites
 
-- A reachable Mycoroute router with at least one `llm` agent registered.
-- The agent's backend must serve `/v1/chat/completions` (vLLM does by default).
-- A Mycoroute API key with access to the model(s) you plan to use.
-- **Node.js ≥ 22.19.0** (pi's hard minimum — see [Common prerequisites — Node.js](/integrations/overview#common-prerequisites--nodejs) for `nvm` install/upgrade and the per-version-globals trap).
+Before configuring Pi, you need:
 
-> **Tool-calling note (vLLM-side).** Once you start asking pi to *do* things (file edits, bash, custom tools), vLLM must be launched with tool-call parsing enabled or the calls are silently emitted as plain text:
-> ```bash
-> vllm serve <model> \
->   --enable-auto-tool-choice \
->   --tool-call-parser qwen3_xml      # or 'hermes' for Qwen2.5
-> ```
-> Chat-only sessions work without these flags, so you can defer this until you actually exercise tools.
+- Node.js `22.19.0` or later
+- a reachable Hivenet Router router
+- a Hivenet Router client API key
+- at least one healthy agent registered with the `llm` capability
+- an inference backend that supports OpenAI Chat Completions
+- a model that can produce reliable structured tool calls
+- HTTPS when the router is reached over an untrusted network
 
----
-
-## Step 1 — Install pi
+Check Node.js:
 
 ```bash
-# Preferred — uses npm directly, skips post-install scripts for security
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-
-# Alternative — official installer script
-curl -fsSL https://pi.dev/install.sh | sh
+node --version
 ```
 
-The binary is `pi`. Verify:
+List the models available to the intended client key:
+
+```bash
+curl \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  https://router.example.com/v1/models \
+  | jq -r '.data[].id'
+```
+
+Use one of the returned model IDs exactly as shown.
+
+## Prepare the inference backend
+
+Pi can answer text prompts through any compatible chat model.
+
+For coding work, the selected model and inference engine must also support structured tool calls for operations such as:
+
+- reading files
+- editing and creating files
+- running shell commands
+- searching the project
+- invoking extension-provided tools
+
+For vLLM, automatic tool calling normally requires:
+
+```bash
+vllm serve <model-source> \
+  --host 0.0.0.0 \
+  --port 8888 \
+  --served-model-name mycoroute-code-model \
+  --enable-auto-tool-choice \
+  --tool-call-parser <model-specific-parser>
+```
+
+Replace:
+
+```text
+<model-source>
+```
+
+with the model being served.
+
+Replace:
+
+```text
+<model-specific-parser>
+```
+
+with the parser supported by that model family.
+
+Some models also require a tool-compatible chat template.
+
+<Note>
+  Tool-call parsers are model-specific.
+
+  Do not copy a parser from another model family without checking the inference-engine documentation and testing the complete tool loop.
+</Note>
+
+Register the same public model ID with the Hivenet Router agent:
+
+```bash
+./bin/hivenet-agent \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --model mycoroute-code-model \
+  --router-grpc <router-host>:50051 \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret
+```
+
+The model ID must match across:
+
+- the backend’s served-model name
+- the Hivenet Router agent registration
+- Pi’s `models.json`
+- the client API key’s model restrictions
+- any per-model quota entry
+
+## Test Hivenet Router directly
+
+Before configuring Pi, test the complete Hivenet Router request path:
+
+```bash
+curl -X POST \
+  https://router.example.com/v1/chat/completions \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with one short sentence."
+      }
+    ],
+    "max_tokens": 64
+  }'
+```
+
+Then test streaming:
+
+```bash
+curl -N -X POST \
+  https://router.example.com/v1/chat/completions \
+  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mycoroute-code-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Count from one to five."
+      }
+    ],
+    "stream": true,
+    "max_tokens": 64
+  }'
+```
+
+Output should arrive incrementally.
+
+A successful direct request confirms:
+
+- the client key is valid
+- the key can access the model
+- an eligible agent is available
+- the backend accepts Chat Completions
+- the router and agent can preserve streaming
+
+## Install Pi
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install -g \
+      --ignore-scripts \
+      @earendil-works/pi-coding-agent
+    ```
+  </Tab>
+  <Tab title="Installer">
+    ```bash
+    curl -fsSL https://pi.dev/install.sh \
+      | sh
+    ```
+  </Tab>
+</Tabs>
+
+Verify the installation:
 
 ```bash
 pi --version
 ```
 
-### Disable telemetry and update-checks (recommended)
+Use a current release unless you have confirmed a specific compatibility regression.
 
-pi pings `pi.dev` for version checks and anonymous install telemetry. Both are easy to disable:
+## Configure Hivenet Router as a provider
 
-```bash
-echo 'export PI_OFFLINE=1' >> ~/.bashrc      # disables BOTH (no version-check, no install telemetry)
-export PI_OFFLINE=1
+Pi reads custom providers and models from:
+
+```text
+~/.pi/agent/models.json
 ```
 
-If you'd rather only silence the version check, use `PI_SKIP_VERSION_CHECK=1` instead.
+Create the directory:
 
-> **What `PI_OFFLINE=1` actually does.** It suppresses **three** outbound behaviours: the version check at `pi.dev/api/latest-version`, the install telemetry ping at `pi.dev/api/report-install`, **and** the automatic download of pi's bundled search helpers (`fd` and `ripgrep`). The last point is what produces the harmless startup line you'll see in this mode:
->
-> ```
-> fd not found. Offline mode enabled, skipping download.
-> ripgrep not found. Offline mode enabled, skipping download.
-> ```
->
-> pi falls back to OS file/text search and keeps working — chat, tools, everything functions normally. If you want the faster search helpers anyway, install them through your package manager (which is the right move for self-hosted setups since the binaries come from your distro, not from `pi.dev`):
->
-> ```bash
-> # Ubuntu / Debian
-> sudo apt install fd-find ripgrep
-> # then symlink so pi finds it under the name it expects:
-> mkdir -p ~/.local/bin && ln -sf "$(which fdfind)" ~/.local/bin/fd
->
-> # macOS
-> brew install fd ripgrep
-> ```
->
-> After that, the startup lines disappear and pi uses the system binaries.
+```bash
+mkdir -p \
+  ~/.pi/agent
+```
 
----
-
-## Step 2 — Register the router in `models.json`
-
-pi reads custom providers from `~/.pi/agent/models.json`. Create the file with the router as an OpenAI-compatible provider:
+Create the configuration:
 
 ```json
 {
   "providers": {
     "mycoroute": {
-      "baseUrl": "https://<router-host>/v1",
+      "baseUrl": "https://router.example.com/v1",
       "api": "openai-completions",
-      "apiKey": "$mycoroute_API_KEY",
       "authHeader": true,
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "supportsUsageInStreaming": true,
-        "maxTokensField": "max_tokens"
-      },
+      "apiKey": "$MYCOROUTE_API_KEY",
+
       "models": [
         {
-          "id": "Qwen/Qwen3.6-27B",
-          "name": "Qwen 3.6 27B",
+          "id": "mycoroute-code-model",
+          "name": "Hivenet Router code model",
           "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 131072,
-          "maxTokens": 8192,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "Qwen/Qwen3.6-35B-A3B",
-          "name": "Qwen 3.6 35B-A3B",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 131072,
-          "maxTokens": 8192,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+          "input": [
+            "text"
+          ],
+          "contextWindow": 32768,
+          "maxTokens": 4096,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
         }
       ]
     }
@@ -124,157 +256,1258 @@ pi reads custom providers from `~/.pi/agent/models.json`. Create the file with t
 }
 ```
 
-### What each piece does (and the rules that matter)
+Replace:
 
-- **`providers.<name>`** — `<name>` is an arbitrary id you pick. It becomes the `--provider` flag value and the prefix wherever pi references the provider.
-- **`baseUrl`** — ends at **`/v1`**, not `/v1/chat/completions`. The OpenAI SDK appends `/chat/completions` itself.
-- **`api: "openai-completions"`** — uses the OpenAI SDK, which automatically sends `Authorization: Bearer <apiKey>`. This is the path we want against the router.
-- **`apiKey: "$mycoroute_API_KEY"`** — pi resolves `$VAR` from the environment at runtime, so the secret never sits in the file. (Also supports `${VAR}` and `!shell-command`.)
-- **`models[].id`** — sent **verbatim** as the `model` field in requests. Must match exactly what an agent registers; check `/v1/models`.
-- **`compat`** flags — explained below; the four above are the ones that matter for vLLM today.
+- `https://router.example.com` with the router address
+- `mycoroute-code-model` with an exact model ID from `/v1/models`
+- `contextWindow` with the usable context size
+- `maxTokens` with the supported maximum output
 
-### Why those `compat` flags
+## Set the API key
 
-vLLM's OpenAI server doesn't speak every modern OpenAI feature. The four flags above match its current behaviour:
-
-| Flag | Setting | Why |
-|---|---|---|
-| `supportsDeveloperRole` | `false` | vLLM only accepts `system`/`user`/`assistant` roles; pi defaults to the newer `developer` role for reasoning models. Forcing `false` keeps the role as `system`. |
-| `supportsReasoningEffort` | `false` | vLLM's OpenAI server doesn't accept the `reasoning_effort` field — sending it would be rejected. |
-| `supportsUsageInStreaming` | `true` | vLLM emits a final `usage` chunk when `stream_options.include_usage: true` is set. Keeping this `true` gives the router the exact token counts to deduct/audit. |
-| `maxTokensField` | `"max_tokens"` | vLLM expects classic `max_tokens`; pi's default for reasoning models is `max_completion_tokens`. |
-
-If you later want thinking/reasoning, set `reasoning: true` on the model and configure your vLLM with `enable_thinking` via `chat_template_kwargs`, then add `compat.thinkingFormat: "qwen-chat-template"`. Skip that today — chat works fine without it.
-
-### Set the env var (case-sensitive)
+Export the raw Hivenet Router client key:
 
 ```bash
-export mycoroute_API_KEY="<your-mycoroute-api-key>"
+export MYCOROUTE_API_KEY="<mycoroute-api-key>"
 ```
 
-Verify:
+Verify that the variable is present without printing it:
 
 ```bash
-env | grep mycoroute_API_KEY     # exact case must match the config interpolation
+test -n "$MYCOROUTE_API_KEY" \
+  && echo "MYCOROUTE_API_KEY is set"
 ```
 
----
+The configuration value:
 
-## Step 3 — Set defaults in `settings.json`
+```json
+"apiKey": "$MYCOROUTE_API_KEY"
+```
 
-Create `~/.pi/agent/settings.json` so pi starts on your model without needing `--provider`/`--model` every time:
+resolves the environment variable when Pi sends a request.
+
+The provider setting:
+
+```json
+"authHeader": true
+```
+
+makes Pi send the resolved credential as:
+
+```http
+Authorization: Bearer <mycoroute-api-key>
+```
+
+Do not put:
+
+- the SHA-256 key hash
+- an administrator key
+- the agent JWT secret
+- a provider fallback key
+
+in this variable.
+
+<Note>
+  `MYCOROUTE_API_KEY` is a client-side environment variable chosen for this guide.
+
+  It does not need to follow the case-sensitive lower-case `mycoroute_*` convention used by the Hivenet Router router process.
+</Note>
+
+## Read the key from a command
+
+Pi can resolve a credential by running a shell command:
+
+```json
+{
+  "apiKey": "!op read 'op://Infrastructure/Hivenet Router API key/credential'"
+}
+```
+
+or:
+
+```json
+{
+  "apiKey": "!pass show services/mycoroute/pi"
+}
+```
+
+The command must print only the raw API key to standard output.
+
+Pi resolves command-backed values when a request is sent. It does not add its own caching, stale-value reuse, or retry policy for arbitrary credential commands.
+
+Use a wrapper script when the secret command needs:
+
+- caching
+- a timeout
+- fallback behavior
+- refresh logic
+- custom error handling
+
+## Understand the provider fields
+
+### Provider ID
+
+```json
+"providers": {
+  "mycoroute": {}
+}
+```
+
+`mycoroute` is Pi’s local provider ID.
+
+It is used by:
+
+```bash
+pi --provider mycoroute
+```
+
+and by full model references such as:
+
+```text
+mycoroute/mycoroute-code-model
+```
+
+The provider ID does not need to match a router, tenant, or organization name.
+
+### Base URL
+
+Use:
+
+```json
+"baseUrl": "https://router.example.com/v1"
+```
+
+The URL must include:
+
+```text
+/v1
+```
+
+but must not include the final endpoint.
+
+Correct:
+
+```text
+https://router.example.com/v1
+```
+
+Incorrect:
+
+```text
+https://router.example.com
+```
+
+Incorrect:
+
+```text
+https://router.example.com/v1/chat/completions
+```
+
+Pi appends:
+
+```text
+/chat/completions
+```
+
+to the configured URL.
+
+### API type
+
+Use:
+
+```json
+"api": "openai-completions"
+```
+
+This selects OpenAI Chat Completions.
+
+Do not use:
+
+```json
+"api": "openai-responses"
+```
+
+Hivenet Router does not currently expose:
+
+```text
+POST /v1/responses
+```
+
+### Bearer authentication
+
+Use:
+
+```json
+"authHeader": true
+```
+
+Pi then sends the resolved `apiKey` value in the standard bearer header Hivenet Router accepts. Without this setting, a custom provider can resolve the key without attaching it as `Authorization: Bearer`.
+
+### Model ID
+
+```json
+"id": "mycoroute-code-model"
+```
+
+Pi sends this value unchanged:
+
+```json
+{
+  "model": "mycoroute-code-model"
+}
+```
+
+It must match the model registered by the Hivenet Router agent.
+
+Model IDs are case-sensitive.
+
+### Display name
+
+```json
+"name": "Hivenet Router code model"
+```
+
+This is the human-readable label shown as secondary model information.
+
+The model picker and status display still identify the model primarily by its configured `id`.
+
+### Context window
+
+```json
+"contextWindow": 32768
+```
+
+This tells Pi how much conversation context the model can accept.
+
+Use the effective context limit of the deployed backend, not only the theoretical limit of the underlying model.
+
+For example, a model repository may support 128,000 tokens while the backend is started with:
+
+```bash
+--max-model-len 32768
+```
+
+In that deployment, configure:
+
+```json
+"contextWindow": 32768
+```
+
+An accurate value helps Pi compact the conversation before the backend rejects it.
+
+### Maximum output
+
+```json
+"maxTokens": 4096
+```
+
+This is the largest output Pi should request.
+
+The prompt and requested output must fit inside the backend context limit.
+
+Use a value that leaves enough room for:
+
+- project instructions
+- conversation history
+- tool definitions
+- tool results
+- the current prompt
+
+### Cost
+
+```json
+"cost": {
+  "input": 0,
+  "output": 0,
+  "cacheRead": 0,
+  "cacheWrite": 0
+}
+```
+
+Pi uses these values for its local cost display.
+
+They do not affect Hivenet Router billing, quotas, or routing.
+
+For a self-hosted deployment, zero values are reasonable unless you maintain your own internal per-token cost model.
+
+## Add several models
+
+Add every model that should appear in Pi:
+
+```json
+{
+  "providers": {
+    "mycoroute": {
+      "baseUrl": "https://router.example.com/v1",
+      "api": "openai-completions",
+      "authHeader": true,
+      "apiKey": "$MYCOROUTE_API_KEY",
+
+      "models": [
+        {
+          "id": "code-model-large",
+          "name": "Code model, large",
+          "reasoning": false,
+          "contextWindow": 131072,
+          "maxTokens": 8192
+        },
+        {
+          "id": "code-model-fast",
+          "name": "Code model, fast",
+          "reasoning": false,
+          "contextWindow": 32768,
+          "maxTokens": 4096
+        }
+      ]
+    }
+  }
+}
+```
+
+Each ID must appear in the live Hivenet Router model catalog for the Pi API key:
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  https://router.example.com/v1/models \
+  | jq -r '.data[].id'
+```
+
+A model may remain configured in Pi while temporarily unavailable in Hivenet Router. Selecting it then produces the relevant model or availability error.
+
+## Configure the default model
+
+Pi’s global settings file is:
+
+```text
+~/.pi/agent/settings.json
+```
+
+Set the default provider and model:
 
 ```json
 {
   "defaultProvider": "mycoroute",
-  "defaultModel": "Qwen/Qwen3.6-27B",
-  "enableInstallTelemetry": false
+  "defaultModel": "mycoroute-code-model"
 }
 ```
 
-`defaultProvider` is the provider id from `models.json`; `defaultModel` is the model `id` from that provider.
+Project-specific settings can live in:
 
----
-
-## Step 4 — Verify
-
-Sanity-check the router (bypassing pi):
-
-```bash
-curl -sS https://<router-host>/v1/chat/completions \
-  -H "Authorization: Bearer $mycoroute_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3.6-27B",
-    "stream": true,
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "say hi"}
-    ],
-    "max_tokens": 64,
-    "stream_options": {"include_usage": true}
-  }'
+```text
+.pi/settings.json
 ```
 
-If you get a streamed chat completion ending with a `usage` chunk, the chain is good.
+Project settings override conflicting global values.
 
-Then pi:
+For example:
+
+```json
+{
+  "defaultProvider": "mycoroute",
+  "defaultModel": "code-model-large"
+}
+```
+
+<Warning>
+  Do not put the raw Hivenet Router API key in a project settings file.
+
+  A project-level `.pi/settings.json` may be committed to source control. Keep the credential in an environment variable, protected secret file, or credential command.
+</Warning>
+
+## Review compatibility only when needed
+
+The minimal configuration should be the starting point.
+
+Pi also supports compatibility overrides for OpenAI-compatible backends:
+
+```json
+{
+  "compat": {
+    "supportsDeveloperRole": false,
+    "supportsReasoningEffort": false,
+    "supportsUsageInStreaming": false,
+    "maxTokensField": "max_tokens"
+  }
+}
+```
+
+Do not add all four automatically.
+
+Use only the fields required by the deployed model, chat template, and backend version.
+
+### Developer role
+
+Set:
+
+```json
+"supportsDeveloperRole": false
+```
+
+when the backend rejects:
+
+```text
+role: developer
+```
+
+Pi then sends its instruction message with:
+
+```text
+role: system
+```
+
+This is most likely to matter for reasoning models or chat templates that accept only:
+
+```text
+system
+user
+assistant
+tool
+```
+
+### Reasoning effort
+
+Set:
+
+```json
+"supportsReasoningEffort": false
+```
+
+when the backend rejects:
+
+```text
+reasoning_effort
+```
+
+Current vLLM versions support `reasoning_effort` for several reasoning-model integrations, so disabling it unconditionally can remove a feature that the deployment supports.
+
+### Output-token field
+
+Set:
+
+```json
+"maxTokensField": "max_tokens"
+```
+
+when the backend rejects:
+
+```text
+max_completion_tokens
+```
+
+Current vLLM accepts both fields. Older or partially compatible servers may accept only `max_tokens`.
+
+### Streaming usage
+
+Set:
+
+```json
+"supportsUsageInStreaming": false
+```
+
+when the backend rejects:
+
+```json
+{
+  "stream_options": {
+    "include_usage": true
+  }
+}
+```
+
+When usage is unavailable, Hivenet Router may need to estimate tokens instead of using the backend’s exact final usage values.
+
+## Configure a model-specific override
+
+Compatibility may differ between models served by the same provider.
+
+Put the override on one model:
+
+```json
+{
+  "providers": {
+    "mycoroute": {
+      "baseUrl": "https://router.example.com/v1",
+      "api": "openai-completions",
+      "authHeader": true,
+      "apiKey": "$MYCOROUTE_API_KEY",
+
+      "models": [
+        {
+          "id": "legacy-code-model",
+          "reasoning": false,
+          "contextWindow": 32768,
+          "maxTokens": 4096,
+
+          "compat": {
+            "supportsDeveloperRole": false,
+            "maxTokensField": "max_tokens"
+          }
+        },
+        {
+          "id": "current-code-model",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+This avoids reducing the capabilities of every model because one backend has a compatibility limitation.
+
+## Configure reasoning models
+
+Set:
+
+```json
+"reasoning": true
+```
+
+only when the model and backend expose reasoning in a format Pi understands.
+
+For example:
+
+```json
+{
+  "id": "reasoning-code-model",
+  "reasoning": true,
+  "contextWindow": 131072,
+  "maxTokens": 16384
+}
+```
+
+Pi also supports model-specific thinking-level mappings and compatibility formats.
+
+The appropriate configuration depends on:
+
+- model family
+- reasoning parser
+- chat template
+- vLLM version
+- whether the server expects `reasoning_effort`
+- whether it expects `enable_thinking`
+- how reasoning is represented in streamed responses
+
+Establish basic chat and tool compatibility before enabling reasoning controls.
+
+<Note>
+  A model being described as a reasoning model does not prove that its tool calls work reliably while reasoning is enabled.
+
+  Test reasoning and tool use together.
+</Note>
+
+## Reload model configuration
+
+Pi reloads:
+
+```text
+~/.pi/agent/models.json
+```
+
+when you open:
+
+```text
+/model
+```
+
+You can edit the file while Pi is running, then reopen the model picker.
+
+A complete application restart is normally unnecessary for model-list changes.
+
+## Verify the provider
+
+List models matching the provider:
 
 ```bash
-# Non-interactive one-shot
-pi -p "say hi"
+pi --list-models mycoroute
+```
 
-# Pinned to a specific model
-pi --provider mycoroute --model "Qwen/Qwen3.6-27B" -p "say hi"
-pi --provider mycoroute --model "Qwen/Qwen3.6-35B-A3B" -p "say hi"
+A result may include:
 
-# Interactive TUI
+```text
+mycoroute/mycoroute-code-model
+```
+
+If the model does not appear, check that:
+
+- `models.json` is valid
+- the provider contains `baseUrl` and `api`
+- the API key can be resolved
+- the model entry has an `id`
+- the expected Pi configuration directory is in use
+
+The default configuration directory is:
+
+```text
+~/.pi/agent
+```
+
+It can be changed with:
+
+```bash
+export PI_CODING_AGENT_DIR=/custom/pi/config
+```
+
+When this is set, Pi reads:
+
+```text
+/custom/pi/config/models.json
+/custom/pi/config/settings.json
+```
+
+## Start Pi
+
+Run Pi in the project directory:
+
+```bash
 pi
-# Inside the TUI: /model opens the picker; Ctrl+L is the shortcut.
 ```
 
-`pi --list-models` shows everything pi has registered.
+Open the model picker:
 
----
+```text
+/model
+```
 
-## Discovering available models
+Select:
 
-The router publishes the live model list (aggregated across all registered agents) at `/v1/models`:
+```text
+mycoroute/mycoroute-code-model
+```
+
+You can also choose the model from the command line:
 
 ```bash
-curl -s https://<router-host>/v1/models \
-  -H "Authorization: Bearer $mycoroute_API_KEY"
+pi \
+  --model mycoroute/mycoroute-code-model
 ```
 
-Use whatever string appears there as the `id` of each model in `models.json` — case- and slash-sensitive.
+Or specify provider and model separately:
 
----
+```bash
+pi \
+  --provider mycoroute \
+  --model mycoroute-code-model
+```
+
+For a non-interactive smoke test:
+
+```bash
+pi \
+  --model mycoroute/mycoroute-code-model \
+  -p \
+  "Reply with the word connected."
+```
+
+## Begin with a read-only test
+
+Pi does not ask for confirmation before using its tools.
+
+For the first integration test, limit the available tools:
+
+```bash
+pi \
+  --model mycoroute/mycoroute-code-model \
+  --tools read,grep,find,ls \
+  -p \
+  "Inspect this project and summarize its structure."
+```
+
+This verifies:
+
+- structured tool calling
+- tool-result handling
+- multi-step model behavior
+- project access
+
+without enabling edits or shell execution.
+
+## Test the complete tool loop
+
+After the read-only test succeeds, start Pi normally in a disposable directory:
+
+```bash
+mkdir -p \
+  /tmp/mycoroute-pi-test
+
+cd \
+  /tmp/mycoroute-pi-test
+
+pi \
+  --model mycoroute/mycoroute-code-model
+```
+
+Ask:
+
+```text
+Create a file named connected.txt containing the word connected, then read it back to me.
+```
+
+Confirm that Pi:
+
+1. receives a structured tool call from the model
+2. invokes the file tool
+3. returns the tool result to the model
+4. reads the file
+5. completes the task without inventing the result
+
+Remove the directory afterward:
+
+```bash
+rm -rf \
+  /tmp/mycoroute-pi-test
+```
+
+Text generation can work while tool calling remains broken. The complete loop is the meaningful compatibility test.
+
+## Streaming
+
+Pi’s OpenAI-compatible provider consumes streamed Chat Completions responses.
+
+The complete path must preserve server-sent events:
+
+```text
+Pi
+  → reverse proxy
+  → Hivenet Router router
+  → Hivenet Router agent
+  → inference backend
+```
+
+When output arrives only after generation finishes, check:
+
+- whether the backend streams
+- whether the response is `text/event-stream`
+- whether the reverse proxy buffers responses
+- whether proxy timeouts are long enough
+- whether the agent is current
+
+For Nginx, the inference route commonly needs:
+
+```nginx
+proxy_buffering off;
+proxy_cache off;
+```
+
+## Request timeout
+
+Hivenet Router’s default request timeout is:
+
+```text
+60 seconds
+```
+
+Long coding requests may exceed it because they can include:
+
+- large system instructions
+- many tool definitions
+- long project context
+- slow model startup
+- large requested outputs
+- backend queueing
+
+Increase it when representative requests need more time:
+
+```bash
+./bin/hivenet-router \
+  --request-timeout 5m \
+  ...
+```
+
+The client cannot extend a shorter deadline enforced by the router.
+
+Avoid increasing the timeout before checking whether the backend is healthy and making progress.
+
+## Model access and quotas
+
+Pi requests use the same Hivenet Router controls as other clients.
+
+The API key may be subject to:
+
+- model allowlists
+- strict per-model quota enumeration
+- request-rate limits
+- daily token budgets
+- expiration
+- routing policies
+- provider fallback
+
+For several Pi models, include each one in the key configuration.
+
+For example:
+
+```yaml
+models:
+  - code-model-large
+  - code-model-fast
+```
+
+or:
+
+```yaml
+quota:
+  per_model:
+    code-model-large:
+      requests_per_minute_per_replica: 10
+      tokens_per_day: 1000000
+
+    code-model-fast:
+      requests_per_minute_per_replica: 30
+      tokens_per_day: 250000
+```
+
+Use a dedicated Pi client key when you need independent:
+
+- revocation
+- rotation
+- model access
+- quotas
+- audit attribution
+
+## Restricted-egress environments
+
+Pi performs some startup network operations independently of model inference.
+
+Disable install and update telemetry:
+
+```bash
+export PI_TELEMETRY=0
+```
+
+Disable only the version check:
+
+```bash
+export PI_SKIP_VERSION_CHECK=1
+```
+
+Disable Pi’s startup network operations:
+
+```bash
+export PI_OFFLINE=1
+```
+
+You can also start one session with:
+
+```bash
+pi --offline
+```
+
+Offline mode disables Pi’s startup update, package-update, and telemetry requests. It does not prevent the selected model provider from calling the configured Hivenet Router router.
+
+Network policy remains the authoritative control for:
+
+- model traffic
+- extensions
+- packages
+- external tools
+- shell commands
+- session sharing
+
+## Session sharing
+
+Pi’s:
+
+```text
+/share
+```
+
+command uploads the current session as a private GitHub gist.
+
+Do not use it when a session may contain:
+
+- private source code
+- credentials
+- customer data
+- internal prompts or documents
+- security findings
+- regulated information
+
+The command is explicit rather than automatic, but Pi does not provide an internal policy control that prevents a user or extension from invoking external network operations.
+
+Use network restrictions and organizational controls where sharing must be prohibited.
+
+## Extensions and packages
+
+Pi can load extensions, skills, prompt templates, and packages.
+
+These can change:
+
+- available tools
+- model behavior
+- project instructions
+- network access
+- command execution
+- session handling
+
+Third-party extensions execute with the same system access as Pi.
+
+Review their source and provenance before installation.
+
+For a minimal Hivenet Router integration test, begin without third-party extensions and add them only after the model, tools, and router path work correctly.
+
+## Observe Pi traffic
+
+Give Pi its own client key and owner:
+
+```yaml
+metadata:
+  name: "Pi development"
+  owner: "pi-development"
+```
+
+Search its audit records in Loki:
+
+```logql
+{
+  job="mycoroute",
+  log_type="audit",
+  tenant_id="pi-development"
+}
+  | json
+```
+
+Request rate by model:
+
+```promql
+sum by (tenant_id, model) (
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+```
+
+Failed requests:
+
+```promql
+sum by (tenant_id, model) (
+  rate(
+    hivenet_router_tenant_requests_failed_total[5m]
+  )
+)
+```
+
+Use the request or trace ID from an audit record to investigate one failed tool or inference step.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Startup error: provider not found | `defaultProvider`/`--provider` doesn't match the key under `providers` in `models.json` | Same id in both places (case-sensitive) |
-| `401` from router | Env var name mismatch (`$mycoroute_API_KEY` is case-sensitive) or wrong header | `env \| grep mycoroute_API_KEY`; the OpenAI SDK sends `Authorization: Bearer` automatically — no extra header should be needed |
-| Backend rejects request with `unknown field reasoning_effort` / `unknown role developer` / `unknown field max_completion_tokens` | Missing `compat` flags | Set the four flags shown in Step 2 (`supportsDeveloperRole: false`, `supportsReasoningEffort: false`, `maxTokensField: "max_tokens"`) |
-| Streaming returns but `usage` is absent | Older vLLM build without `include_usage` in stream tail | Set `compat.supportsUsageInStreaming: false`; router falls back to its own token meter |
-| Chat works but tool calls have no effect (writes don't happen, bash doesn't run) | vLLM launched without tool-call parsing | Restart agent's vLLM with `--enable-auto-tool-choice --tool-call-parser qwen3_xml` (or `hermes` for Qwen2.5) |
-| `model_not_found` from router | `models[].id` doesn't match what any agent registers | `curl /v1/models` and update the `id` |
+### The provider or model does not appear
 
-### Reading the right logs
+Check the configuration file:
 
-- **Router**: `docker logs gpt-router 2>&1 | grep -iE "chat/completions|policy|no eligible"`
-- **Agent (proxy)**: `docker logs mycoroute-agent-<model> 2>&1 | tail -40`
-- **Backend (vLLM)**: `docker logs vllm-<model> 2>&1 | tail -40` — request validation errors live here, not in the agent or router logs.
+```bash
+jq . \
+  ~/.pi/agent/models.json
+```
 
----
+List matching models:
 
-## Why we use the OpenAI path, not the Anthropic path
+```bash
+pi --list-models mycoroute
+```
 
-pi *also* supports `api: "anthropic-messages"` against a custom `baseURL`. It's a valid option, and the request shape is spec-correct (pi puts `system` as a top-level field, so it does **not** have the inline-`system` role bug that affects Claude Code 2.1.154+). Two reasons we recommend the OpenAI path anyway:
+Check that:
 
-1. **No header gymnastics.** The Anthropic SDK sends `x-api-key` by default. To use `Authorization: Bearer` you'd set `authHeader: true` *and* override `x-api-key` to suppress it — workable but more moving parts.
-2. **Lighter dialect.** vLLM's OpenAI-compatible server is its first-class endpoint; the Anthropic translation layer is thinner (and was the source of the recent Claude Code regression we worked around).
+- the file is in the active Pi configuration directory
+- `providers.mycoroute` exists
+- `baseUrl` ends in `/v1`
+- `api` is `openai-completions`
+- `authHeader` is `true`
+- `models` contains at least one entry
+- each model has an `id`
+- the API-key value can be resolved
 
-If you specifically want Anthropic-style prompt caching exposed by the router later, the `anthropic-messages` provider is the place — but today, `openai-completions` is the cleanest path.
+Open `/model` again after editing the file.
 
----
+### Pi reports that no API key is available
 
-## Known limitations
+Check the variable:
 
-- **`max_tokens` ceiling.** vLLM enforces `max_tokens ≤ max_model_len − prompt_tokens`. The `models[].maxTokens` value in `models.json` is the upper bound pi will request; keep it well below the model's context window or you'll hit backend 400s on long prompts.
-- **Streaming required.** pi *always* streams (`stream: true` is hardcoded). Your router and agents already handle SSE correctly post-deploy, so this is a non-issue today — but it means non-streaming-only backends are unusable through pi.
-- **Backend 4xx responses currently bench the agent** via the router's `prev_failures` gate (router behaviour, not pi-specific). A malformed client can transiently take all agents serving a model offline. Durable fix is a router-side change to distinguish backend 4xx from agent failures.
-- **`enabledModels` glob patterns** in `settings.json` filter which models the `Ctrl+P` cycle and TUI picker show, but do *not* restrict what `--model` can target. Don't rely on `enabledModels` as access control.
-- **`/share` slash command** uploads the current session to a private GitHub gist. Opt-in / explicit — no automatic exfiltration — but worth noting if you handle regulated data: train people to know what `/share` does.
+```bash
+test -n "$MYCOROUTE_API_KEY" \
+  && echo set \
+  || echo missing
+```
 
----
+The configuration must include the `$`:
 
-## See also
+```json
+"apiKey": "$MYCOROUTE_API_KEY"
+```
 
-- [Integrations Overview](/integrations/overview) — when to use Claude Code vs OpenCode vs pi.
-- [Inference Endpoints](/api/chat-completions) — `/v1/chat/completions` reference and the allowlisted passthrough.
-- [auth.yaml Reference](/security/auth-yaml-reference) — API keys, quotas, token budget enforcement.
-- [pi docs — Models](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md) — upstream reference for `models.json`.
-- [pi docs — Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md) — upstream reference for the built-in providers and `compat` flags.
-- [pi docs — Settings](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md) — `settings.json` schema and telemetry flags.
+This is a literal string rather than environment interpolation:
+
+```json
+"apiKey": "MYCOROUTE_API_KEY"
+```
+
+### Hivenet Router returns `401 Unauthorized`
+
+Check that:
+
+- the variable contains the raw client key
+- the key has not expired
+- the key belongs to client authentication
+- the variable reached the Pi process
+
+Test the same value directly:
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  https://router.example.com/v1/models
+```
+
+### Requests return a plain `404`
+
+Check the base URL.
+
+It should be:
+
+```text
+https://router.example.com/v1
+```
+
+not:
+
+```text
+https://router.example.com
+```
+
+and not:
+
+```text
+https://router.example.com/v1/chat/completions
+```
+
+Also confirm that the provider uses:
+
+```json
+"api": "openai-completions"
+```
+
+rather than `openai-responses`.
+
+### Hivenet Router returns `model_not_found`
+
+Compare Pi’s configuration with the live catalog:
+
+```bash
+pi --list-models mycoroute
+```
+
+```bash
+curl \
+  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  https://router.example.com/v1/models \
+  | jq -r '.data[].id'
+```
+
+Check:
+
+- capitalization
+- punctuation and slashes
+- backend served-model name
+- agent registration
+- key model access
+- agent health
+
+### Text works but tools do not
+
+Check that:
+
+- the model supports tool calling
+- the backend uses a model-appropriate tool parser
+- vLLM was started with `--enable-auto-tool-choice`
+- the chat template supports tool and tool-result messages
+- the backend returns structured `tool_calls`
+- the model follows the schemas reliably
+
+Test the backend directly with a Chat Completions request containing a `tools` array.
+
+Hivenet Router forwards the response. It does not convert plain model text into a structured tool call.
+
+### Tool calls appear as text
+
+The backend parser did not recognize the model’s tool syntax.
+
+Review:
+
+- model family
+- tool-call parser
+- chat template
+- backend version
+- streaming tool-call support
+
+Inspect the backend logs first.
+
+### The backend rejects the `developer` role
+
+Add:
+
+```json
+"compat": {
+  "supportsDeveloperRole": false
+}
+```
+
+to the provider or affected model.
+
+Open `/model` again to reload the configuration.
+
+### The backend rejects `reasoning_effort`
+
+Add:
+
+```json
+"compat": {
+  "supportsReasoningEffort": false
+}
+```
+
+Do this only for models or backends that reject the field.
+
+### The backend rejects `max_completion_tokens`
+
+Add:
+
+```json
+"compat": {
+  "maxTokensField": "max_tokens"
+}
+```
+
+Current vLLM supports both fields, but other OpenAI-compatible servers may not.
+
+### Streaming usage causes a validation error
+
+Add:
+
+```json
+"compat": {
+  "supportsUsageInStreaming": false
+}
+```
+
+This prevents Pi from requesting the final streaming usage block.
+
+### Pi compacts too early
+
+Increase the configured:
+
+```json
+"contextWindow"
+```
+
+only when the deployed backend genuinely accepts the larger context.
+
+Check the backend’s effective maximum model length.
+
+### The backend rejects the prompt as too long
+
+Reduce:
+
+- `contextWindow`
+- `maxTokens`
+- included project context
+- requested output
+
+An accurate context configuration lets Pi compact before the request reaches the backend limit.
+
+### Output arrives only after completion
+
+Test streaming directly with curl.
+
+Then check:
+
+- backend SSE behavior
+- reverse-proxy buffering
+- proxy read and idle timeouts
+- Hivenet Router request timeout
+- agent logs
+
+### Pi modifies files without asking
+
+This is expected behavior.
+
+Pi does not have a built-in permission-prompt system.
+
+Restart it with restricted tools:
+
+```bash
+pi \
+  --tools read,grep,find,ls
+```
+
+Use a container, virtual machine, or equivalent sandbox when tools need stronger boundaries.
+
+### Requests return `504 request_timeout`
+
+The request exceeded the Hivenet Router deadline.
+
+Check:
+
+- backend readiness
+- prompt size
+- output size
+- engine queue depth
+- router-side capacity queueing
+- current request timeout
+
+Increase the deadline only after confirming that the backend is progressing normally.
+
+## Read the relevant logs
+
+<Tabs>
+  <Tab title="Router">
+    ```bash
+    docker compose logs router \
+      | grep -iE \
+        "chat/completions|invalid_parameter|context_length|policy|timeout"
+    ```
+  </Tab>
+  <Tab title="Agent">
+    ```bash
+    docker compose logs <agent-service> \
+      | tail -100
+    ```
+  </Tab>
+  <Tab title="Backend">
+    ```bash
+    docker compose logs <backend-service> \
+      | tail -100
+    ```
+  </Tab>
+</Tabs>
+
+Request-schema, context, chat-template, and tool-parser failures usually appear most clearly in the backend log.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Open WebUI" href="/integrations/open-web-ui">
+    Add a browser-based chat interface backed by Hivenet Router.
+  </Card>
+
+  <Card title="Use from code" href="/integrations/use-from-code">
+    Call Hivenet Router from SDKs, scripts, and custom applications.
+  </Card>
+
+  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+    Review the supported LLM request paths and streaming behavior.
+  </Card>
+
+  <Card title="API keys" href="/security/api-keys">
+    Configure model access, quotas, expiration, and rotation.
+  </Card>
+
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Deploy and register an OpenAI-compatible inference backend.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Investigate Pi requests by tenant, model, status, and agent.
+  </Card>
+</CardGroup>

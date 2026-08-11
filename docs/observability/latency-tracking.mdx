@@ -1,0 +1,857 @@
+---
+title: "Latency tracking"
+description: "Understand how Hivenet Router measures router-observed request latency and calculates per-agent SRTT and RTTVAR."
+sidebarTitle: "Latency tracking"
+---
+
+Hivenet Router tracks per-agent request latency using a smoothed round-trip-time estimate.
+
+The router records one latency sample whenever it forwards a request to an agent and receives the agent’s HTTP response headers. It then updates two values:
+
+- **SRTT** is the smoothed round-trip time.
+- **RTTVAR** describes how much recent samples vary from the smoothed value.
+
+Hivenet Router adapts the update rules from [RFC 6298](https://datatracker.ietf.org/doc/html/rfc6298), which defines TCP’s retransmission-time estimator. It uses the RFC’s initialization and variance calculation, but changes the smoothing factor when latency improves.
+
+<Note>
+  Hivenet Router uses SRTT as an operational routing signal.
+
+  It does not calculate or use TCP’s retransmission timeout, and its samples measure application-level request behavior rather than TCP packet round trips.
+</Note>
+
+## What Hivenet Router measures
+
+The router starts timing immediately before it sends the HTTP request over libp2p.
+
+The sample ends when the router receives the HTTP response headers from the agent.
+
+```text
+Router sends request
+        │
+        │ libp2p request
+        ▼
+Agent forwards to backend
+        │
+        │ backend response begins
+        ▼
+Agent sends response headers
+        │
+        ▼
+Router records latency sample
+```
+
+The resulting value includes:
+
+- router-to-agent transport time
+- work performed by the agent
+- time spent waiting for the inference backend
+- backend response timing
+- agent-to-router transport time
+
+It is measured in milliseconds.
+
+## Streaming and non-streaming requests
+
+The meaning of one sample depends on how the response is delivered.
+
+### Streaming Chat Completions
+
+For a streaming response, the agent forwards the backend’s response headers as soon as the stream begins.
+
+The sample therefore approximates:
+
+```text
+router-agent transport
++ backend queueing and prompt setup
++ time until the backend begins its streaming response
+```
+
+This boundary can be close to time to first token, but it is not the same measurement. SRTT ends when response headers reach the router; engine TTFT ends when the backend records its first generated token.
+
+It does not include the time needed to generate and deliver the complete response.
+
+This response-header boundary is also where the current implementation releases the agent’s declared capacity slot and the router’s forwarding slot for a streaming request. Backend generation can continue after the SRTT sample has been recorded and those slots have been released.
+
+### Non-streaming Chat Completions
+
+For the native non-streaming Chat Completions path, the agent buffers the complete backend response before returning headers to the router.
+
+The sample therefore approximates:
+
+```text
+router-agent transport
++ backend queueing
++ complete inference
++ response processing
+```
+
+### Other passthrough endpoints
+
+For passthrough routes, the exact point at which headers become available depends on the backend and endpoint behavior.
+
+<Warning>
+  Do not compare SRTT values blindly across different request types.
+
+  A short streaming request, a long non-streaming completion, an embedding batch, and a reranking request measure different amounts of backend work.
+</Warning>
+
+Use SRTT to compare agents serving similar workloads and request shapes.
+
+## What SRTT does not measure
+
+SRTT does not include:
+
+- client-to-router network latency
+- time spent waiting in Hivenet Router’s per-model capacity queue
+- time needed to send a complete stream to the client
+- delays caused by a slow client reading streamed output
+- application processing before the request reaches Hivenet Router
+- application processing after the response leaves Hivenet Router
+
+This keeps the value centered on the router-agent-backend path.
+
+For complete client-visible latency, use the router HTTP, tenant-duration, audit, and tracing data instead.
+
+## Why Hivenet Router does not use end-to-end latency
+
+End-to-end latency would mix agent performance with conditions the agent cannot control.
+
+For example:
+
+- a distant client would make the selected agent look slower
+- a request waiting in the router queue would inflate the agent’s value
+- a client reading an SSE stream slowly would extend the measured duration
+- clients in different locations would make agent comparisons inconsistent
+
+SRTT measures every agent from the router’s point of view. That makes values more useful for comparing agents inside one Hivenet Router deployment.
+
+## First latency sample
+
+For the first valid sample, Hivenet Router initializes the values as:
+
+```text
+SRTT   = R
+RTTVAR = R / 2
+```
+
+where:
+
+```text
+R = the first measured request latency
+```
+
+For a first sample of 200 milliseconds:
+
+```text
+SRTT   = 200 ms
+RTTVAR = 100 ms
+```
+
+The routing table reports the latency state as:
+
+```text
+UNKNOWN
+```
+
+before the first sample and:
+
+```text
+KNOWN
+```
+
+after the estimator has been initialized.
+
+## Subsequent samples
+
+Hivenet Router updates RTTVAR before SRTT.
+
+```text
+RTTVAR =
+  0.75 × previous RTTVAR
+  + 0.25 × |previous SRTT - new sample|
+```
+
+The SRTT calculation uses an asymmetric smoothing factor.
+
+### When latency improves
+
+When the new sample is lower than the current SRTT:
+
+```text
+SRTT =
+  0.5 × previous SRTT
+  + 0.5 × new sample
+```
+
+This gives the new, faster sample a weight of:
+
+```text
+α = 0.5
+```
+
+### When latency worsens
+
+When the new sample is equal to or higher than the current SRTT:
+
+```text
+SRTT =
+  0.875 × previous SRTT
+  + 0.125 × new sample
+```
+
+This uses:
+
+```text
+α = 0.125
+```
+
+The result adapts quickly when an agent becomes faster and more cautiously when one slow sample appears.
+
+## Why the smoothing is asymmetric
+
+Language-model backends can produce large one-off latency samples.
+
+Examples include:
+
+- loading a model after startup
+- a cold cache
+- garbage collection
+- temporary host contention
+- a large prompt
+- an unusually long non-streaming response
+
+Using a larger weight when latency improves helps an agent recover quickly after a cold or anomalous request.
+
+Using a smaller weight when latency worsens prevents one brief spike from immediately dominating its routing history.
+
+<Note>
+  This is a Hivenet Router adaptation.
+
+  RFC 6298 normally uses `α = 1/8` for subsequent SRTT updates in both directions. Hivenet Router uses `α = 1/2` only for improving samples.
+</Note>
+
+## Example
+
+Assume an agent has:
+
+```text
+SRTT   = 200 ms
+RTTVAR = 50 ms
+```
+
+It then produces a 5,000-millisecond sample.
+
+### After the slow sample
+
+Update RTTVAR first:
+
+```text
+RTTVAR =
+  0.75 × 50
+  + 0.25 × |200 - 5000|
+
+RTTVAR = 1237.5 ms
+```
+
+Because the sample is worse than SRTT:
+
+```text
+SRTT =
+  0.875 × 200
+  + 0.125 × 5000
+
+SRTT = 800 ms
+```
+
+The single spike raises SRTT from 200 to 800 milliseconds rather than immediately replacing it with 5,000 milliseconds.
+
+### After a normal 200-millisecond sample
+
+The new sample is better than the current SRTT, so Hivenet Router uses the faster downward update:
+
+```text
+SRTT =
+  0.5 × 800
+  + 0.5 × 200
+
+SRTT = 500 ms
+```
+
+Further 200-millisecond samples produce:
+
+| Sample | Updated SRTT |
+| --: | --: |
+| Initial state | `800 ms` |
+| 1 | `500 ms` |
+| 2 | `350 ms` |
+| 3 | `275 ms` |
+| 4 | `237.5 ms` |
+| 5 | `218.75 ms` |
+
+The estimate moves back toward normal behavior without forgetting the spike immediately.
+
+## Successful and failed requests
+
+Successful requests update SRTT and RTTVAR.
+
+Failed requests also update the estimator when the router obtained a positive latency sample before the failure.
+
+Examples include:
+
+- a backend returning an error response
+- an unsuccessful response received from an agent
+- a transport failure after the request was sent
+
+Failures that occur before Hivenet Router can obtain a meaningful sample do not update latency.
+
+For example:
+
+- failure to create the outbound request
+- failure before a connection to the agent is established
+- another local error with a zero sample
+
+This lets latency history include slow or failed backend responses without fabricating a measurement for work that never reached an agent.
+
+## Live routing values
+
+Routing policies use the current in-memory SRTT.
+
+They do not read the periodically flushed BadgerDB record for every request.
+
+This matters because the persistent record may be up to one flush interval behind an actively serving agent.
+
+The default universal-history flush interval is:
+
+```text
+30 seconds
+```
+
+The live in-memory value is updated immediately after a recorded request outcome.
+
+## Persistence
+
+Hivenet Router persists SRTT and RTTVAR in BadgerDB under the agent’s peer ID.
+
+The router flushes universal agent history:
+
+- every 30 seconds by default
+- when an agent disconnects
+- during graceful router shutdown
+
+Change the periodic interval:
+
+```bash
+./bin/hivenet-router \
+  --universal-flush-interval 1m \
+  ...
+```
+
+The persistent record uses the router’s normal disk retention period, which defaults to:
+
+```text
+30 days
+```
+
+## Warm start
+
+When an agent reconnects with the same peer ID, Hivenet Router restores its previous SRTT and RTTVAR.
+
+For example:
+
+```text
+Persisted SRTT: 195 ms
+Router restarts
+Agent reconnects with the same peer ID
+First new sample: 190 ms
+Updated SRTT: 192.5 ms
+```
+
+Without the persisted baseline, the first request would initialize a new estimator.
+
+<Warning>
+  Warm start depends on a stable agent peer ID.
+
+  Configure `--identity-path` and preserve the identity file or volume across agent restarts. An agent with a new peer ID begins with no previous latency history.
+</Warning>
+
+## Reset latency history
+
+The administration metrics-reset endpoint clears SRTT and RTTVAR together with the other persisted per-agent lifetime metrics.
+
+```text
+POST /admin/metrics/reset
+```
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/metrics/reset
+```
+
+After the reset, the next valid request sample initializes the estimator again.
+
+<Danger>
+  This operation also clears other per-agent historical request, token, failure, and disconnection counters.
+
+  It is not a latency-only reset.
+</Danger>
+
+## View current values
+
+Use the routing table:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      engine: .metadata.engine,
+      latency_state: .universal.latency_state,
+      srtt_ms: .universal.srtt_ms,
+      rttvar_ms: .universal.rttvar_ms
+    }'
+```
+
+A response may resemble:
+
+```json
+{
+  "peer_id": "12D3KooW...",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "engine": "vllm",
+  "latency_state": "KNOWN",
+  "srtt_ms": 214.5,
+  "rttvar_ms": 38.2
+}
+```
+
+Before the agent has a sample:
+
+```json
+{
+  "latency_state": "UNKNOWN",
+  "srtt_ms": null,
+  "rttvar_ms": null
+}
+```
+
+## Prometheus metrics
+
+Hivenet Router exports:
+
+```text
+hivenet_router_agent_srtt_ms
+hivenet_router_agent_rttvar_ms
+```
+
+Labels:
+
+```text
+peer_id
+model
+engine
+organization
+machine
+```
+
+### SRTT by agent
+
+```promql
+hivenet_router_agent_srtt_ms
+```
+
+### Average SRTT by model
+
+```promql
+avg by (model) (
+  hivenet_router_agent_srtt_ms
+)
+```
+
+### SRTT by engine
+
+```promql
+avg by (engine) (
+  hivenet_router_agent_srtt_ms
+)
+```
+
+### Agents above 500 milliseconds
+
+```promql
+hivenet_router_agent_srtt_ms > 500
+```
+
+### High variation
+
+```promql
+hivenet_router_agent_rttvar_ms > 300
+```
+
+### SRTT compared with variation
+
+```promql
+hivenet_router_agent_srtt_ms
++
+4
+*
+hivenet_router_agent_rttvar_ms
+```
+
+This final query can be useful for visualization, but Hivenet Router does not use it as a TCP-style retransmission timeout.
+
+## Interpret RTTVAR
+
+RTTVAR represents the smoothed absolute difference between recent samples and SRTT.
+
+A low value suggests relatively consistent observed latency.
+
+A high value suggests greater variation, which may come from:
+
+- variable prompt or generation lengths
+- queueing
+- cache misses
+- mixed streaming and non-streaming traffic
+- backend contention
+- network instability
+- cold starts
+- different request types sharing one agent
+
+<Warning>
+  High RTTVAR does not identify the cause of variation.
+
+  Correlate it with request shape, engine queues, TTFT, ITL, hardware pressure, logs, and traces.
+</Warning>
+
+## Use SRTT in a routing policy
+
+The policy field is:
+
+```text
+srtt
+```
+
+The threshold uses milliseconds.
+
+```yaml
+routing_policy:
+  exclude_if:
+    srtt:
+      gt: 500
+
+  strategy: least-loaded
+```
+
+This excludes an agent whose current SRTT is above 500 milliseconds.
+
+<Warning>
+  Use `srtt`, not `srtt_ms`, in policy YAML.
+
+  `srtt_ms` is the JSON and Prometheus naming convention. The policy field is `srtt`.
+</Warning>
+
+## Missing latency history passes
+
+A new agent with no request samples has no SRTT value.
+
+When a policy contains:
+
+```yaml
+exclude_if:
+  srtt:
+    gt: 500
+```
+
+the gate is skipped for that new agent until latency history exists.
+
+The agent can therefore receive traffic before it has an established SRTT.
+
+Use tags or a staged policy when new agents need a warm-up period before production traffic.
+
+## SRTT is not a ranking strategy
+
+The only currently implemented ranking strategy is:
+
+```text
+least-loaded
+```
+
+This is not supported:
+
+```yaml
+strategy: lowest-srtt
+```
+
+A policy using it is rejected during validation.
+
+SRTT can currently be used as an exclusion gate and observability signal.
+
+## Choose a threshold
+
+A useful SRTT threshold depends on:
+
+- streaming or non-streaming behavior
+- model size
+- prompt length
+- expected output length
+- backend engine
+- hardware
+- agent location
+- service objective
+
+A 500-millisecond threshold may be reasonable for one streaming workload and impossible for a long non-streaming completion.
+
+Use observed distributions before setting a gate.
+
+A practical process is:
+
+1. collect several days of representative traffic
+2. group SRTT by model and engine
+3. identify normal and degraded ranges
+4. compare SRTT with RTTVAR and backend metrics
+5. set a conservative threshold
+6. create a relaxed fallback step
+7. monitor fallback and policy-exhaustion rates
+
+Example:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+
+  exclude_if:
+    srtt:
+      gt: 500
+
+  strategy: least-loaded
+
+fallback_chain:
+  - name: relaxed-latency
+
+    match:
+      engine: vllm
+
+    exclude_if:
+      srtt:
+        gt: 1500
+
+    strategy: least-loaded
+```
+
+## Alerting examples
+
+The thresholds below are examples. Establish values from your own workload.
+
+### High SRTT
+
+```yaml
+groups:
+  - name: hivenet-router-latency
+
+    rules:
+      - alert: HivenetRouterHighSRTT
+
+        expr: |
+          hivenet_router_agent_srtt_ms > 500
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High smoothed request latency on {{ $labels.peer_id }}
+```
+
+### High RTTVAR
+
+```yaml
+      - alert: HivenetRouterUnstableLatency
+
+        expr: |
+          hivenet_router_agent_rttvar_ms > 300
+
+        for: 10m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            Unstable request latency on {{ $labels.peer_id }}
+```
+
+### Model-level degradation
+
+```yaml
+      - alert: HivenetRouterModelLatencyDegradation
+
+        expr: |
+          avg by (model) (
+            hivenet_router_agent_srtt_ms
+          ) > 750
+
+        for: 5m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: >-
+            High average SRTT for {{ $labels.model }}
+```
+
+## Debug latency changes
+
+Enable debug logs:
+
+```bash
+export GOLOG_LOG_LEVEL="router=debug,metrics=debug"
+```
+
+Start the router, then search for latency-related records:
+
+<Tabs>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -fu hivenet-router \
+      | grep -i "srtt\|rtt"
+    ```
+  </Tab>
+  <Tab title="Docker Compose">
+    ```bash
+    docker compose logs -f router \
+      | grep -i "srtt\|rtt"
+    ```
+  </Tab>
+</Tabs>
+
+Use tracing when you need to break the request into router, agent, backend, and provider spans.
+
+Use audit or tenant-duration metrics when you need client-visible request duration rather than router-agent SRTT.
+
+## Troubleshooting
+
+### SRTT remains unknown
+
+The agent has not produced a valid recorded request sample.
+
+Check that:
+
+- the agent is registered
+- it has served a request
+- the request reached the agent
+- the router recorded a success or a failure with a positive sample
+
+Inspect:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      latency_state: .universal.latency_state,
+      successful: .universal.successful_requests_total,
+      failed: .universal.failed_requests_total
+    }'
+```
+
+### SRTT is much higher than TTFT
+
+The requests may be non-streaming.
+
+For native non-streaming Chat Completions, SRTT includes the complete inference before the agent returns headers. Engine TTFT measures only the start of model output.
+
+Also check:
+
+- router-agent network time
+- backend queueing
+- response parsing
+- mixed request types
+- different observation windows
+
+### SRTT changes after switching to streaming
+
+This is expected.
+
+Streaming usually records latency near response start, while non-streaming native chat records latency after the complete backend response is ready.
+
+Establish separate baselines when both modes are used heavily.
+
+### SRTT remains high after a cold start
+
+The estimator moves downward quickly, but it still needs successful faster samples.
+
+Send representative requests and check whether:
+
+- the backend is fully loaded
+- queue pressure has cleared
+- new samples are actually lower
+- the agent is still serving unusually large requests
+
+### SRTT resets after an agent restart
+
+The agent may have started with a new peer ID.
+
+Check that `--identity-path` points to persistent storage and compare the current peer ID with the previous deployment.
+
+Also confirm that:
+
+- the router uses a persistent BadgerDB directory
+- universal history was not reset
+- the previous record has not expired
+- the router shut down or flushed recently enough to preserve the latest value
+
+### Policy does not exclude a slow agent
+
+Check that the field is:
+
+```yaml
+srtt:
+```
+
+rather than:
+
+```yaml
+srtt_ms:
+```
+
+Inspect the live routing-table value.
+
+A new agent with no SRTT passes the gate.
+
+Also confirm that the agent survived the earlier model, health, capability, match, failure, and capacity gates.
+
+### Prometheus shows zero before traffic
+
+The SRTT gauge may be seeded at zero when the agent first registers without latency history.
+
+Use the routing table’s:
+
+```text
+latency_state
+```
+
+when you need to distinguish an initialized low value from an unknown estimator.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+    Combine latency with GPU, CPU, memory, cache, and queue pressure.
+  </Card>
+
+  <Card title="Routing concepts" href="/routing/routing-concepts">
+    See where the SRTT gate fits inside the complete routing pipeline.
+  </Card>
+
+  <Card title="Performance characteristics" href="/reference/performance-characteristics">
+    Review performance measurements, scope, and testing considerations.
+  </Card>
+</CardGroup>

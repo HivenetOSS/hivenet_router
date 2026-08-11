@@ -1,30 +1,30 @@
 ---
 title: "Ollama agent"
-description: "Connect an Ollama backend to Mycoroute, select the model an agent represents, and configure capacity for local or edge inference."
+description: "Connect an Ollama backend to Hivenet Router, select the model an agent represents, and configure capacity for local or edge inference."
 sidebarTitle: "Ollama"
 ---
 
-Connect an Ollama server to Mycoroute by running an agent beside the backend.
+Connect an Ollama server to Hivenet Router by running an agent beside the backend.
 
-The agent checks Ollama through its `/api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
+The agent checks Ollama through its `/use-the-api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
 
 <Warning>
-  One Mycoroute agent represents one model. If your Ollama server contains several models, pin each agent to a model with `--model` and run a separate agent process for each one.
+  One Hivenet Router agent represents one model. If your Ollama server contains several models, pin each agent to a model with `--model` and run a separate agent process for each one.
 </Warning>
 
 <Note>
-  Ollama does not provide the engine metrics collected from vLLM, SGLang, or metrics-enabled llama.cpp servers. Mycoroute still records routing, request, latency, health, and available hardware metrics for the agent.
+  Ollama does not provide the engine metrics collected from vLLM, SGLang, or metrics-enabled llama.cpp servers. Hivenet Router still records routing, request, latency, health, and available hardware metrics for the agent.
 </Note>
 
 ## Before you start
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - Ollama on the agent host
 - at least one model pulled in Ollama
 - network access between the agent and router
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 
 The examples use:
@@ -129,17 +129,17 @@ Replace these values with addresses and model names from your deployment.
 Check that the Ollama server is ready:
 
 ```bash
-curl http://localhost:11434/api/tags \
+curl http://localhost:11434/use-the-api/tags \
   | jq .
 ```
 
 The response should contain the model you pulled.
 
-## Prepare the Mycoroute agent
+## Prepare the Hivenet Router agent
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -168,10 +168,10 @@ The response should contain the model you pulled.
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the router’s JWT secret somewhere the agent can read, for example:
@@ -197,7 +197,7 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -224,7 +224,7 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine ollama \
       --model llama3.1:8b \
       --backend-url http://localhost:11434 \
@@ -248,7 +248,7 @@ The agent waits until Ollama responds and the selected model is available. If Ol
 | `--backend-url` | Base URL of the local Ollama server |
 | `--router-grpc` | Router endpoint used for agent authentication |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Mycoroute may assign |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--identity-path` | Persistent private key that keeps the peer ID stable |
 
@@ -267,7 +267,7 @@ Policies can match these values when selecting agents.
 If you omit `--model`, the agent requests:
 
 ```text
-GET <backend-url>/api/tags
+GET <backend-url>/use-the-api/tags
 ```
 
 It registers the first model returned by Ollama.
@@ -276,9 +276,9 @@ Automatic discovery is convenient when the Ollama server contains one model. Pin
 
 ### The `:latest` suffix
 
-Ollama adds `:latest` when a model has no explicit tag. Mycoroute removes that implicit suffix during discovery.
+Ollama adds `:latest` when a model has no explicit tag. Hivenet Router removes that implicit suffix during discovery.
 
-| Ollama model name | Registered with Mycoroute |
+| Ollama model name | Registered with Hivenet Router |
 | --- | --- |
 | `llama3.1:latest` | `llama3.1` |
 | `llama3.1:8b` | `llama3.1:8b` |
@@ -292,16 +292,16 @@ When using `--model`, provide the model name expected by Ollama:
 --model llama3.1:8b
 ```
 
-The model name clients send to Mycoroute must match the model registered by the agent.
+The model name clients send to Hivenet Router must match the model registered by the agent.
 
 ## Run several Ollama models
 
-Run one agent for each model you want Mycoroute to expose.
+Run one agent for each model you want Hivenet Router to expose.
 
 For the first model:
 
 ```bash
-./bin/mycoroute-agent \
+./bin/hivenet-agent \
   --engine ollama \
   --model llama3.1:8b \
   --backend-url http://localhost:11434 \
@@ -312,7 +312,7 @@ For the first model:
 For another model:
 
 ```bash
-./bin/mycoroute-agent \
+./bin/hivenet-agent \
   --engine ollama \
   --model mistral:7b \
   --backend-url http://localhost:11434 \
@@ -326,7 +326,7 @@ The agents can share the same Ollama backend URL.
 
 ## Set agent capacity
 
-`--capacity` controls how many concurrent requests Mycoroute may assign to the agent.
+`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
 
 It does not change Ollama’s own parallelism or memory settings.
 
@@ -348,10 +348,10 @@ These values are starting points, not fixed limits. The right setting depends on
 
 Test the backend under representative load before raising capacity.
 
-When the agent reaches capacity, Mycoroute stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
+When the agent reaches capacity, Hivenet Router stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
 
 <Note>
-  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
 </Note>
 
 ## Verify the connection
@@ -393,13 +393,13 @@ curl -X POST http://192.168.1.100:8080/v1/chat/completions \
   }'
 ```
 
-Applications call Mycoroute’s OpenAI-compatible endpoint. The agent forwards the request to the Ollama backend.
+Applications call Hivenet Router’s OpenAI-compatible endpoint. The agent forwards the request to the Ollama backend.
 
 ## Available observability
 
 The Ollama integration does not scrape an engine-specific Prometheus endpoint.
 
-Mycoroute can still expose:
+Hivenet Router can still expose:
 
 - agent health
 - routed request counts
@@ -455,13 +455,13 @@ ollama pull llama3.1:8b
 Check the endpoint used by the agent:
 
 ```bash
-curl http://localhost:11434/api/tags \
+curl http://localhost:11434/use-the-api/tags \
   | jq .
 ```
 
 ### The wrong model is registered
 
-When `--model` is omitted, the agent registers the first model returned by `/api/tags`.
+When `--model` is omitted, the agent registers the first model returned by `/use-the-api/tags`.
 
 Restart the agent with an explicit model:
 
@@ -473,7 +473,7 @@ Restart the agent with an explicit model:
 
 This is expected.
 
-Mycoroute converts:
+Hivenet Router converts:
 
 ```text
 llama3.1:latest
@@ -492,7 +492,7 @@ Explicit tags such as `:8b` or `:7b` are preserved.
 Check the server:
 
 ```bash
-curl http://localhost:11434/api/tags
+curl http://localhost:11434/use-the-api/tags
 ```
 
 For a Linux process, inspect its log:
@@ -544,13 +544,13 @@ Check the agent logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
   </Tab>
   <Tab title="systemd">
     ```bash
     sudo journalctl \
-      -u mycoroute-agent \
+      -u hivenet-agent \
       -n 100 \
       --no-pager
     ```
@@ -578,7 +578,7 @@ Make sure `--identity-path` points to persistent storage.
 For Docker:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].Mounts'
 ```
 
@@ -599,7 +599,7 @@ nvidia-smi
 For Docker, confirm the agent received GPU access:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].HostConfig.DeviceRequests'
 ```
 
