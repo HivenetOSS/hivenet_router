@@ -187,5 +187,12 @@
       "github": "https://github.com/HivenetOSS/hivenet_router"
     }
   },
-  "description": "Open-source routing for self-hosted and distributed AI inference."
+  "description": "Open-source routing for self-hosted and distributed AI inference.",
+  "redirects": [
+    {
+      "source": "/__rollback-marker",
+      "destination": "/",
+      "permanent": true
+    }
+  ]
 }
