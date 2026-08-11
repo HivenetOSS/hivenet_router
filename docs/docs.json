@@ -1,11 +1,11 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
+  "theme": "luma",
   "name": "Hivenet Router",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#FF9A33",
+    "light": "#FFB366",
+    "dark": "#D46E35"
   },
   "favicon": "/favicon.svg",
   "navigation": {
@@ -138,14 +138,18 @@
   "navbar": {
     "links": [
       {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
+        "href": "https://github.com/HivenetOSS/hivenet_router",
+        "label": "GitHub"
+      },
+      {
+        "href": "https://github.com/HivenetOSS/hivenet_router/issues",
+        "label": "Issues"
       }
     ],
     "primary": {
       "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "label": "View on GitHub",
+      "href": "https://github.com/HivenetOSS/hivenet_router"
     }
   },
   "contextual": {
@@ -164,5 +168,6 @@
     "socials": {
       "github": "https://github.com/HivenetOSS/hivenet_router"
     }
-  }
+  },
+  "description": "Open-source routing for self-hosted and distributed AI inference."
 }
