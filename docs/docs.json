@@ -29,7 +29,9 @@
       },
       {
         "group": "Deploy Mycoroute",
-        "pages": []
+        "pages": [
+          "deploy/docker-quickstart"
+        ]
       },
       {
         "group": "Use the API",
