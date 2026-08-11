@@ -4,7 +4,7 @@ description: "Understand how the router, agents, control plane, data plane, stor
 sidebarTitle: "Architecture overview"
 ---
 
-Mycoroute uses a hub-and-spoke architecture.
+Hivenet Router uses a hub-and-spoke architecture.
 
 A central router exposes the API used by applications and coordinates a fleet of agents. Each agent connects one inference backend to the router and reports the information needed to make routing decisions.
 
@@ -14,7 +14,7 @@ Applications only need to know the router endpoint. They do not need to know whi
 
 ## Main components
 
-Mycoroute has two runtime components: the router and one or more agents.
+Hivenet Router has two runtime components: the router and one or more agents.
 
 ### Router
 
@@ -81,7 +81,7 @@ A deployment can mix different backend types. Applications continue to use the r
 
 ## Request lifecycle
 
-A typical inference request moves through Mycoroute like this:
+A typical inference request moves through Hivenet Router like this:
 
 1. A client sends a request to the router.
 2. The router authenticates the client if API authentication is enabled.
@@ -93,9 +93,9 @@ A typical inference request moves through Mycoroute like this:
 8. The request is forwarded to the agent over the encrypted libp2p data plane.
 9. The agent sends the request to its local inference backend.
 10. The response returns through the agent and router to the client.
-11. Mycoroute records the outcome and updates routing and latency metrics.
+11. Hivenet Router records the outcome and updates routing and latency metrics.
 
-If the initial routing step cannot serve the request, Mycoroute can continue through a configured fallback chain. An optional provider fallback can send the request to OpenAI or Anthropic after local options are exhausted.
+If the initial routing step cannot serve the request, Hivenet Router can continue through a configured fallback chain. An optional provider fallback can send the request to OpenAI or Anthropic after local options are exhausted.
 
 ## Routing pipeline
 
@@ -109,11 +109,11 @@ Routing policies use three stages.
 
 `least-loaded` is currently the only implemented ranking strategy. It ranks agents by the proportion of their declared capacity that is in use.
 
-If you do not configure a policy file, Mycoroute uses its built-in least-loaded policy without static filters or dynamic gates.
+If you do not configure a policy file, Hivenet Router uses its built-in least-loaded policy without static filters or dynamic gates.
 
 ## Control and data paths
 
-Mycoroute separates authentication from inference traffic.
+Hivenet Router separates authentication from inference traffic.
 
 ### Agent authentication
 
@@ -156,11 +156,11 @@ Agents collect backend and system state at different intervals. The router uses 
 
 Routing signals carry recent engine and hardware data without updating the agent’s heartbeat timestamp. Heartbeats act as the health keepalive and include fallback metric information.
 
-This separation lets Mycoroute receive fresh routing data without treating every metrics update as proof that the agent is healthy.
+This separation lets Hivenet Router receive fresh routing data without treating every metrics update as proof that the agent is healthy.
 
 ## Storage
 
-Mycoroute uses two BadgerDB stores.
+Hivenet Router uses two BadgerDB stores.
 
 | Store | Location | Purpose | Default lifetime |
 | --- | --- | --- | --- |
@@ -177,7 +177,7 @@ The disk database preserves information such as smoothed round-trip time and lif
 
 ## Authentication and access control
 
-Mycoroute handles agent and client authentication separately.
+Hivenet Router handles agent and client authentication separately.
 
 ### Agents
 
@@ -215,7 +215,7 @@ Common deployments include:
 - router and agents running in Docker
 - a mix of local infrastructure and hosted compute instances
 
-Mycoroute does not require Kubernetes. The current repository does not include a supported Helm deployment.
+Hivenet Router does not require Kubernetes. The current repository does not include a supported Helm deployment.
 
 ## What to read next
 
@@ -224,7 +224,7 @@ Mycoroute does not require Kubernetes. The current repository does not include a
     Deploy a router and several agents, then send your first routed request.
   </Card>
 
-  <Card title="Mycoroute and Hivenet services" href="/getting-started/mycoroute-hivenet-inference-api-compute">
-    Understand how Mycoroute differs from Hivenet Inference API and Compute with Hivenet.
+  <Card title="Hivenet Router and Hivenet services" href="/getting-started/mycoroute-hivenet-inference-api-compute">
+    Understand how Hivenet Router differs from Hivenet Inference API and Compute with Hivenet.
   </Card>
 </CardGroup>

@@ -4,24 +4,24 @@ description: "Connect a vLLM backend to Mycoroute, configure model discovery and
 sidebarTitle: "vLLM"
 ---
 
-Connect a vLLM inference server to Mycoroute by running an agent beside the backend.
+Connect a vLLM inference server to Hivenet Router by running an agent beside the backend.
 
-The agent discovers the model served by vLLM, registers it with the router, forwards requests, and reports engine and hardware metrics that Mycoroute can use for routing and observability.
+The agent discovers the model served by vLLM, registers it with the router, forwards requests, and reports engine and hardware metrics that Hivenet Router can use for routing and observability.
 
 <Warning>
-  Each Mycoroute agent registers one model. If a backend exposes several models, run a separate agent for each model and use `--model` to select the model that agent represents.
+  Each Hivenet Router agent registers one model. If a backend exposes several models, run a separate agent for each model and use `--model` to select the model that agent represents.
 </Warning>
 
 ## Before you start
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - an NVIDIA GPU with CUDA support
 - network access between the agent host and the router
 - access to the model you want to serve
 - either Docker or a Python environment supported by vLLM
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 
 The examples use:
@@ -99,13 +99,13 @@ curl http://localhost:8888/v1/models \
   | jq '.data[].id'
 ```
 
-The model ID returned here is the value clients must use when sending requests through Mycoroute.
+The model ID returned here is the value clients must use when sending requests through Hivenet Router.
 
-## Prepare the Mycoroute agent
+## Prepare the Hivenet Router agent
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -134,10 +134,10 @@ The model ID returned here is the value clients must use when sending requests t
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the shared JWT secret somewhere the agent process can read, for example:
@@ -161,7 +161,7 @@ The model ID returned here is the value clients must use when sending requests t
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -185,7 +185,7 @@ The model ID returned here is the value clients must use when sending requests t
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine vllm \
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
@@ -250,7 +250,7 @@ Use `--model` when you want to pin the agent to a specific model:
 The explicit value overrides automatic discovery.
 
 <Note>
-  The model name registered by the agent must match the model name clients send to Mycoroute.
+  The model name registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
 ## Connect multiple models
@@ -260,7 +260,7 @@ Each agent registers as an independent peer and represents one model.
 If one backend exposes multiple models, start one agent process for each model:
 
 ```bash
-./bin/mycoroute-agent \
+./bin/hivenet-agent \
   --engine vllm \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --backend-url http://localhost:8888 \
@@ -271,7 +271,7 @@ If one backend exposes multiple models, start one agent process for each model:
 Start the second agent with a different model and identity:
 
 ```bash
-./bin/mycoroute-agent \
+./bin/hivenet-agent \
   --engine vllm \
   --model meta-llama/Llama-3.1-70B-Instruct \
   --backend-url http://localhost:8888 \
@@ -293,11 +293,11 @@ vllm serve ... \
 ```
 
 ```bash
-mycoroute-agent ... \
+hivenet-agent ... \
   --capacity 256
 ```
 
-You may set the Mycoroute capacity slightly lower to preserve headroom:
+You may set the Hivenet Router capacity slightly lower to preserve headroom:
 
 ```bash
 --capacity 224
@@ -305,10 +305,10 @@ You may set the Mycoroute capacity slightly lower to preserve headroom:
 
 When an agent reaches its declared capacity, the router stops assigning new requests to it and considers other matching agents or configured fallback steps.
 
-Capacity does not change vLLM’s own scheduler limit. It tells Mycoroute how much work the agent is prepared to accept.
+Capacity does not change vLLM’s own scheduler limit. It tells Hivenet Router how much work the agent is prepared to accept.
 
 <Note>
-  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify vLLM concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify vLLM concurrency under sustained streaming load.
 </Note>
 
 ## Verify the connection
@@ -364,7 +364,7 @@ The agent scrapes vLLM’s `/metrics` endpoint every 500 milliseconds by default
 
 It sends the resulting engine data to the router, which exposes it through the router’s Prometheus endpoint. The agent does not expose a separate Prometheus port.
 
-| Signal | vLLM source | Mycoroute use |
+| Signal | vLLM source | Hivenet Router use |
 | --- | --- | --- |
 | KV cache utilization | `vllm:kv_cache_usage_perc` | Routing gates and observability |
 | Running requests | `vllm:num_requests_running` | Routing and load visibility |
@@ -380,20 +380,20 @@ View all engine metrics on the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep mycoroute_agent_engine
+  | grep hivenet_router_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-mycoroute_agent_engine_kv_cache_utilization
-mycoroute_agent_engine_running_requests
-mycoroute_agent_engine_waiting_requests
-mycoroute_agent_engine_preemptions_total
-mycoroute_agent_engine_avg_ttft_seconds
-mycoroute_agent_engine_p90_ttft_seconds
-mycoroute_agent_engine_avg_itl_seconds
-mycoroute_agent_engine_p90_itl_seconds
+hivenet_router_agent_engine_kv_cache_utilization
+hivenet_router_agent_engine_running_requests
+hivenet_router_agent_engine_waiting_requests
+hivenet_router_agent_engine_preemptions_total
+hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_router_agent_engine_avg_itl_seconds
+hivenet_router_agent_engine_p90_itl_seconds
 ```
 
 View live values through the routing table:
@@ -429,7 +429,7 @@ exclude_if:
     gt: 0
 ```
 
-When a metric is unavailable for an agent, Mycoroute skips that gate for the agent rather than excluding it.
+When a metric is unavailable for an agent, Hivenet Router skips that gate for the agent rather than excluding it.
 
 See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy schema.
 
@@ -471,12 +471,12 @@ Check the agent logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
   </Tab>
   <Tab title="systemd">
     ```bash
-    sudo journalctl -u mycoroute-agent -n 100 --no-pager
+    sudo journalctl -u hivenet-agent -n 100 --no-pager
     ```
   </Tab>
 </Tabs>
@@ -492,7 +492,7 @@ Check that the router and agent use the same JWT secret.
 
 ### KV cache utilization remains high
 
-Reduce the amount of work Mycoroute assigns to the agent:
+Reduce the amount of work Hivenet Router assigns to the agent:
 
 ```bash
 --capacity 128
@@ -512,7 +512,7 @@ Rising preemptions indicate that vLLM is evicting in-flight KV-cache data under 
 
 Reduce:
 
-- `--capacity` on the Mycoroute agent
+- `--capacity` on the Hivenet Router agent
 - `--max-num-seqs` on vLLM
 - model context or batch pressure, where appropriate for your workload
 
@@ -533,7 +533,7 @@ Make sure `--identity-path` points to persistent storage.
 For Docker, confirm the volume is mounted:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].Mounts'
 ```
 
@@ -564,7 +564,7 @@ Metrics are scraped in the background. A scrape failure does not stop the agent 
   </Card>
 
   <Card title="Routing concepts" href="/routing/routing-concepts">
-    Learn how Mycoroute filters and ranks matching agents.
+    Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
   <Card title="Engine metrics" href="/observability/engine-metrics">

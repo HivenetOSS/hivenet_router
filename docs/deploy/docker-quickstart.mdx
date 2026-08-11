@@ -1,12 +1,12 @@
 ---
 title: "Docker quickstart"
 sidebarTitle: "Docker quickstart"
-description: "Deploy a Mycoroute router and two vLLM agents across Linux hosts with Docker, then verify routing and metrics."
+description: "Deploy a Hivenet Router router and two vLLM agents across Linux hosts with Docker, then verify routing and metrics."
 ---
 
-Deploy one Mycoroute router and two vLLM agents across three Linux machines.
+Deploy one Hivenet Router router and two vLLM agents across three Linux machines.
 
-The router receives application requests through one client-facing API. Each agent connects a vLLM backend to the router. Both agents serve the same model, allowing Mycoroute to distribute requests between them.
+The router receives application requests through one client-facing API. Each agent connects a vLLM backend to the router. Both agents serve the same model, allowing Hivenet Router to distribute requests between them.
 
 <Note>
   The hostnames and private IP addresses in this guide are examples. Replace them with addresses from your own network.
@@ -16,7 +16,7 @@ The router receives application requests through one client-facing API. Each age
 
 | Machine | Role | Example IP | GPU |
 | --- | --- | --- | --- |
-| `router-server` | Mycoroute router | `192.168.1.100` | None |
+| `router-server` | Hivenet Router router | `192.168.1.100` | None |
 | `gpu-eu-1` | Agent and vLLM | `192.168.1.101` | NVIDIA GPU |
 | `gpu-eu-2` | Agent and vLLM | `192.168.1.102` | NVIDIA GPU |
 
@@ -33,7 +33,7 @@ Agents authenticate with the router over gRPC, receive the router’s libp2p con
 | Agents → Router | `9000` | libp2p registration and communication |
 | Monitoring → Router | `2112` | Prometheus metrics |
 
-Agent hosts initiate their connections to the router and do not need to expose an inbound Mycoroute port.
+Agent hosts initiate their connections to the router and do not need to expose an inbound Hivenet Router port.
 
 Keep the Prometheus endpoint restricted to your monitoring network.
 
@@ -56,7 +56,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     On `router-server`, clone the repository:
 
     ```bash
-    git clone https://github.com/HiveNetCode/mycoroute.git
+    git clone https://github.com/HivenetOSS/hivenet_router.git
     cd mycoroute
     ```
 
@@ -85,7 +85,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     Clone the repository:
 
     ```bash
-    git clone https://github.com/HiveNetCode/mycoroute.git
+    git clone https://github.com/HivenetOSS/hivenet_router.git
     cd mycoroute
     ```
 
@@ -155,10 +155,10 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     docker run -d \
-      --name mycoroute-router \
+      --name hivenet-router \
       --restart unless-stopped \
       --network host \
-      -e mycoroute_ALLOW_INSECURE_ADMIN=true \
+      -e HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true \
       -v "$PWD/jwt.secret:/jwt.secret:ro" \
       -v "$PWD/badger:/badger" \
       mycoroute/router:latest \
@@ -174,7 +174,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     The router uses host networking so its HTTP, gRPC, libp2p, and metrics interfaces bind directly to the machine.
 
     <Warning>
-      `mycoroute_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` for this quickstart. Configure administrator API-key authentication before exposing the router to shared or untrusted networks.
+      `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` for this quickstart. Configure administrator API-key authentication before exposing the router to shared or untrusted networks.
     </Warning>
 
     Check the public liveness endpoint:
@@ -250,7 +250,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -271,7 +271,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     Check the agent logs:
 
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
 
     The agent waits for the backend to become healthy, discovers the model through `GET /v1/models`, authenticates with the router, and registers.
@@ -309,7 +309,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -450,7 +450,7 @@ Because the agent container uses host networking, it reaches vLLM at `localhost:
 Check the agent logs:
 
 ```bash
-docker logs mycoroute-agent
+docker logs hivenet-agent
 ```
 
 Test the agent’s connection to the router:
@@ -508,7 +508,7 @@ docker run --rm \
 Confirm that the agent container received a GPU device request:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | grep -A5 DeviceRequests
 ```
 
@@ -536,15 +536,15 @@ sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
 On each agent host:
 
 ```bash
-docker stop mycoroute-agent vllm
-docker rm mycoroute-agent vllm
+docker stop hivenet-agent vllm
+docker rm hivenet-agent vllm
 ```
 
 On the router:
 
 ```bash
-docker stop mycoroute-router
-docker rm mycoroute-router
+docker stop hivenet-router
+docker rm hivenet-router
 ```
 
 The BadgerDB data in the mounted `badger` directory and agent identity files in `/opt/mycoroute` remain after the containers are removed.
@@ -561,6 +561,6 @@ The BadgerDB data in the mounted `badger` directory and agent identity files in 
   </Card>
 
   <Card title="Routing concepts" href="/routing/routing-concepts">
-    Control how Mycoroute filters, ranks, and falls back across agents.
+    Control how Hivenet Router filters, ranks, and falls back across agents.
   </Card>
 </CardGroup>

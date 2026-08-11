@@ -4,23 +4,23 @@ description: "Connect an SGLang backend to Mycoroute and expose cache, queue, an
 sidebarTitle: "SGLang"
 ---
 
-Connect an SGLang inference server to Mycoroute by running an agent beside the backend.
+Connect an SGLang inference server to Hivenet Router by running an agent beside the backend.
 
 The agent discovers the model exposed by SGLang, registers it with the router, forwards OpenAI-compatible chat-completion requests, and reports engine and hardware metrics.
 
 <Warning>
-  Each Mycoroute agent registers one model. If an SGLang server exposes several models, run a separate agent for each model and use `--model` to select the model that agent represents.
+  Each Hivenet Router agent registers one model. If an SGLang server exposes several models, run a separate agent for each model and use `--model` to select the model that agent represents.
 </Warning>
 
 ## Before you start
 
 You need:
 
-- a running Mycoroute router
+- a running Hivenet Router router
 - an NVIDIA GPU with CUDA support
 - SGLang installed or available as a Docker image
 - network access between the agent host and router
-- the Mycoroute agent binary or Docker image
+- the Hivenet Router agent binary or Docker image
 - the same JWT secret used by the router
 - access to the model you want to serve
 
@@ -90,7 +90,7 @@ Replace these values with addresses and model names from your deployment.
 </Tabs>
 
 <Warning>
-  Start SGLang with `--enable-metrics`. Without it, Mycoroute can still forward requests, but SGLang’s cache, queue, and time-to-first-token metrics will not be available.
+  Start SGLang with `--enable-metrics`. Without it, Hivenet Router can still forward requests, but SGLang’s cache, queue, and time-to-first-token metrics will not be available.
 </Warning>
 
 For a multi-GPU deployment, set the tensor-parallel size:
@@ -119,13 +119,13 @@ curl http://localhost:3000/v1/models \
   | jq '.data[].id'
 ```
 
-The model ID returned here is the value clients must use when sending requests through Mycoroute.
+The model ID returned here is the value clients must use when sending requests through Hivenet Router.
 
-## Prepare the Mycoroute agent
+## Prepare the Hivenet Router agent
 
 <Tabs>
   <Tab title="Docker">
-    From the Mycoroute repository, build the agent image if you have not already done so:
+    From the Hivenet Router repository, build the agent image if you have not already done so:
 
     ```bash
     docker build \
@@ -154,10 +154,10 @@ The model ID returned here is the value clients must use when sending requests t
     ```
   </Tab>
   <Tab title="Bare metal">
-    Build the agent from the Mycoroute repository:
+    Build the agent from the Hivenet Router repository:
 
     ```bash
-    go build -o bin/mycoroute-agent ./cmd/agent/
+    go build -o bin/hivenet-agent ./cmd/agent/
     ```
 
     Place the shared JWT secret somewhere the agent process can read, for example:
@@ -181,7 +181,7 @@ The model ID returned here is the value clients must use when sending requests t
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-agent \
+      --name hivenet-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
@@ -205,7 +205,7 @@ The model ID returned here is the value clients must use when sending requests t
   </Tab>
   <Tab title="Bare metal">
     ```bash
-    ./bin/mycoroute-agent \
+    ./bin/hivenet-agent \
       --engine sglang \
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
@@ -229,7 +229,7 @@ The agent waits for SGLang to become healthy and expose a model before registeri
 | `--backend-url` | Base URL of the local SGLang server |
 | `--router-grpc` | Router endpoint used for agent authentication |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Mycoroute may assign |
+| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -270,12 +270,12 @@ Use `--model` to pin the agent to a particular model:
 The explicit value overrides automatic discovery.
 
 <Note>
-  The model registered by the agent must match the model name clients send to Mycoroute.
+  The model registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
 ## Set agent capacity
 
-`--capacity` controls how many concurrent requests Mycoroute may assign to the agent.
+`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
 
 It does not change SGLang’s own scheduler or memory configuration.
 
@@ -294,12 +294,12 @@ For example:
 --capacity 20
 ```
 
-When the agent reaches its declared capacity, Mycoroute stops assigning new requests to it and considers other matching agents or configured fallback steps.
+When the agent reaches its declared capacity, Hivenet Router stops assigning new requests to it and considers other matching agents or configured fallback steps.
 
 Test the backend under representative load before increasing capacity.
 
 <Note>
-  For streaming responses, Mycoroute releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify SGLang concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify SGLang concurrency under sustained streaming load.
 </Note>
 
 ## Verify the connection
@@ -341,7 +341,7 @@ curl -X POST http://192.168.1.100:8080/v1/chat/completions \
   }'
 ```
 
-Applications call Mycoroute’s OpenAI-compatible endpoint. The agent forwards the request to SGLang’s OpenAI-compatible API.
+Applications call Hivenet Router’s OpenAI-compatible endpoint. The agent forwards the request to SGLang’s OpenAI-compatible API.
 
 ## SGLang metrics
 
@@ -349,7 +349,7 @@ The agent scrapes SGLang’s `/metrics` endpoint every 500 milliseconds by defau
 
 It sends the resulting engine data to the router, which exposes it through the router’s Prometheus endpoint. The agent does not expose a separate Prometheus port.
 
-| Signal | SGLang source | Mycoroute field |
+| Signal | SGLang source | Hivenet Router field |
 | --- | --- | --- |
 | Token-cache utilization | `sglang:token_usage` | `kv_cache_utilization` |
 | Running requests | `sglang:num_running_reqs` | `running_requests` |
@@ -357,7 +357,7 @@ It sends the resulting engine data to the router, which exposes it through the r
 | Average time to first token | `sglang:time_to_first_token_seconds` | Average TTFT |
 | P90 time to first token | `sglang:time_to_first_token_seconds` | P90 TTFT |
 
-SGLang does not expose an inter-token-latency histogram through this integration. Mycoroute therefore does not populate average or P90 ITL values for SGLang agents.
+SGLang does not expose an inter-token-latency histogram through this integration. Hivenet Router therefore does not populate average or P90 ITL values for SGLang agents.
 
 SGLang also has no preemption metric equivalent to the one collected from vLLM.
 
@@ -365,17 +365,17 @@ View engine metrics on the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep mycoroute_agent_engine
+  | grep hivenet_router_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-mycoroute_agent_engine_kv_cache_utilization
-mycoroute_agent_engine_running_requests
-mycoroute_agent_engine_waiting_requests
-mycoroute_agent_engine_avg_ttft_seconds
-mycoroute_agent_engine_p90_ttft_seconds
+hivenet_router_agent_engine_kv_cache_utilization
+hivenet_router_agent_engine_running_requests
+hivenet_router_agent_engine_waiting_requests
+hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_router_agent_engine_p90_ttft_seconds
 ```
 
 View current values through the routing table:
@@ -419,7 +419,7 @@ exclude_if:
     gt: 2
 ```
 
-When a metric is unavailable for an agent, Mycoroute skips that gate for the agent rather than excluding it.
+When a metric is unavailable for an agent, Hivenet Router skips that gate for the agent rather than excluding it.
 
 See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy schema.
 
@@ -529,13 +529,13 @@ Check the agent logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-agent
+    docker logs hivenet-agent
     ```
   </Tab>
   <Tab title="systemd">
     ```bash
     sudo journalctl \
-      -u mycoroute-agent \
+      -u hivenet-agent \
       -n 100 \
       --no-pager
     ```
@@ -563,7 +563,7 @@ Make sure `--identity-path` points to persistent storage.
 For Docker:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].Mounts'
 ```
 
@@ -596,7 +596,7 @@ nvidia-smi
 For Docker, confirm the agent received GPU access:
 
 ```bash
-docker inspect mycoroute-agent \
+docker inspect hivenet-agent \
   | jq '.[0].HostConfig.DeviceRequests'
 ```
 
@@ -610,7 +610,7 @@ The agent continues to operate without NVML. It reports CPU and memory metrics b
   </Card>
 
   <Card title="Routing concepts" href="/routing/routing-concepts">
-    Learn how Mycoroute filters and ranks matching agents.
+    Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
   <Card title="Engine metrics" href="/observability/engine-metrics">

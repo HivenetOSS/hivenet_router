@@ -1,10 +1,10 @@
 ---
 title: "Bare-metal deployment"
-description: "Run the Mycoroute router and agents as native Linux services managed by systemd."
+description: "Run the Hivenet Router router and agents as native Linux services managed by systemd."
 sidebarTitle: "Bare metal"
 ---
 
-Run the Mycoroute router and agents as native Linux binaries managed by systemd.
+Run the Hivenet Router router and agents as native Linux binaries managed by systemd.
 
 This setup avoids a container runtime and gives you direct control over process supervision, filesystem permissions, logs, resource limits, and upgrades.
 
@@ -18,9 +18,9 @@ The examples use three machines:
 
 | Machine | Role | Example IP | Software |
 | --- | --- | --- | --- |
-| `router-server` | Mycoroute router | `192.168.1.100` | Router binary |
-| `gpu-eu-1` | Inference host | `192.168.1.101` | vLLM and Mycoroute agent |
-| `gpu-eu-2` | Inference host | `192.168.1.102` | vLLM and Mycoroute agent |
+| `router-server` | Hivenet Router router | `192.168.1.100` | Router binary |
+| `gpu-eu-1` | Inference host | `192.168.1.101` | vLLM and Hivenet Router agent |
+| `gpu-eu-2` | Inference host | `192.168.1.102` | vLLM and Hivenet Router agent |
 
 Applications send requests to the router. Each agent connects its local inference backend to the router.
 
@@ -35,7 +35,7 @@ Applications send requests to the router. Each agent connects its local inferenc
 
 Restrict ports `50051` and `9000` to agent hosts.
 
-Agent hosts initiate their connections to the router and do not need to expose an inbound Mycoroute port. Keep the metrics endpoint limited to your monitoring network.
+Agent hosts initiate their connections to the router and do not need to expose an inbound Hivenet Router port. Keep the metrics endpoint limited to your monitoring network.
 
 ## Prerequisites
 
@@ -50,25 +50,25 @@ You need:
 
 Go is required only to build the binaries. It does not need to be installed on the runtime hosts.
 
-This guide uses vLLM as the example backend. Mycoroute also supports Ollama, SGLang, llama.cpp, Infinity, and custom OpenAI-compatible servers.
+This guide uses vLLM as the example backend. Hivenet Router also supports Ollama, SGLang, llama.cpp, Infinity, and custom OpenAI-compatible servers.
 
 ## Build the binaries
 
 On the build machine:
 
 ```bash
-git clone https://github.com/HiveNetCode/mycoroute.git
+git clone https://github.com/HivenetOSS/hivenet_router.git
 cd mycoroute
 
-go build -o bin/mycoroute-router ./cmd/router/
-go build -o bin/mycoroute-agent ./cmd/agent/
+go build -o bin/hivenet-router ./cmd/router/
+go build -o bin/hivenet-agent ./cmd/agent/
 ```
 
 Check that both binaries start:
 
 ```bash
-./bin/mycoroute-router --help
-./bin/mycoroute-agent --help
+./bin/hivenet-router --help
+./bin/hivenet-agent --help
 ```
 
 ## Prepare the runtime hosts
@@ -164,7 +164,7 @@ getent group render >/dev/null \
 Copy the router binary to the router host through a temporary location:
 
 ```bash
-scp bin/mycoroute-router router-server:/tmp/mycoroute-router
+scp bin/hivenet-router router-server:/tmp/hivenet-router
 ```
 
 On `router-server`:
@@ -174,17 +174,17 @@ sudo install \
   -o root \
   -g root \
   -m 0755 \
-  /tmp/mycoroute-router \
-  /opt/mycoroute/mycoroute-router
+  /tmp/hivenet-router \
+  /opt/mycoroute/hivenet-router
 
-rm /tmp/mycoroute-router
+rm /tmp/hivenet-router
 ```
 
 Copy the agent binary to each inference host:
 
 ```bash
-scp bin/mycoroute-agent gpu-eu-1:/tmp/mycoroute-agent
-scp bin/mycoroute-agent gpu-eu-2:/tmp/mycoroute-agent
+scp bin/hivenet-agent gpu-eu-1:/tmp/hivenet-agent
+scp bin/hivenet-agent gpu-eu-2:/tmp/hivenet-agent
 ```
 
 On each inference host:
@@ -194,10 +194,10 @@ sudo install \
   -o root \
   -g root \
   -m 0755 \
-  /tmp/mycoroute-agent \
-  /opt/mycoroute/mycoroute-agent
+  /tmp/hivenet-agent \
+  /opt/mycoroute/hivenet-agent
 
-rm /tmp/mycoroute-agent
+rm /tmp/hivenet-agent
 ```
 
 Keeping the binaries owned by `root` prevents the service account from replacing its own executable.
@@ -221,7 +221,7 @@ scp jwt.secret gpu-eu-1:/tmp/mycoroute-jwt.secret
 scp jwt.secret gpu-eu-2:/tmp/mycoroute-jwt.secret
 ```
 
-On each host, install it with permissions that allow the Mycoroute service to read it:
+On each host, install it with permissions that allow the Hivenet Router service to read it:
 
 ```bash
 sudo install \
@@ -229,7 +229,7 @@ sudo install \
   -g mycoroute \
   -m 0640 \
   /tmp/mycoroute-jwt.secret \
-  /etc/mycoroute/jwt.secret
+  /etc/hivenet-router/jwt.secret
 
 rm /tmp/mycoroute-jwt.secret
 ```
@@ -267,22 +267,22 @@ curl http://localhost:8888/health
 
 A ready vLLM server returns HTTP status `200`.
 
-The Mycoroute agent runs as a long-lived daemon. It can start before the backend is ready and will continue polling until it becomes available. If the backend or router later becomes unavailable, the agent waits and reconnects rather than exiting on the first transient failure.
+The Hivenet Router agent runs as a long-lived daemon. It can start before the backend is ready and will continue polling until it becomes available. If the backend or router later becomes unavailable, the agent waits and reconnects rather than exiting on the first transient failure.
 
 ## Configure the router service
 
 Create:
 
 ```text
-/etc/systemd/system/mycoroute-router.service
+/etc/systemd/system/hivenet-router.service
 ```
 
 with the following content:
 
 ```ini
 [Unit]
-Description=Mycoroute router
-Documentation=https://github.com/HiveNetCode/mycoroute
+Description=Hivenet Router router
+Documentation=https://github.com/HivenetOSS/hivenet_router
 After=network-online.target
 Wants=network-online.target
 
@@ -292,8 +292,8 @@ User=mycoroute
 Group=mycoroute
 WorkingDirectory=/var/lib/mycoroute
 
-ExecStart=/opt/mycoroute/mycoroute-router \
-  --jwt-secret-file /etc/mycoroute/jwt.secret \
+ExecStart=/opt/mycoroute/hivenet-router \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
   --http-port :8080 \
   --grpc-port :50051 \
   --p2p-port 9000 \
@@ -301,7 +301,7 @@ ExecStart=/opt/mycoroute/mycoroute-router \
   --metrics-port :2112 \
   --disk-db-path /var/lib/mycoroute/badger
 
-Environment=mycoroute_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
+Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
 Environment=mycoroute_ALLOW_INSECURE_ADMIN=true
 
 Restart=on-failure
@@ -310,7 +310,7 @@ TimeoutStopSec=30s
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=mycoroute-router
+SyslogIdentifier=hivenet-router
 
 UMask=0027
 NoNewPrivileges=true
@@ -338,7 +338,7 @@ The `--p2p-listen-addr 0.0.0.0` setting is required when agents connect from oth
 Create a host-specific environment file on `gpu-eu-1`:
 
 ```text
-/etc/mycoroute/agent.env
+/etc/hivenet-router/agent.env
 ```
 
 with:
@@ -352,22 +352,22 @@ AGENT_CAPACITY=32
 Protect the file:
 
 ```bash
-sudo chown root:mycoroute /etc/mycoroute/agent.env
-sudo chmod 0640 /etc/mycoroute/agent.env
+sudo chown root:mycoroute /etc/hivenet-router/agent.env
+sudo chmod 0640 /etc/hivenet-router/agent.env
 ```
 
 Create:
 
 ```text
-/etc/systemd/system/mycoroute-agent.service
+/etc/systemd/system/hivenet-agent.service
 ```
 
 with:
 
 ```ini
 [Unit]
-Description=Mycoroute agent
-Documentation=https://github.com/HiveNetCode/mycoroute
+Description=Hivenet Router agent
+Documentation=https://github.com/HivenetOSS/hivenet_router
 After=network-online.target
 Wants=network-online.target
 
@@ -377,11 +377,11 @@ User=mycoroute
 Group=mycoroute
 SupplementaryGroups=video
 WorkingDirectory=/var/lib/mycoroute/agent
-EnvironmentFile=/etc/mycoroute/agent.env
+EnvironmentFile=/etc/hivenet-router/agent.env
 
-ExecStart=/opt/mycoroute/mycoroute-agent \
+ExecStart=/opt/mycoroute/hivenet-agent \
   --router-grpc ${ROUTER_IP}:50051 \
-  --jwt-secret-file /etc/mycoroute/jwt.secret \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
   --capacity ${AGENT_CAPACITY} \
@@ -394,7 +394,7 @@ TimeoutStopSec=30s
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=mycoroute-agent
+SyslogIdentifier=hivenet-agent
 
 UMask=0027
 NoNewPrivileges=true
@@ -422,7 +422,7 @@ The important multi-machine settings are:
 
 Install the same systemd service file on `gpu-eu-2`.
 
-Create `/etc/mycoroute/agent.env` with host-specific values:
+Create `/etc/hivenet-router/agent.env` with host-specific values:
 
 ```bash
 ROUTER_IP=192.168.1.100
@@ -433,8 +433,8 @@ AGENT_CAPACITY=32
 Protect it:
 
 ```bash
-sudo chown root:mycoroute /etc/mycoroute/agent.env
-sudo chmod 0640 /etc/mycoroute/agent.env
+sudo chown root:mycoroute /etc/hivenet-router/agent.env
+sudo chmod 0640 /etc/hivenet-router/agent.env
 ```
 
 The service file itself does not need to change between hosts.
@@ -445,28 +445,28 @@ On `router-server`:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now mycoroute-router
+sudo systemctl enable --now hivenet-router
 ```
 
 Check its status:
 
 ```bash
-sudo systemctl status mycoroute-router
-sudo journalctl -fu mycoroute-router
+sudo systemctl status hivenet-router
+sudo journalctl -fu hivenet-router
 ```
 
 On each agent host:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now mycoroute-agent
+sudo systemctl enable --now hivenet-agent
 ```
 
 Check the agent:
 
 ```bash
-sudo systemctl status mycoroute-agent
-sudo journalctl -fu mycoroute-agent
+sudo systemctl status hivenet-agent
+sudo journalctl -fu hivenet-agent
 ```
 
 ## Verify the deployment
@@ -564,22 +564,22 @@ On the new host:
 1. Create the `mycoroute` account and directories.
 2. Install the agent binary.
 3. Install the shared JWT secret.
-4. Create `/etc/mycoroute/agent.env` with the router address and agent region.
+4. Create `/etc/hivenet-router/agent.env` with the router address and agent region.
 5. Install the agent systemd unit.
 6. Start the inference backend.
-7. Enable and start `mycoroute-agent`.
+7. Enable and start `hivenet-agent`.
 
 The new agent registers automatically once it can reach the router and its backend is ready.
 
-## Upgrade Mycoroute
+## Upgrade Hivenet Router
 
 Build the new binaries on the build machine:
 
 ```bash
 git pull
 
-go build -o bin/mycoroute-router ./cmd/router/
-go build -o bin/mycoroute-agent ./cmd/agent/
+go build -o bin/hivenet-router ./cmd/router/
+go build -o bin/hivenet-agent ./cmd/agent/
 ```
 
 ### Upgrade agents
@@ -589,29 +589,29 @@ When several agents serve the same model, upgrade them one at a time to preserve
 Copy the new agent binary:
 
 ```bash
-scp bin/mycoroute-agent gpu-eu-1:/tmp/mycoroute-agent.new
+scp bin/hivenet-agent gpu-eu-1:/tmp/hivenet-agent.new
 ```
 
 On the agent host:
 
 ```bash
-sudo systemctl stop mycoroute-agent
+sudo systemctl stop hivenet-agent
 
 sudo cp \
-  /opt/mycoroute/mycoroute-agent \
-  /opt/mycoroute/mycoroute-agent.bak
+  /opt/mycoroute/hivenet-agent \
+  /opt/mycoroute/hivenet-agent.bak
 
 sudo install \
   -o root \
   -g root \
   -m 0755 \
-  /tmp/mycoroute-agent.new \
-  /opt/mycoroute/mycoroute-agent
+  /tmp/hivenet-agent.new \
+  /opt/mycoroute/hivenet-agent
 
-rm /tmp/mycoroute-agent.new
+rm /tmp/hivenet-agent.new
 
-sudo systemctl start mycoroute-agent
-sudo systemctl status mycoroute-agent
+sudo systemctl start hivenet-agent
+sudo systemctl status hivenet-agent
 ```
 
 Confirm that the agent registers again before upgrading the next host.
@@ -621,29 +621,29 @@ Confirm that the agent registers again before upgrading the next host.
 Copy the new binary:
 
 ```bash
-scp bin/mycoroute-router router-server:/tmp/mycoroute-router.new
+scp bin/hivenet-router router-server:/tmp/hivenet-router.new
 ```
 
 On the router host:
 
 ```bash
-sudo systemctl stop mycoroute-router
+sudo systemctl stop hivenet-router
 
 sudo cp \
-  /opt/mycoroute/mycoroute-router \
-  /opt/mycoroute/mycoroute-router.bak
+  /opt/mycoroute/hivenet-router \
+  /opt/mycoroute/hivenet-router.bak
 
 sudo install \
   -o root \
   -g root \
   -m 0755 \
-  /tmp/mycoroute-router.new \
-  /opt/mycoroute/mycoroute-router
+  /tmp/hivenet-router.new \
+  /opt/mycoroute/hivenet-router
 
-rm /tmp/mycoroute-router.new
+rm /tmp/hivenet-router.new
 
-sudo systemctl start mycoroute-router
-sudo systemctl status mycoroute-router
+sudo systemctl start hivenet-router
+sudo systemctl status hivenet-router
 ```
 
 Check the health endpoint before returning traffic:
@@ -657,16 +657,16 @@ curl http://localhost:8080/health
 To restore the previous router binary:
 
 ```bash
-sudo systemctl stop mycoroute-router
+sudo systemctl stop hivenet-router
 
 sudo mv \
-  /opt/mycoroute/mycoroute-router.bak \
-  /opt/mycoroute/mycoroute-router
+  /opt/mycoroute/hivenet-router.bak \
+  /opt/mycoroute/hivenet-router
 
-sudo systemctl start mycoroute-router
+sudo systemctl start hivenet-router
 ```
 
-Use the equivalent commands with `mycoroute-agent` on an agent host.
+Use the equivalent commands with `hivenet-agent` on an agent host.
 
 ## Run an agent behind NAT
 
@@ -688,15 +688,15 @@ When the router itself is behind NAT or another translated network, configure th
 Inspect its status and recent logs:
 
 ```bash
-sudo systemctl status mycoroute-router
-sudo journalctl -u mycoroute-router -n 100 --no-pager
+sudo systemctl status hivenet-router
+sudo journalctl -u hivenet-router -n 100 --no-pager
 ```
 
 For an agent:
 
 ```bash
-sudo systemctl status mycoroute-agent
-sudo journalctl -u mycoroute-agent -n 100 --no-pager
+sudo systemctl status hivenet-agent
+sudo journalctl -u hivenet-agent -n 100 --no-pager
 ```
 
 ### The router cannot read the JWT secret
@@ -704,7 +704,7 @@ sudo journalctl -u mycoroute-agent -n 100 --no-pager
 Check the file ownership and mode:
 
 ```bash
-sudo ls -l /etc/mycoroute/jwt.secret
+sudo ls -l /etc/hivenet-router/jwt.secret
 ```
 
 Expected ownership and permissions:
@@ -716,7 +716,7 @@ Expected ownership and permissions:
 Test access as the service account:
 
 ```bash
-sudo -u mycoroute cat /etc/mycoroute/jwt.secret >/dev/null
+sudo -u mycoroute cat /etc/hivenet-router/jwt.secret >/dev/null
 ```
 
 ### An agent does not register
@@ -773,7 +773,7 @@ If necessary:
 
 ```bash
 sudo usermod -aG video mycoroute
-sudo systemctl restart mycoroute-agent
+sudo systemctl restart hivenet-agent
 ```
 
 If NVML remains unavailable, the agent continues to report CPU and memory metrics but omits GPU metrics.
