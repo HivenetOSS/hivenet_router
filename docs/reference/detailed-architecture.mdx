@@ -354,7 +354,7 @@ The normal agent lifecycle is:
 The agent’s identity file should remain persistent across restarts:
 
 ```bash
---identity-path /var/lib/mycoroute/agent-identity.key
+--identity-path /var/lib/hivenet-router/agent-identity.key
 ```
 
 A stable peer ID lets the router restore the agent’s earlier latency and counter history.
@@ -385,7 +385,7 @@ Both sides derive the same Ed25519 key material from the shared secret using HKD
 The current derivation uses:
 
 ```text
-Salt: mycoroute-grpc-tls-v2
+Salt: hivenet-router-grpc-tls-v2
 Info: ed25519
 ```
 
@@ -421,8 +421,8 @@ Hivenet Router uses two namespaced libp2p HTTP protocols.
 
 | Protocol | Hosted by | Purpose |
 | --- | --- | --- |
-| `/mycoroute/router/1.0.0` | Router | Registration, heartbeat, and routing signals |
-| `/mycoroute/inference/1.0.0` | Agent side of the established connection | Inference request forwarding |
+| `/hivenet_router/router/1.0.0` | Router | Registration, heartbeat, and routing signals |
+| `/hivenet_router/inference/1.0.0` | Agent side of the established connection | Inference request forwarding |
 
 libp2p encrypts peer streams with Noise.
 
@@ -1150,8 +1150,8 @@ The main implementation areas are:
 | --- | --- |
 | Router startup and lifecycle | `cmd/router/main.go`, `internal/router/router.go` |
 | Agent lifecycle and proxy | `cmd/agent/main.go`, `internal/agent/agent.go` |
-| HTTP routes and middleware | `internal/use-the-api/server.go`, `internal/use-the-api/middleware.go` |
-| Inference handlers | `internal/use-the-api/handlers.go` |
+| HTTP routes and middleware | `internal/api/server.go`, `internal/api/middleware.go` |
+| Inference handlers | `internal/api/handlers.go` |
 | Request dispatch and forwarding | `internal/router/processor.go` |
 | Agent registry | `internal/router/registry.go` |
 | Routing policy | `internal/policy/` |

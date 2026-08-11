@@ -1,129 +1,1397 @@
 ---
-title: "Configuration Reference"
+title: "Configuration reference"
+sidebarTitle: "Configuration reference"
+description: "Review every Hivenet Router router and agent flag, supported environment variable, default value, precedence rule, and restart requirement."
 ---
 
-Complete reference for all Router and Agent CLI flags and environment variables.
+Hivenet Router is configured through command-line flags, environment variables, and two optional YAML configuration surfaces:
 
-> **Note on env var casing:** All environment variables use the prefix `HIVENET_ROUTER_` (lowercase 'h', uppercase 'LLM') — this is case-sensitive on Linux.
+- `auth.yaml` for client and administrator authentication
+- policy YAML for routing, fallback, and dynamic gates
 
-## Router Flags
+This page covers process-level router and agent configuration.
 
-| Flag | Environment Variable | Default | Description |
+See [auth.yaml reference](/security/auth-yaml-reference) and [Policy YAML reference](/routing/policy-yaml-reference) for the file schemas.
+
+## View the installed options
+
+Use the binary’s built-in help to confirm the options available in the version you deployed:
+
+```bash
+./bin/hivenet-router --help
+```
+
+```bash
+./bin/hivenet-agent --help
+```
+
+For API-key generation:
+
+```bash
+./bin/hivenet-router keygen --help
+```
+
+<Note>
+  The environment-variable prefix is exactly:
+
+  ```text
+  hivenet_router_
+  ```
+
+  Environment-variable names are case-sensitive on Linux. Use the capitalization shown in this reference.
+</Note>
+
+## Configuration precedence
+
+The router loads configuration in this order:
+
+```text
+Command-line flag
+  overrides
+Environment variable
+  overrides
+Built-in default
+```
+
+For example:
+
+```bash
+export HIVENET_ROUTER_HTTP_PORT=":8081"
+
+./bin/hivenet-router \
+  --http-port :8082 \
+  ...
+```
+
+The router listens on:
+
+```text
+:8082
+```
+
+### Agent precedence
+
+Most agent settings are available only as command-line flags.
+
+The current agent reads these Hivenet Router environment variables directly:
+
+```text
+HIVENET_ROUTER_JWT_SECRET
+HIVENET_ROUTER_GPU_MODEL
+HIVENET_ROUTER_DEPLOYMENT_ID
+HIVENET_ROUTER_REPLICA_ID
+```
+
+Other agent environment variables that resemble flag names are not loaded automatically.
+
+For example, this does not currently configure the agent:
+
+```bash
+export HIVENET_ROUTER_CAPACITY=20
+```
+
+Use:
+
+```bash
+./bin/hivenet-agent \
+  --capacity 20 \
+  ...
+```
+
+instead.
+
+<Warning>
+  Do not assume that every flag has an environment-variable equivalent.
+
+  Only the mappings explicitly shown on this page are implemented.
+</Warning>
+
+## Value formats
+
+### Durations
+
+Duration flags and environment variables use Go duration syntax:
+
+```text
+500ms
+5s
+2m
+1h
+1h30m
+```
+
+Examples:
+
+```bash
+--request-timeout 5m
+--engine-sample-interval 500ms
+--session-ttl 1h
+```
+
+`--disk-db-ttl` is different. It accepts an integer number of days rather than a duration string.
+
+### HTTP and gRPC listen addresses
+
+Router HTTP, gRPC, and metrics values are complete TCP listen addresses.
+
+Listen on every interface:
+
+```text
+:8080
+```
+
+Listen only on loopback:
+
+```text
+127.0.0.1:8080
+```
+
+### libp2p ports
+
+The router’s `--p2p-port` accepts a port without a colon:
+
+```text
+9000
+```
+
+libp2p announce and bootstrap addresses use multiaddress syntax:
+
+```text
+/ip4/203.0.113.10/tcp/9000
+/dns4/router.example.com/tcp/9000
+```
+
+### Paths
+
+Relative paths are resolved from the process’s working directory.
+
+For a system service or container, prefer explicit paths such as:
+
+```text
+/etc/hivenet-router/auth.yaml
+/etc/hivenet-router/policy.yaml
+/var/lib/hivenet-router/badger
+/var/lib/hivenet-router/agent-identity.key
+```
+
+### Tags
+
+Agent tags are comma-separated:
+
+```bash
+--tags production,realtime,gpu
+```
+
+Do not add spaces after commas.
+
+The current parser splits on commas without trimming each value. This:
+
+```bash
+--tags production, realtime
+```
+
+creates the tags:
+
+```text
+production
+ realtime
+```
+
+The second value includes a leading space and will not match:
+
+```yaml
+tags:
+  - realtime
+```
+
+## Router network settings
+
+| Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` | HTTP API port |
-| `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` | gRPC auth port |
-| `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` | libp2p port (no colon prefix) |
-| `--p2p-listen-addr` | — | `127.0.0.1` | libp2p bind address (`0.0.0.0` for remote agents) |
-| `--p2p-announce-addr` | — | \`\` | Advertised P2P address (required behind NAT/Docker) |
-| `--p2p-max-conns-per-ip` | `HIVENET_ROUTER_P2P_MAX_CONNS_PER_IP` | `32` | Max concurrent libp2p connections from one source IP (see note below) |
-| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics port |
-| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | — | **Required.** JWT HMAC-SHA256 secret |
-| `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | \`\` | Path to `auth.yaml` |
-| `HIVENET_ROUTER_AUTH_MODE` | — | `none` | Auth mode: `none`, `api-key`, `dynamic` |
-| `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | \`\` | Routing policy YAML |
-| `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | \`\` | Per-model policies directory |
-| `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default max slot attempts per policy step |
-| `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Internal request channel size |
-| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Capacity wait queue depth per model (0 = disabled) |
-| `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | End-to-end request timeout |
-| `HIVENET_ROUTER_MAX_REQUEST_BYTES` | — | `10485760` | Max `/v1/*` request body size in bytes (10 MB; 0 disables) |
-| `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` | Agent session token TTL (minimum 5m) |
-| `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` | Persistent BadgerDB path |
-| `--disk-db-ttl` | — | `30` | diskDB entry TTL in days (0 = no expiry) |
-| `--reset-disk-db` | — | `false` | Wipe diskDB on startup (testing/migrations) |
-| `--universal-flush-interval` | — | `30s` | How often universal history is flushed to diskDB |
-| `--health-check-interval` | — | `5s` | How often health monitor runs |
-| `--unhealthy-after` | — | `15s` | Mark agent unhealthy after this without a heartbeat |
-| `--remove-after` | — | `30s` | Remove agent after this without a heartbeat |
-| `--max-concurrent` | — | `50` | Max concurrent in-flight request forwards |
-| `--heartbeat-interval` | — | `5s` | Expected heartbeat cadence sent to agents in `RouterConfig` |
-| `HIVENET_ROUTER_ADMIT_FRACTION` | — | `0.90` | Scales a model's `admit_budget_tokens` into the effective occupancy budget (admission gate B2). Range (0,1]; out-of-range values keep the default. Shipped at 0.85, raised to 0.90 with the learned token estimator |
-| `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | — | `250ms` | How long an over-budget request waits for occupancy to free before 429 (Go duration; `0` rejects immediately) |
-| `HIVENET_ROUTER_RPM_BURST_SECONDS` | — | `0` | Per-key RPM bucket burst window in seconds. `0` or ≥60 keeps the legacy full-minute burst; a short certified window (e.g. `10`) stops a key from spending its whole minute's quota in one instant |
+| `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` | Client, health, and administration HTTP listen address |
+| `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` | Agent-authentication gRPC listen address |
+| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics listen address |
+| `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` | Router libp2p TCP port |
+| `--p2p-listen-addr` | — | `127.0.0.1` | IP address used to bind the router’s libp2p host |
+| `--p2p-announce-addr` | — | Empty | Dialable multiaddress advertised to agents |
+| `--p2p-max-conns-per-ip` | `HIVENET_ROUTER_P2P_MAX_CONNS_PER_IP` | `32` | Maximum libp2p connections from one IPv4 `/32` or IPv6 `/56` source prefix |
 
-> **`--p2p-max-conns-per-ip` and agents behind a shared NAT.** go-libp2p's resource manager caps concurrent connections from a single source IP at **8** by default. When agents reach the router through one shared egress IP — e.g. a Kubernetes SNAT gateway, a Docker bridge, or any NAT — they all count against that single bucket, so the **9th agent's connection is accepted at TCP but reset during the Noise handshake** (the agent logs `failed to negotiate security protocol: EOF`). This flag raises that per-IP ceiling (default `32`). Keep it **≥ 2× the number of agents behind a single egress IP**, not equal to the agent count: a restarting agent briefly holds both its old (not yet timed out, see `--remove-after`) and its new connection, so a fleet-wide rollout transiently needs up to ~2× the slots. Agents that present distinct source IPs each get their own bucket and are unaffected.
+### HTTP API
 
-### Provider API Keys (Environment Only)
+The HTTP server exposes:
 
-| Environment Variable | Description |
-| --- | --- |
-| `HIVENET_ROUTER_OPENAI_API_KEY` | OpenAI API key for `fallback_provider: { engine: openai }` |
-| `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Anthropic API key for `fallback_provider: { engine: anthropic }` |
-| `HIVENET_ROUTER_ADMIN_API_KEYS` | Comma-separated admin keys (used when `admin.mode: api-key` in auth.yaml) |
-| `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | Set to `true` to start with unauthenticated `/admin/*` (admin `mode: none`). Otherwise the router refuses to start without admin auth. Dev/test only. |
-| `HIVENET_ROUTER_QUOTA_BACKEND` | Quota storage backend: `memory` (default) or `badger` |
-| `HIVENET_ROUTER_AUDIT_LOG_PATH` | Audit log file path (default `/var/log/mycoroute/audit.jsonl`); falls back to stdout if unwritable |
+```text
+/health
+/v1/*
+/admin/*
+```
 
-### Logging
+Use a reverse proxy or another ingress layer for TLS.
 
-| Environment Variable | Default | Description |
-| --- | --- | --- |
-| `GOLOG_LOG_LEVEL` | `info` | Log level for all subsystems. Accepts a global level (`debug`, `info`, `warn`, `error`) or per-subsystem overrides: `subsystem=level,subsystem2=level2`. Available subsystems: `router`, `policy`, `metrics`, `api`, `grpc`, `p2p`, `agent`, `hardware`, `storage`, `auth`. |
+The HTTP server does not enable HTTPS itself.
 
-## Agent Flags
+### Metrics
 
-| Flag | Environment Variable | Default | Description |
+The metrics server is separate from the main HTTP API:
+
+```text
+http://<router-host>:2112/metrics
+```
+
+It has no built-in authentication.
+
+Keep it on a private interface or protect it through network controls.
+
+### Remote agents
+
+The router’s libp2p host binds to loopback by default:
+
+```text
+127.0.0.1
+```
+
+For agents on other machines:
+
+```bash
+--p2p-listen-addr 0.0.0.0
+```
+
+When the bind address is not the address agents should dial, also set:
+
+```bash
+--p2p-announce-addr \
+  /dns4/router.example.com/tcp/9000
+```
+
+The announce value must be a valid multiaddress. An invalid value stops router startup.
+
+### Agents behind shared NAT
+
+Agents behind one NAT or egress gateway appear to libp2p as connections from one source IP.
+
+Set:
+
+```bash
+--p2p-max-conns-per-ip <limit>
+```
+
+comfortably above the number of agents sharing that address.
+
+A practical starting point is:
+
+```text
+at least 2 × the maximum agent count behind one egress IP
+```
+
+The additional room covers reconnect overlap during restarts and fleet rollouts.
+
+## Router routing and backpressure settings
+
+| Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--engine` | — | `vllm` | Backend engine: `vllm`, `ollama`, `sglang`, `llamacpp`, `infinity`, `custom` |
-| `--backend-url` | — | `http://localhost:8888` | Backend inference server URL |
-| `--model` | — | \`\` | Model name override (required for `--engine custom`) |
-| `--health-url` | — | \`\` | Health check URL (required for `--engine custom`) |
-| `--capacity` | — | `10` | Max concurrent requests |
-| `--region` | — | `UE-France` | Region label |
-| `--organization` | — | `Unknown` | Organization/cloud provider label |
-| `--machine` | — | `Unknown` | Machine name within the organization |
-| `--tags` | — | `production` | Comma-separated tags |
-| `--router-grpc` | — | `localhost:50051` | Router gRPC address |
-| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Router libp2p address |
-| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | — | **Required.** JWT secret |
-| `--capability` | — | `llm` | Inference capability: `llm`, `embedding`, `reranker` |
-| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | \`\` | GPU hardware label for routing (e.g. `RTX4090`) |
-| `--hide-llm` | — | `false` | Exclude from `/v1/models` listing |
-| `--llm-pretty-name` | — | \`\` | Human-readable model display name |
-| `--llm-info` | — | \`\` | Short model description |
-| `--identity-path` | — | `./agent_identity.key` | Persistent libp2p identity file |
-| `--p2p-listen-port` | — | `0` | Agent libp2p listen port (0 = random; agents accept no inbound dials, so a fixed port is rarely needed). In case of multiple agents on the same host, make sure each agent is using a different port when using fixed ports |
-| `--hardware-sample-interval` | — | `2s` | GPU/CPU/memory sampling interval |
-| `--engine-sample-interval` | — | `500ms` | vLLM/SGLang /metrics scrape interval |
-| `--routing-signal-interval` | — | `500ms` | How often agent pushes metrics to router |
-| `--http-timeout` | — | `120s` | HTTP timeout for backend requests |
-| `--stream-write-timeout` | — | `60s` | Rolling per-chunk deadline for writing a streaming response to the router; a stalled write fails after this so the stream is released (0 disables) |
-| `--gpu-devices-file` | — | \`\` | File containing GPU UUIDs to monitor (one per line) |
-| `--version` | — | `1.0.0` | Agent version string sent in registration metadata |
+| `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty | Global routing-policy YAML file |
+| `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty | Directory containing global and per-model policies |
+| `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
+| `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
+| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues |
+| `--max-concurrent` | — | `50` | Maximum simultaneous router-to-agent request forwards |
+| `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | Deadline for the complete router-side request operation |
+| — | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
 
-## Minimal Startup Examples
+### Built-in policy
 
-### Router
+When no policy file or directory is configured, Hivenet Router uses:
+
+```text
+least-loaded
+```
+
+with:
+
+- no static filters
+- no dynamic exclusions
+- no local fallback steps
+- no provider fallback
+
+### Policy-file precedence
+
+When both are configured:
+
+```text
+--policy-file
+--policy-model-dir
+```
+
+and the model-policy directory contains:
+
+```text
+_default.yaml
+```
+
+the directory’s `_default.yaml` becomes the global policy.
+
+Hivenet Router logs a warning that it replaced the standalone policy file.
+
+Named policy files in the directory can claim specific models.
+
+### Global request queue
+
+`--queue-size` controls the buffered request channel before processor work begins.
+
+When the channel remains full for the handler’s enqueue window, Hivenet Router returns:
+
+```text
+503 queue_full
+```
+
+Use a positive value.
+
+### Per-model wait queue
+
+`--queue-depth` controls how many requests can wait for capacity for each model.
+
+```bash
+--queue-depth 0
+```
+
+disables capacity waiting. A request encountering full eligible agents then advances directly through its fallback path.
+
+### Concurrent forwards
+
+`--max-concurrent` limits requests actively being forwarded to agents.
+
+It is separate from:
+
+- the global request-channel size
+- the per-model wait queue
+- each agent’s declared capacity
+
+### Request deadline
+
+`--request-timeout` covers:
+
+- time waiting for processor concurrency
+- policy evaluation
+- time waiting in a per-model capacity queue
+- retries and fallback steps
+- agent forwarding
+- response or stream handling
+
+A longer client or agent timeout cannot extend a shorter router deadline.
+
+## Router health and session settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--health-check-interval` | — | `5s` | Frequency of router health-monitor passes |
+| `--heartbeat-interval` | — | `5s` | Heartbeat cadence sent to agents during authentication |
+| `--unhealthy-after` | — | `15s` | Time without a heartbeat before an agent is marked unhealthy |
+| `--remove-after` | — | `30s` | Time without a heartbeat before an agent is removed |
+| `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` | Lifetime of an agent session token |
+
+Keep these relationships:
+
+```text
+heartbeat interval
+  <
+unhealthy threshold
+  <
+removal threshold
+```
+
+The defaults are:
+
+```text
+5s < 15s < 30s
+```
+
+<Warning>
+  The router does not currently reject every inconsistent combination of these timing values.
+
+  Changing them makes you responsible for preserving a coherent ordering.
+</Warning>
+
+### Session lifetime
+
+The session TTL must be longer than:
+
+```text
+5 minutes
+```
+
+The router refuses to start when it is five minutes or less because agents begin renewal five minutes before expiration.
+
+Agents normally:
+
+- authenticate once
+- receive a one-hour session
+- renew five minutes before expiry
+- retry failed renewal after 30 seconds
+
+## Router storage settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` | Persistent BadgerDB directory |
+| `--disk-db-ttl` | — | `30` | Entry lifetime in days; `0` disables expiry |
+| `--universal-flush-interval` | — | `30s` | Frequency for flushing per-agent history and persistent quota changes |
+| `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup |
+
+The persistent database can contain:
+
+- per-agent request and token history
+- SRTT and RTTVAR
+- disconnection and failure history
+- daily token state when the Badger quota backend is active
+
+### Database reset
+
+```bash
+--reset-disk-db
+```
+
+deletes the configured database directory before the router opens it.
+
+<Danger>
+  Do not use `--reset-disk-db` as a normal recovery step.
+
+  It removes persisted agent history and Badger-backed daily quota state from that directory.
+</Danger>
+
+### Universal flush interval
+
+The same interval is currently used for:
+
+- universal per-agent history flushes
+- Badger-backed quota flushes
+
+Request-per-minute quota buckets remain in memory even when the Badger quota backend is enabled.
+
+## Router security and authentication settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Read the shared agent secret from a file, or provide its raw value through the environment |
+| `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | Empty | Path to `auth.yaml` |
+
+### Agent JWT secret
+
+The router requires a shared secret containing at least:
+
+```text
+32 bytes
+```
+
+Recommended file-based configuration:
 
 ```bash
 ./bin/hivenet-router \
-  --jwt-secret-file jwt.secret \
-  --auth-config-file auth.yaml \
-  --policy-file policy.yaml
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
+  ...
 ```
 
-### Agent (vLLM)
+Environment-based configuration:
+
+```bash
+export HIVENET_ROUTER_JWT_SECRET="<shared-secret>"
+```
+
+When both are provided, `--jwt-secret-file` wins.
+
+The file’s leading and trailing whitespace is removed, so a final newline is safe.
+
+The value must match every agent exactly.
+
+Changing it changes:
+
+- JWT validation
+- the router’s derived gRPC TLS identity
+- the public key pinned by agents
+
+Rotate it as a coordinated router-and-agent change.
+
+### Authentication file
+
+```bash
+--auth-config-file /etc/hivenet-router/auth.yaml
+```
+
+controls:
+
+- client API authentication
+- administrator authentication mode
+- static client keys
+- model access
+- quotas
+- static expiration
+
+See [auth.yaml reference](/security/auth-yaml-reference).
+
+## Router environment-only settings
+
+These settings do not have equivalent router command-line flags.
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `HIVENET_ROUTER_AUTH_MODE` | `none` when no file is configured | API auth mode when `auth.yaml` is absent |
+| `HIVENET_ROUTER_ADMIN_API_KEYS` | Empty | Comma-separated raw administrator keys |
+| `HIVENET_ROUTER_QUOTA_BACKEND` | `memory` | `memory` or `badger` |
+| `HIVENET_ROUTER_OPENAI_API_KEY` | Empty | OpenAI credential for provider fallback |
+| `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Empty | Anthropic credential for provider fallback |
+| `HIVENET_ROUTER_AUDIT_LOG_PATH` | `/var/log/hivenet-router/audit.jsonl` | Structured audit-log path |
+| `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
+| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.85` | Fraction of `admit_budget_tokens` available for occupancy admission; valid range `(0, 1]` |
+| `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | Maximum time an over-budget request waits for occupancy to free; `0` rejects immediately |
+| `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | `false` | Set to `true` to permit unauthenticated `/admin/*` endpoints when administrator mode is `none`; development and testing only |
+
+### `HIVENET_ROUTER_AUTH_MODE`
+
+Accepted API modes are:
+
+```text
+none
+api-key
+dynamic
+```
+
+This variable is read only when no auth configuration file is set.
+
+When `auth.yaml` is present, its:
+
+```yaml
+api:
+  mode:
+```
+
+value takes precedence.
+
+<Warning>
+  Setting:
+
+  ```text
+  HIVENET_ROUTER_AUTH_MODE=api-key
+  ```
+
+  without an `auth.yaml` file does not provide any static keys.
+
+  Startup fails because the key list is empty. Use an auth file for static API-key mode.
+</Warning>
+
+Dynamic mode automatically requires administrator authentication and:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+### `HIVENET_ROUTER_ADMIN_API_KEYS`
+
+Provide one or more raw keys separated by commas:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-key-1,admin-key-2"
+```
+
+Whitespace around values is removed.
+
+Administrator keys are separate from client API keys.
+
+### `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN`
+
+The router refuses to start with unauthenticated administrator endpoints unless you explicitly set:
+
+```bash
+export HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+```
+
+Use this only for isolated local development or testing. In shared, remote, or production environments, configure administrator API-key authentication instead.
+
+### `HIVENET_ROUTER_MAX_REQUEST_BYTES`
+
+The default maximum request body size for `/v1/*` endpoints is:
+
+```text
+10485760 bytes
+```
+
+which is 10 MiB. Requests above the configured limit are rejected with HTTP `413` before routing. Set another byte value to change the limit, or:
+
+```bash
+export HIVENET_ROUTER_MAX_REQUEST_BYTES=0
+```
+
+to disable it. A reverse proxy may enforce a smaller limit before the request reaches Hivenet Router.
+
+### Admission environment variables
+
+`HIVENET_ROUTER_ADMIT_FRACTION` scales a policy's `admit_budget_tokens` before the router admits token-weighted occupancy. It defaults to `0.85`; invalid values or values outside `(0, 1]` leave the default unchanged.
+
+`HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` bounds how long an over-budget request waits for occupancy to free. It uses Go duration syntax, defaults to `250ms`, and accepts `0` for immediate rejection. Negative or invalid values leave the default unchanged.
+
+See [Admission control](/routing/admission-control) for policy fields, footprint calculation, and error responses.
+
+### `HIVENET_ROUTER_QUOTA_BACKEND`
+
+Supported values are:
+
+```text
+memory
+badger
+```
+
+`memory`:
+
+- keeps RPM and daily token state in process memory
+- loses both after a router restart
+
+`badger`:
+
+- keeps RPM buckets in memory
+- periodically persists daily token use
+- restores daily token state after restart
+
+Any other value stops router startup.
+
+### Provider credentials
+
+Provider fallback credentials are read when the router starts:
+
+```bash
+export HIVENET_ROUTER_OPENAI_API_KEY="<openai-key>"
+export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-key>"
+```
+
+If an active policy refers to a provider whose key is absent, startup fails.
+
+Changing a provider credential requires a router restart.
+
+### Audit path
+
+```bash
+export HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
+```
+
+The router creates the parent directory when possible.
+
+When it cannot open the file, it writes audit JSON to standard output instead.
+
+Changing the path requires a router restart.
+
+## Router flag reference
+
+The complete current router flag set is:
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` |
+| `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` |
+| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` |
+| `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` |
+| `--p2p-listen-addr` | — | `127.0.0.1` |
+| `--p2p-announce-addr` | — | Empty |
+| `--p2p-max-conns-per-ip` | `HIVENET_ROUTER_P2P_MAX_CONNS_PER_IP` | `32` |
+| `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` |
+| `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` |
+| `--health-check-interval` | — | `5s` |
+| `--unhealthy-after` | — | `15s` |
+| `--remove-after` | — | `30s` |
+| `--heartbeat-interval` | — | `5s` |
+| `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` |
+| `--reset-disk-db` | — | `false` |
+| `--disk-db-ttl` | — | `30` days |
+| `--universal-flush-interval` | — | `30s` |
+| `--max-concurrent` | — | `50` |
+| `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |
+| `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty |
+| `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
+| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
+| `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |
+| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` contains the raw value | Required |
+| `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | Empty |
+
+## Agent backend settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--engine` | — | `vllm` | Inference-engine adapter |
+| `--backend-url` | — | `http://localhost:8888` | Base URL of the local inference server |
+| `--model` | — | Empty | Public model ID override |
+| `--health-url` | — | Empty | Health endpoint for a custom engine |
+| `--capability` | — | `llm` | `llm`, `embedding`, or `reranker` |
+| `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
+| `--http-timeout` | — | `120s` | Backend HTTP request timeout |
+| `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
+
+### Supported engines
+
+Accepted values are:
+
+```text
+vllm
+ollama
+sglang
+llamacpp
+infinity
+custom
+```
+
+### Model discovery
+
+When `--model` is empty, supported engine adapters try to discover a model from the backend.
+
+Use an explicit model value when:
+
+- the backend exposes several models
+- the client-facing alias must remain stable
+- backend discovery is unreliable
+- the custom engine is selected
+
+A custom engine requires both:
+
+```text
+--model
+--health-url
+```
+
+### Capability
+
+Accepted values are:
+
+```text
+llm
+embedding
+reranker
+```
+
+The router combines the model name and capability when selecting an agent.
+
+Ollama currently cannot be registered with:
+
+```text
+--capability reranker
+```
+
+because its integration does not expose the required reranking endpoint.
+
+### Capacity
+
+Capacity must be positive.
+
+It is an operator-defined concurrency limit, not a value calculated from GPU memory or model size.
+
+The router rejects agent authentication when the reported capacity is zero or negative.
+
+### Backend and router timeouts
+
+The agent’s default backend HTTP timeout is:
+
+```text
+120s
+```
+
+The router’s default request timeout is:
+
+```text
+60s
+```
+
+The shorter router deadline usually ends the client operation first.
+
+### Stream write timeout
+
+`--stream-write-timeout` is a rolling per-chunk deadline.
+
+When the router or another receiver stops reading a stream, the agent eventually releases the blocked write rather than holding the libp2p stream indefinitely.
+
+Set:
+
+```bash
+--stream-write-timeout 0
+```
+
+to disable it.
+
+## Agent router and libp2p settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--router-grpc` | — | `localhost:50051` | Router gRPC authentication address; the response supplies the router’s libp2p connection details |
+| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Deprecated no-op retained for CLI compatibility |
+| `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
+| `--p2p-listen-port` | — | `0` | Local libp2p port; agents initiate the router connection and normally do not need a fixed inbound port |
+| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Shared agent-authentication secret |
+
+### Router discovery
+
+The agent currently obtains the router’s actual libp2p addresses from the gRPC authentication response.
+
+The accepted:
+
+```text
+--router-p2p
+```
+
+flag is not read by the current connection sequence.
+
+Configure:
+
+```text
+--router-grpc
+```
+
+and make sure the router advertises a reachable libp2p address through:
+
+```text
+--p2p-announce-addr
+```
+
+when necessary.
+
+### Persistent identity
+
+Use a persistent identity path:
+
+```bash
+--identity-path \
+  /var/lib/hivenet-router/agent-identity.key
+```
+
+Preserving this file preserves the agent’s peer ID.
+
+A stable peer ID lets the router associate the agent with earlier:
+
+- request counters
+- token counts
+- SRTT and RTTVAR
+- disconnection history
+
+### Agent connection direction
+
+Agents initiate their libp2p connection to the router after successful gRPC authentication. The router forwards inference traffic over that established connection rather than opening a new inbound connection to the agent.
+
+The default:
+
+```text
+--p2p-listen-port 0
+```
+
+lets the operating system choose a local port. A fixed port is rarely needed and does not create a requirement to expose that port to the router.
+
+<Warning>
+  Do not add inbound agent firewall rules, public agent port mappings, or NAT forwarding solely for Hivenet Router request forwarding. Agent hosts need outbound access to the router’s gRPC and libp2p ports.
+</Warning>
+
+## Agent metadata settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--version` | — | Build version; `dev` in an unversioned local build | Version recorded in agent metadata |
+| `--region` | — | `UE-France` | Operator-defined location label |
+| `--organization` | — | `Unknown` | Operator or infrastructure-provider label |
+| `--machine` | — | `Unknown` | Machine label |
+| `--tags` | — | `production` | Comma-separated routing tags |
+| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty | Operator-defined GPU label |
+| `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty | Deployment identifier used in tenant metrics |
+| `--replica-id` | `HIVENET_ROUTER_REPLICA_ID` | Empty | Stable replica identifier used with deployment ID by external schedulers |
+| `--hide-llm` | — | `false` | Set the aggregated model’s `hide_llm` metadata flag; this does not currently remove the model from discovery |
+| `--llm-pretty-name` | — | Empty | Human-readable model name |
+| `--llm-info` | — | Empty | Short model description |
+
+### Region default
+
+The current code default is literally:
+
+```text
+UE-France
+```
+
+This is an operator-defined label rather than a validated region code.
+
+Override it with the convention used in your deployment:
+
+```bash
+--region EU-France
+```
+
+or another stable value.
+
+<Warning>
+  Region, organization, machine, tags, and GPU model become routing and observability labels.
+
+  Keep them stable and bounded. Do not put user IDs, request IDs, timestamps, or other unbounded values in these fields.
+</Warning>
+
+### Version
+
+Release builds can inject a version at build time.
+
+A local build without an injected value reports:
+
+```text
+dev
+```
+
+The `--version` flag changes registration metadata only. It does not select or install another agent software version.
+
+### GPU model
+
+`--gpu-model` is not detected automatically through NVML.
+
+Set a consistent operator-defined value when routing policies use:
+
+```yaml
+match:
+  gpu_model:
+```
+
+### Deployment ID
+
+The deployment ID is included in agent registration and used in tenant request metrics.
+
+It may be empty in local or bare-metal deployments that do not have a separate deployment identity.
+
+### Replica ID
+
+`--replica-id` supplies a stable identifier for one agent replica. When `--deployment-id` is also set, the two values form a join key for external schedulers and registration-stream consumers.
+
+### `hide_llm` metadata
+
+An agent with:
+
+```bash
+--hide-llm
+```
+
+sets the aggregated model object’s:
+
+```json
+{
+  "hide_llm": true
+}
+```
+
+metadata flag.
+
+The current catalog implementation still includes that model in `/v1/models`. Do not use this flag as an access-control or reliable discovery-hiding mechanism. Use API-key model restrictions to control which models a caller can discover and invoke.
+
+## Agent telemetry settings
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--hardware-sample-interval` | — | `2s` | GPU, CPU, and system-memory collection interval |
+| `--engine-sample-interval` | — | `500ms` | Supported inference-engine metrics scrape interval |
+| `--routing-signal-interval` | — | `500ms` | Frequency for sending cached hardware and engine data to the router |
+| `--gpu-devices-file` | — | Empty | File containing assigned NVIDIA GPU UUIDs |
+
+### Sampling and push intervals
+
+Sampling and pushing are independent.
+
+For example:
+
+```text
+Hardware sample: 2s
+Routing signal: 500ms
+```
+
+causes the same cached hardware snapshot to be sent several times before the next sample.
+
+Reducing only the routing-signal interval does not increase hardware collection frequency.
+
+### GPU-device file
+
+The file accepts NVIDIA GPU UUIDs separated by commas or line breaks.
+
+When it is empty or contains:
+
+```text
+none
+```
+
+the agent reports no GPU metrics.
+
+When no file is configured, the agent reports every NVIDIA GPU visible to the process.
+
+After the file has loaded successfully, restart the agent to apply later changes.
+
+See [Hardware metrics](/observability/hardware-metrics).
+
+## Agent flag reference
+
+The complete current agent flag set is:
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--engine` | — | `vllm` |
+| `--backend-url` | — | `http://localhost:8888` |
+| `--model` | — | Empty |
+| `--health-url` | — | Empty |
+| `--capacity` | — | `10` |
+| `--version` | — | Build version; commonly `dev` locally |
+| `--region` | — | `UE-France` |
+| `--organization` | — | `Unknown` |
+| `--machine` | — | `Unknown` |
+| `--router-grpc` | — | `localhost:50051` |
+| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000`; deprecated no-op |
+| `--tags` | — | `production` |
+| `--http-timeout` | — | `120s` |
+| `--stream-write-timeout` | — | `60s` |
+| `--identity-path` | — | `./agent_identity.key` |
+| `--p2p-listen-port` | — | `0` |
+| `--hardware-sample-interval` | — | `2s` |
+| `--engine-sample-interval` | — | `500ms` |
+| `--routing-signal-interval` | — | `500ms` |
+| `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
+| `--gpu-devices-file` | — | Empty |
+| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty |
+| `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty |
+| `--replica-id` | `HIVENET_ROUTER_REPLICA_ID` | Empty |
+| `--capability` | — | `llm` |
+| `--hide-llm` | — | `false` |
+| `--llm-pretty-name` | — | Empty |
+| `--llm-info` | — | Empty |
+
+## Logging configuration
+
+Both processes use `go-log`.
+
+### Log level
+
+```bash
+export GOLOG_LOG_LEVEL=debug
+```
+
+Set one global level:
+
+```text
+debug
+info
+warn
+error
+```
+
+Or configure application subsystems individually:
+
+```bash
+export GOLOG_LOG_LEVEL="router=debug,policy=debug,api=info"
+```
+
+The application-defined subsystems are:
+
+```text
+router
+agent
+api
+auth
+grpc
+p2p
+hardware
+metrics
+policy
+storage
+```
+
+Dependencies such as libp2p may emit additional subsystem names.
+
+### JSON logs
+
+For structured application logs:
+
+```bash
+export GOLOG_LOG_FMT=json
+```
+
+The agent adds its peer ID as a process-wide structured label.
+
+Audit records remain in their separate JSONL output.
+
+Logging environment variables are read at process startup.
+
+## Distributed tracing
+
+Set an OTLP gRPC endpoint on the router, agents, or both:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=tempo:4317
+```
+
+When the variable is empty or absent, tracing is disabled.
+
+The current exporter uses an insecure OTLP gRPC connection. Put the collector on a trusted network or use an appropriate protected intermediary.
+
+The processes identify themselves as:
+
+```text
+hivenet-router
+hivenet-agent
+```
+
+Changing the endpoint requires a process restart.
+
+## Environment parsing behavior
+
+Router environment variables are loaded before CLI parsing.
+
+For typed router values such as integers and durations, an invalid environment value is generally ignored and the previous default remains active.
+
+For example:
+
+```bash
+export HIVENET_ROUTER_REQUEST_TIMEOUT="five minutes"
+```
+
+does not produce a valid duration and is ignored.
+
+The router therefore continues with:
+
+```text
+60s
+```
+
+unless a CLI flag overrides it.
+
+<Warning>
+  Invalid typed router environment values do not consistently stop startup.
+
+  Read the router startup banner and verify the resolved configuration after every deployment change.
+</Warning>
+
+Invalid command-line values are more visible because Go’s flag parser normally exits with an error.
+
+Configuration values such as invalid auth modes, quota backends, policy files, and provider requirements fail during subsystem initialization.
+
+## Startup validation
+
+### Router validation
+
+Router startup fails for conditions including:
+
+- missing JWT secret
+- JWT secret shorter than 32 bytes
+- session TTL of five minutes or less
+- `max-tries-per-step` below `1`
+- negative queue depth
+- invalid libp2p announce address
+- invalid policy YAML
+- invalid per-model policy directory
+- unknown authentication mode
+- static API-key mode without keys
+- administrator API-key mode without administrator keys
+- unknown quota backend
+- provider fallback without the required provider key
+- storage initialization failure
+
+Use positive values for:
+
+```text
+queue-size
+max-concurrent
+p2p-max-conns-per-ip
+```
+
+even where the command entry point does not currently perform a dedicated validation check.
+
+### Agent validation
+
+Agent startup or authentication fails for conditions including:
+
+- missing JWT secret
+- JWT secret shorter than 32 bytes
+- unknown engine
+- custom engine without a model
+- custom engine without a health URL
+- unknown capability
+- Ollama configured as a reranker
+- backend that never becomes ready
+- model discovery that never returns a model
+- non-positive capacity rejected by the router
+- JWT secret that does not match the router
+- unreachable router gRPC or libp2p interfaces
+
+## Reload or restart
+
+| Change | Apply with | Notes |
+| --- | --- | --- |
+| Global policy file | `SIGHUP` | Invalid replacement leaves the current policy active |
+| Per-model policy directory | `SIGHUP` | Directory is reread and replaced atomically |
+| Static `auth.yaml` keys and quotas | `SIGHUP` | Current valid provider remains active after a failed reload |
+| Administrator auth provider | `SIGHUP` or restart | Rebuilt from the running process environment |
+| Dynamic client-key entries | Administration API | Changes take effect immediately |
+| Dynamic client-auth mode | Restart | Cannot switch to or from dynamic mode through SIGHUP |
+| Network addresses and ports | Restart | Listen sockets are created at startup |
+| JWT secret | Coordinated router and agent restart | Changes gRPC identity and agent authentication |
+| Provider API keys | Router restart | Provider adapters are built at startup |
+| Quota backend | Router restart | Rate limiter is built at startup |
+| Storage path or TTL | Router restart | Database is opened at startup |
+| Audit-log path | Router restart | File is opened at process initialization |
+| Logging or tracing environment | Process restart | Read during initialization |
+| Agent metadata, backend, capacity, or sampling | Agent restart | Agent flags are parsed at startup |
+
+Editing a systemd `EnvironmentFile`, Docker `.env` file, or Kubernetes Secret does not modify the environment of an already running process.
+
+Recreate or restart the process when the changed value comes from its environment.
+
+## Send SIGHUP
+
+Bare metal:
+
+```bash
+sudo kill -HUP \
+  "$(pgrep hivenet-router)"
+```
+
+systemd:
+
+```bash
+sudo systemctl kill \
+  --signal HUP \
+  hivenet-router
+```
+
+Docker Compose:
+
+```bash
+docker compose kill \
+  --signal SIGHUP \
+  router
+```
+
+Inspect the router logs after reload.
+
+An invalid file leaves the previous valid configuration active, but the attempted change has not taken effect.
+
+## Router startup example
+
+```bash
+./bin/hivenet-router \
+  --http-port 127.0.0.1:8080 \
+  --grpc-port :50051 \
+  --metrics-port 127.0.0.1:2112 \
+  --p2p-port 9000 \
+  --p2p-listen-addr 0.0.0.0 \
+  --p2p-announce-addr \
+    /dns4/router.example.com/tcp/9000 \
+  --p2p-max-conns-per-ip 64 \
+  --jwt-secret-file \
+    /etc/hivenet-router/jwt.secret \
+  --auth-config-file \
+    /etc/hivenet-router/auth.yaml \
+  --policy-model-dir \
+    /etc/hivenet-router/policies \
+  --disk-db-path \
+    /var/lib/hivenet-router/badger \
+  --request-timeout 5m
+```
+
+This example:
+
+- exposes gRPC and libp2p for remote agents
+- keeps the client API behind a local reverse proxy
+- keeps metrics on loopback
+- reads secrets and configuration from explicit paths
+- uses a policy directory
+- persists state outside the working directory
+
+## vLLM agent example
 
 ```bash
 ./bin/hivenet-agent \
   --engine vllm \
-  --backend-url http://localhost:8888 \
-  --jwt-secret-file jwt.secret \
-  --router-grpc 192.168.1.100:50051 \
+  --backend-url \
+    http://127.0.0.1:8888 \
+  --model \
+    hivenet-router-code-model \
+  --capability llm \
   --capacity 20 \
+  --router-grpc \
+    router.example.com:50051 \
+  --jwt-secret-file \
+    /etc/hivenet-router/jwt.secret \
+  --identity-path \
+    /var/lib/hivenet-router/agent-identity.key \
   --region EU-France \
   --organization "Acme Compute" \
-  --machine gpu-worker-1
+  --machine gpu-worker-1 \
+  --gpu-model "NVIDIA H100" \
+  --tags production,realtime
 ```
 
-### Agent (Custom Engine)
+The example does not set `--router-p2p`. The current agent receives the router’s dialable libp2p address during gRPC authentication.
+
+## Custom-engine example
 
 ```bash
 ./bin/hivenet-agent \
   --engine custom \
-  --model my-custom-model \
-  --health-url http://localhost:1234/health \
-  --backend-url http://localhost:1234 \
-  --jwt-secret-file jwt.secret \
-  --router-grpc 192.168.1.100:50051
+  --backend-url \
+    http://127.0.0.1:1234 \
+  --health-url \
+    http://127.0.0.1:1234/health \
+  --model \
+    custom-chat-model \
+  --capability llm \
+  --router-grpc \
+    router.example.com:50051 \
+  --jwt-secret-file \
+    /etc/hivenet-router/jwt.secret \
+  --identity-path \
+    /var/lib/hivenet-router/custom-agent-identity.key
 ```
+
+A custom engine must implement the client-facing endpoint used by the request. Hivenet Router does not translate its API schema.
+
+## Generate a static client key
+
+Run:
+
+```bash
+./bin/hivenet-router \
+  keygen \
+  --tenant acme-corp
+```
+
+The subcommand:
+
+- generates 32 random bytes
+- encodes a key beginning with `sk-hivenet-`
+- prints the raw key once
+- prints its SHA-256 hash
+- prints a masked preview
+- produces an `auth.yaml` entry
+
+The tenant defaults to:
+
+```text
+my-tenant
+```
+
+The value is limited to 200 characters.
+
+Store the raw key in a secret manager. Put only the generated hash in `auth.yaml`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+    Configure static keys, administrator access, model restrictions, and quotas.
+  </Card>
+
+  <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
+    Configure primary routing, fallback chains, provider fallback, and gates.
+  </Card>
+
+  <Card title="Detailed architecture" href="/reference/detailed-architecture">
+    See where each configuration value affects the running system.
+  </Card>
+
+  <Card title="Error codes" href="/reference/error-codes">
+    Diagnose startup, authentication, routing, and backend failures.
+  </Card>
+
+  <Card title="Key rotation" href="/security/key-rotation">
+    Rotate client, administrator, agent, and provider credentials.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Verify runtime behavior after configuration changes.
+  </Card>
+</CardGroup>

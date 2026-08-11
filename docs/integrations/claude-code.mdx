@@ -67,7 +67,7 @@ A typical command resembles:
 vllm serve <model-source> \
   --host 0.0.0.0 \
   --port 8888 \
-  --served-model-name mycoroute-code-model \
+  --served-model-name hivenet-router-code-model \
   --enable-auto-tool-choice \
   --tool-call-parser <model-specific-parser>
 ```
@@ -93,7 +93,7 @@ Tool-call configuration differs by model family. Check that the selected parser 
 Prefer a short, stable alias for the model Claude Code will request:
 
 ```text
-mycoroute-code-model
+hivenet-router-code-model
 ```
 
 Current vLLM guidance recommends avoiding slash-containing Hugging Face IDs in this integration path.
@@ -102,7 +102,7 @@ The alias also separates the client-facing model name from the underlying model 
 
 ```bash
 vllm serve Qwen/<model-repository> \
-  --served-model-name mycoroute-code-model \
+  --served-model-name hivenet-router-code-model \
   ...
 ```
 
@@ -112,7 +112,7 @@ Make the Hivenet Router agent register the same value:
 ./bin/hivenet-agent \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --model mycoroute-code-model \
+  --model hivenet-router-code-model \
   --router-grpc <router-host>:50051 \
   --jwt-secret-file /etc/hivenet-router/jwt.secret
 ```
@@ -134,7 +134,7 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "max_tokens": 32,
     "messages": [
       {
@@ -155,7 +155,7 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",
@@ -181,7 +181,7 @@ List the models visible to the Claude Code API key:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -189,7 +189,7 @@ curl \
 Confirm that the list contains:
 
 ```text
-mycoroute-code-model
+hivenet-router-code-model
 ```
 
 Then test the Messages endpoint through Hivenet Router:
@@ -197,11 +197,11 @@ Then test the Messages endpoint through Hivenet Router:
 ```bash
 curl -X POST \
   https://router.example.com/v1/messages \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "max_tokens": 32,
     "messages": [
       {
@@ -262,12 +262,12 @@ Set the router URL, client credential, and model aliases before launching Claude
 unset ANTHROPIC_API_KEY
 
 export ANTHROPIC_BASE_URL="https://router.example.com"
-export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+export ANTHROPIC_AUTH_TOKEN="<hivenet-router-api-key>"
 
-export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
 
 claude --model sonnet
 ```
@@ -311,7 +311,7 @@ for a Hivenet Router client key.
 Claude Code sends it as:
 
 ```http
-Authorization: Bearer <mycoroute-api-key>
+Authorization: Bearer <hivenet-router-api-key>
 ```
 
 This is the authentication header Hivenet Router accepts.
@@ -358,10 +358,10 @@ Claude Code uses built-in model aliases for different kinds of work.
 You may map every alias to one model:
 
 ```bash
-export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
 ```
 
 Or map them to different Hivenet Router models:
@@ -422,7 +422,7 @@ Read the current directory and tell me what kind of project this is.
 Then test a harmless tool action:
 
 ```text
-Create a file named mycoroute-test.txt containing the word connected.
+Create a file named hivenet-router-test.txt containing the word connected.
 ```
 
 Confirm that Claude Code:
@@ -437,7 +437,7 @@ A model that produces good text but cannot emit the expected structured tool cal
 Remove the test file afterward:
 
 ```bash
-rm mycoroute-test.txt
+rm hivenet-router-test.txt
 ```
 
 ## Make the configuration persistent
@@ -457,11 +457,11 @@ A user-wide configuration can look like:
   "model": "sonnet",
   "env": {
     "ANTHROPIC_BASE_URL": "https://router.example.com",
-    "ANTHROPIC_AUTH_TOKEN": "<mycoroute-api-key>",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mycoroute-code-model"
+    "ANTHROPIC_AUTH_TOKEN": "<hivenet-router-api-key>",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "hivenet-router-code-model"
   }
 }
 ```
@@ -488,13 +488,13 @@ For short-lived or externally managed keys, configure:
 
 ```json
 {
-  "apiKeyHelper": "~/bin/get-mycoroute-key.sh",
+  "apiKeyHelper": "~/bin/get-hivenet-router-key.sh",
   "env": {
     "ANTHROPIC_BASE_URL": "https://router.example.com",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mycoroute-code-model",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mycoroute-code-model"
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "hivenet-router-code-model",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "hivenet-router-code-model"
   }
 }
 ```
@@ -533,7 +533,7 @@ The alias mappings are the simplest way to expose Hivenet Router models.
 You can also add one explicit custom entry:
 
 ```bash
-export ANTHROPIC_CUSTOM_MODEL_OPTION="mycoroute-code-model"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="hivenet-router-code-model"
 export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Hivenet Router code model"
 export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Served through Hivenet Router"
 ```
@@ -705,12 +705,12 @@ Create a launcher for Hivenet Router:
 unset ANTHROPIC_API_KEY
 
 export ANTHROPIC_BASE_URL="https://router.example.com"
-export ANTHROPIC_AUTH_TOKEN="<mycoroute-api-key>"
+export ANTHROPIC_AUTH_TOKEN="<hivenet-router-api-key>"
 
-export ANTHROPIC_DEFAULT_FABLE_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="mycoroute-code-model"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="mycoroute-code-model"
+export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
 
 exec claude --model sonnet "$@"
 ```
@@ -718,14 +718,14 @@ exec claude --model sonnet "$@"
 Save it as:
 
 ```text
-~/bin/claude-mycoroute
+~/bin/claude-hivenet-router
 ```
 
 and make it executable:
 
 ```bash
 chmod +x \
-  ~/bin/claude-mycoroute
+  ~/bin/claude-hivenet-router
 ```
 
 For a normal Anthropic session, start Claude Code without the Hivenet Router variables:
@@ -751,7 +751,7 @@ Search one tenant in Loki:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   tenant_id="claude-code"
 }
@@ -762,9 +762,9 @@ Inspect requests by model:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
-  model="mycoroute-code-model"
+  model="hivenet-router-code-model"
 }
   | json
 ```
@@ -829,7 +829,7 @@ Test it directly:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models
 ```
 
@@ -857,7 +857,7 @@ Compare the configured alias with:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -978,7 +978,7 @@ curl -i -X POST \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",

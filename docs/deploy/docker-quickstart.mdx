@@ -57,7 +57,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     git clone https://github.com/HivenetOSS/hivenet_router.git
-    cd mycoroute
+    cd hivenet_router
     ```
 
     Make sure Docker is installed and running:
@@ -70,7 +70,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     Build the router image:
 
     ```bash
-    docker build -t mycoroute/router:latest .
+    docker build -t hivenet-router/router:latest .
     ```
 
     Create the persistent database directory:
@@ -86,7 +86,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     git clone https://github.com/HivenetOSS/hivenet_router.git
-    cd mycoroute
+    cd hivenet_router
     ```
 
     Run the agent-host setup script:
@@ -94,8 +94,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     ```bash
     chmod +x scripts/setup-agent-host.sh
     
-    sudo MYCOROUTE_ROUTER_IP=192.168.1.100 \
-      ./scripts/setup-agent-host.sh
+    sudo ./scripts/setup-agent-host.sh
     ```
 
     The script:
@@ -114,15 +113,15 @@ This guide uses Docker host networking and is intended for Linux hosts.
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent agent identity:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
   </Step>
   <Step title="Create and distribute the shared secret">
@@ -136,14 +135,14 @@ This guide uses Docker host networking and is intended for Linux hosts.
     Copy the secret to both agent hosts:
 
     ```bash
-    scp jwt.secret gpu-eu-1:/opt/mycoroute/jwt.secret
-    scp jwt.secret gpu-eu-2:/opt/mycoroute/jwt.secret
+    scp jwt.secret gpu-eu-1:/opt/hivenet-router/jwt.secret
+    scp jwt.secret gpu-eu-2:/opt/hivenet-router/jwt.secret
     ```
 
     On each agent host, restrict access to the file:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
 
     <Warning>
@@ -161,7 +160,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
       -e HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true \
       -v "$PWD/jwt.secret:/jwt.secret:ro" \
       -v "$PWD/badger:/badger" \
-      mycoroute/router:latest \
+      hivenet-router/router:latest \
       --jwt-secret-file /jwt.secret \
       --http-port :8080 \
       --grpc-port :50051 \
@@ -254,9 +253,9 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
       --engine vllm \
@@ -313,9 +312,9 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
       --engine vllm \
@@ -426,7 +425,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     ```bash
     curl -s http://192.168.1.100:2112/metrics \
-      | grep mycoroute_routing_requests_routed_total
+      | grep hivenet_router_routing_requests_routed_total
     ```
   </Step>
 </Steps>
@@ -547,7 +546,7 @@ docker stop hivenet-router
 docker rm hivenet-router
 ```
 
-The BadgerDB data in the mounted `badger` directory and agent identity files in `/opt/mycoroute` remain after the containers are removed.
+The BadgerDB data in the mounted `badger` directory and agent identity files in `/opt/hivenet-router` remain after the containers are removed.
 
 ## Next steps
 

@@ -88,7 +88,7 @@ https://router.example.com
 Clients authenticate with:
 
 ```http
-Authorization: Bearer <mycoroute-api-key>
+Authorization: Bearer <hivenet-router-api-key>
 ```
 
 Use a client API key configured through static or dynamic authentication.
@@ -109,7 +109,7 @@ List the models available to the client key:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```

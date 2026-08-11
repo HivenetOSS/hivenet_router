@@ -50,7 +50,7 @@ List the models visible to the intended client key:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -75,7 +75,7 @@ For vLLM, automatic tool calling normally requires:
 vllm serve <model-source> \
   --host 0.0.0.0 \
   --port 8888 \
-  --served-model-name mycoroute-code-model \
+  --served-model-name hivenet-router-code-model \
   --enable-auto-tool-choice \
   --tool-call-parser <model-specific-parser>
 ```
@@ -102,7 +102,7 @@ Register the same served-model name with the Hivenet Router agent:
 ./bin/hivenet-agent \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --model mycoroute-code-model \
+  --model hivenet-router-code-model \
   --router-grpc <router-host>:50051 \
   --jwt-secret-file /etc/hivenet-router/jwt.secret
 ```
@@ -121,10 +121,10 @@ Before installing or configuring OpenCode, send a basic Chat Completions request
 ```bash
 curl -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",
@@ -148,10 +148,10 @@ Test streaming separately:
 ```bash
 curl -N -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",
@@ -256,11 +256,11 @@ with:
   "share": "disabled",
 
   "enabled_providers": [
-    "mycoroute"
+    "hivenet-router"
   ],
 
-  "model": "mycoroute/mycoroute-code-model",
-  "small_model": "mycoroute/mycoroute-code-model",
+  "model": "hivenet-router/hivenet-router-code-model",
+  "small_model": "hivenet-router/hivenet-router-code-model",
 
   "permission": {
     "edit": "ask",
@@ -268,17 +268,17 @@ with:
   },
 
   "provider": {
-    "mycoroute": {
+    "hivenet-router": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Hivenet Router",
 
       "options": {
         "baseURL": "https://router.example.com/v1",
-        "apiKey": "{env:MYCOROUTE_API_KEY}"
+        "apiKey": "{env:HIVENET_ROUTER_API_KEY}"
       },
 
       "models": {
-        "mycoroute-code-model": {
+        "hivenet-router-code-model": {
           "name": "Hivenet Router code model",
 
           "limit": {
@@ -295,7 +295,7 @@ with:
 Replace:
 
 - `https://router.example.com` with the router address
-- `mycoroute-code-model` with an exact model ID from `/v1/models`
+- `hivenet-router-code-model` with an exact model ID from `/v1/models`
 - the context and output limits with values supported by that model and backend
 
 ## Set the API key
@@ -303,20 +303,20 @@ Replace:
 Export the raw Hivenet Router client key:
 
 ```bash
-export MYCOROUTE_API_KEY="<mycoroute-api-key>"
+export HIVENET_ROUTER_API_KEY="<hivenet-router-api-key>"
 ```
 
 Verify that the variable exists without printing its value:
 
 ```bash
-test -n "$MYCOROUTE_API_KEY" \
-  && echo "MYCOROUTE_API_KEY is set"
+test -n "$HIVENET_ROUTER_API_KEY" \
+  && echo "HIVENET_ROUTER_API_KEY is set"
 ```
 
 OpenCode’s:
 
 ```json
-"apiKey": "{env:MYCOROUTE_API_KEY}"
+"apiKey": "{env:HIVENET_ROUTER_API_KEY}"
 ```
 
 substitution reads the value when the configuration loads.
@@ -324,15 +324,15 @@ substitution reads the value when the configuration loads.
 The OpenAI-compatible adapter sends it as:
 
 ```http
-Authorization: Bearer <mycoroute-api-key>
+Authorization: Bearer <hivenet-router-api-key>
 ```
 
 This is the authentication header Hivenet Router expects.
 
 <Note>
-  `MYCOROUTE_API_KEY` is an environment variable used by the OpenCode client.
+  `HIVENET_ROUTER_API_KEY` is an environment variable used by the OpenCode client.
 
-  It does not need to follow the lower-case `mycoroute_*` convention used by the Hivenet Router router process.
+  It does not need to follow the lower-case `hivenet_router_*` convention used by the Hivenet Router router process.
 </Note>
 
 ## Read the key from a file
@@ -343,7 +343,7 @@ OpenCode can also substitute the contents of a file:
 {
   "options": {
     "baseURL": "https://router.example.com/v1",
-    "apiKey": "{file:~/.secrets/mycoroute-api-key}"
+    "apiKey": "{file:~/.secrets/hivenet-router-api-key}"
   }
 }
 ```
@@ -352,7 +352,7 @@ Protect the file:
 
 ```bash
 chmod 600 \
-  ~/.secrets/mycoroute-api-key
+  ~/.secrets/hivenet-router-api-key
 ```
 
 The file should contain only the raw API key, without a variable name or surrounding quotation marks.
@@ -363,22 +363,22 @@ The file should contain only the raw API key, without a variable name or surroun
 
 ```json
 "provider": {
-  "mycoroute": {}
+  "hivenet-router": {}
 }
 ```
 
-`mycoroute` is the OpenCode provider ID.
+`hivenet-router` is the OpenCode provider ID.
 
 It is an arbitrary local identifier, but it must match the prefix used in:
 
 ```json
-"model": "mycoroute/mycoroute-code-model"
+"model": "hivenet-router/hivenet-router-code-model"
 ```
 
 and:
 
 ```json
-"small_model": "mycoroute/mycoroute-code-model"
+"small_model": "hivenet-router/hivenet-router-code-model"
 ```
 
 ### Provider adapter
@@ -447,7 +447,7 @@ to the configured base URL.
 
 ```json
 "models": {
-  "mycoroute-code-model": {
+  "hivenet-router-code-model": {
     "name": "Hivenet Router code model"
   }
 }
@@ -457,7 +457,7 @@ The object key is the exact model ID sent to Hivenet Router:
 
 ```json
 {
-  "model": "mycoroute-code-model"
+  "model": "hivenet-router-code-model"
 }
 ```
 
@@ -476,7 +476,7 @@ For example:
 produces the full OpenCode model identifier:
 
 ```text
-mycoroute/Qwen/Qwen3.6-27B
+hivenet-router/Qwen/Qwen3.6-27B
 ```
 
 The part after the first slash remains the Hivenet Router model ID.
@@ -523,20 +523,20 @@ Add each model visible through Hivenet Router:
   "share": "disabled",
 
   "enabled_providers": [
-    "mycoroute"
+    "hivenet-router"
   ],
 
-  "model": "mycoroute/code-model-large",
-  "small_model": "mycoroute/code-model-fast",
+  "model": "hivenet-router/code-model-large",
+  "small_model": "hivenet-router/code-model-fast",
 
   "provider": {
-    "mycoroute": {
+    "hivenet-router": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Hivenet Router",
 
       "options": {
         "baseURL": "https://router.example.com/v1",
-        "apiKey": "{env:MYCOROUTE_API_KEY}"
+        "apiKey": "{env:HIVENET_ROUTER_API_KEY}"
       },
 
       "models": {
@@ -572,8 +572,8 @@ identifier.
 In this example:
 
 ```text
-mycoroute/code-model-large
-mycoroute/code-model-fast
+hivenet-router/code-model-large
+hivenet-router/code-model-fast
 ```
 
 Switch models in the TUI with:
@@ -586,7 +586,7 @@ Or choose one for a single run:
 
 ```bash
 opencode run \
-  -m mycoroute/code-model-fast \
+  -m hivenet-router/code-model-fast \
   "Explain the structure of this repository."
 ```
 
@@ -597,14 +597,14 @@ OpenCode can use `small_model` for lightweight background tasks such as title ge
 Set it explicitly:
 
 ```json
-"small_model": "mycoroute/code-model-fast"
+"small_model": "hivenet-router/code-model-fast"
 ```
 
 When you have only one compatible model, use the same value for both:
 
 ```json
-"model": "mycoroute/mycoroute-code-model",
-"small_model": "mycoroute/mycoroute-code-model"
+"model": "hivenet-router/hivenet-router-code-model",
+"small_model": "hivenet-router/hivenet-router-code-model"
 ```
 
 This keeps both primary and background model requests on Hivenet Router.
@@ -617,7 +617,7 @@ The example uses:
 
 ```json
 "enabled_providers": [
-  "mycoroute"
+  "hivenet-router"
 ]
 ```
 
@@ -641,7 +641,7 @@ To use Hivenet Router alongside another provider, include both provider IDs:
 
 ```json
 "enabled_providers": [
-  "mycoroute",
+  "hivenet-router",
   "another-provider"
 ]
 ```
@@ -732,14 +732,14 @@ opencode debug config \
       small_model,
       share,
       permission,
-      mycoroute: .provider.mycoroute
+      hivenet-router: .provider.hivenet-router
     }'
 ```
 
 Confirm that:
 
-- `mycoroute` appears in `enabled_providers`
-- `model` and `small_model` use the `mycoroute/` prefix
+- `hivenet-router` appears in `enabled_providers`
+- `model` and `small_model` use the `hivenet-router/` prefix
 - `baseURL` ends in `/v1`
 - the API-key value resolved
 - the expected model IDs appear under `models`
@@ -753,13 +753,13 @@ Confirm that:
 List the models OpenCode loaded for the provider:
 
 ```bash
-opencode models mycoroute
+opencode models hivenet-router
 ```
 
 A result may resemble:
 
 ```text
-mycoroute/mycoroute-code-model
+hivenet-router/hivenet-router-code-model
 ```
 
 The OpenCode list comes from its configuration.
@@ -796,7 +796,7 @@ For a non-interactive smoke test:
 
 ```bash
 opencode run \
-  -m mycoroute/mycoroute-code-model \
+  -m hivenet-router/hivenet-router-code-model \
   "Reply with the word connected."
 ```
 
@@ -811,7 +811,7 @@ Inspect the current directory and summarize the project structure.
 Then test a controlled edit:
 
 ```text
-Create a file named mycoroute-test.txt containing the word connected.
+Create a file named hivenet-router-test.txt containing the word connected.
 ```
 
 Confirm that OpenCode:
@@ -825,7 +825,7 @@ Confirm that OpenCode:
 Remove the test file afterward:
 
 ```bash
-rm mycoroute-test.txt
+rm hivenet-router-test.txt
 ```
 
 A model that answers the request as prose instead of issuing a structured tool call is not fully compatible with the coding workflow.
@@ -842,13 +842,13 @@ Compare them periodically:
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
 
 ```bash
-opencode models mycoroute
+opencode models hivenet-router
 ```
 
 Update `opencode.json` when:
@@ -998,7 +998,7 @@ Search its audit records in Loki:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   tenant_id="opencode-development"
 }
@@ -1033,14 +1033,14 @@ Check the merged configuration:
 
 ```bash
 opencode debug config \
-  | jq '.provider.mycoroute'
+  | jq '.provider.hivenet-router'
 ```
 
 Check that:
 
 - the file is in a supported configuration location
 - the JSON is valid
-- `mycoroute` is included in `enabled_providers`
+- `hivenet-router` is included in `enabled_providers`
 - it is not also present in `disabled_providers`
 - the current project does not override the provider
 
@@ -1057,14 +1057,14 @@ provider/model
 For example:
 
 ```text
-mycoroute/mycoroute-code-model
+hivenet-router/hivenet-router-code-model
 ```
 
 The provider prefix must match:
 
 ```json
 "provider": {
-  "mycoroute": {}
+  "hivenet-router": {}
 }
 ```
 
@@ -1072,7 +1072,7 @@ The model suffix must match a key under:
 
 ```json
 "provider": {
-  "mycoroute": {
+  "hivenet-router": {
     "models": {}
   }
 }
@@ -1081,14 +1081,14 @@ The model suffix must match a key under:
 List the loaded models:
 
 ```bash
-opencode models mycoroute
+opencode models hivenet-router
 ```
 
 ### Hivenet Router returns `401 Unauthorized`
 
 Check that:
 
-- `MYCOROUTE_API_KEY` contains the raw client key
+- `HIVENET_ROUTER_API_KEY` contains the raw client key
 - the variable reached the OpenCode process
 - the key has not expired
 - the configured `apiKey` uses the correct environment-variable name
@@ -1097,7 +1097,7 @@ Test the same value directly:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models
 ```
 
@@ -1146,14 +1146,14 @@ Inspect the reverse-proxy access log to confirm the final path.
 Compare:
 
 ```bash
-opencode models mycoroute
+opencode models hivenet-router
 ```
 
 with:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```

@@ -50,15 +50,15 @@ Check the installed SDK version’s runtime requirements when upgrading.
 Use the router’s root URL without a trailing `/v1`:
 
 ```bash
-export MYCOROUTE_URL="https://router.example.com"
-export MYCOROUTE_API_KEY="<mycoroute-api-key>"
-export MYCOROUTE_MODEL="<registered-model-id>"
+export HIVENET_ROUTER_URL="https://router.example.com"
+export HIVENET_ROUTER_API_KEY="<hivenet-router-api-key>"
+export HIVENET_ROUTER_MODEL="<registered-model-id>"
 ```
 
 The examples construct the endpoint appropriate to each SDK:
 
-- OpenAI-compatible clients use `${MYCOROUTE_URL}/v1`
-- Anthropic-compatible clients use `MYCOROUTE_URL`
+- OpenAI-compatible clients use `${HIVENET_ROUTER_URL}/v1`
+- Anthropic-compatible clients use `HIVENET_ROUTER_URL`
 
 Do not store the raw key in source control.
 
@@ -68,8 +68,8 @@ Query the catalog with the same key your application will use:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
-  "$MYCOROUTE_URL/v1/models" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+  "$HIVENET_ROUTER_URL/v1/models" \
   | jq -r '.data[] | [
       .id,
       .capability,
@@ -89,11 +89,11 @@ Before debugging an SDK, test the router directly.
 
 ```bash
 curl -X POST \
-  "$MYCOROUTE_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  "$HIVENET_ROUTER_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"$MYCOROUTE_MODEL\",
+    \"model\": \"$HIVENET_ROUTER_MODEL\",
     \"messages\": [
       {
         \"role\": \"user\",
@@ -108,11 +108,11 @@ curl -X POST \
 
 ```bash
 curl -N -X POST \
-  "$MYCOROUTE_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  "$HIVENET_ROUTER_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"$MYCOROUTE_MODEL\",
+    \"model\": \"$HIVENET_ROUTER_MODEL\",
     \"messages\": [
       {
         \"role\": \"user\",
@@ -150,9 +150,9 @@ import os
 
 from openai import OpenAI
 
-router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
-api_key = os.environ["MYCOROUTE_API_KEY"]
-model = os.environ["MYCOROUTE_MODEL"]
+router_url = os.environ["HIVENET_ROUTER_URL"].rstrip("/")
+api_key = os.environ["HIVENET_ROUTER_API_KEY"]
+model = os.environ["HIVENET_ROUTER_MODEL"]
 
 client = OpenAI(
     base_url=f"{router_url}/v1",
@@ -245,15 +245,15 @@ from openai import AsyncOpenAI
 
 
 async def main() -> None:
-    router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+    router_url = os.environ["HIVENET_ROUTER_URL"].rstrip("/")
 
     async with AsyncOpenAI(
         base_url=f"{router_url}/v1",
-        api_key=os.environ["MYCOROUTE_API_KEY"],
+        api_key=os.environ["HIVENET_ROUTER_API_KEY"],
         max_retries=0,
     ) as client:
         response = await client.chat.completions.create(
-            model=os.environ["MYCOROUTE_MODEL"],
+            model=os.environ["HIVENET_ROUTER_MODEL"],
             messages=[
                 {
                     "role": "user",
@@ -468,8 +468,8 @@ import os
 
 import httpx
 
-router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
-api_key = os.environ["MYCOROUTE_API_KEY"]
+router_url = os.environ["HIVENET_ROUTER_URL"].rstrip("/")
+api_key = os.environ["HIVENET_ROUTER_API_KEY"]
 
 documents = [
     "Paris is the capital of France.",
@@ -527,13 +527,13 @@ Create a server-side client:
 ```js
 import OpenAI from "openai";
 
-const routerURL = process.env.MYCOROUTE_URL?.replace(/\/+$/, "");
-const apiKey = process.env.MYCOROUTE_API_KEY;
-const model = process.env.MYCOROUTE_MODEL;
+const routerURL = process.env.HIVENET_ROUTER_URL?.replace(/\/+$/, "");
+const apiKey = process.env.HIVENET_ROUTER_API_KEY;
+const model = process.env.HIVENET_ROUTER_MODEL;
 
 if (!routerURL || !apiKey || !model) {
   throw new Error(
-    "MYCOROUTE_URL, MYCOROUTE_API_KEY, and MYCOROUTE_MODEL are required.",
+    "HIVENET_ROUTER_URL, HIVENET_ROUTER_API_KEY, and HIVENET_ROUTER_MODEL are required.",
   );
 }
 
@@ -693,12 +693,12 @@ import os
 
 from anthropic import Anthropic
 
-router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+router_url = os.environ["HIVENET_ROUTER_URL"].rstrip("/")
 
 client = Anthropic(
     base_url=router_url,
     api_key=None,
-    auth_token=os.environ["MYCOROUTE_API_KEY"],
+    auth_token=os.environ["HIVENET_ROUTER_API_KEY"],
     max_retries=0,
 )
 ```
@@ -707,7 +707,7 @@ Use the router root without `/v1`. The SDK appends `/v1/messages`.
 
 ```python
 message = client.messages.create(
-    model=os.environ["MYCOROUTE_MODEL"],
+    model=os.environ["HIVENET_ROUTER_MODEL"],
     max_tokens=128,
     system="Answer clearly and concisely.",
     messages=[
@@ -726,7 +726,7 @@ for block in message.content:
 The `auth_token` parameter sends:
 
 ```http
-Authorization: Bearer <mycoroute-api-key>
+Authorization: Bearer <hivenet-router-api-key>
 ```
 
 This matches Hivenet Router client authentication.
@@ -745,7 +745,7 @@ When the backend supports the endpoint:
 
 ```python
 result = client.messages.count_tokens(
-    model=os.environ["MYCOROUTE_MODEL"],
+    model=os.environ["HIVENET_ROUTER_MODEL"],
     system="Answer clearly and concisely.",
     messages=[
         {
@@ -777,13 +777,13 @@ npm install @anthropic-ai/sdk
 ```js
 import Anthropic from "@anthropic-ai/sdk";
 
-const routerURL = process.env.MYCOROUTE_URL?.replace(/\/+$/, "");
-const apiKey = process.env.MYCOROUTE_API_KEY;
-const model = process.env.MYCOROUTE_MODEL;
+const routerURL = process.env.HIVENET_ROUTER_URL?.replace(/\/+$/, "");
+const apiKey = process.env.HIVENET_ROUTER_API_KEY;
+const model = process.env.HIVENET_ROUTER_MODEL;
 
 if (!routerURL || !apiKey || !model) {
   throw new Error(
-    "MYCOROUTE_URL, MYCOROUTE_API_KEY, and MYCOROUTE_MODEL are required.",
+    "HIVENET_ROUTER_URL, HIVENET_ROUTER_API_KEY, and HIVENET_ROUTER_MODEL are required.",
   );
 }
 
@@ -835,12 +835,12 @@ import os
 
 from langchain_openai import ChatOpenAI
 
-router_url = os.environ["MYCOROUTE_URL"].rstrip("/")
+router_url = os.environ["HIVENET_ROUTER_URL"].rstrip("/")
 
 chat_model = ChatOpenAI(
-    model=os.environ["MYCOROUTE_MODEL"],
+    model=os.environ["HIVENET_ROUTER_MODEL"],
     base_url=f"{router_url}/v1",
-    api_key=os.environ["MYCOROUTE_API_KEY"],
+    api_key=os.environ["HIVENET_ROUTER_API_KEY"],
     use_responses_api=False,
     max_retries=0,
     max_tokens=256,
@@ -1244,8 +1244,8 @@ Test the same key with:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
-  "$MYCOROUTE_URL/v1/models"
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+  "$HIVENET_ROUTER_URL/v1/models"
 ```
 
 ### The Anthropic SDK returns `401`
@@ -1304,8 +1304,8 @@ Compare the application model with:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
-  "$MYCOROUTE_URL/v1/models" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+  "$HIVENET_ROUTER_URL/v1/models" \
   | jq -r '.data[].id'
 ```
 
