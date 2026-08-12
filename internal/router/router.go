@@ -615,16 +615,19 @@ func (r *Router) validateProviderPolicy(p *policy.Policy) error {
 }
 
 // checkAdmissionAgainstKeys validates proposed policies against the API keys
-// currently on disk, so a reload cannot introduce a serverless key whose input
-// bucket no longer covers a model's context. A key-read error is logged and
-// treated as "cannot validate" (nil) so an unrelated auth.yaml problem does not
-// block a policy reload — that problem surfaces on the auth reload path instead.
+// currently in force — the static list on disk plus the dynamic registry — so a
+// policy reload cannot introduce a serverless key whose input bucket no longer
+// covers a model's context, regardless of how that key was created. A key-read
+// error is logged and treated as "cannot validate" (nil) so an unrelated
+// auth.yaml problem does not block a policy reload — that problem surfaces on
+// the auth reload path instead.
 func (r *Router) checkAdmissionAgainstKeys(policies []*policy.Policy) error {
 	keys, err := admissionKeysFromConfig(r.cfg)
 	if err != nil {
 		log.Warnf("SIGHUP: could not read auth keys to validate policy admission invariants (%v) — skipping that check", err)
-		return nil
+		keys = nil
 	}
+	keys = append(keys, dynamicKeysAsEntries(r.keyRegistry)...)
 	return ValidateAdmissionInvariants(policies, keys)
 }
 

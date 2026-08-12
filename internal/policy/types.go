@@ -3,7 +3,11 @@
 
 package policy
 
-import "hivenet_router/internal/domain"
+import (
+	"slices"
+
+	"hivenet_router/internal/domain"
+)
 
 // Policy is the top-level routing configuration loaded from a YAML file.
 // It contains a primary routing step, an optional fallback chain, and an
@@ -76,6 +80,24 @@ func (p *Policy) EffectiveMode() PolicyMode {
 // IsServerless reports whether per-key caps apply to this policy's replicas.
 func (p *Policy) IsServerless() bool {
 	return p.EffectiveMode() == ModeServerless
+}
+
+// GovernsAnyOf reports whether a key restricted to keyModels could send a
+// request governed by this policy: a key with no model list may call any
+// model, a policy with no Models list is the global policy governing every
+// model, and otherwise the two sets must intersect. Shared by the startup,
+// reload, and admin-API cross-config validations so they agree on
+// reachability.
+func (p *Policy) GovernsAnyOf(keyModels []string) bool {
+	if len(keyModels) == 0 || len(p.Models) == 0 {
+		return true
+	}
+	for _, km := range keyModels {
+		if slices.Contains(p.Models, km) {
+			return true
+		}
+	}
+	return false
 }
 
 // FallbackProvider configures a last-resort closed-source model provider.

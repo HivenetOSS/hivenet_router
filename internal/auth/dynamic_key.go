@@ -128,6 +128,16 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	if e.Name == "" {
 		return fmt.Errorf("auth: key entry %q: name must not be empty", e.ID)
 	}
+	// The same quota bounds static keys get at load (static_key.go): a share
+	// outside (0,1] would let one key out-reserve the whole pool, and negative
+	// per-minute buckets are nonsense. Enforced here — not only in the HTTP
+	// DTO layer — so every registry mutation path is covered.
+	if err := validateOccupancyShare(fmt.Sprintf("key entry %q", e.ID), e.Quota.MaxOccupancyShare); err != nil {
+		return err
+	}
+	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
+		return fmt.Errorf("auth: key entry %q: input_tokens_per_minute and output_tokens_per_minute must be >= 0", e.ID)
+	}
 	return nil
 }
 
