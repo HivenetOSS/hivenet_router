@@ -1146,14 +1146,13 @@ func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted
 // in-flight token sum (Σw), the in-flight request count, and the effective admit
 // budget. Called on every admit/release/grow, so occupancy_tokens / budget_tokens
-// tracks real utilization. A model whose budget is unknown (0) leaves the budget
-// gauge untouched so a transient 0 does not blank the denominator.
+// tracks real utilization. The budget is always written — including 0 — so a
+// model with no token budget (max_inflight-only), or one whose budget was
+// disabled on reload, reports the true denominator rather than a stale value.
 func (m *RouterMetrics) SetAdmissionOccupancy(model string, sumW int64, count int, budget int64) {
 	m.admissionOccupancyTokens.With(prometheus.Labels{"model": model}).Set(float64(sumW))
 	m.admissionInflightRequests.With(prometheus.Labels{"model": model}).Set(float64(count))
-	if budget > 0 {
-		m.admissionBudgetTokens.With(prometheus.Labels{"model": model}).Set(float64(budget))
-	}
+	m.admissionBudgetTokens.With(prometheus.Labels{"model": model}).Set(float64(budget))
 }
 
 // TenantSetTokensUsedToday updates the gauge that tracks how many tokens the
