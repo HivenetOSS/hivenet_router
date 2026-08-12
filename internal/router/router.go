@@ -567,6 +567,7 @@ func (r *Router) startHTTPServer() {
 		r.agents.CountHealthyByModel,
 		r, // RegistrationFeed — Router implements SubscribeRegistration
 		admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout),
+		r.EnginePressureForModel,
 	)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
@@ -922,6 +923,58 @@ func (r *Router) reloadPolicyModelDir() {
 func (r *Router) SubscribeRegistration() (<-chan domain.RegistrationEvent, func()) {
 	sub := r.registrationNotifier.Subscribe()
 	return sub.Events, func() { r.registrationNotifier.Unsubscribe(sub) }
+}
+
+// EnginePressureForModel returns the aggregate live engine pressure across the
+// healthy agents serving model: the mean KV-cache utilization and the mean
+// waiting-request count, each averaged over the agents that report it. A metric
+// is nil when no healthy agent reports it (e.g. non-vLLM engines), so the
+// front-door shed gate skips that dimension rather than treating a missing
+// signal as zero pressure. The mean (not max) is used deliberately: a single hot
+// replica is handled by routing's per-agent exclude_if, so shedding new
+// admissions is warranted only when the pool as a whole is under pressure.
+func (r *Router) EnginePressureForModel(model string) (kvUtil, waiting *float64) {
+	var metrics []*domain.BackendMetrics
+	for _, agent := range r.agents.ListByModel(model) {
+		if !agent.IsHealthy() {
+			continue
+		}
+		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil {
+			metrics = append(metrics, ep)
+		}
+	}
+	return MeanEnginePressure(metrics)
+}
+
+// MeanEnginePressure averages the KV-cache utilization and waiting-request count
+// over the given per-agent engine snapshots, ignoring nil metrics. A dimension
+// that no snapshot reports is returned as nil (not zero), so the shed gate skips
+// it rather than reading a missing signal as no pressure.
+func MeanEnginePressure(metrics []*domain.BackendMetrics) (kvUtil, waiting *float64) {
+	var kvSum, waitSum float64
+	var kvN, waitN int
+	for _, ep := range metrics {
+		if ep == nil {
+			continue
+		}
+		if ep.KVCacheUtilization != nil {
+			kvSum += *ep.KVCacheUtilization
+			kvN++
+		}
+		if ep.WaitingRequests != nil {
+			waitSum += *ep.WaitingRequests
+			waitN++
+		}
+	}
+	if kvN > 0 {
+		v := kvSum / float64(kvN)
+		kvUtil = &v
+	}
+	if waitN > 0 {
+		v := waitSum / float64(waitN)
+		waiting = &v
+	}
+	return kvUtil, waiting
 }
 
 // GetRoutingTable implements api.RoutingTableProvider.
