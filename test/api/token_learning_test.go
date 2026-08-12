@@ -176,3 +176,37 @@ func TestDoesNotLearnFromStreamingEstimate(t *testing.T) {
 		t.Errorf("streaming estimate (non-exact) must not move the ratio: %.4f → %.4f", before, after)
 	}
 }
+
+// TestDoesNotLearnFromProviderFallback verifies a response served by the cloud
+// provider fallback is skipped for estimator learning: its prompt_tokens come
+// from the provider's tokenizer, not the local model's, so folding them in
+// would mis-calibrate the local ratio (and its output is likewise not local
+// decode work — the same guard skips the OTPM charge).
+func TestDoesNotLearnFromProviderFallback(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	est := tokenizer.NewEstimator()
+	h := learnHandler(q, est)
+	before := est.RatioFor(b2Model)
+	c, w := newCtx("/v1/chat/completions", b2Body(0))
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{
+			RawBytes:    []byte(`{"ok":true}`),
+			ProcessedBy: "provider:openai",
+			Usage:       domain.Usage{PromptTokens: 50, CompletionTokens: 5, TotalTokens: 55},
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if after := est.RatioFor(b2Model); after != before {
+		t.Errorf("provider-served usage must not teach the local ratio: %.4f -> %.4f", before, after)
+	}
+}

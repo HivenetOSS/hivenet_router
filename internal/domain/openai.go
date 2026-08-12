@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // New ChatRequest that covers text generation, vision and audio, with extensible fields for future use.
@@ -128,6 +129,20 @@ type ChatResponse struct {
 	HttpHeaders http.Header   `json:"-"`
 	RawBytes    []byte        `json:"-"`
 	Body        io.ReadCloser `json:"-"` // non-nil for streaming responses; handler must Close
+}
+
+// providerProcessedByPrefix marks a response served by a cloud provider
+// fallback (OpenAI/Anthropic) instead of a local agent; the providers stamp
+// ProcessedBy as "provider:<engine>".
+const providerProcessedByPrefix = "provider:"
+
+// ServedByProvider reports whether this response came from the cloud provider
+// fallback rather than a local GPU replica. Provider tokens are billed to the
+// operator's provider account and consume no local KV cache or decode
+// throughput, so the local-resource accounting (OTPM charge, estimator
+// learning) must skip them.
+func (r *ChatResponse) ServedByProvider() bool {
+	return strings.HasPrefix(r.ProcessedBy, providerProcessedByPrefix)
 }
 
 // Choice represents a response choice

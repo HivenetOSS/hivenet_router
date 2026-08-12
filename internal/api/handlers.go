@@ -1037,8 +1037,15 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 
 	if resp.Body == nil {
 		c.Writer.Write(resp.RawBytes) //nolint:errcheck
-		h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
-		h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
+		// A provider-fallback response is served off-box on the operator's cloud
+		// account: it consumes no local decode throughput (so no OTPM charge) and
+		// its prompt_tokens come from the PROVIDER's tokenizer, which must not
+		// teach the local model's learned ratio. The occupancy reservation was
+		// already released when the processor handed the request to the provider.
+		if !resp.ServedByProvider() {
+			h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
+			h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
+		}
 		return
 	}
 	// Streaming: flush SSE chunks as they arrive so tokens appear progressively.
