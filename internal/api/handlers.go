@@ -401,10 +401,13 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		h.onRequestReceived(MetricContext{TenantID: m.tenantID, KeyID: m.keyID, DeploymentID: m.deploymentID})
 	}
 
-	if !h.reserveInputBudget(c, &req, m) {
+	// Per-key rate caps before the daily-budget charge: reserveInputBudget
+	// deducts daily tokens, so charging it only after the cheaper per-minute
+	// caps means a rate rejection never spends a tenant's daily budget.
+	if !h.enforcePerKeyRates(c, &req, m) {
 		return
 	}
-	if !h.enforcePerKeyRates(c, &req, m) {
+	if !h.reserveInputBudget(c, &req, m) {
 		return
 	}
 	if !captureRawBody(c, &req, m.requestID) {
@@ -621,13 +624,15 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 		return true
 	}
 	limits := quotaLimitsFromContext(c)
+	// Check the non-deducting OTPM gate before charging the ITPM bucket, so an
+	// output-rate rejection never spends input-rate tokens.
+	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
+		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
+	}
 	if limits.InputTokensPerMinute > 0 {
 		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, estimatePromptTokens(req)) {
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}
-	}
-	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
-		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	return true
 }

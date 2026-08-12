@@ -32,6 +32,16 @@ func TestDerive_ShareContextFloorBinds(t *testing.T) {
 	}
 }
 
+func TestDerive_ShareClampedToOne(t *testing.T) {
+	// max_model_len > admit_budget (a KV pool that barely holds one max-context
+	// request) would give share_floor > 1.0 — the derived share must clamp to 1.0
+	// so it stays a valid (0,1] config value.
+	d := auth.DeriveKeyDefaults(auth.ModelLimits{AdmitBudgetTokens: 100_000, MaxModelLen: 150_000})
+	if d.OccupancyShare != 1.0 {
+		t.Errorf("share = %v, want 1.0 (clamped)", d.OccupancyShare)
+	}
+}
+
 // --- ITPM: the three binding branches ---------------------------------------
 
 func TestDerive_ITPMFloorBinds(t *testing.T) {

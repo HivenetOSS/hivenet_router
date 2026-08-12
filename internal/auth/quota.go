@@ -115,11 +115,11 @@ type InMemoryLimiter struct {
 	// Set once at startup via SetOnTokensUsed before any requests arrive.
 	onTokensUsed func(tenantID string, used int)
 
-	// rpmBurstSeconds sizes the RPM token bucket's burst as that many seconds of
-	// the rate, instead of a full minute. 0 (or >= 60) keeps the legacy
-	// full-minute burst. A short certified window (e.g. 10s) closes the hole
-	// where a key could spend its entire minute's quota in one instant. Set once
-	// at startup via SetRPMBurstWindow before any request is handled.
+	// rpmBurstSeconds sizes the per-tenant RPM token bucket's burst as that many
+	// seconds of the rate, instead of a full minute. 0 (or >= 60) keeps the
+	// legacy full-minute burst. A short certified window (e.g. 10s) closes the
+	// hole where a tenant could spend its entire minute's quota in one instant.
+	// Set once at startup via SetRPMBurstWindow before any request is handled.
 	rpmBurstSeconds int
 }
 

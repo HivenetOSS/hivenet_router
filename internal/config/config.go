@@ -92,12 +92,11 @@ type Config struct {
 	// Env: HIVENET_ROUTER_ADMIT_PARK_TIMEOUT (a Go duration, e.g. "250ms").
 	AdmitParkTimeout time.Duration
 
-	// RPMBurstSeconds sizes the per-key RPM token bucket's burst as that many
+	// RPMBurstSeconds sizes the per-tenant RPM token bucket's burst as that many
 	// seconds of the rate, instead of a full minute. 0 (default) keeps the legacy
-	// full-minute burst; a short certified window (e.g. 10) stops a key from
+	// full-minute burst; a short certified window (e.g. 10) stops a tenant from
 	// spending its whole minute's quota in one instant — the anti-flood burst
-	// control for serverless keys. Range [0,60); values outside keep the legacy
-	// full-minute burst.
+	// control. Range [0,60); values outside keep the legacy full-minute burst.
 	// Env: HIVENET_ROUTER_RPM_BURST_SECONDS
 	RPMBurstSeconds int
 

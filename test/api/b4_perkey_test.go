@@ -141,6 +141,32 @@ func TestB4_FullContextRequestPassesAllCaps(t *testing.T) {
 	}
 }
 
+// TestB4_ITPMDenialDoesNotChargeDailyBudget verifies the gate order: a request
+// rejected by the per-key input-rate cap must not have spent the tenant's daily
+// token budget (the per-minute caps are enforced before the daily charge).
+func TestB4_ITPMDenialDoesNotChargeDailyBudget(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	exec := policy.NewExecutor(nil, nil, serverless(0), 0, 0)
+	lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000}
+	h := api.NewHandlers(
+		nil, nil, q, time.Second,
+		exec, nil, nil, lim,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, auth.NewMinuteRateLimiter(),
+	)
+	c, w := newCtx("/v1/chat/completions", textBody(40, 0)) // input 14 > ITPM burst 10
+	withKey(c, auth.QuotaLimits{TokensPerDay: 1_000_000, InputTokensPerMinute: 10})
+
+	h.Passthrough(c)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 from ITPM, got %d", w.Code)
+	}
+	if lim.inputCalls != 0 {
+		t.Errorf("an ITPM-denied request must not charge the daily budget; AllowInputTokens called %d times", lim.inputCalls)
+	}
+}
+
 // runAndRespond runs Passthrough in a goroutine, answers the queued request, and
 // waits for completion — the shared drive-to-success helper for admit tests.
 func runAndRespond(t *testing.T, h *api.Handlers, c *gin.Context, q chan *domain.PendingRequest) {

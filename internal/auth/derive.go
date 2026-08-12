@@ -52,6 +52,13 @@ func DeriveKeyDefaults(m ModelLimits) KeyDefaults {
 			share = floor
 		}
 	}
+	// A share is a fraction of the admit budget, so it can never exceed 1.0 (the
+	// loader validates (0,1]). It reaches the ceiling only when the KV pool
+	// barely holds one max-context request — a provisioning limit the derivation
+	// cannot lift, but the returned value must stay valid.
+	if share > 1.0 {
+		share = 1.0
+	}
 
 	itpm := int(share * float64(m.ITPMCeiling))
 	if floor := 2 * m.MaxInputTokens; itpm < floor {
