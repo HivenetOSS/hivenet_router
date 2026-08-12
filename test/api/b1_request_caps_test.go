@@ -30,7 +30,7 @@ func newCapHandlers(q chan *domain.PendingRequest, global *policy.Policy) *api.H
 		nil, nil, q, 2*time.Second,
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil,
+		nil, nil, nil, nil,
 	)
 }
 
@@ -314,7 +314,7 @@ func TestB1_PerModelPolicyCap(t *testing.T) {
 		t.Fatalf("SetNamedPolicy: %v", err)
 	}
 	q := make(chan *domain.PendingRequest, 1)
-	h := api.NewHandlers(nil, nil, q, 2*time.Second, exec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	h := api.NewHandlers(nil, nil, q, 2*time.Second, exec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// Over-cap request for the capped model → 400.
 	over := fmt.Appendf(nil, `{"model":"capped","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 28))

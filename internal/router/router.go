@@ -140,6 +140,11 @@ type Router struct {
 	// rateLimiter enforces per-tenant RPM and daily token limits on /v1/* endpoints.
 	rateLimiter auth.RateLimiter
 
+	// minuteLimiter enforces the serverless per-key tokens-per-minute caps
+	// (ITPM/OTPM). Reset alongside rateLimiter on auth reload so updated caps
+	// take effect immediately.
+	minuteLimiter *auth.MinuteRateLimiter
+
 	// keyRegistry is the mutable in-memory API key registry (dynamic mode).
 	// Nil when running in static-key or no-auth mode — guards against SIGHUP reload.
 	keyRegistry *auth.DynamicKeyProvider
@@ -288,6 +293,7 @@ func New(cfg *config.Config) (*Router, error) {
 		apiAuth:              auth.NewAtomicProvider(apiProv),
 		adminAuth:            auth.NewAtomicProvider(adminProv),
 		rateLimiter:          rateLimiter,
+		minuteLimiter:        auth.NewMinuteRateLimiter(),
 		keyRegistry:          keyRegistry,
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
@@ -568,6 +574,10 @@ func (r *Router) startHTTPServer() {
 		r, // RegistrationFeed — Router implements SubscribeRegistration
 		admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout),
 		r.EnginePressureForModel,
+		// Per-key occupancy share: no admit fraction (it is fairness, not box
+		// safety) and no parking (a per-key breach is denied immediately).
+		admission.NewController(1.0, 0),
+		r.minuteLimiter,
 	)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
@@ -730,6 +740,7 @@ func (r *Router) reloadAuthProviders() {
 	r.apiAuth.Swap(apiProv)
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
+	r.minuteLimiter.Reset()
 	r.publishTenantQuotas()
 	if r.cfg.AuthConfigFile != "" {
 		log.Infof("SIGHUP: auth providers reloaded from %s", r.cfg.AuthConfigFile)

@@ -234,6 +234,14 @@ type Handlers struct {
 	// waiting-request count for a model (each nil when no healthy agent reports
 	// it), driving the front-door shed gate. Nil disables the gate (e.g. tests).
 	enginePressure func(model string) (kvUtil, waiting *float64)
+
+	// keyAdmission enforces the serverless per-key occupancy share — a per-key
+	// token-weighted in-flight budget parallel to the global one. Nil disables it.
+	keyAdmission *admission.Controller
+
+	// minuteLimiter enforces the serverless per-key tokens-per-minute caps
+	// (ITPM/OTPM). Nil disables them.
+	minuteLimiter *auth.MinuteRateLimiter
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -259,6 +267,8 @@ func NewHandlers(
 	registrationFeed RegistrationFeed,
 	admissionController *admission.Controller,
 	enginePressure func(model string) (kvUtil, waiting *float64),
+	keyAdmission *admission.Controller,
+	minuteLimiter *auth.MinuteRateLimiter,
 ) *Handlers {
 	return &Handlers{
 		storage:              storage,
@@ -279,6 +289,8 @@ func NewHandlers(
 		registrationFeed:     registrationFeed,
 		admission:            admissionController,
 		enginePressure:       enginePressure,
+		keyAdmission:         keyAdmission,
+		minuteLimiter:        minuteLimiter,
 	}
 }
 
@@ -389,6 +401,12 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		h.onRequestReceived(MetricContext{TenantID: m.tenantID, KeyID: m.keyID, DeploymentID: m.deploymentID})
 	}
 
+	// Per-key rate caps before the daily-budget charge: reserveInputBudget
+	// deducts daily tokens, so charging it only after the cheaper per-minute
+	// caps means a rate rejection never spends a tenant's daily budget.
+	if !h.enforcePerKeyRates(c, &req, m) {
+		return
+	}
 	if !h.reserveInputBudget(c, &req, m) {
 		return
 	}
@@ -405,7 +423,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
 	pending.Path = path // forward to the backend's native endpoint at this path
-	if reservation != nil {
+	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
 
@@ -522,16 +540,19 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 // parks briefly for capacity to free, then returns 429 concurrency_limit_exceeded
 // with Retry-After.
 //
-// It returns the reservation (which the caller MUST release exactly once on every
-// exit path) and whether the request was admitted. A nil reservation with ok=true
-// means the gate is inert for this model — nothing to release, nothing rejected.
-func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (*admission.Reservation, bool) {
-	if h.admission == nil || h.executor == nil {
-		return nil, true
+// It returns the reservations (which the caller MUST release exactly once on
+// every exit path) and whether the request was admitted. An empty slice with
+// ok=true means the gate is inert for this model — nothing to release, nothing
+// rejected. On a serverless replica it holds a second, per-key reservation for
+// the key's occupancy share alongside the global budget.
+func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (admission.Reservations, bool) {
+	var rs admission.Reservations
+	if h.executor == nil {
+		return rs, true
 	}
 	pol := h.executor.EffectivePolicy(req.Model)
-	if pol == nil || (pol.AdmitBudgetTokens <= 0 && pol.MaxInflight <= 0) {
-		return nil, true // no budget and no backstop declared — gate inert
+	if pol == nil {
+		return rs, true
 	}
 	declared := req.MaxCompletionTokens
 	if declared == 0 {
@@ -540,14 +561,106 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// Declared output is reserved up front; an undeclared request reserves only
 	// its input and grows live (grows=true), matching how the processor meters it.
 	footprint := estimatePromptTokens(req) + declared
-	res := h.admission.Admit(c.Request.Context(), req.Model, footprint, declared == 0, pol.AdmitBudgetTokens, pol.MaxInflight)
-	if res == nil {
-		c.Header("Retry-After", "1")
-		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
-			"server at capacity for this model, please retry", domain.SourceRouter)
-		return nil, false
+	grows := declared == 0
+
+	// Global occupancy budget (all replicas).
+	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
+		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, pol.AdmitBudgetTokens, pol.MaxInflight)
+		if res == nil {
+			c.Header("Retry-After", "1")
+			writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
+				"server at capacity for this model, please retry", domain.SourceRouter)
+			return nil, false
+		}
+		rs = append(rs, res)
 	}
-	return res, true
+
+	// Per-key occupancy share (serverless replicas only): the key's in-flight
+	// footprint must stay within max_occupancy_share × admit_budget_tokens. This
+	// is anti-abuse fairness, not box safety (the global budget above is), so the
+	// shares are intentionally oversubscribed and no admit fraction is applied.
+	if pol.IsServerless() && pol.AdmitBudgetTokens > 0 && h.keyAdmission != nil {
+		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
+			_, keyID, _ := callerIDs(c)
+			budget := int(share * float64(pol.AdmitBudgetTokens))
+			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
+			if res == nil {
+				rs.Release() // hand back the global reservation already taken
+				c.Header("Retry-After", "1")
+				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
+					"per-key occupancy share exceeded, please retry", domain.SourceRouter)
+				return nil, false
+			}
+			rs = append(rs, res)
+		}
+	}
+	return rs, true
+}
+
+// quotaLimitsFromContext returns the calling key's resolved quota limits, or a
+// zero value when none were stashed (no auth). The serverless per-key caps live
+// on the flat fields; a per-model key leaves them zero, so B4 is inert for it.
+func quotaLimitsFromContext(c *gin.Context) auth.QuotaLimits {
+	if raw, ok := c.Get("quota_limits"); ok {
+		if limits, ok := raw.(auth.QuotaLimits); ok {
+			return limits
+		}
+	}
+	return auth.QuotaLimits{}
+}
+
+// enforcePerKeyRates applies the serverless per-key token-per-minute caps: it
+// charges the request's estimated input tokens against the key's ITPM bucket and
+// rejects when the key's OTPM bucket is already drained by recent output. Both
+// deny with 429 rate_limit_exceeded + Retry-After. Inert unless the request
+// lands on a serverless policy and the key declares the cap. Returns false after
+// writing the 429.
+func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m reqMeta) bool {
+	if h.minuteLimiter == nil || h.executor == nil {
+		return true
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil || !pol.IsServerless() {
+		return true
+	}
+	limits := quotaLimitsFromContext(c)
+	// Check the non-deducting OTPM gate before charging the ITPM bucket, so an
+	// output-rate rejection never spends input-rate tokens.
+	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
+		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
+	}
+	if limits.InputTokensPerMinute > 0 {
+		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, estimatePromptTokens(req)) {
+			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
+		}
+	}
+	return true
+}
+
+// chargeOutputRate meters completion tokens against the key's OTPM bucket after
+// a serverless response, so a burst of output throttles the key's next requests.
+// Best-effort and post-hoc: the response is already delivered. No-op unless the
+// request is serverless and the key declares an OTPM cap.
+func (h *Handlers) chargeOutputRate(c *gin.Context, req *domain.ChatRequest, m reqMeta, completionTokens int) {
+	if h.minuteLimiter == nil || h.executor == nil || completionTokens <= 0 {
+		return
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil || !pol.IsServerless() {
+		return
+	}
+	if otpm := quotaLimitsFromContext(c).OutputTokensPerMinute; otpm > 0 {
+		h.minuteLimiter.ChargeOutputTokens(m.keyID, req.Model, otpm, completionTokens)
+	}
+}
+
+// writeRateLimited emits a 429 rate_limit_exceeded with Retry-After for a per-key
+// cap breach, firing the token-limited metric callback. Always returns false.
+func (h *Handlers) writeRateLimited(c *gin.Context, m reqMeta, model, msg string) bool {
+	h.fireTokenLimited(m, model)
+	c.Header("Retry-After", "1")
+	writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded, msg, domain.SourceRouter)
+	return false
 }
 
 // enforceShedPressure is the front-door KV-pressure shed: when the live engine
@@ -830,6 +943,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 
 	if resp.Body == nil {
 		c.Writer.Write(resp.RawBytes) //nolint:errcheck
+		h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
 		return
 	}
 	// Streaming: flush SSE chunks as they arrive so tokens appear progressively.
@@ -851,6 +965,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	if ct := pending.StreamedCompletionTokens.Load(); ct > 0 {
 		c.Set(auditKeyOutputTokens, ct)
 	}
+	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
 }
 
 // writeErrorResponse writes a worker error, carrying real usage/agent into the
