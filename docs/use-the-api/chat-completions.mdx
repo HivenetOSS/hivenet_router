@@ -27,9 +27,10 @@ For each request, Hivenet Router:
 2. applies request and token quotas when configured
 3. reads and validates the top-level `model` field
 4. checks that the API key may use that model
-5. selects a healthy `llm` agent through the routing policy
-6. forwards the original body to the same path on the selected backend
-7. returns the backend response to the client
+5. applies the [admission gates](/routing/admission-control) — per-request caps, pressure shed, occupancy budget, and (on serverless) per-key caps
+6. selects a healthy `llm` agent through the routing policy
+7. forwards the original body to the same path on the selected backend
+8. returns the backend response to the client
 
 Apart from the fields needed for routing and quota estimation, Hivenet Router does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
 
@@ -145,8 +146,10 @@ Hivenet Router forwards the complete request, but it reads a small number of fie
 | Field | How Hivenet Router uses it |
 | --- | --- |
 | `model` | Selects matching agents and applies model restrictions |
-| `messages` | Estimates input-token use when token quotas are enabled |
-| `max_completion_tokens` | Checks the worst-case requested output against the daily token budget |
+| `messages` | Estimates input-token use for quotas and admission; image parts count against the per-request image cap |
+| `system` | Anthropic top-level system prompt — included in the input-token estimate |
+| `tools` | Tool/function definitions — their JSON bytes are included in the input-token estimate (the backend tokenizes them) |
+| `max_completion_tokens` | Reserved as the request's output footprint for occupancy admission and checked against the daily token budget |
 | `max_tokens` | Used as a fallback when `max_completion_tokens` is absent |
 | `stream` | Enables progressive streaming through the router and agent |
 
@@ -389,10 +392,13 @@ API keys can enforce:
 - requests per minute
 - daily token budgets
 - separate quotas for individual models
+- on serverless deployments: per-key input/output tokens-per-minute and an occupancy share (see [Admission control](/routing/admission-control))
 
 Before routing, Hivenet Router checks the request-rate quota.
 
-When a daily token budget is configured, it also estimates the prompt and checks whether the remaining budget can cover:
+Independently of per-key quotas, every request also passes the [admission gates](/routing/admission-control) for its model: the per-request input and image caps, the front-door pressure shed, and the KV-occupancy budget. These protect the serving pool as a whole and apply even to keys with unlimited quotas.
+
+When a daily token budget is configured, the router estimates the prompt and checks whether the remaining budget can cover:
 
 ```text
 estimated input tokens + requested maximum output tokens
@@ -402,9 +408,9 @@ estimated input tokens + requested maximum output tokens
 
 The estimated input tokens are charged at admission. Actual completion tokens are charged after the backend responds.
 
-<Warning>
-  Token estimation for Anthropic-format requests is best-effort. The estimator does not fully account for every Anthropic content structure, including some top-level system instructions and non-text blocks.
-</Warning>
+<Note>
+  The input estimate uses a per-model learned tokens-per-byte ratio that self-calibrates from each backend's reported usage, and it covers message text, the Anthropic top-level `system` prompt, and tool-definition JSON. The estimate is reconciled against the backend's exact `prompt_tokens` when the response completes. Image content is not byte-estimable and is bounded by the per-request image cap instead.
+</Note>
 
 ## Rate-limit headers
 
@@ -457,12 +463,14 @@ Common responses include:
 | HTTP status | Example code | Meaning |
 | --- | --- | --- |
 | `400` | `request_invalid` | Malformed request or missing model |
+| `400` | `input_too_long` | Prompt over the model's `max_input_tokens`, or more images than `images_max` |
 | `400` | `context_length_exceeded` | Backend rejected the context length |
 | `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid credentials |
 | `403` | `model_forbidden` | API key cannot use the requested model |
 | `404` | `model_not_found` | No registered model matches the request |
-| `429` | `rate_limit_exceeded` | Request-rate quota exhausted |
+| `429` | `rate_limit_exceeded` | A per-key cap: request rate, input/output tokens per minute, or occupancy share |
+| `429` | `concurrency_limit_exceeded` | Occupancy budget or `max_inflight` full, or the front-door pressure shed fired; carries `Retry-After` |
 | `429` | `token_limit_exceeded` | Daily token budget exhausted |
 | `503` | `no_agents_available` | No healthy matching agent |
 | `503` | `no_capacity` | Matching agents are at capacity |

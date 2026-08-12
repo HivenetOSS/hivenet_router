@@ -597,16 +597,19 @@ requests_per_minute_per_replica
 
 When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error.
 
-### 4. Model authorization and token admission
+### 4. Model authorization and admission gates
 
 The handler:
 
 - parses the top-level `model`
 - checks the key’s effective model allowlist
-- estimates input tokens
+- estimates input tokens with the per-model learned estimator (message text, Anthropic `system` prompt, tool JSON)
+- applies the [admission gates](/routing/admission-control) in order: the per-request input/image caps (400 `input_too_long`), the front-door KV-pressure shed, the KV-occupancy admit budget with its `max_inflight` backstop (429 `concurrency_limit_exceeded`, brief parking), and — on serverless policies — the per-key occupancy share and token-per-minute caps (429 `rate_limit_exceeded`)
 - checks the worst-case input plus requested output against the daily budget
 - charges admitted prompt tokens
 - preserves the original request bytes and headers
+
+The occupancy reservation taken here is held for the request’s lifetime — grown as undeclared output streams, reconciled to the backend’s exact `prompt_tokens`, and released on every exit path (or early, when the request fails over to a cloud provider). `/v1/messages/count_tokens` skips the admission gates: it is a stateless tokenizer lookup guarded by the request-rate quota alone.
 
 ### 5. Global request queue
 

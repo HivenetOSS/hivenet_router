@@ -304,7 +304,14 @@ meta-llama/Llama-3.1-8B-Instruct
 
 It does not need a Hivenet Router allowlist entry for the external provider model.
 
-Request and token accounting also remains associated with the original requested model and tenant. When the provider returns usage data, Hivenet Router charges the resulting input and output tokens to the same quota bucket used during request admission.
+Request and token accounting remains associated with the original requested model and tenant, but a provider-served request is deliberately **not** charged as local load:
+
+- Charges taken **before routing** stand: the per-key request-rate deduction, the input-tokens-per-minute charge, and the daily input-token reservation. They are the key's plan limits and apply regardless of which backend answers.
+- The **KV-occupancy reservation is released** the moment the request is handed to the provider — provider traffic consumes the provider's account, not local GPU memory.
+- Provider output is **not** charged against the per-key output-tokens-per-minute cap, and provider usage never feeds the router's learned token estimator (the provider's tokenizer differs from the local model's).
+- The provider-reported usage is still recorded in the per-tenant Prometheus token counters and the audit log, attributed to the original model, so billing and observability see the real consumption.
+
+See [Admission control](/routing/admission-control) for the full accounting model.
 
 ## OpenAI fallback
 

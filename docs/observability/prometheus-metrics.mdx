@@ -142,6 +142,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Policies | Primary routing, fallback, exhaustion, reloads, and connection resets |
 | Queue | Requests waiting for agent capacity |
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
+| Admission control | Gate rejections by reason, live occupancy vs budget, in-flight concurrency |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -1252,6 +1253,20 @@ increase(
 
   Investigate any increase rather than treating it as a harmless background error.
 </Warning>
+
+## Admission-control metrics
+
+The admission gates publish a rejection counter and live occupancy gauges:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `hivenet_router_admission_rejections_total` | counter | `reason`, `model` |
+| `hivenet_router_admission_occupancy_tokens` | gauge | `model` |
+| `hivenet_router_admission_budget_tokens` | gauge | `model` |
+| `hivenet_router_admission_inflight_requests` | gauge | `model` |
+| `hivenet_router_admission_max_inflight` | gauge | `model` |
+
+The `reason` label attributes each rejection to the gate that produced it (`b1`, `b2`, `b3`, `b4_occupancy`, `b4_itpm`, `b4_otpm`, `b4_rpm`). See [Admission control metrics](/observability/admission-control-metrics) for the full label semantics and panel queries, and [Admission control](/routing/admission-control) for the gates themselves.
 
 ## Per-request duration by agent
 
