@@ -776,9 +776,12 @@ curl -X PUT \
     \"allowed_models\": [
       \"meta-llama/Llama-3.1-8B-Instruct\"
     ],
+    \"max_occupancy_share\": 0.4,
     \"quota\": {
       \"requests_per_minute\": 1000,
-      \"tokens_per_day\": 1000000
+      \"tokens_per_day\": 1000000,
+      \"input_tokens_per_minute\": 524288,
+      \"output_tokens_per_minute\": 47424
     }
   }" \
   http://localhost:8080/admin/api-keys/acme-prod
@@ -802,7 +805,8 @@ Response:
 | `enabled` | Yes | Whether the key may authenticate |
 | `expires_at` | No | RFC 3339 timestamp; empty means no expiry |
 | `allowed_models` | No | Model allowlist; empty means unrestricted |
-| `quota` | No | Flat or per-model quota configuration |
+| `quota` | No | Flat or per-model quota configuration; the flat shape also accepts the serverless `input_tokens_per_minute` / `output_tokens_per_minute` caps |
+| `max_occupancy_share` | No | Serverless occupancy share, fraction of a model pool's admit budget in (0, 1]; 0 means unset. Key-level, mirroring the `auth.yaml` field |
 
 A stale version returns HTTP `409`:
 
@@ -814,6 +818,16 @@ A stale version returns HTTP `409`:
 ```
 
 A key hash cannot belong to two different IDs. Delete the existing entry before assigning its hash to another ID.
+
+### Admission validation on key writes
+
+`PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants the static `auth.yaml` loader enforces at startup, returning HTTP `400` instead of accepting a key that would misbehave silently:
+
+- `max_occupancy_share` outside (0, 1] is rejected (a share above 1 would let one key out-reserve the whole pool).
+- Negative `input_tokens_per_minute` / `output_tokens_per_minute` are rejected.
+- On every `mode: serverless` model the key can reach, `input_tokens_per_minute` must be at least the policy's `max_input_tokens` — a smaller bucket can never admit a full-context prompt, so it would silently cap the usable context for that key.
+
+The reverse direction holds too: a policy reload that would break these invariants against the keys currently registered (static or dynamic) is rejected, keeping the previous policies active. See [Admission control](/routing/admission-control).
 
 ### Use per-model quotas
 

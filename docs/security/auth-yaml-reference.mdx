@@ -184,6 +184,7 @@ api:
 | `metadata` | Yes | Identity and lifecycle information |
 | `models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
+| `max_occupancy_share` | No | Serverless occupancy share: the fraction of a model pool's admit budget this key may hold in flight at once. Range (0, 1]; 0/absent = unset. Sits at the key level (not inside `quota`) because it is a fraction of the replica pool's KV budget, not a per-minute rate. Ignored on `mode: reserved` policies. |
 
 ### `key_hash`
 
@@ -385,13 +386,19 @@ The flat quota shape applies one shared budget to every model the owner may call
 quota:
   requests_per_minute: 1000
   tokens_per_day: 5000000
+  input_tokens_per_minute: 519540    # serverless per-key ITPM (admission gate B4)
+  output_tokens_per_minute: 47424    # serverless per-key OTPM (admission gate B4)
 ```
 
 | Field | Required | Description |
 | --- | --- | --- |
 | `requests_per_minute` | No | Shared request-rate limit |
 | `tokens_per_day` | No | Shared daily language-model token budget |
+| `input_tokens_per_minute` | No | Per-key input-token rate; charged with the admission estimate before forwarding. Applies only on `mode: serverless` policies |
+| `output_tokens_per_minute` | No | Per-key output-token rate; metered from real usage after each response (never reserved). Applies only on `mode: serverless` policies |
 | `0` | Not applicable | Unlimited |
+
+The two per-minute token fields are flat-shape only — they cannot be combined with `per_model`, like the other flat fields. Negative values are rejected at load.
 
 Flat quota buckets are associated with the owner rather than the individual key.
 
@@ -437,6 +444,38 @@ The daily budget:
 A value of `0` disables the token budget.
 
 Embedding and reranking requests currently participate in request-rate limits but do not charge input against `tokens_per_day`.
+
+### Serverless per-key caps (B4)
+
+On a policy with `mode: serverless`, four per-key caps apply on top of the shared circuit breaker — see [Admission control](/routing/admission-control) for the full model:
+
+```yaml
+api:
+  - key_hash: "..."
+    metadata: { name: some-customer, owner: acme }
+    models: [gemma-4-31b]
+    max_occupancy_share: 0.64
+    quota:
+      requests_per_minute: 96
+      input_tokens_per_minute: 519540
+      output_tokens_per_minute: 47424
+      tokens_per_day: 5000000
+```
+
+- **ITPM** is a continuously refilling token bucket (rate = limit/60 per second, capacity = one minute). It is charged with the request's estimated input tokens *before* the daily budget, so a rate rejection never spends daily tokens.
+- **OTPM** is metered after each response from the real completion tokens — output is never reserved up front, so a long response spread over minutes is not penalised; a key that over-produces is held off on its next request instead.
+- **`max_occupancy_share`** bounds the key's token-weighted in-flight sum to `share × (admit_fraction × admit_budget_tokens × healthy replicas)` — the same pool the global occupancy gate admits against.
+- The caps are **fairness/anti-abuse, deliberately oversubscribed** — box safety is the occupancy budget and the shed gate, so do not size shares to "add up" to 1.0.
+- Rejections are 429 `rate_limit_exceeded` with `Retry-After`.
+
+Derive the four values per model from its benchmark artifact (`auth.DeriveKeyDefaults` implements the rules); never copy another model's constants.
+
+### Cross-config validation
+
+Two invariants are enforced wherever keys enter the system — at startup, on SIGHUP reload of `auth.yaml` or the policies, and on every dynamic admin-API key mutation (`PUT /admin/api-keys/:id`, `POST /admin/api-keys/replace`):
+
+1. `max_occupancy_share` must be in (0, 1] (0 means unset). Above 1 one key could out-reserve the whole pool.
+2. On every serverless model a key can reach, `input_tokens_per_minute` must be at least the policy's `max_input_tokens`. A smaller bucket can never admit a full-context prompt — even from a completely idle bucket — so it silently becomes a context cap for that key. The router refuses to start, rejects the reload, or returns 400 from the admin API instead.
 
 ## Per-model quotas
 
