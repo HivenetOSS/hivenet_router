@@ -28,6 +28,12 @@ type Controller struct {
 	admitFraction float64       // scales the caller's budget tokens; (0,1]
 	parkFor       time.Duration // how long an over-budget request waits for room before 429
 
+	// observer, when set, is called after every occupancy change (admit, release,
+	// grow) with the model's current sum, count, effective budget, and max-inflight
+	// limit — the hook the router uses to publish the occupancy gauges. Set once at
+	// startup via SetObserver, before any request, so it needs no lock.
+	observer func(model string, sumW int64, count int, budget int64, maxInflight int)
+
 	mu     sync.Mutex
 	models map[string]*modelState
 }
@@ -47,14 +53,33 @@ func NewController(admitFraction float64, parkFor time.Duration) *Controller {
 	}
 }
 
+// SetObserver registers the occupancy-change callback (see observer). Call once
+// at startup before any request is admitted.
+func (c *Controller) SetObserver(fn func(model string, sumW int64, count int, budget int64, maxInflight int)) {
+	c.observer = fn
+}
+
+func (s *modelState) emit() {
+	s.mu.Lock()
+	sumW, count, budget, maxInflight := s.sumW, s.count, s.budget, s.maxInflight
+	s.mu.Unlock()
+	if s.c.observer != nil {
+		s.c.observer(s.model, sumW, count, budget, maxInflight)
+	}
+}
+
 // modelState is the weighted in-flight accounting for one model. Its own mutex
 // guards the counters and the broadcast channel; the Controller mutex guards
 // only the map that hands these out.
 type modelState struct {
-	mu     sync.Mutex
-	sumW   int64         // Σ footprint over in-flight requests for this model
-	count  int           // number of in-flight requests (the max_inflight backstop)
-	notify chan struct{} // closed-and-replaced on every release to wake parked waiters
+	c           *Controller
+	model       string
+	mu          sync.Mutex
+	sumW        int64         // Σ footprint over in-flight requests for this model
+	count       int           // number of in-flight requests (the max_inflight backstop)
+	budget      int64         // last effective budget seen, for the utilization gauge
+	maxInflight int           // last max_inflight seen, for the concurrency gauge
+	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
 }
 
 func (c *Controller) stateFor(model string) *modelState {
@@ -62,7 +87,7 @@ func (c *Controller) stateFor(model string) *modelState {
 	defer c.mu.Unlock()
 	s := c.models[model]
 	if s == nil {
-		s = &modelState{notify: make(chan struct{})}
+		s = &modelState{c: c, model: model, notify: make(chan struct{})}
 		c.models[model] = s
 	}
 	return s
@@ -158,15 +183,20 @@ func (c *Controller) Occupancy(model string) (sumW int64, count int) {
 // reporting whether it did. A budget or backstop of <= 0 disables that check.
 func (s *modelState) tryReserve(weight, budget int64, maxInflight int) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.budget = budget
+	s.maxInflight = maxInflight
 	if budget > 0 && s.sumW+weight > budget {
+		s.mu.Unlock()
 		return false
 	}
 	if maxInflight > 0 && s.count+1 > maxInflight {
+		s.mu.Unlock()
 		return false
 	}
 	s.sumW += weight
 	s.count++
+	s.mu.Unlock()
+	s.emit()
 	return true
 }
 
@@ -186,6 +216,7 @@ func (s *modelState) release(weight int64) {
 	s.notify = make(chan struct{})
 	s.mu.Unlock()
 	close(ch)
+	s.emit()
 }
 
 // grow tightens occupancy as an undeclared request produces output. It never
@@ -194,6 +225,7 @@ func (s *modelState) grow(delta int64) {
 	s.mu.Lock()
 	s.sumW += delta
 	s.mu.Unlock()
+	s.emit()
 }
 
 func (s *modelState) notifyCh() chan struct{} {

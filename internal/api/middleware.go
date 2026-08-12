@@ -250,6 +250,8 @@ func resolveCaller(c *gin.Context) quotaCaller {
 func denyRPM(c *gin.Context, m *metrics.RouterMetrics, caller quotaCaller, model, msg string) {
 	m.TenantRateLimited(caller.tenantID, caller.keyID)
 	m.TenantRequestFailed(caller.tenantID, caller.keyID, caller.deploymentID, model)
+	m.AdmissionRejected("b4_rpm", model) // also surface in the unified 429-by-reason counter
+
 	c.Header(headerRateLimitRemainingRequests, "0")
 	abortWithRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded, msg, domain.SourceRouter)
 }

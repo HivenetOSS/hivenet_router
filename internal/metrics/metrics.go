@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 var log = logging.Logger("metrics")
@@ -162,6 +163,30 @@ type RouterMetrics struct {
 
 	// quotaBackendErrors counts Redis quota backend call failures (fail-open events).
 	quotaBackendErrors prometheus.Counter
+
+	// --- Admission-control metrics ---
+
+	// admissionRejections counts requests rejected by an admission gate, labelled
+	// by the gate that rejected it. reason ∈ {b1, b2, b3, b4_occupancy, b4_itpm,
+	// b4_otpm}; the existing per-tenant RPM path reports via tenantRateLimited.
+	// Labels: reason, model.
+	admissionRejections *prometheus.CounterVec
+
+	// admissionOccupancyTokens is the current weighted in-flight token sum (Σw)
+	// for a model — the numerator of the occupancy-vs-budget utilization.
+	admissionOccupancyTokens *prometheus.GaugeVec
+
+	// admissionBudgetTokens is the effective occupancy admit budget (admit_fraction
+	// × admit_budget_tokens) for a model — the denominator of the utilization.
+	admissionBudgetTokens *prometheus.GaugeVec
+
+	// admissionInflightRequests is the current in-flight request count for a model,
+	// against the max_inflight backstop. Label: model.
+	admissionInflightRequests *prometheus.GaugeVec
+
+	// admissionMaxInflight is the configured max_inflight backstop for a model —
+	// the denominator for the concurrency-utilization panel. 0 = no backstop.
+	admissionMaxInflight *prometheus.GaugeVec
 
 	// --- Policy routing metrics ---
 
@@ -440,6 +465,41 @@ func NewRouterMetrics() *RouterMetrics {
 				Name: "hivenet_router_quota_backend_errors_total",
 				Help: "Redis quota backend call failures (fail-open events).",
 			},
+		),
+		admissionRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_router_admission_rejections_total",
+				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
+			},
+			[]string{"reason", "model"},
+		),
+		admissionOccupancyTokens: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_router_admission_occupancy_tokens",
+				Help: "Current weighted in-flight token sum (Σw) per model — the occupancy-budget numerator.",
+			},
+			[]string{"model"},
+		),
+		admissionBudgetTokens: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_router_admission_budget_tokens",
+				Help: "Effective occupancy admit budget (admit_fraction × admit_budget_tokens) per model — the occupancy-budget denominator.",
+			},
+			[]string{"model"},
+		),
+		admissionInflightRequests: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_router_admission_inflight_requests",
+				Help: "Current in-flight request count per model, against the max_inflight backstop.",
+			},
+			[]string{"model"},
+		),
+		admissionMaxInflight: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_router_admission_max_inflight",
+				Help: "Configured max_inflight backstop per model — the concurrency-utilization denominator. 0 = no backstop.",
+			},
+			[]string{"model"},
 		),
 		agentSuccessTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -806,6 +866,11 @@ func NewRouterMetrics() *RouterMetrics {
 		m.requestDuration,
 		m.tenantLastRequestTimestamp,
 		m.quotaBackendErrors,
+		m.admissionRejections,
+		m.admissionOccupancyTokens,
+		m.admissionBudgetTokens,
+		m.admissionInflightRequests,
+		m.admissionMaxInflight,
 		m.agentSuccessTotal,
 		m.agentFailedTotal,
 		m.agentSuccessRate,
@@ -1082,6 +1147,32 @@ func (m *RouterMetrics) TenantSetPerModelQuotaLimit(tenantID, model string, rpm 
 // (tenant, model) pair on a per-model quota key. Idempotent on every request.
 func (m *RouterMetrics) TenantSetPerModelTPDLimit(tenantID, model string, tpd int) {
 	m.tenantPerModelQuotaTPDLimit.With(prometheus.Labels{"tenant_id": tenantID, "model": model}).Set(float64(tpd))
+}
+
+// AdmissionRejected counts a request rejected by an admission gate, labelled by
+// the gate/reason and model. reason ∈ {b1, b2, b3, b4_occupancy, b4_itpm,
+// b4_otpm}. B3 shed rate is rate(...{reason="b3"}); "429 by reason" sums over all.
+func (m *RouterMetrics) AdmissionRejected(reason, model string) {
+	m.admissionRejections.With(prometheus.Labels{"reason": reason, "model": model}).Inc()
+}
+
+// SetAdmissionOccupancy publishes a model's live occupancy: the weighted
+// in-flight token sum (Σw), the in-flight request count, and the effective admit
+// budget. Called on every admit/release/grow, so occupancy_tokens / budget_tokens
+// tracks real utilization. The budget is always written — including 0 — so a
+// model with no token budget (max_inflight-only), or one whose budget was
+// disabled on reload, reports the true denominator rather than a stale value.
+func (m *RouterMetrics) SetAdmissionOccupancy(model string, sumW int64, count int, budget int64, maxInflight int) {
+	m.admissionOccupancyTokens.With(prometheus.Labels{"model": model}).Set(float64(sumW))
+	m.admissionInflightRequests.With(prometheus.Labels{"model": model}).Set(float64(count))
+	m.admissionBudgetTokens.With(prometheus.Labels{"model": model}).Set(float64(budget))
+	m.admissionMaxInflight.With(prometheus.Labels{"model": model}).Set(float64(maxInflight))
+}
+
+// Gather returns the current metric families from this instance's registry. It
+// exposes the private registry for tests that assert exported metric values.
+func (m *RouterMetrics) Gather() ([]*dto.MetricFamily, error) {
+	return m.registry.Gather()
 }
 
 // TenantSetTokensUsedToday updates the gauge that tracks how many tokens the

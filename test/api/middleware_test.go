@@ -155,6 +155,7 @@ func newPolicyHandlers() *api.Handlers {
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
+		nil,
 	)
 }
 

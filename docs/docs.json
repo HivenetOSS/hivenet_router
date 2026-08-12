@@ -80,7 +80,8 @@
           "observability/hardware-metrics",
           "observability/engine-metrics",
           "observability/latency-tracking",
-          "observability/hardware-aware-routing"
+          "observability/hardware-aware-routing",
+          "observability/admission-control-metrics"
         ]
       },
       {

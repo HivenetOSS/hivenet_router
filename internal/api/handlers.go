@@ -242,6 +242,11 @@ type Handlers struct {
 	// minuteLimiter enforces the serverless per-key tokens-per-minute caps
 	// (ITPM/OTPM). Nil disables them.
 	minuteLimiter *auth.MinuteRateLimiter
+
+	// onAdmissionReject is called when an admission gate rejects a request, with
+	// the gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.
+	// Wired to the admission-rejections counter. Nil-safe.
+	onAdmissionReject func(reason, model string)
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -269,6 +274,7 @@ func NewHandlers(
 	enginePressure func(model string) (kvUtil, waiting *float64),
 	keyAdmission *admission.Controller,
 	minuteLimiter *auth.MinuteRateLimiter,
+	onAdmissionReject func(reason, model string),
 ) *Handlers {
 	return &Handlers{
 		storage:              storage,
@@ -291,6 +297,14 @@ func NewHandlers(
 		enginePressure:       enginePressure,
 		keyAdmission:         keyAdmission,
 		minuteLimiter:        minuteLimiter,
+		onAdmissionReject:    onAdmissionReject,
+	}
+}
+
+// fireAdmissionReject reports an admission-gate rejection by reason and model.
+func (h *Handlers) fireAdmissionReject(reason, model string) {
+	if h.onAdmissionReject != nil {
+		h.onAdmissionReject(reason, model)
 	}
 }
 
@@ -513,6 +527,7 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 	if pol.MaxInputTokens > 0 {
 		inputTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
 		if inputTokens > pol.MaxInputTokens {
+			h.fireAdmissionReject("b1", req.Model)
 			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
 				fmt.Sprintf("input is %d tokens, over the model limit of %d", inputTokens, pol.MaxInputTokens),
 				domain.SourceRouter)
@@ -522,6 +537,7 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 	if pol.ImagesMax > 0 {
 		images := domain.CountImages(req.Messages)
 		if images > pol.ImagesMax {
+			h.fireAdmissionReject("b1", req.Model)
 			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
 				fmt.Sprintf("request carries %d images, over the model limit of %d", images, pol.ImagesMax),
 				domain.SourceRouter)
@@ -567,6 +583,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
 		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, pol.AdmitBudgetTokens, pol.MaxInflight)
 		if res == nil {
+			h.fireAdmissionReject("b2", req.Model)
 			c.Header("Retry-After", "1")
 			writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
 				"server at capacity for this model, please retry", domain.SourceRouter)
@@ -586,6 +603,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
 			if res == nil {
 				rs.Release() // hand back the global reservation already taken
+				h.fireAdmissionReject("b4_occupancy", req.Model)
 				c.Header("Retry-After", "1")
 				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
 					"per-key occupancy share exceeded, please retry", domain.SourceRouter)
@@ -627,10 +645,12 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 	// Check the non-deducting OTPM gate before charging the ITPM bucket, so an
 	// output-rate rejection never spends input-rate tokens.
 	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
+		h.fireAdmissionReject("b4_otpm", req.Model)
 		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	if limits.InputTokensPerMinute > 0 {
 		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, estimatePromptTokens(req)) {
+			h.fireAdmissionReject("b4_itpm", req.Model)
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}
 	}
@@ -690,6 +710,7 @@ func (h *Handlers) enforceShedPressure(c *gin.Context, model string) bool {
 	if policy.PassesGates(snap, pol.ShedIf) {
 		return true
 	}
+	h.fireAdmissionReject("b3", model)
 	c.Header("Retry-After", "1")
 	writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
 		"model is under high load, please retry", domain.SourceRouter)

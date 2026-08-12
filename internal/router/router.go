@@ -548,6 +548,9 @@ func (r *Router) startHTTPServer() {
 	if r.counters != nil {
 		resetMetrics = r.counters.ResetAll
 	}
+	// The global occupancy controller publishes its Σw/count/budget as gauges.
+	occupancy := admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout)
+	occupancy.SetObserver(r.metrics.SetAdmissionOccupancy)
 	handlers := api.NewHandlers(
 		r.storage,
 		r,
@@ -572,12 +575,13 @@ func (r *Router) startHTTPServer() {
 		resetMetrics,
 		r.agents.CountHealthyByModel,
 		r, // RegistrationFeed — Router implements SubscribeRegistration
-		admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout),
+		occupancy,
 		r.EnginePressureForModel,
 		// Per-key occupancy share: no admit fraction (it is fairness, not box
 		// safety) and no parking (a per-key breach is denied immediately).
 		admission.NewController(1.0, 0),
 		r.minuteLimiter,
+		r.metrics.AdmissionRejected,
 	)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {

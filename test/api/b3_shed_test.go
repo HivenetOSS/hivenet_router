@@ -36,6 +36,7 @@ func newB3Handlers(q chan *domain.PendingRequest, pol *policy.Policy, pressure f
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, pressure, nil, nil,
+		nil,
 	)
 }
 

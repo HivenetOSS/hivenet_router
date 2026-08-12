@@ -60,6 +60,7 @@ func newTestHandlers(q chan *domain.PendingRequest, lim auth.RateLimiter) *api.H
 		nil, nil, nil, lim,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
+		nil,
 	)
 }
 

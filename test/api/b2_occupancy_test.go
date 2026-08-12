@@ -46,6 +46,7 @@ func newB2Handlers(q chan *domain.PendingRequest, ctrl *admission.Controller, gl
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		ctrl, nil, nil, nil,
+		nil,
 	)
 }
 
