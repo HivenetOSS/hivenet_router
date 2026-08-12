@@ -572,14 +572,36 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest, i
 	return true
 }
 
+// healthyReplicas returns the pool-size multiplier for a model's per-replica
+// admission limits: the number of healthy replicas serving it, floored at 1.
+// The floor matters twice — with no healthy-count source wired (tests) the
+// limits apply as-is, and with zero healthy replicas a bare multiply would zero
+// the budget, which the controller reads as "no budget limit" (gate off) at the
+// exact moment the pool is most fragile.
+func (h *Handlers) healthyReplicas(model string) int {
+	if h.healthyAgentCount == nil {
+		return 1
+	}
+	if n := h.healthyAgentCount(model); n > 1 {
+		return n
+	}
+	return 1
+}
+
 // enforceOccupancyBudget applies the KV-occupancy admit budget: the request is
 // admitted only while the model's weighted in-flight token sum plus this
 // request's footprint stays within admit_fraction × admit_budget_tokens, and the
-// in-flight request count stays within max_inflight. The footprint is the input
-// estimate plus the declared max_tokens (reserved up front); an undeclared
-// request reserves only its input and grows as output streams. Over budget, it
-// parks briefly for capacity to free, then returns 429 concurrency_limit_exceeded
-// with Retry-After.
+// in-flight request count stays within max_inflight. admit_budget_tokens and
+// max_inflight are PER-REPLICA numbers (what the benchmark certifies for one
+// box), so both are scaled by the number of healthy replicas serving the model —
+// the pool's capacity is the sum of its replicas', and holding N replicas to one
+// replica's budget would waste (N−1)/N of it. Routing spreads the admitted load;
+// a single hot replica is handled by the per-agent exclude_if gates and the B3
+// shed, not by this counter. The footprint is the input estimate plus the
+// declared max_tokens (reserved up front); an undeclared request reserves only
+// its input and grows as output streams. Over budget, it parks briefly for
+// capacity to free, then returns 429 concurrency_limit_exceeded with
+// Retry-After.
 //
 // It returns the reservations (which the caller MUST release exactly once on
 // every exit path) and whether the request was admitted. An empty slice with
@@ -610,9 +632,16 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	footprint := inputEstimate + declared
 	grows := declared == 0
 
+	// Scale the per-replica limits to the live pool size. Recomputed per request,
+	// so the budget tracks replicas joining/leaving; a shrink only affects new
+	// admissions (existing reservations release their recorded weight unchanged).
+	replicas := h.healthyReplicas(req.Model)
+	poolBudget := pol.AdmitBudgetTokens * replicas
+	poolInflight := pol.MaxInflight * replicas
+
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, pol.AdmitBudgetTokens, pol.MaxInflight)
+		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, poolBudget, poolInflight)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
 			c.Header("Retry-After", "1")
@@ -624,13 +653,15 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	}
 
 	// Per-key occupancy share (serverless replicas only): the key's in-flight
-	// footprint must stay within max_occupancy_share × admit_budget_tokens. This
-	// is anti-abuse fairness, not box safety (the global budget above is), so the
+	// footprint must stay within max_occupancy_share × the pool budget — the same
+	// replica-scaled pool the global gate admits against, so a share keeps meaning
+	// "this fraction of what the pool can hold" as replicas come and go. This is
+	// anti-abuse fairness, not box safety (the global budget above is), so the
 	// shares are intentionally oversubscribed and no admit fraction is applied.
 	if pol.IsServerless() && pol.AdmitBudgetTokens > 0 && h.keyAdmission != nil {
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
-			budget := int(share * float64(pol.AdmitBudgetTokens))
+			budget := int(share * float64(poolBudget))
 			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
 			if res == nil {
 				rs.Release() // hand back the global reservation already taken

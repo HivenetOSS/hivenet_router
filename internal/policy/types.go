@@ -40,9 +40,13 @@ type Policy struct {
 	MaxInputTokens int `yaml:"max_input_tokens" json:"max_input_tokens,omitempty"`
 	// ImagesMax rejects any single request carrying more images than this.
 	ImagesMax int `yaml:"images_max" json:"images_max,omitempty"`
-	// AdmitBudgetTokens caps the total KV-cache tokens in flight per replica.
+	// AdmitBudgetTokens caps the KV-cache tokens in flight PER REPLICA (the
+	// benchmark-certified capacity of one box). At enforcement the router scales
+	// it by the number of healthy replicas serving the model, so the pool's
+	// admit budget grows and shrinks with the pool.
 	AdmitBudgetTokens int `yaml:"admit_budget_tokens" json:"admit_budget_tokens,omitempty"`
-	// MaxInflight caps the number of concurrent in-flight requests per replica.
+	// MaxInflight caps concurrent in-flight requests PER REPLICA; scaled by the
+	// healthy replica count at enforcement, like AdmitBudgetTokens.
 	MaxInflight int `yaml:"max_inflight" json:"max_inflight,omitempty"`
 	// ShedIf holds front-door shed thresholds; only kv_cache_utilization and
 	// waiting_requests are accepted (see knownShedIfFields in loader.go).

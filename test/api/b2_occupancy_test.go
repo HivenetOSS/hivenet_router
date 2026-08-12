@@ -305,3 +305,61 @@ func TestB2_NegativeMaxTokens_TreatedAsUndeclared(t *testing.T) {
 		t.Fatalf("reservation must be released; got sumW=%d count=%d", sumW, count)
 	}
 }
+
+// newB2PoolHandlers is newB2Handlers plus a healthy-replica count source, so
+// the per-replica budget scaling is live.
+func newB2PoolHandlers(q chan *domain.PendingRequest, ctrl *admission.Controller, global *policy.Policy, healthy func(string) int) *api.Handlers {
+	exec := policy.NewExecutor(nil, nil, global, 0, 0)
+	return api.NewHandlers(
+		nil, nil, q, time.Second,
+		exec, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, healthy, nil,
+		ctrl, nil, nil, nil,
+		nil, nil,
+	)
+}
+
+// TestB2_BudgetScalesWithHealthyReplicas verifies admit_budget_tokens is a
+// per-replica number: with two healthy replicas the pool admits a footprint
+// that one replica's budget alone would reject.
+func TestB2_BudgetScalesWithHealthyReplicas(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	ctrl := admission.NewController(1.0, 0)
+	// footprint = input(4) + declared(80) = 84: over one replica's budget of 50,
+	// under the two-replica pool budget of 100.
+	h := newB2PoolHandlers(q, ctrl, &policy.Policy{AdmitBudgetTokens: 50}, func(string) int { return 2 })
+	c, w := newCtx("/v1/chat/completions", b2Body(80))
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+	case <-time.After(time.Second):
+		t.Fatal("a footprint within the scaled pool budget must be admitted")
+	}
+	<-done
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// TestB2_ZeroHealthyReplicas_KeepsGateEnforcing verifies the replica multiplier
+// floors at 1: with zero healthy replicas the budget must not multiply to zero,
+// which the controller would read as "no budget limit" — disabling the gate at
+// the exact moment the pool has no capacity at all.
+func TestB2_ZeroHealthyReplicas_KeepsGateEnforcing(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	ctrl := admission.NewController(1.0, 0)
+	h := newB2PoolHandlers(q, ctrl, &policy.Policy{AdmitBudgetTokens: 50}, func(string) int { return 0 })
+	c, w := newCtx("/v1/chat/completions", b2Body(100)) // footprint 104 > 50
+
+	h.Passthrough(c)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 with zero healthy replicas, got %d", w.Code)
+	}
+	if len(q) != 0 {
+		t.Errorf("an over-budget request must not be queued, depth=%d", len(q))
+	}
+}
