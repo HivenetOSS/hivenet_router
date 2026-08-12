@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 var log = logging.Logger("metrics")
@@ -182,6 +183,10 @@ type RouterMetrics struct {
 	// admissionInflightRequests is the current in-flight request count for a model,
 	// against the max_inflight backstop. Label: model.
 	admissionInflightRequests *prometheus.GaugeVec
+
+	// admissionMaxInflight is the configured max_inflight backstop for a model —
+	// the denominator for the concurrency-utilization panel. 0 = no backstop.
+	admissionMaxInflight *prometheus.GaugeVec
 
 	// --- Policy routing metrics ---
 
@@ -486,6 +491,13 @@ func NewRouterMetrics() *RouterMetrics {
 			prometheus.GaugeOpts{
 				Name: "hivenet_router_admission_inflight_requests",
 				Help: "Current in-flight request count per model, against the max_inflight backstop.",
+			},
+			[]string{"model"},
+		),
+		admissionMaxInflight: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_router_admission_max_inflight",
+				Help: "Configured max_inflight backstop per model — the concurrency-utilization denominator. 0 = no backstop.",
 			},
 			[]string{"model"},
 		),
@@ -858,6 +870,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.admissionOccupancyTokens,
 		m.admissionBudgetTokens,
 		m.admissionInflightRequests,
+		m.admissionMaxInflight,
 		m.agentSuccessTotal,
 		m.agentFailedTotal,
 		m.agentSuccessRate,
@@ -1149,10 +1162,17 @@ func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 // tracks real utilization. The budget is always written — including 0 — so a
 // model with no token budget (max_inflight-only), or one whose budget was
 // disabled on reload, reports the true denominator rather than a stale value.
-func (m *RouterMetrics) SetAdmissionOccupancy(model string, sumW int64, count int, budget int64) {
+func (m *RouterMetrics) SetAdmissionOccupancy(model string, sumW int64, count int, budget int64, maxInflight int) {
 	m.admissionOccupancyTokens.With(prometheus.Labels{"model": model}).Set(float64(sumW))
 	m.admissionInflightRequests.With(prometheus.Labels{"model": model}).Set(float64(count))
 	m.admissionBudgetTokens.With(prometheus.Labels{"model": model}).Set(float64(budget))
+	m.admissionMaxInflight.With(prometheus.Labels{"model": model}).Set(float64(maxInflight))
+}
+
+// Gather returns the current metric families from this instance's registry. It
+// exposes the private registry for tests that assert exported metric values.
+func (m *RouterMetrics) Gather() ([]*dto.MetricFamily, error) {
+	return m.registry.Gather()
 }
 
 // TenantSetTokensUsedToday updates the gauge that tracks how many tokens the

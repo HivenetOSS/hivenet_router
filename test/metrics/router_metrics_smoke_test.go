@@ -63,7 +63,8 @@ func TestRouterMetrics_EmitMethodsNoPanic(t *testing.T) {
 	m.AdmissionRejected("b4_occupancy", model)
 	m.AdmissionRejected("b4_itpm", model)
 	m.AdmissionRejected("b4_otpm", model)
-	m.SetAdmissionOccupancy(model, 250000, 1, 409000)
+	m.AdmissionRejected("b4_rpm", model)
+	m.SetAdmissionOccupancy(model, 250000, 1, 409000, 37)
 
 	// Routing-policy pipeline outcomes (primary / fallback / exhausted / reload).
 	m.PolicyPrimaryRouted(model)

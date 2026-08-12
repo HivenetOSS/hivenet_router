@@ -158,20 +158,20 @@ func TestSmallBudgetFlooredNotDisabled(t *testing.T) {
 func TestObserverTracksOccupancy(t *testing.T) {
 	c := admission.NewController(1.0, 0)
 	var gotSum, gotBudget int64
-	var gotCount int
-	c.SetObserver(func(_ string, sumW int64, count int, budget int64) {
-		gotSum, gotCount, gotBudget = sumW, count, budget
+	var gotCount, gotMaxInflight int
+	c.SetObserver(func(_ string, sumW int64, count int, budget int64, maxInflight int) {
+		gotSum, gotCount, gotBudget, gotMaxInflight = sumW, count, budget, maxInflight
 	})
 	ctx := context.Background()
 
-	r := c.Admit(ctx, model, 250_000, true, 409_000, 0)
-	if gotSum != 250_000 || gotCount != 1 || gotBudget != 409_000 {
-		t.Fatalf("after admit: observed sum=%d count=%d budget=%d, want 250000/1/409000", gotSum, gotCount, gotBudget)
+	r := c.Admit(ctx, model, 250_000, true, 409_000, 64)
+	if gotSum != 250_000 || gotCount != 1 || gotBudget != 409_000 || gotMaxInflight != 64 {
+		t.Fatalf("after admit: observed sum=%d count=%d budget=%d maxInflight=%d, want 250000/1/409000/64", gotSum, gotCount, gotBudget, gotMaxInflight)
 	}
 	// A rejected admit does not change occupancy, so it emits nothing new.
-	c.Admit(ctx, model, 250_000, true, 409_000, 0)
-	if gotSum != 250_000 {
-		t.Errorf("a rejected admit must not change observed occupancy; got %d", gotSum)
+	c.Admit(ctx, model, 250_000, true, 409_000, 64)
+	if gotSum != 250_000 || gotMaxInflight != 64 {
+		t.Errorf("a rejected admit must not change observed occupancy; got sum=%d maxInflight=%d", gotSum, gotMaxInflight)
 	}
 	// Undeclared growth is reflected live.
 	r.Grow(1000)

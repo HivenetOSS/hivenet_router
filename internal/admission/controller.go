@@ -29,10 +29,10 @@ type Controller struct {
 	parkFor       time.Duration // how long an over-budget request waits for room before 429
 
 	// observer, when set, is called after every occupancy change (admit, release,
-	// grow) with the model's current sum, count, and effective budget — the hook
-	// the router uses to publish the occupancy gauges. Set once at startup via
-	// SetObserver, before any request, so it needs no lock.
-	observer func(model string, sumW int64, count int, budget int64)
+	// grow) with the model's current sum, count, effective budget, and max-inflight
+	// limit — the hook the router uses to publish the occupancy gauges. Set once at
+	// startup via SetObserver, before any request, so it needs no lock.
+	observer func(model string, sumW int64, count int, budget int64, maxInflight int)
 
 	mu     sync.Mutex
 	models map[string]*modelState
@@ -55,13 +55,16 @@ func NewController(admitFraction float64, parkFor time.Duration) *Controller {
 
 // SetObserver registers the occupancy-change callback (see observer). Call once
 // at startup before any request is admitted.
-func (c *Controller) SetObserver(fn func(model string, sumW int64, count int, budget int64)) {
+func (c *Controller) SetObserver(fn func(model string, sumW int64, count int, budget int64, maxInflight int)) {
 	c.observer = fn
 }
 
-func (c *Controller) emit(model string, sumW int64, count, budget int64) {
-	if c.observer != nil {
-		c.observer(model, sumW, int(count), budget)
+func (s *modelState) emit() {
+	s.mu.Lock()
+	sumW, count, budget, maxInflight := s.sumW, s.count, s.budget, s.maxInflight
+	s.mu.Unlock()
+	if s.c.observer != nil {
+		s.c.observer(s.model, sumW, count, budget, maxInflight)
 	}
 }
 
@@ -69,13 +72,14 @@ func (c *Controller) emit(model string, sumW int64, count, budget int64) {
 // guards the counters and the broadcast channel; the Controller mutex guards
 // only the map that hands these out.
 type modelState struct {
-	c      *Controller
-	model  string
-	mu     sync.Mutex
-	sumW   int64         // Σ footprint over in-flight requests for this model
-	count  int           // number of in-flight requests (the max_inflight backstop)
-	budget int64         // last effective budget seen, for the utilization gauge
-	notify chan struct{} // closed-and-replaced on every release to wake parked waiters
+	c           *Controller
+	model       string
+	mu          sync.Mutex
+	sumW        int64         // Σ footprint over in-flight requests for this model
+	count       int           // number of in-flight requests (the max_inflight backstop)
+	budget      int64         // last effective budget seen, for the utilization gauge
+	maxInflight int           // last max_inflight seen, for the concurrency gauge
+	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
 }
 
 func (c *Controller) stateFor(model string) *modelState {
@@ -180,6 +184,7 @@ func (c *Controller) Occupancy(model string) (sumW int64, count int) {
 func (s *modelState) tryReserve(weight, budget int64, maxInflight int) bool {
 	s.mu.Lock()
 	s.budget = budget
+	s.maxInflight = maxInflight
 	if budget > 0 && s.sumW+weight > budget {
 		s.mu.Unlock()
 		return false
@@ -190,9 +195,8 @@ func (s *modelState) tryReserve(weight, budget int64, maxInflight int) bool {
 	}
 	s.sumW += weight
 	s.count++
-	sumW, count, b := s.sumW, s.count, s.budget
 	s.mu.Unlock()
-	s.c.emit(s.model, sumW, int64(count), b)
+	s.emit()
 	return true
 }
 
@@ -210,10 +214,9 @@ func (s *modelState) release(weight int64) {
 	}
 	ch := s.notify
 	s.notify = make(chan struct{})
-	sumW, count, b := s.sumW, s.count, s.budget
 	s.mu.Unlock()
 	close(ch)
-	s.c.emit(s.model, sumW, int64(count), b)
+	s.emit()
 }
 
 // grow tightens occupancy as an undeclared request produces output. It never
@@ -221,9 +224,8 @@ func (s *modelState) release(weight int64) {
 func (s *modelState) grow(delta int64) {
 	s.mu.Lock()
 	s.sumW += delta
-	sumW, count, b := s.sumW, s.count, s.budget
 	s.mu.Unlock()
-	s.c.emit(s.model, sumW, int64(count), b)
+	s.emit()
 }
 
 func (s *modelState) notifyCh() chan struct{} {
