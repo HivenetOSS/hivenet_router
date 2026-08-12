@@ -950,6 +950,9 @@ func (h *Handlers) awaitResponse(c *gin.Context, pending *domain.PendingRequest,
 // writeSuccessResponse streams or writes the agent response and records success
 // metrics and audit usage.
 func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingRequest, req *domain.ChatRequest, m reqMeta, resp *domain.ChatResponse) {
+	// Whether the backend reported real usage, captured before the estimate
+	// fallback below overwrites it — only an exact count feeds the estimator.
+	usageExact := resp.Usage.TotalTokens > 0
 	// Fall back to local estimation only if the engine omitted usage.
 	if resp.Usage.TotalTokens == 0 && len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		promptTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
@@ -980,7 +983,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	if resp.Body == nil {
 		c.Writer.Write(resp.RawBytes) //nolint:errcheck
 		h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
-		h.learnInputTokens(req, pending, resp.Usage.PromptTokens)
+		h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
 		return
 	}
 	// Streaming: flush SSE chunks as they arrive so tokens appear progressively.
@@ -1003,23 +1006,29 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		c.Set(auditKeyOutputTokens, ct)
 	}
 	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
-	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()))
+	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 }
 
-// learnInputTokens folds the backend's exact prompt_tokens into the per-model
-// estimator (so future estimates self-calibrate) and trues up the reservation by
-// the estimate error (exact − estimated). No-op when the exact count is
-// unavailable or no estimator/reservation is wired.
-func (h *Handlers) learnInputTokens(req *domain.ChatRequest, pending *domain.PendingRequest, exactPrompt int) {
-	if exactPrompt <= 0 {
+// learnInputTokens reconciles a completed request against the backend's exact
+// prompt_tokens: it trues up the reservation by the estimate error and folds the
+// count into the per-model estimator so future estimates self-calibrate.
+//
+// exact reports whether promptTokens came from a real backend usage object; a
+// fallback estimate is never fed back, or the estimator would just relearn its
+// own heuristic. The estimator is a text tokens-per-byte model, so a request
+// carrying images is skipped for learning — its prompt_tokens include image
+// tokens that would inflate the text ratio — but the true-up still applies,
+// since it corrects the reservation to the real footprint (images included).
+func (h *Handlers) learnInputTokens(req *domain.ChatRequest, pending *domain.PendingRequest, promptTokens int, exact bool) {
+	if !exact || promptTokens <= 0 {
 		return
 	}
-	if h.estimator != nil {
-		textBytes, _ := domain.PromptTextBytes(req)
-		h.estimator.Observe(req.Model, textBytes, exactPrompt)
-	}
 	if pending.Reservation != nil && pending.EstimatedInputTokens > 0 {
-		pending.Reservation.Adjust(exactPrompt - pending.EstimatedInputTokens)
+		pending.Reservation.Adjust(promptTokens - pending.EstimatedInputTokens)
+	}
+	if h.estimator != nil && domain.CountImages(req.Messages) == 0 {
+		textBytes, _ := domain.PromptTextBytes(req)
+		h.estimator.Observe(req.Model, textBytes, promptTokens)
 	}
 }
 

@@ -72,6 +72,13 @@ type PendingRequest struct {
 	StreamedPromptTokens     atomic.Int64
 	StreamedCompletionTokens atomic.Int64
 
+	// StreamedPromptExact is true when StreamedPromptTokens came from an exact
+	// backend usage object rather than a fallback estimate — so the handler only
+	// feeds an exact count into the learned token estimator. Written by the
+	// processor's meter goroutine before pw.Close(), read by the handler after
+	// io.Copy returns (same visibility guarantee as the token totals).
+	StreamedPromptExact atomic.Bool
+
 	// Reservation is the occupancy-budget reservation this request holds, or nil
 	// when the budget gate is inert for its model. The processor grows it as
 	// undeclared output streams; the handler releases it exactly once when the
