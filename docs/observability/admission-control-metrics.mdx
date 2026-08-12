@@ -1,0 +1,77 @@
+---
+title: "Admission control metrics"
+description: "Prometheus metrics and Grafana panel queries for the admission-control gates: occupancy vs budget, in-flight concurrency, and 429s by reason."
+sidebarTitle: "Admission control"
+---
+
+The admission-control gates expose two kinds of signal: a **counter** of rejections labelled by the gate that produced them, and **gauges** that track live occupancy against the budget. Together they answer "why are requests being rejected?" and "how close is a model to its budget?".
+
+## Metrics
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_router_admission_rejections_total` | counter | `reason`, `model` | Requests rejected by an admission gate. |
+| `hivenet_router_admission_occupancy_tokens` | gauge | `model` | Current weighted in-flight token sum (Σw). |
+| `hivenet_router_admission_budget_tokens` | gauge | `model` | Effective admit budget (`admit_fraction × admit_budget_tokens`). |
+| `hivenet_router_admission_inflight_requests` | gauge | `model` | Current in-flight request count (against `max_inflight`). |
+
+The per-tenant RPM rejects continue to report through `hivenet_router_tenant_rate_limited_total`.
+
+### `reason` values
+
+| reason | gate |
+| --- | --- |
+| `b1` | per-request cap (input tokens or images) — HTTP 400 `input_too_long` |
+| `b2` | occupancy budget / in-flight backstop — 429 `concurrency_limit_exceeded` |
+| `b3` | front-door KV-pressure shed — 429 `concurrency_limit_exceeded` |
+| `b4_occupancy` | per-key occupancy share — 429 `rate_limit_exceeded` |
+| `b4_itpm` | per-key input tokens/minute — 429 `rate_limit_exceeded` |
+| `b4_otpm` | per-key output tokens/minute — 429 `rate_limit_exceeded` |
+
+## Panel queries (PromQL)
+
+**Occupancy vs budget** — utilization of the occupancy budget per model (target: watch it approach 1.0):
+
+```promql
+hivenet_router_admission_occupancy_tokens
+  / hivenet_router_admission_budget_tokens
+```
+
+Overlay the raw series to see headroom in absolute tokens:
+
+```promql
+hivenet_router_admission_occupancy_tokens
+hivenet_router_admission_budget_tokens
+```
+
+**In-flight concurrency** per model (against the `max_inflight` backstop):
+
+```promql
+hivenet_router_admission_inflight_requests
+```
+
+**429s (and 400s) by reason** — rejection rate attributed to each gate:
+
+```promql
+sum by (reason) (rate(hivenet_router_admission_rejections_total[5m]))
+```
+
+**Shed rate** — how often the front door is shedding for a model (B3):
+
+```promql
+sum by (model) (rate(hivenet_router_admission_rejections_total{reason="b3"}[5m]))
+```
+
+**Per-key throttling** — serverless per-key caps firing, to spot an abusive key or an undersized cap:
+
+```promql
+sum by (reason, model) (
+  rate(hivenet_router_admission_rejections_total{reason=~"b4_.*"}[5m])
+)
+```
+
+## Reading the signals together
+
+- **Occupancy near budget + rising `b2`** — the model is at its KV-occupancy limit; this is the circuit breaker working. Add capacity or accept the shed.
+- **`b3` firing while occupancy is below budget** — the live engine is under more pressure than the router's token estimate predicts; the token estimate may be optimistic (lower the shed threshold or improve the estimator).
+- **`b4_itpm` / `b4_occupancy` firing on legitimate traffic** — a per-key cap is undersized for the model; re-derive the defaults from the model's certified limits.

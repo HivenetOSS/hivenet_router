@@ -152,6 +152,44 @@ func TestSmallBudgetFlooredNotDisabled(t *testing.T) {
 	}
 }
 
+// TestObserverTracksOccupancy verifies the occupancy observer (the gauge source)
+// reports the live Σw, count, and effective budget on every admit, grow, and
+// release — matching Occupancy() throughout the §0 scenario.
+func TestObserverTracksOccupancy(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	var gotSum, gotBudget int64
+	var gotCount int
+	c.SetObserver(func(_ string, sumW int64, count int, budget int64) {
+		gotSum, gotCount, gotBudget = sumW, count, budget
+	})
+	ctx := context.Background()
+
+	r := c.Admit(ctx, model, 250_000, true, 409_000, 0)
+	if gotSum != 250_000 || gotCount != 1 || gotBudget != 409_000 {
+		t.Fatalf("after admit: observed sum=%d count=%d budget=%d, want 250000/1/409000", gotSum, gotCount, gotBudget)
+	}
+	// A rejected admit does not change occupancy, so it emits nothing new.
+	c.Admit(ctx, model, 250_000, true, 409_000, 0)
+	if gotSum != 250_000 {
+		t.Errorf("a rejected admit must not change observed occupancy; got %d", gotSum)
+	}
+	// Undeclared growth is reflected live.
+	r.Grow(1000)
+	if gotSum != 251_000 {
+		t.Errorf("after grow: observed sum=%d, want 251000", gotSum)
+	}
+	// Release returns to zero.
+	r.Release()
+	if gotSum != 0 || gotCount != 0 {
+		t.Errorf("after release: observed sum=%d count=%d, want 0/0", gotSum, gotCount)
+	}
+	// The observed value always matches the authoritative Occupancy().
+	sumW, count := c.Occupancy(model)
+	if sumW != gotSum || count != gotCount {
+		t.Errorf("observed (%d,%d) must match Occupancy (%d,%d)", gotSum, gotCount, sumW, count)
+	}
+}
+
 // TestPerKeyOversubscriptionIsIndependent models the per-key occupancy share:
 // three keys each capped at 0.40 of a 1000-token budget (400 each) all admit
 // their full share concurrently, because per-key buckets are independent — the

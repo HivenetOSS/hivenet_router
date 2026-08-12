@@ -56,6 +56,15 @@ func TestRouterMetrics_EmitMethodsNoPanic(t *testing.T) {
 	m.TenantObserveRequestDuration(tenant, keyID, deploy, model, 0.3)
 	m.QuotaBackendError()
 
+	// Admission-control metrics: reject counter (per reason) and occupancy gauges.
+	m.AdmissionRejected("b1", model)
+	m.AdmissionRejected("b2", model)
+	m.AdmissionRejected("b3", model)
+	m.AdmissionRejected("b4_occupancy", model)
+	m.AdmissionRejected("b4_itpm", model)
+	m.AdmissionRejected("b4_otpm", model)
+	m.SetAdmissionOccupancy(model, 250000, 1, 409000)
+
 	// Routing-policy pipeline outcomes (primary / fallback / exhausted / reload).
 	m.PolicyPrimaryRouted(model)
 	m.PolicyFallbackRouted(model)
