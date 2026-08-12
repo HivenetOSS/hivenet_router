@@ -107,6 +107,7 @@ func TestMeter_ContentObserverFiresPerChunk(t *testing.T) {
 type countingReservation struct{ grown int }
 
 func (c *countingReservation) Grow(tokens int) { c.grown += tokens }
+func (c *countingReservation) Adjust(int)      {}
 func (c *countingReservation) Release()        {}
 
 // TestGrowthObserver_ChargesFloorOfCumulativeBytes verifies growth charges
@@ -123,6 +124,26 @@ func TestGrowthObserver_ChargesFloorOfCumulativeBytes(t *testing.T) {
 	}
 	if res.grown != 75 {
 		t.Errorf("cumulative growth must be floor(300/4)=75, got %d", res.grown)
+	}
+}
+
+// TestMeter_HaveUsage verifies the exactness signal the handler uses to decide
+// whether to feed a streaming prompt count into the learned estimator.
+func TestMeter_HaveUsage(t *testing.T) {
+	withUsage := router.NewSSETokenMeter()
+	if _, err := withUsage.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !withUsage.HaveUsage() {
+		t.Error("HaveUsage must be true after a backend usage chunk")
+	}
+
+	noUsage := router.NewSSETokenMeter()
+	if _, err := noUsage.Write([]byte(`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if noUsage.HaveUsage() {
+		t.Error("HaveUsage must be false when the stream carried no usage object")
 	}
 }
 

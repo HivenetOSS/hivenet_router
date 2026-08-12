@@ -1,0 +1,24 @@
+func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (admission.Reservations, bool) {
+	var rs admission.Reservations
+	if h.executor == nil {
+		return rs, true
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil {
+		return rs, true
+	}
+	declared := req.MaxCompletionTokens
+	if declared == 0 {
+		declared = req.MaxTokens
+	}
+	footprint := h.estimatePromptTokens(req) + declared
+	grows := declared == 0
+	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
+		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, pol.AdmitBudgetTokens, pol.MaxInflight)
+		if res == nil {
+			return nil, false
+		}
+		rs = append(rs, res)
+	}
+	return rs, true
+}

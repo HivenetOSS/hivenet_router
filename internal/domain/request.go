@@ -72,11 +72,23 @@ type PendingRequest struct {
 	StreamedPromptTokens     atomic.Int64
 	StreamedCompletionTokens atomic.Int64
 
+	// StreamedPromptExact is true when StreamedPromptTokens came from an exact
+	// backend usage object rather than a fallback estimate — so the handler only
+	// feeds an exact count into the learned token estimator. Written by the
+	// processor's meter goroutine before pw.Close(), read by the handler after
+	// io.Copy returns (same visibility guarantee as the token totals).
+	StreamedPromptExact atomic.Bool
+
 	// Reservation is the occupancy-budget reservation this request holds, or nil
 	// when the budget gate is inert for its model. The processor grows it as
 	// undeclared output streams; the handler releases it exactly once when the
 	// request finishes. Set by the handler before enqueue.
 	Reservation Reservation
+
+	// EstimatedInputTokens is the prompt-token estimate charged at admission,
+	// stashed so the handler can true up the reservation by the difference once
+	// the backend reports the exact prompt_tokens.
+	EstimatedInputTokens int
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.
@@ -86,6 +98,8 @@ type Reservation interface {
 	// Grow adds streamed output tokens for an undeclared request (a no-op for a
 	// declared one, so it may be called unconditionally per output chunk).
 	Grow(tokens int)
+	// Adjust applies a signed true-up correction (exact input − estimated input).
+	Adjust(delta int)
 	// Release returns the reservation to the budget; idempotent.
 	Release()
 }

@@ -152,6 +152,108 @@ func TestSmallBudgetFlooredNotDisabled(t *testing.T) {
 	}
 }
 
+// TestTrueUpAdjustsOccupancy verifies the reservation true-up reconciles the
+// occupancy sum from the admission estimate to the exact input the backend
+// reports — both when the estimate was low (charge more) and high (free budget).
+func TestTrueUpAdjustsOccupancy(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	ctx := context.Background()
+
+	// Admitted on an estimate of 1000; the backend later reports 1200 (+200).
+	r := c.Admit(ctx, model, 1000, false, 1_000_000, 0)
+	if sumW, _ := c.Occupancy(model); sumW != 1000 {
+		t.Fatalf("occupancy after admit = %d, want 1000", sumW)
+	}
+	r.Adjust(1200 - 1000)
+	if sumW, _ := c.Occupancy(model); sumW != 1200 {
+		t.Errorf("occupancy after under-estimate true-up = %d, want 1200", sumW)
+	}
+
+	// A second request admitted on an estimate of 1000, actual 600 (−400).
+	r2 := c.Admit(ctx, model, 1000, false, 1_000_000, 0)
+	r2.Adjust(600 - 1000)
+	if sumW, _ := c.Occupancy(model); sumW != 1200+600 {
+		t.Errorf("occupancy after over-estimate true-up = %d, want 1800", sumW)
+	}
+
+	// Release returns exactly the trued-up weights, back to zero.
+	r.Release()
+	r2.Release()
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 0 {
+		t.Errorf("occupancy after release = %d/%d, want 0/0", sumW, count)
+	}
+}
+
+// TestTrueUpCannotFreeOtherReservations verifies a negative true-up larger than
+// the reservation's own weight is capped, so it never subtracts other in-flight
+// reservations' weight from the shared occupancy sum.
+func TestTrueUpCannotFreeOtherReservations(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	ctx := context.Background()
+
+	other := c.Admit(ctx, model, 300, false, 1_000_000, 0) // co-tenant, must be preserved
+	r := c.Admit(ctx, model, 100, false, 1_000_000, 0)
+	if sumW, _ := c.Occupancy(model); sumW != 400 {
+		t.Fatalf("occupancy = %d, want 400", sumW)
+	}
+
+	// An oversized negative true-up (−1000) may only free r's own 100.
+	r.Adjust(-1000)
+	if sumW, _ := c.Occupancy(model); sumW != 300 {
+		t.Errorf("occupancy = %d, want 300 (only r's weight freed, co-tenant preserved)", sumW)
+	}
+	// The co-tenant's weight is intact: releasing it drops the sum to zero.
+	other.Release()
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 1 {
+		t.Errorf("after co-tenant release occupancy = %d/%d, want 0/1 (r still in flight)", sumW, count)
+	}
+	r.Release()
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 0 {
+		t.Errorf("after both release occupancy = %d/%d, want 0/0", sumW, count)
+	}
+}
+
+// TestReservationsTrueUpFansOut verifies a bundled true-up reaches every held
+// reservation — the global occupancy budget and the per-key share both correct
+// to the same exact input.
+func TestReservationsTrueUpFansOut(t *testing.T) {
+	global := admission.NewController(1.0, 0)
+	perKey := admission.NewController(1.0, 0)
+	ctx := context.Background()
+
+	g := global.Admit(ctx, model, 100, false, 1_000_000, 0)
+	k := perKey.Admit(ctx, "key\x00"+model, 100, false, 1_000_000, 0)
+	rs := admission.Reservations{g, k}
+
+	rs.Adjust(150 - 100) // exact 150, estimated 100
+	if s, _ := global.Occupancy(model); s != 150 {
+		t.Errorf("global occupancy = %d, want 150", s)
+	}
+	if s, _ := perKey.Occupancy("key\x00" + model); s != 150 {
+		t.Errorf("per-key occupancy = %d, want 150", s)
+	}
+
+	rs.Release()
+	if s, _ := global.Occupancy(model); s != 0 {
+		t.Errorf("global occupancy after release = %d, want 0", s)
+	}
+	if s, _ := perKey.Occupancy("key\x00" + model); s != 0 {
+		t.Errorf("per-key occupancy after release = %d, want 0", s)
+	}
+}
+
+// TestTrueUpAfterReleaseNoOp verifies a late true-up (after the request finished)
+// cannot corrupt occupancy.
+func TestTrueUpAfterReleaseNoOp(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	r := c.Admit(context.Background(), model, 1000, false, 1_000_000, 0)
+	r.Release()
+	r.Adjust(5000)
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 0 {
+		t.Errorf("true-up after release must be a no-op; got %d/%d", sumW, count)
+	}
+}
+
 // TestObserverTracksOccupancy verifies the occupancy observer (the gauge source)
 // reports the live Σw, count, and effective budget on every admit, grow, and
 // release — matching Occupancy() throughout the §0 scenario.

@@ -660,6 +660,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			// handler side as soon as it unblocks.
 			pending.StreamedPromptTokens.Store(int64(prompt))
 			pending.StreamedCompletionTokens.Store(int64(completion))
+			pending.StreamedPromptExact.Store(meter.HaveUsage())
 			if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
 				allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
 				if err != nil {

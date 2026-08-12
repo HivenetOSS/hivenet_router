@@ -134,6 +134,11 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 	}
 }
 
+// HaveUsage reports whether the stream carried an exact backend usage object
+// (stream_options.include_usage). When false, Tokens returns an estimate, which
+// the caller must not feed back into the learned estimator.
+func (m *SSETokenMeter) HaveUsage() bool { return m.haveUsage }
+
 // Tokens returns the prompt and completion token counts for the stream. It
 // prefers the backend-reported usage (exact) and otherwise estimates: prompt
 // from the original request messages, completion from the accumulated deltas.

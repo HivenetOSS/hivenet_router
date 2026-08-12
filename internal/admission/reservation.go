@@ -37,6 +37,34 @@ func (r *Reservation) Grow(tokens int) {
 	r.state.grow(int64(tokens))
 }
 
+// Adjust applies a signed correction to the reservation's footprint — the
+// true-up that reconciles the admission estimate to the exact input the backend
+// reports. A negative delta frees budget; a positive one charges more. No-op
+// after Release or on a nil reservation.
+func (r *Reservation) Adjust(delta int) {
+	if r == nil || delta == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.released {
+		return
+	}
+	// Never free more than this reservation holds: applying a larger negative
+	// delta to the shared sum would subtract other reservations' weight too. The
+	// same capped delta is applied to both the reservation and the shared sum so
+	// they stay consistent.
+	d := int64(delta)
+	if d < -r.weight {
+		d = -r.weight
+	}
+	if d == 0 {
+		return
+	}
+	r.weight += d
+	r.state.adjust(d)
+}
+
 // Release returns the reservation's full footprint to the budget. It is safe to
 // call more than once and on a nil reservation; only the first call has effect.
 func (r *Reservation) Release() {
@@ -75,6 +103,13 @@ type Reservations []*Reservation
 func (rs Reservations) Grow(tokens int) {
 	for _, r := range rs {
 		r.Grow(tokens)
+	}
+}
+
+// Adjust forwards a true-up correction to every held reservation.
+func (rs Reservations) Adjust(delta int) {
+	for _, r := range rs {
+		r.Adjust(delta)
 	}
 }
 

@@ -29,7 +29,7 @@ func meteredHandler(q chan *domain.PendingRequest, pol *policy.Policy, keyAdm *a
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		admission.NewController(1.0, 0), pressure, keyAdm, minLim,
-		func(r, _ string) { *reason = r },
+		func(r, _ string) { *reason = r }, nil,
 	)
 }
 

@@ -17,6 +17,7 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/storage"
+	"hivenet_router/internal/tokenizer"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -247,6 +248,11 @@ type Handlers struct {
 	// the gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.
 	// Wired to the admission-rejections counter. Nil-safe.
 	onAdmissionReject func(reason, model string)
+
+	// estimator produces the per-model learned prompt-token estimate used by the
+	// admission gates, and learns from each backend usage report. Nil falls back
+	// to the legacy len/4 estimate (tests).
+	estimator *tokenizer.Estimator
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -275,6 +281,7 @@ func NewHandlers(
 	keyAdmission *admission.Controller,
 	minuteLimiter *auth.MinuteRateLimiter,
 	onAdmissionReject func(reason, model string),
+	estimator *tokenizer.Estimator,
 ) *Handlers {
 	return &Handlers{
 		storage:              storage,
@@ -298,6 +305,7 @@ func NewHandlers(
 		keyAdmission:         keyAdmission,
 		minuteLimiter:        minuteLimiter,
 		onAdmissionReject:    onAdmissionReject,
+		estimator:            estimator,
 	}
 }
 
@@ -368,11 +376,11 @@ func (h *Handlers) AdminHealth(c *gin.Context) {
 // (/v1/chat/completions) and Anthropic (/v1/messages) dialects. It routes by the
 // top-level "model" field and forwards the ORIGINAL request bytes to a healthy
 // "llm" agent at the SAME path, so the backend's native endpoint answers without
-// schema translation. Token budgeting is exact for OpenAI bodies; for other
-// dialects the input estimate is best-effort — it inspects only OpenAI message
-// fields, so it may undercount (e.g. it does not see Anthropic's top-level
-// "system" or non-text content blocks) — while output-token enforcement and
-// per-tenant token metrics still apply via the processor.
+// schema translation. The input estimate covers OpenAI message text and the
+// Anthropic top-level "system" prompt, learns each model's tokens-per-byte ratio
+// from backend usage, and is trued up against the exact prompt_tokens on
+// completion; image token cost is not byte-estimable and is bounded by the image
+// cap instead.
 func (h *Handlers) Passthrough(c *gin.Context) {
 	m := reqMeta{start: time.Now()}
 
@@ -397,10 +405,14 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.enforceShedPressure(c, req.Model) {
 		return
 	}
+	// Compute the input estimate once, so the value reserved for occupancy and the
+	// value the reservation is later trued up against are identical — the shared
+	// estimator can shift between calls as other requests complete.
+	inputEstimate := h.estimatePromptTokens(&req)
 	// Occupancy admit budget. The reservation is released on every exit path
 	// below via this single defer — success, error, timeout, disconnect, and the
 	// daily-budget reject that may follow — so a slot is never leaked.
-	reservation, admitted := h.enforceOccupancyBudget(c, &req)
+	reservation, admitted := h.enforceOccupancyBudget(c, &req, inputEstimate)
 	if !admitted {
 		return
 	}
@@ -436,7 +448,8 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.TokensPerDay = m.tpd
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
-	pending.Path = path // forward to the backend's native endpoint at this path
+	pending.Path = path                          // forward to the backend's native endpoint at this path
+	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -561,7 +574,7 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 // ok=true means the gate is inert for this model — nothing to release, nothing
 // rejected. On a serverless replica it holds a second, per-key reservation for
 // the key's occupancy share alongside the global budget.
-func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (admission.Reservations, bool) {
+func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest, inputEstimate int) (admission.Reservations, bool) {
 	var rs admission.Reservations
 	if h.executor == nil {
 		return rs, true
@@ -576,7 +589,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	}
 	// Declared output is reserved up front; an undeclared request reserves only
 	// its input and grows live (grows=true), matching how the processor meters it.
-	footprint := estimatePromptTokens(req) + declared
+	footprint := inputEstimate + declared
 	grows := declared == 0
 
 	// Global occupancy budget (all replicas).
@@ -649,7 +662,7 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	if limits.InputTokensPerMinute > 0 {
-		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, estimatePromptTokens(req)) {
+		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, h.estimatePromptTokens(req)) {
 			h.fireAdmissionReject("b4_itpm", req.Model)
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}
@@ -717,11 +730,17 @@ func (h *Handlers) enforceShedPressure(c *gin.Context, model string) bool {
 	return false
 }
 
-// estimatePromptTokens returns the input-token estimate used by both admission
-// gates: the text estimate, floored at a per-message overhead so a multimodal or
-// tool-only message (no estimable text) is still counted rather than measured as
-// zero.
-func estimatePromptTokens(req *domain.ChatRequest) int {
+// estimatePromptTokens returns the input-token estimate the admission gates
+// charge. With a learned estimator it uses the model's tokens-per-byte ratio
+// over the prompt text (message content plus any system prompt), which
+// self-calibrates from backend usage; without one it falls back to the legacy
+// len/4 estimate. Both floor at a per-message overhead so a textless (image or
+// tool-only) request is still counted rather than measured as zero.
+func (h *Handlers) estimatePromptTokens(req *domain.ChatRequest) int {
+	if h.estimator != nil {
+		textBytes, messageCount := domain.PromptTextBytes(req)
+		return h.estimator.Estimate(req.Model, textBytes, messageCount)
+	}
 	promptTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
 	if floor := len(req.Messages) * perMessageTokenOverhead; promptTokens < floor {
 		promptTokens = floor
@@ -822,7 +841,7 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	// EstimateTokens only sees text content; estimatePromptTokens floors a
 	// multimodal or tool-only message at a per-message overhead so it is charged
 	// (and passes through this gate) rather than bypassing it with a 0 estimate.
-	promptTokens := estimatePromptTokens(req)
+	promptTokens := h.estimatePromptTokens(req)
 	if promptTokens == 0 {
 		return true // genuinely empty body — nothing to budget
 	}
@@ -935,6 +954,9 @@ func (h *Handlers) awaitResponse(c *gin.Context, pending *domain.PendingRequest,
 // writeSuccessResponse streams or writes the agent response and records success
 // metrics and audit usage.
 func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingRequest, req *domain.ChatRequest, m reqMeta, resp *domain.ChatResponse) {
+	// Whether the backend reported real usage, captured before the estimate
+	// fallback below overwrites it — only an exact count feeds the estimator.
+	usageExact := resp.Usage.TotalTokens > 0
 	// Fall back to local estimation only if the engine omitted usage.
 	if resp.Usage.TotalTokens == 0 && len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		promptTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
@@ -965,6 +987,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	if resp.Body == nil {
 		c.Writer.Write(resp.RawBytes) //nolint:errcheck
 		h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
+		h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
 		return
 	}
 	// Streaming: flush SSE chunks as they arrive so tokens appear progressively.
@@ -987,6 +1010,30 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		c.Set(auditKeyOutputTokens, ct)
 	}
 	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
+	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
+}
+
+// learnInputTokens reconciles a completed request against the backend's exact
+// prompt_tokens: it trues up the reservation by the estimate error and folds the
+// count into the per-model estimator so future estimates self-calibrate.
+//
+// exact reports whether promptTokens came from a real backend usage object; a
+// fallback estimate is never fed back, or the estimator would just relearn its
+// own heuristic. The estimator is a text tokens-per-byte model, so a request
+// carrying images is skipped for learning — its prompt_tokens include image
+// tokens that would inflate the text ratio — but the true-up still applies,
+// since it corrects the reservation to the real footprint (images included).
+func (h *Handlers) learnInputTokens(req *domain.ChatRequest, pending *domain.PendingRequest, promptTokens int, exact bool) {
+	if !exact || promptTokens <= 0 {
+		return
+	}
+	if pending.Reservation != nil && pending.EstimatedInputTokens > 0 {
+		pending.Reservation.Adjust(promptTokens - pending.EstimatedInputTokens)
+	}
+	if h.estimator != nil && domain.CountImages(req.Messages) == 0 {
+		textBytes, _ := domain.PromptTextBytes(req)
+		h.estimator.Observe(req.Model, textBytes, promptTokens)
+	}
 }
 
 // writeErrorResponse writes a worker error, carrying real usage/agent into the

@@ -82,8 +82,10 @@ type Config struct {
 	// AdmitFraction scales a model's KV token capacity into the occupancy admit
 	// budget: a request is admitted only while the weighted in-flight token sum
 	// stays within AdmitFraction × admit_budget_tokens. Below 1.0 it leaves head-
-	// room for token-estimate error; the default is deliberately conservative
-	// until the estimator improves. Range (0,1]; values outside are clamped to 1.
+	// room for token-estimate error. The default is 0.90, safe now that the
+	// learned per-model estimator (with true-up on backend usage) replaced the
+	// len/4 heuristic that under-counted coding inputs — before that the fraction
+	// was held at 0.85 to absorb the error. Range (0,1]; values outside clamp to 1.
 	// Env: HIVENET_ROUTER_ADMIT_FRACTION
 	AdmitFraction float64
 
@@ -159,7 +161,7 @@ func DefaultConfig() *Config {
 		MaxTriesPerStep:        3,
 		QueueDepth:             30,
 		MaxRequestBytes:        10 << 20, // 10 MB
-		AdmitFraction:          0.85,     // conservative until the token estimator improves
+		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
 	}
 }
