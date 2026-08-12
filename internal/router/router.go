@@ -146,6 +146,14 @@ type Router struct {
 	// take effect immediately.
 	minuteLimiter *auth.MinuteRateLimiter
 
+	// occupancy is the global KV-occupancy admit controller (B2), keyed per
+	// model; keyAdmission is the per-key occupancy-share controller (B4), keyed
+	// per key×model. Both live on the Router so the periodic GC can sweep their
+	// idle state (keyAdmission's key space is unbounded when keys are minted
+	// programmatically).
+	occupancy    *admission.Controller
+	keyAdmission *admission.Controller
+
 	// keyRegistry is the mutable in-memory API key registry (dynamic mode).
 	// Nil when running in static-key or no-auth mode — guards against SIGHUP reload.
 	keyRegistry *auth.DynamicKeyProvider
@@ -295,7 +303,11 @@ func New(cfg *config.Config) (*Router, error) {
 		adminAuth:            auth.NewAtomicProvider(adminProv),
 		rateLimiter:          rateLimiter,
 		minuteLimiter:        auth.NewMinuteRateLimiter(),
-		keyRegistry:          keyRegistry,
+		occupancy:            admission.NewController(cfg.AdmitFraction, cfg.AdmitParkTimeout),
+		// Per-key occupancy share: no admit fraction (it is fairness, not box
+		// safety) and no parking (a per-key breach is denied immediately).
+		keyAdmission: admission.NewController(1.0, 0),
+		keyRegistry:  keyRegistry,
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
@@ -480,6 +492,9 @@ func (r *Router) Start() error {
 			if n := r.sessionManager.CleanupExpired(); n > 0 {
 				log.Infof("Session GC: removed %d expired sessions", n)
 			}
+			if n := r.sweepLimiterState(); n > 0 {
+				log.Infof("Limiter GC: removed %d idle rate/occupancy entries", n)
+			}
 		}
 	}()
 
@@ -550,8 +565,7 @@ func (r *Router) startHTTPServer() {
 		resetMetrics = r.counters.ResetAll
 	}
 	// The global occupancy controller publishes its Σw/count/budget as gauges.
-	occupancy := admission.NewController(r.cfg.AdmitFraction, r.cfg.AdmitParkTimeout)
-	occupancy.SetObserver(r.metrics.SetAdmissionOccupancy)
+	r.occupancy.SetObserver(r.metrics.SetAdmissionOccupancy)
 	handlers := api.NewHandlers(
 		r.storage,
 		r,
@@ -576,11 +590,9 @@ func (r *Router) startHTTPServer() {
 		resetMetrics,
 		r.agents.CountHealthyByModel,
 		r, // RegistrationFeed — Router implements SubscribeRegistration
-		occupancy,
+		r.occupancy,
 		r.EnginePressureForModel,
-		// Per-key occupancy share: no admit fraction (it is fairness, not box
-		// safety) and no parking (a per-key breach is denied immediately).
-		admission.NewController(1.0, 0),
+		r.keyAdmission,
 		r.minuteLimiter,
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
@@ -612,6 +624,39 @@ func (r *Router) validateProviderPolicy(p *policy.Policy) error {
 		}
 	}
 	return nil
+}
+
+// limiterIdleTTL is how long an occupancy state must sit empty before the GC
+// evicts it. Rate buckets need no TTL (a full bucket is evicted on sight —
+// refill makes that lossless); occupancy states are evicted only once idle
+// well past any admit/park/release cycle.
+const limiterIdleTTL = 15 * time.Minute
+
+// sweepLimiterState evicts idle per-key/per-tenant limiter state — RPM and
+// daily buckets, ITPM/OTPM buckets, and occupancy counters — returning the
+// total removed. These maps grow with every key×model pair that ever made a
+// request and are never cleared by traffic, so without this sweep memory grows
+// without bound when keys are minted programmatically (e.g. one key per user
+// session via the admin API). Eviction is lossless: buckets are only removed
+// when full (identical to the fresh bucket the next request creates) or when
+// their UTC day has passed, and occupancy states only when they hold nothing
+// in flight. Usage history is unaffected — cumulative token accounting lives
+// in the Prometheus tenant counters and the audit log, never in these maps.
+func (r *Router) sweepLimiterState() int {
+	n := 0
+	if s, ok := r.rateLimiter.(interface{ SweepIdle() int }); ok {
+		n += s.SweepIdle()
+	}
+	if r.minuteLimiter != nil {
+		n += r.minuteLimiter.SweepIdle()
+	}
+	if r.occupancy != nil {
+		n += r.occupancy.SweepIdle(limiterIdleTTL)
+	}
+	if r.keyAdmission != nil {
+		n += r.keyAdmission.SweepIdle(limiterIdleTTL)
+	}
+	return n
 }
 
 // checkAdmissionAgainstKeys validates proposed policies against the API keys

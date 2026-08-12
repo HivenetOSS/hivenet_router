@@ -431,3 +431,63 @@ func TestConcurrentAdmitReleaseNoLeak(t *testing.T) {
 		t.Fatalf("after all admit/release pairs, occupancy must be zero; got sumW=%d count=%d", sumW, count)
 	}
 }
+
+// TestSweepIdle_EvictsEmptyIdleState verifies the janitor removes a model
+// state once it holds nothing in flight and its idle TTL has passed, and that
+// a later request simply recreates it from zero.
+func TestSweepIdle_EvictsEmptyIdleState(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	res := c.Admit(context.Background(), model, 100, false, 1000, 0)
+	if res == nil {
+		t.Fatal("admit failed")
+	}
+	res.Release()
+
+	// A negative TTL puts the cutoff in the future, so the just-released empty
+	// state is idle-eligible immediately.
+	if n := c.SweepIdle(-time.Second); n != 1 {
+		t.Fatalf("SweepIdle removed %d states, want 1", n)
+	}
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 0 {
+		t.Errorf("evicted model must read zero occupancy, got sumW=%d count=%d", sumW, count)
+	}
+	// The next request recreates the state transparently.
+	res2 := c.Admit(context.Background(), model, 100, false, 1000, 0)
+	if res2 == nil {
+		t.Fatal("admit after eviction failed")
+	}
+	res2.Release()
+}
+
+// TestSweepIdle_KeepsInFlightState verifies a state with a live reservation is
+// never evicted, regardless of TTL.
+func TestSweepIdle_KeepsInFlightState(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	res := c.Admit(context.Background(), model, 100, false, 1000, 0)
+	if res == nil {
+		t.Fatal("admit failed")
+	}
+	defer res.Release()
+
+	if n := c.SweepIdle(-time.Second); n != 0 {
+		t.Fatalf("SweepIdle removed %d states while a reservation is in flight, want 0", n)
+	}
+	if sumW, count := c.Occupancy(model); sumW != 100 || count != 1 {
+		t.Errorf("in-flight occupancy must survive the sweep, got sumW=%d count=%d", sumW, count)
+	}
+}
+
+// TestSweepIdle_RespectsTTL verifies a recently-touched empty state is kept
+// until the TTL elapses.
+func TestSweepIdle_RespectsTTL(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	res := c.Admit(context.Background(), model, 100, false, 1000, 0)
+	if res == nil {
+		t.Fatal("admit failed")
+	}
+	res.Release()
+
+	if n := c.SweepIdle(time.Hour); n != 0 {
+		t.Fatalf("SweepIdle removed %d states inside the TTL, want 0", n)
+	}
+}
