@@ -399,22 +399,32 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.authorizeModel(c, req.Model) {
 		return
 	}
-	if !h.enforceRequestCaps(c, &req) {
-		return
-	}
-	if !h.enforceShedPressure(c, req.Model) {
-		return
-	}
-	// Compute the input estimate once, so the value reserved for occupancy and the
-	// value the reservation is later trued up against are identical — the shared
-	// estimator can shift between calls as other requests complete.
+	// Compute the input estimate once, so B1, the occupancy reservation, the
+	// per-key ITPM charge, and the later true-up all see the same value — the
+	// shared estimator can shift between calls as other requests complete.
 	inputEstimate := h.estimatePromptTokens(&req)
-	// Occupancy admit budget. The reservation is released on every exit path
-	// below via this single defer — success, error, timeout, disconnect, and the
-	// daily-budget reject that may follow — so a slot is never leaked.
-	reservation, admitted := h.enforceOccupancyBudget(c, &req, inputEstimate)
-	if !admitted {
-		return
+	// /v1/messages/count_tokens is a stateless tokenizer lookup: it holds no KV
+	// cache and generates nothing, so charging it against the occupancy budget or
+	// the per-key token buckets would double-bill every client that counts before
+	// it sends (Claude Code does exactly that). It skips the admission gates and
+	// is guarded by the per-key RPM flood limit alone.
+	countOnly := path == "/v1/messages/count_tokens"
+	var reservation admission.Reservations
+	if !countOnly {
+		if !h.enforceRequestCaps(c, &req, inputEstimate) {
+			return
+		}
+		if !h.enforceShedPressure(c, req.Model) {
+			return
+		}
+		// Occupancy admit budget. The reservation is released on every exit path
+		// below via this single defer — success, error, timeout, disconnect, and
+		// the daily-budget reject that may follow — so a slot is never leaked.
+		var admitted bool
+		reservation, admitted = h.enforceOccupancyBudget(c, &req, inputEstimate)
+		if !admitted {
+			return
+		}
 	}
 	defer reservation.Release()
 
@@ -430,7 +440,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// Per-key rate caps before the daily-budget charge: reserveInputBudget
 	// deducts daily tokens, so charging it only after the cheaper per-minute
 	// caps means a rate rejection never spends a tenant's daily budget.
-	if !h.enforcePerKeyRates(c, &req, m) {
+	if !countOnly && !h.enforcePerKeyRates(c, &req, m, inputEstimate) {
 		return
 	}
 	if !h.reserveInputBudget(c, &req, m) {
@@ -515,21 +525,24 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 }
 
 // enforceRequestCaps applies the per-request hard caps declared by the model's
-// policy: the estimated text prompt must fit max_input_tokens and the image
-// count must fit images_max. The two caps are complementary — the token cap
-// bounds text, the image cap bounds image payloads (an image's token cost is
-// invisible to the len/4 estimator, so counting images is how they are bounded;
-// a textless image request therefore passes the token cap by design and is held
-// only by images_max). Each caps the worst single request and returns a clean
-// 400 input_too_long; aggregate load safety is a separate concern handled at
-// admission, not here.
+// policy: the estimated prompt must fit max_input_tokens and the image count
+// must fit images_max. inputTokens is the same admission estimate B2 reserves
+// (learned per-model ratio over message text, system prompt, and tool
+// definitions), so B1's accuracy tracks B2's and an Anthropic system prompt or
+// a tool-schema payload cannot slip under the cap. The two caps are
+// complementary — the token cap bounds text, the image cap bounds image
+// payloads (an image's token cost is invisible to a byte estimator, so counting
+// images is how they are bounded; a textless image request therefore passes the
+// token cap by design and is held only by images_max). Each caps the worst
+// single request and returns a clean 400 input_too_long; aggregate load safety
+// is a separate concern handled at admission, not here.
 //
 // The governing policy is resolved per model (named override, else the global
 // policy). A cap of zero is "unset" and disables that check, so the gate is a
 // no-op when both caps are zero, or when no policy/executor is configured
 // (tests). This gate never inspects or clamps max_tokens: the router applies no
 // output limit anywhere.
-func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) bool {
+func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest, inputTokens int) bool {
 	if h.executor == nil {
 		return true
 	}
@@ -538,7 +551,6 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 		return true
 	}
 	if pol.MaxInputTokens > 0 {
-		inputTokens := domain.EstimateTokens(domain.GetMessageSlice(req.Messages))
 		if inputTokens > pol.MaxInputTokens {
 			h.fireAdmissionReject("b1", req.Model)
 			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
@@ -586,6 +598,12 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	declared := req.MaxCompletionTokens
 	if declared == 0 {
 		declared = req.MaxTokens
+	}
+	// A negative max_tokens is not a declaration (the backend will reject or
+	// ignore it) — treat it as undeclared rather than letting it shrink the
+	// charged footprint below the input estimate.
+	if declared < 0 {
+		declared = 0
 	}
 	// Declared output is reserved up front; an undeclared request reserves only
 	// its input and grows live (grows=true), matching how the processor meters it.
@@ -641,12 +659,14 @@ func quotaLimitsFromContext(c *gin.Context) auth.QuotaLimits {
 }
 
 // enforcePerKeyRates applies the serverless per-key token-per-minute caps: it
-// charges the request's estimated input tokens against the key's ITPM bucket and
-// rejects when the key's OTPM bucket is already drained by recent output. Both
-// deny with 429 rate_limit_exceeded + Retry-After. Inert unless the request
-// lands on a serverless policy and the key declares the cap. Returns false after
-// writing the 429.
-func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m reqMeta) bool {
+// charges the request's estimated input tokens (inputEstimate — the same value
+// the occupancy budget reserved, so the two gates never disagree about a
+// request's size) against the key's ITPM bucket and rejects when the key's OTPM
+// bucket is already drained by recent output. Both deny with 429
+// rate_limit_exceeded + Retry-After. Inert unless the request lands on a
+// serverless policy and the key declares the cap. Returns false after writing
+// the 429.
+func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m reqMeta, inputEstimate int) bool {
 	if h.minuteLimiter == nil || h.executor == nil {
 		return true
 	}
@@ -662,7 +682,7 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	if limits.InputTokensPerMinute > 0 {
-		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, h.estimatePromptTokens(req)) {
+		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, inputEstimate) {
 			h.fireAdmissionReject("b4_itpm", req.Model)
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}

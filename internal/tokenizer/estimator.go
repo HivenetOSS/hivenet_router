@@ -28,6 +28,16 @@ const (
 	// perMessageOverhead floors the estimate so a textless (image/tool-only)
 	// request is still counted rather than measured as zero.
 	perMessageOverhead = 4
+
+	// minRatio / maxRatio bound each observed sample before it is folded into
+	// the EWMA. Real tokenizers sit between ~20 bytes/token (padding-heavy
+	// prompts) and ~1 byte/token (dense CJK / emoji text); a sample outside
+	// that band means the reported prompt_tokens covered content the byte
+	// count cannot see (a dialect quirk, unmodeled request fields) and would
+	// poison the model's ratio — clamping keeps one bad sample from swinging
+	// every subsequent estimate.
+	minRatio = 1.0 / 20.0
+	maxRatio = 1.0
 )
 
 // Estimator holds a per-model tokens-per-byte ratio, learned from backend usage.
@@ -85,6 +95,12 @@ func (e *Estimator) Observe(model string, textBytes, promptTokens int) {
 		return
 	}
 	obs := float64(promptTokens) / float64(textBytes)
+	if obs < minRatio {
+		obs = minRatio
+	}
+	if obs > maxRatio {
+		obs = maxRatio
+	}
 	e.mu.Lock()
 	cur, ok := e.ratio[model]
 	if !ok {

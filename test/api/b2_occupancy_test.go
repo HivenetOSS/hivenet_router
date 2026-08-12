@@ -278,3 +278,30 @@ func TestB2_MaxInflightBackstop(t *testing.T) {
 		t.Fatalf("occupancy must be zero once the first request completes; got sumW=%d count=%d", sumW, count)
 	}
 }
+
+// TestB2_NegativeMaxTokens_TreatedAsUndeclared verifies a negative max_tokens
+// cannot shrink the charged footprint: it is treated as undeclared (input-only
+// reservation that grows with output), not subtracted from the input estimate.
+func TestB2_NegativeMaxTokens_TreatedAsUndeclared(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	ctrl := admission.NewController(1.0, 0)
+	h := newB2Handlers(q, ctrl, &policy.Policy{AdmitBudgetTokens: 1_000_000}, time.Second)
+	body := []byte(`{"model":"gemma","messages":[{"role":"user","content":"hi"}],"max_tokens":-1000}`)
+	c, _ := newCtx("/v1/chat/completions", body)
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		if sumW, count := ctrl.Occupancy(b2Model); sumW <= 0 || count != 1 {
+			t.Errorf("footprint must be the positive input estimate, not input-1000; got sumW=%d count=%d", sumW, count)
+		}
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+	if sumW, count := ctrl.Occupancy(b2Model); sumW != 0 || count != 0 {
+		t.Fatalf("reservation must be released; got sumW=%d count=%d", sumW, count)
+	}
+}

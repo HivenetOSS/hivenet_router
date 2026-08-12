@@ -74,3 +74,58 @@ func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// TestPromptTextBytes_IncludesTools verifies the prompt-byte count covers the
+// raw tool-definition JSON: the backend renders tool schemas into the prompt
+// and tokenizes them, so leaving them out would both under-estimate agentic
+// requests at admission and inflate the learned tokens-per-byte ratio when the
+// exact prompt_tokens (which include the schemas) are divided by the bytes.
+func TestPromptTextBytes_IncludesTools(t *testing.T) {
+	tools := `[{"type":"function","function":{"name":"read_file","description":"Read a file from disk","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}]`
+	body := `{
+		"model": "gemma",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": ` + tools + `
+	}`
+	var req domain.ChatRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	withTools, _ := domain.PromptTextBytes(&req)
+
+	req.Tools = nil
+	withoutTools, _ := domain.PromptTextBytes(&req)
+
+	if withTools <= withoutTools {
+		t.Errorf("tool definitions must contribute bytes: with=%d without=%d", withTools, withoutTools)
+	}
+	if got := withTools - withoutTools; got < len(tools)-10 {
+		t.Errorf("tools contributed %d bytes, want ~%d", got, len(tools))
+	}
+}
+
+// TestCountImages_AnthropicImageBlocks verifies the image cap sees the
+// Anthropic /v1/messages image shape ({"type":"image","source":...}) as well as
+// the OpenAI image_url shape — otherwise an Anthropic-dialect request could
+// carry unlimited images past images_max.
+func TestCountImages_AnthropicImageBlocks(t *testing.T) {
+	body := `{
+		"model": "gemma",
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "text", "text": "what is in these?"},
+				{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+				{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+				{"type": "image_url", "image_url": {"url": "http://x/y.png"}}
+			]}
+		]
+	}`
+	var req domain.ChatRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := domain.CountImages(req.Messages); got != 3 {
+		t.Errorf("CountImages = %d, want 3 (2 Anthropic blocks + 1 OpenAI part)", got)
+	}
+}

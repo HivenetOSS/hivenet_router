@@ -161,3 +161,29 @@ func loadCorpus(t *testing.T) []string {
 	}
 	return corpus
 }
+
+// TestObserveClampsOutlierSamples verifies a wildly out-of-band sample (e.g. a
+// backend-reported prompt_tokens covering content the byte count cannot see)
+// is clamped before entering the EWMA, so one bad observation cannot swing
+// every subsequent estimate for the model.
+func TestObserveClampsOutlierSamples(t *testing.T) {
+	e := tokenizer.NewEstimator()
+
+	// 100 bytes reported as 5,000 tokens → 50 tokens/byte, far beyond any real
+	// tokenizer. The sample must be clamped to the 1 token/byte ceiling, so the
+	// ratio after one EWMA step stays at most alpha·1.0 + (1−alpha)·cold < 1.
+	e.Observe("m", 100, 5000)
+	if r := e.RatioFor("m"); r > 1.0 {
+		t.Errorf("ratio after absurd high sample = %.3f, must stay <= 1.0", r)
+	}
+
+	// 10,000 bytes reported as 1 token → 1/10,000 tokens/byte; the floor keeps
+	// the ratio from collapsing toward zero (which would admit everything).
+	e2 := tokenizer.NewEstimator()
+	for range 100 {
+		e2.Observe("m", 10_000, 1)
+	}
+	if r := e2.RatioFor("m"); r < 1.0/20.0-1e-9 {
+		t.Errorf("ratio after absurd low samples = %.5f, must stay >= 0.05", r)
+	}
+}
