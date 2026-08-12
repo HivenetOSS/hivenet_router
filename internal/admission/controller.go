@@ -228,6 +228,26 @@ func (s *modelState) grow(delta int64) {
 	s.emit()
 }
 
+// adjust applies a signed correction (true-up) to occupancy. A negative delta
+// frees capacity, so it wakes parked waiters like a release does.
+func (s *modelState) adjust(delta int64) {
+	s.mu.Lock()
+	s.sumW += delta
+	if s.sumW < 0 {
+		s.sumW = 0
+	}
+	var ch chan struct{}
+	if delta < 0 {
+		ch = s.notify
+		s.notify = make(chan struct{})
+	}
+	s.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	s.emit()
+}
+
 func (s *modelState) notifyCh() chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()

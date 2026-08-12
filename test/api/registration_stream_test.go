@@ -48,7 +48,7 @@ func TestRegistrationStream_EmitsSSEFrame(t *testing.T) {
 		nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, feed,
 		nil, nil, nil, nil,
-		nil,
+		nil, nil,
 	)
 
 	router := gin.New()
@@ -129,6 +129,7 @@ func TestRegistrationStream_NotImplementedWhenNoFeed(t *testing.T) {
 		nil, // key admission = nil
 		nil, // minute limiter = nil
 		nil, // admission reject callback = nil
+		nil, // estimator = nil
 	)
 
 	router := gin.New()

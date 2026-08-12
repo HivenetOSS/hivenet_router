@@ -35,6 +35,7 @@ func newB4Handlers(q chan *domain.PendingRequest, pol *policy.Policy) *api.Handl
 		admission.NewController(1.0, 0), // per-key occupancy share
 		auth.NewMinuteRateLimiter(),     // ITPM/OTPM
 		nil,                             // admission reject callback
+		nil,                             // estimator
 	)
 }
 
@@ -153,7 +154,7 @@ func TestB4_ITPMDenialDoesNotChargeDailyBudget(t *testing.T) {
 		nil, nil, q, time.Second,
 		exec, nil, nil, lim,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, auth.NewMinuteRateLimiter(), nil,
+		nil, nil, nil, auth.NewMinuteRateLimiter(), nil, nil,
 	)
 	c, w := newCtx("/v1/chat/completions", textBody(40, 0)) // input 14 > ITPM burst 10
 	withKey(c, auth.QuotaLimits{TokensPerDay: 1_000_000, InputTokensPerMinute: 10})

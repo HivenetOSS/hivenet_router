@@ -1,0 +1,19 @@
+class TokenEstimator:
+    def __init__(self, alpha=0.2, cold_chars_per_token=3.2):
+        self.alpha = alpha
+        self.cold = 1.0 / cold_chars_per_token
+        self.ratio = {}
+
+    def ratio_for(self, model):
+        return self.ratio.get(model, self.cold)
+
+    def estimate(self, model, text_bytes, message_count, overhead=4):
+        est = int(text_bytes * self.ratio_for(model))
+        return max(est, message_count * overhead)
+
+    def observe(self, model, text_bytes, prompt_tokens):
+        if text_bytes <= 0 or prompt_tokens <= 0:
+            return
+        obs = prompt_tokens / text_bytes
+        cur = self.ratio.get(model, self.cold)
+        self.ratio[model] = self.alpha * obs + (1 - self.alpha) * cur

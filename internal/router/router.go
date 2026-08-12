@@ -25,6 +25,7 @@ import (
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/storage"
+	"hivenet_router/internal/tokenizer"
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
 
@@ -582,6 +583,7 @@ func (r *Router) startHTTPServer() {
 		admission.NewController(1.0, 0),
 		r.minuteLimiter,
 		r.metrics.AdmissionRejected,
+		tokenizer.NewEstimator(),
 	)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {

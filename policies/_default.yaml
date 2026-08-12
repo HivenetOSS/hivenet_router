@@ -31,9 +31,10 @@ routing_policy:
 #
 # Operator note: 0.90 is deliberately more permissive than the industry de-facto
 # ~0.80 shed threshold. The headroom leans on the accuracy of the occupancy
-# budget's token estimate — under-counting at 0.90 is what would let preemption
-# start — so this threshold should move down if the token estimator proves
-# optimistic in production (tracked with the estimator-accuracy work).
+# budget's token estimate; that is now the per-model learned ratio (with true-up
+# on backend usage) rather than the old len/4 heuristic that under-counted coding
+# inputs, which is what makes 0.90 (matching the admit fraction) safe. Move this
+# threshold down if preemption metrics show the estimate is still optimistic.
 shed_if:
   kv_cache_utilization: { gt: 0.90 }
   waiting_requests:     { gt: 20 }

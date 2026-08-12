@@ -107,6 +107,7 @@ func TestMeter_ContentObserverFiresPerChunk(t *testing.T) {
 type countingReservation struct{ grown int }
 
 func (c *countingReservation) Grow(tokens int) { c.grown += tokens }
+func (c *countingReservation) Adjust(int)      {}
 func (c *countingReservation) Release()        {}
 
 // TestGrowthObserver_ChargesFloorOfCumulativeBytes verifies growth charges

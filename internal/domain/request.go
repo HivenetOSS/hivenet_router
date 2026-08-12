@@ -77,6 +77,11 @@ type PendingRequest struct {
 	// undeclared output streams; the handler releases it exactly once when the
 	// request finishes. Set by the handler before enqueue.
 	Reservation Reservation
+
+	// EstimatedInputTokens is the prompt-token estimate charged at admission,
+	// stashed so the handler can true up the reservation by the difference once
+	// the backend reports the exact prompt_tokens.
+	EstimatedInputTokens int
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.
@@ -86,6 +91,8 @@ type Reservation interface {
 	// Grow adds streamed output tokens for an undeclared request (a no-op for a
 	// declared one, so it may be called unconditionally per output chunk).
 	Grow(tokens int)
+	// Adjust applies a signed true-up correction (exact input − estimated input).
+	Adjust(delta int)
 	// Release returns the reservation to the budget; idempotent.
 	Release()
 }

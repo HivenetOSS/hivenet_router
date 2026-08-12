@@ -25,6 +25,11 @@ type ChatRequest struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	MaxTokens           int `json:"max_tokens,omitempty"`
 
+	// System is the top-level system prompt used by the Anthropic /v1/messages
+	// dialect (absent from Messages). Kept raw because it may be either a plain
+	// string or an array of text content blocks; SystemText decodes both.
+	System json.RawMessage `json:"system,omitempty"`
+
 	// Sampling & Controls
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"top_p,omitempty"`
@@ -197,6 +202,42 @@ func GetMessageSlice(messages []ChatCompletionMessage) []string {
 		}
 	}
 	return result
+}
+
+// SystemText extracts the text of a top-level Anthropic system prompt, which is
+// absent from Messages. It accepts either a plain string or an array of text
+// content blocks; non-text blocks contribute nothing.
+func SystemText(req *ChatRequest) string {
+	if len(req.System) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(req.System, &s); err == nil {
+		return s
+	}
+	var parts []ContentPart
+	if err := json.Unmarshal(req.System, &parts); err == nil {
+		var out string
+		for _, p := range parts {
+			if p.Type == "text" {
+				out += p.Text
+			}
+		}
+		return out
+	}
+	return ""
+}
+
+// PromptTextBytes returns the total bytes of estimable prompt text — message
+// content plus any top-level system prompt — and the message count, for the
+// token estimator. Non-text content (images) is not byte-estimable and is
+// bounded separately by the per-request image cap.
+func PromptTextBytes(req *ChatRequest) (textBytes, messageCount int) {
+	for _, s := range GetMessageSlice(req.Messages) {
+		textBytes += len(s)
+	}
+	textBytes += len(SystemText(req))
+	return textBytes, len(req.Messages)
 }
 
 // CountImages returns the number of image_url content parts across all messages.
