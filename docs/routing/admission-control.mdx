@@ -4,7 +4,7 @@ description: "Configure request caps and token-weighted occupancy limits before 
 sidebarTitle: "Admission control"
 ---
 
-Hivenet Router can reject an oversized request or briefly park work when the configured occupancy budget is full. These checks run before the request enters the routing queue and before an inference backend receives it.
+Hivenet Router can reject an oversized request, shed new work when the serving pool is under pressure, or briefly park work when the configured occupancy budget is full. These checks run before the request enters the routing queue and before an inference backend receives it.
 
 Admission control currently applies to the allowlisted LLM passthrough routes:
 
@@ -44,7 +44,9 @@ All four numeric limits are optional. `0` or an omitted field disables that chec
 | `max_inflight` | Limits the number of in-flight requests for the model |
 
 <Note>
-  The token estimator is approximate. It extracts message text and estimates roughly one token per four bytes. Image content is counted separately by `images_max` because the text estimate does not include an image's model-specific token cost.
+  The `max_input_tokens` request cap uses the router's simple text estimate. Occupancy and token-budget admission use a separate learned per-model tokens-per-byte estimate. It starts conservatively at one token per 3.2 bytes, includes OpenAI message text and an Anthropic top-level `system` prompt, and updates from exact backend `prompt_tokens` reports with an EWMA weight of `0.2`.
+
+  Image content is counted separately by `images_max` because an image's model-specific token cost cannot be inferred from its byte size.
 </Note>
 
 ## Request caps
@@ -81,7 +83,7 @@ The effective token budget is:
 floor(HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens)
 ```
 
-`HIVENET_ROUTER_ADMIT_FRACTION` defaults to `0.85` and accepts values greater than `0` and at most `1`. Invalid values leave the default unchanged.
+`HIVENET_ROUTER_ADMIT_FRACTION` defaults to `0.90` and accepts values greater than `0` and at most `1`. Invalid values leave the default unchanged.
 
 When the request would exceed the token budget or `max_inflight`, it waits for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. The default is `250ms`; `0` rejects immediately. The value uses Go duration syntax such as `100ms`, `2s`, or `1m`.
 
@@ -98,6 +100,24 @@ If capacity does not become available, the router returns HTTP `429`, sets `Retr
 ```
 
 Retry this error with bounded exponential backoff and jitter.
+
+When a backend reports exact prompt usage, the router adjusts the active reservation by the difference between the estimated and actual input. Text-only samples also update the in-memory per-model estimator for later requests. The learned ratio resets when the router restarts; fallback estimates are not fed back into it, and image-bearing requests are not used for learning.
+
+## Front-door shedding
+
+Use `shed_if` to reject new work before queueing when the healthy serving pool is already under pressure:
+
+```yaml
+shed_if:
+  kv_cache_utilization:
+    gt: 0.90
+  waiting_requests:
+    gt: 20
+```
+
+The router averages each available signal across healthy agents serving the requested model. If any configured threshold fails, it returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded` with the message `model is under high load, please retry`.
+
+Missing engine signals pass the gate. A single hot replica should normally be handled by per-agent `exclude_if`; `shed_if` is for pressure across the pool.
 
 ## Reserved and serverless modes
 
@@ -120,13 +140,21 @@ api:
         output_tokens_per_minute: 32768
 ```
 
+These fields are enforced only when the effective policy uses `mode: serverless`:
+
+- `max_occupancy_share` limits the key's in-flight footprint to that fraction of `admit_budget_tokens`. It does not apply `HIVENET_ROUTER_ADMIT_FRACTION` and rejects immediately with `429 rate_limit_exceeded`.
+- `input_tokens_per_minute` is a continuously refilling one-minute token bucket charged at admission from the learned input estimate.
+- `output_tokens_per_minute` is charged after a response completes. When the bucket is drained, the next request is rejected at admission. One response can drain at most one minute of capacity.
+
+The input and output buckets are independent for each key-and-model combination. A zero value disables the corresponding cap.
+
 <Warning>
-  In the audited source, `input_tokens_per_minute`, `output_tokens_per_minute`, and `max_occupancy_share` are parsed and validated but are not consulted by the request-admission path. Do not rely on them as enforced runtime limits in this version. Existing RPM and daily token quotas remain enforced as described in the auth reference.
+  Dynamic keys have a stable key ID, so the three serverless controls are isolated per key. Static-key authentication does not currently populate a key ID; the handler falls back to `anonymous`. As a result, static keys share these B4 buckets and occupancy state for a model in the audited source. Do not describe them as isolated per-static-key controls until the runtime supplies a distinct static key ID.
 </Warning>
 
-For a static API-key configuration that can reach a serverless policy, startup fails when a nonzero `input_tokens_per_minute` is lower than that policy's `max_input_tokens`. `max_occupancy_share` must be `0` (unset) or greater than `0` and at most `1`.
+For a static API-key configuration that can reach a serverless policy, startup fails when a nonzero `input_tokens_per_minute` is lower than that policy's `max_input_tokens`. The same cross-file invariant is checked during auth and policy reloads. `max_occupancy_share` must be `0` (unset) or greater than `0` and at most `1`.
 
-The policy loader also accepts `shed_if` with `kv_cache_utilization` or `waiting_requests`, but the audited request path does not currently evaluate this top-level block. Use `exclude_if` inside routing steps for live metric gates that are enforced today.
+The repository includes `auth.DeriveKeyDefaults` to calculate suggested B4 values from certified model limits. The router does not call this helper when loading `auth.yaml`; operators or provisioning tooling must still write the resulting values into the key configuration.
 
 ## Related pages
 
@@ -136,7 +164,7 @@ The policy loader also accepts `shed_if` with `kv_cache_utilization` or `waiting
   </Card>
 
   <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
-    Configure enforced RPM and daily token quotas.
+    Configure RPM, daily token, and serverless per-key limits.
   </Card>
 
   <Card title="Error codes" href="/reference/error-codes">
@@ -145,5 +173,9 @@ The policy loader also accepts `shed_if` with `kv_cache_utilization` or `waiting
 
   <Card title="Configuration reference" href="/reference/configuration-reference">
     Review admission environment variables and defaults.
+  </Card>
+
+  <Card title="Admission control metrics" href="/observability/admission-control-metrics">
+    Monitor occupancy, budgets, concurrency, and rejections by gate.
   </Card>
 </CardGroup>

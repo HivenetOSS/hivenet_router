@@ -1,0 +1,781 @@
+---
+title: "Docker Compose"
+sidebarTitle: "Docker Compose"
+description: "Use Docker Compose to run the Hivenet Router router with its full observability stack, then connect agents from separate inference hosts."
+---
+
+Use Docker Compose to run the Hivenet Router router with its full observability stack, then connect agents from separate inference hosts.
+
+The repository includes two Compose files:
+
+| File | Run it on | What it starts |
+| --- | --- | --- |
+| `docker-compose.yml` | Router host | Router, Prometheus, Grafana, Tempo, Loki, and Promtail |
+| `docker-compose.agent.yml` | Each inference host | One Hivenet Router agent |
+
+The router Compose file does not start an inference backend or agent. Run the agent Compose file separately on each host where an inference engine is available.
+
+## Stack overview
+
+The router host runs:
+
+| Service | Purpose | Exposed port |
+| --- | --- | --- |
+| Hivenet Router router | API, agent authentication, and request routing | `8888`, `8902`, `8903` |
+| Prometheus | Metrics collection | Internal only |
+| Grafana | Dashboards and data exploration | `3000` |
+| Tempo | Distributed tracing | Internal only |
+| Loki | Log storage | Internal only |
+| Promtail | Ships router audit logs to Loki | None |
+
+Each inference host runs:
+
+| Service | Purpose | Exposed port |
+| --- | --- | --- |
+| Hivenet Router agent | Connects the backend to the router | Outbound connection only |
+| Inference backend | Runs the model | Host-local, `8888` in this guide |
+
+Prometheus scrapes the router’s metrics endpoint. Agents push their hardware, engine, latency, and routing signals to the router, so Prometheus does not need direct access to every agent host.
+
+## Network requirements
+
+| Connection | Port | Purpose |
+| --- | --- | --- |
+| Clients → Router | `8888` | Client HTTP API |
+| Agents → Router | `8902` | gRPC authentication |
+| Agents → Router | `8903` | libp2p registration and communication |
+| Users → Grafana | `3000` | Dashboard UI |
+
+Prometheus, Loki, Tempo, and the router metrics endpoint remain inside the Compose network by default.
+
+<Warning>
+  Restrict the router and agent ports to the systems that require them. Put Grafana behind a reverse proxy, VPN, or SSH tunnel before using it outside a trusted network.
+</Warning>
+
+## Before you start
+
+You need:
+
+- Docker 20.10 or later
+- Docker Compose 2.0 or later
+- Git, OpenSSL, `curl`, and `jq`
+- one router host
+- one or more inference hosts
+- network access between the router and agents
+- an inference backend running on each agent host
+- NVIDIA drivers and the NVIDIA Container Toolkit on GPU hosts
+
+This guide assumes a vLLM backend is running on port `8888` of each agent host.
+
+## Configure the shared secret
+
+The current Compose files contain a `changeme` placeholder for the router-agent JWT secret.
+
+Before starting the stack, change this line in both `docker-compose.yml` and `docker-compose.agent.yml`:
+
+```yaml
+- HIVENET_ROUTER_JWT_SECRET=changeme
+```
+
+Replace it with:
+
+```yaml
+- HIVENET_ROUTER_JWT_SECRET=${HIVENET_ROUTER_JWT_SECRET:?Set HIVENET_ROUTER_JWT_SECRET}
+```
+
+The names use different capitalization deliberately:
+
+- `HIVENET_ROUTER_JWT_SECRET` is the host-side variable read by Docker Compose.
+- `HIVENET_ROUTER_JWT_SECRET` is the environment variable read inside the Hivenet Router container.
+
+Create a `.env` file on the router host:
+
+```bash
+printf 'HIVENET_ROUTER_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
+chmod 600 .env
+```
+
+The repository ignores `.env` files by default. Do not commit the secret.
+
+<Warning>
+  Every router and agent must use the same secret. Anyone with this value can authenticate an agent with the router.
+</Warning>
+
+## Allow administrator access for this walkthrough
+
+The router refuses to start with unauthenticated `/admin/*` endpoints unless the insecure override is explicitly enabled.
+
+For this local walkthrough, add the following environment value to the router service in `docker-compose.yml`:
+
+```yaml
+environment:
+  - HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+```
+
+<Warning>
+  This setting permits unauthenticated access to every administrator endpoint. Use it only in an isolated development environment. Configure administrator API-key authentication before exposing the router to shared or untrusted networks.
+</Warning>
+
+## Start the router stack
+
+<Steps>
+  <Step title="Clone the repository">
+    On the router host:
+
+    ```bash
+    git clone https://github.com/HivenetOSS/hivenet_router.git
+    cd hivenet_router
+    ```
+
+    Make the JWT substitution described above in `docker-compose.yml`, then create the `.env` file.
+  </Step>
+  <Step title="Review the exposed ports">
+    The router service publishes:
+
+    ```yaml
+    ports:
+      - "8888:8888"
+      - "8902:8902"
+      - "8903:8903"
+    ```
+
+    Grafana publishes:
+
+    ```yaml
+    ports:
+      - "3000:3000"
+    ```
+
+    Prometheus, Loki, Tempo, and port `2112` remain internal unless you change the Compose file.
+  </Step>
+  <Step title="Start the stack">
+    Build the router and start all services:
+
+    ```bash
+    docker compose --env-file .env up -d --build
+    ```
+
+    Check their status:
+
+    ```bash
+    docker compose ps
+    ```
+
+    The stack should include:
+
+    - `router`
+    - `prometheus`
+    - `grafana`
+    - `tempo`
+    - `loki`
+    - `promtail`
+  </Step>
+  <Step title="Check the router">
+    Check the public liveness endpoint:
+
+    ```bash
+    curl http://localhost:8888/health
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "status": "ok"
+    }
+    ```
+
+    Check the operational health endpoint:
+
+    ```bash
+    curl http://localhost:8888/admin/health | jq .
+    ```
+
+    Before any agents register, the router should report zero agents and a degraded operational state.
+  </Step>
+  <Step title="Open Grafana">
+    Open:
+
+    ```text
+    http://<router-host>:3000
+    ```
+
+    The default credentials are:
+
+    ```text
+    Username: admin
+    Password: changeme
+    ```
+
+    Change the password before exposing Grafana outside a trusted environment.
+
+    You can also change the initial password before startup by editing:
+
+    ```yaml
+    GF_SECURITY_ADMIN_PASSWORD=changeme
+    ```
+
+    in `docker-compose.yml`.
+  </Step>
+</Steps>
+
+## Connect an agent host
+
+Repeat these steps on every machine that runs an inference backend.
+
+<Steps>
+  <Step title="Prepare the GPU host">
+    Clone the repository:
+
+    ```bash
+    git clone https://github.com/HivenetOSS/hivenet_router.git
+    cd hivenet_router
+    ```
+
+    Run the host setup script:
+
+    ```bash
+    chmod +x scripts/setup-agent-host.sh
+    
+    sudo ./scripts/setup-agent-host.sh
+    ```
+
+    Replace `192.168.1.100` with the router’s reachable IP address.
+
+    The script checks or installs:
+
+    - Docker
+    - Docker Compose
+    - the NVIDIA Container Toolkit
+    - GPU container access
+    - required host packages
+    - the host packages and container runtime required by the agent
+
+    If the script adds your account to the Docker group, sign out and back in before continuing.
+  </Step>
+  <Step title="Start the inference backend">
+    The agent Compose file expects a backend on the host at:
+
+    ```text
+    http://host.docker.internal:8888
+    ```
+
+    For vLLM, one example is:
+
+    ```bash
+    docker run -d \
+      --name vllm \
+      --restart unless-stopped \
+      --gpus all \
+      --network host \
+      vllm/vllm-openai:latest \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8888 \
+      --max-num-seqs 32
+    ```
+
+    Wait for the model to load:
+
+    ```bash
+    docker logs -f vllm
+    ```
+
+    Then check the backend:
+
+    ```bash
+    curl http://localhost:8888/health
+    ```
+
+    A ready vLLM server returns HTTP status `200`.
+  </Step>
+  <Step title="Copy the shared secret">
+    Copy the router’s `.env` file to the agent host through a secure channel:
+
+    ```bash
+    scp router-server:/path/to/hivenet-router/.env .
+    chmod 600 .env
+    ```
+
+    Make the same JWT substitution in `docker-compose.agent.yml`:
+
+    ```yaml
+    - HIVENET_ROUTER_JWT_SECRET=${HIVENET_ROUTER_JWT_SECRET:?Set HIVENET_ROUTER_JWT_SECRET}
+    ```
+  </Step>
+  <Step title="Update and start the agent">
+    The current agent connection path does not use `--router-p2p`, `--p2p-listen-port`, or `--p2p-announce-addr`.
+
+    If `docker-compose.agent.yml` still contains these command entries, remove them before starting the agent:
+
+    ```yaml
+    - "--router-p2p"
+    - "${ROUTER_P2P}"
+    - "--p2p-listen-port"
+    - "9001"
+    - "--p2p-announce-addr"
+    - "/ip4/${HOST_IP}/tcp/9001"
+    ```
+
+    Then set the router address and agent metadata:
+
+    ```bash
+    ROUTER_GRPC=192.168.1.100:8902 \
+    AGENT_REGION=EU-Primary \
+    AGENT_CAPACITY=32 \
+    MACHINE=gpu-eu-1 \
+      docker compose \
+      --env-file .env \
+      -f docker-compose.agent.yml \
+      up -d --build
+    ```
+
+    Replace:
+
+    - `ROUTER_GRPC` with the router’s gRPC authentication address
+    - `AGENT_REGION` with the region label you want to expose
+    - `AGENT_CAPACITY` with the concurrency the backend can support
+    - `MACHINE` with a stable machine identifier
+
+    The agent authenticates through gRPC, receives the router’s libp2p connection details, and initiates the persistent transport connection. It needs outbound access to router ports `8902` and `8903`; it does not expose an inbound Hivenet Router port.
+  </Step>
+  <Step title="Check the agent">
+    Inspect the agent logs:
+
+    ```bash
+    docker compose \
+      -f docker-compose.agent.yml \
+      logs -f agent
+    ```
+
+    The logs should show that the agent authenticated and registered with the router.
+
+    On the router host, confirm registration:
+
+    ```bash
+    curl http://localhost:8888/admin/health | jq .
+    ```
+
+    For a fuller view of routing, latency, hardware, and engine state:
+
+    ```bash
+    curl http://localhost:8888/admin/routing-table | jq .
+    ```
+  </Step>
+</Steps>
+
+## Agent environment variables
+
+The agent Compose file accepts:
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `ROUTER_GRPC` | Yes | None | Router gRPC authentication address |
+| `HIVENET_ROUTER_JWT_SECRET` | Yes | None | Shared router-agent secret used during Compose substitution |
+| `AGENT_REGION` | No | `EU-France` | Region exposed as agent metadata |
+| `AGENT_CAPACITY` | No | `10` | Maximum concurrent requests declared by the agent |
+| `MACHINE` | No | `Unknown` | Machine identifier used in metadata and metrics |
+
+`ROUTER_GRPC` must be reachable from the agent host. After authentication, the router supplies the libp2p connection details the agent uses for its outbound transport connection.
+
+## Persistent data
+
+The Compose files create named volumes:
+
+| Volume | Used by | Contains |
+| --- | --- | --- |
+| `badger_data` | Router | Persistent counters, latency history, and router state |
+| `audit_logs` | Router and Promtail | Audit log files |
+| `prometheus_data` | Prometheus | Metrics history |
+| `grafana_data` | Grafana | Users, sessions, and dashboard state |
+| `loki_data` | Loki | Log chunks and index |
+| `tempo_data` | Tempo | Trace data |
+| `agent_data` | Agent | Persistent libp2p identity |
+
+Running `docker compose down` stops and removes containers but retains these volumes.
+
+Running `docker compose down -v` also deletes the volumes and their data.
+
+## Configure routing policies
+
+The router mounts the repository’s `policies` directory at:
+
+```text
+/app/policies
+```
+
+Hivenet Router uses least-loaded routing without a policy file by default.
+
+To use one global policy, add these values to the router’s `command` list in `docker-compose.yml`:
+
+```yaml
+- "--policy-file"
+- "/app/policies/_default.yaml"
+```
+
+To load policies by model, use:
+
+```yaml
+- "--policy-model-dir"
+- "/app/policies"
+```
+
+Per-model policy loading is the better choice when different models need different filters, gates, or fallback behavior.
+
+See [Policy YAML reference](/routing/policy-yaml-reference) for the complete schema.
+
+## Configure API authentication
+
+Client authentication is disabled when no auth configuration is provided.
+
+### Static API keys
+
+Copy the example configuration:
+
+```bash
+cp deploy/auth/auth.api-key.yaml deploy/auth/auth.yaml
+```
+
+Add the required key hashes and access rules.
+
+Then mount the file in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./deploy/auth/auth.yaml:/app/auth.yaml:ro
+```
+
+Add the router arguments:
+
+```yaml
+command:
+  - "--auth-config-file"
+  - "/app/auth.yaml"
+```
+
+### Dynamic API keys
+
+For runtime-managed keys, add these container environment variables to the router service:
+
+```yaml
+environment:
+  - HIVENET_ROUTER_AUTH_MODE=dynamic
+  - HIVENET_ROUTER_ADMIN_API_KEYS=${HIVENET_ROUTER_ADMIN_API_KEYS:?Set HIVENET_ROUTER_ADMIN_API_KEYS}
+```
+
+Add the corresponding host-side value to `.env`:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS=<secure-admin-key>
+```
+
+Admin authentication is mandatory in dynamic mode. The router refuses to start without an admin key because the admin endpoints manage the API-key registry itself.
+
+See [API keys](/security/api-keys) for the complete setup.
+
+## Configure persistent quota counters
+
+Quota counters use in-memory storage by default and reset when the router restarts.
+
+To persist daily token counters in BadgerDB, add:
+
+```yaml
+- HIVENET_ROUTER_QUOTA_BACKEND=badger
+```
+
+to the router environment.
+
+The existing `badger_data` volume preserves those counters across container restarts.
+
+## Configure debug logging
+
+Set one global log level:
+
+```yaml
+environment:
+  - GOLOG_LOG_LEVEL=debug
+```
+
+Or configure specific subsystems:
+
+```yaml
+environment:
+  - GOLOG_LOG_LEVEL=router=debug,policy=debug,metrics=debug
+```
+
+Apply the setting to the router, agent, or both.
+
+## Access the services
+
+| Service | Address | Exposure |
+| --- | --- | --- |
+| Router API | `http://<router-host>:8888` | Published |
+| Router health | `http://<router-host>:8888/admin/health` | Published with the router API |
+| Grafana | `http://<router-host>:3000` | Published |
+| Prometheus | `http://prometheus:9090` | Compose network only |
+| Loki | `http://loki:3100` | Compose network only |
+| Tempo | `http://tempo:3200` | Compose network only |
+| Router metrics | `http://router:2112/metrics` | Compose network only |
+
+To inspect Prometheus without exposing it publicly, use an SSH tunnel:
+
+```bash
+ssh -L 9090:localhost:9090 <user>@<router-host>
+```
+
+Prometheus is not published by default, so first add a loopback-only port mapping:
+
+```yaml
+ports:
+  - "127.0.0.1:9090:9090"
+```
+
+Then open:
+
+```text
+http://localhost:9090
+```
+
+## Useful Prometheus queries
+
+Active agents:
+
+```promql
+count(hivenet_router_routing_agent_info)
+```
+
+Request routing rate:
+
+```promql
+rate(hivenet_router_routing_requests_routed_total[5m])
+```
+
+Failed routing rate:
+
+```promql
+rate(hivenet_router_routing_requests_failed_total[5m])
+```
+
+Smoothed round-trip time by model:
+
+```promql
+avg by (model) (
+  hivenet_router_agent_srtt_ms
+)
+```
+
+## Grafana dashboards
+
+The repository provisions dashboards for:
+
+- router and agent health
+- request and routing counters
+- smoothed round-trip time
+- hardware and engine metrics
+- policy routing behavior
+- tenant usage
+- audit logs
+
+Router traces are sent to Tempo through OpenTelemetry. Explore them through Grafana’s Tempo data source.
+
+Audit log records are written to the shared `audit_logs` volume. Promtail reads those files and sends them to Loki.
+
+## Back up persistent data
+
+Stop the stack before taking filesystem-level snapshots:
+
+```bash
+docker compose down
+```
+
+Create a backup directory:
+
+```bash
+mkdir -p backup
+```
+
+The default volume names assume the Compose project is named `hivenet-router`. Confirm the actual names first:
+
+```bash
+docker volume ls \
+  --filter label=com.docker.compose.project=hivenet-router
+```
+
+Back up the router database:
+
+```bash
+docker run --rm \
+  -v hivenet_router_badger_data:/data:ro \
+  -v "$PWD/backup:/backup" \
+  alpine \
+  tar czf /backup/badger-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+Back up Prometheus:
+
+```bash
+docker run --rm \
+  -v hivenet_router_prometheus_data:/data:ro \
+  -v "$PWD/backup:/backup" \
+  alpine \
+  tar czf /backup/prometheus-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+Back up Grafana:
+
+```bash
+docker run --rm \
+  -v hivenet_router_grafana_data:/data:ro \
+  -v "$PWD/backup:/backup" \
+  alpine \
+  tar czf /backup/grafana-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+Restart the stack:
+
+```bash
+docker compose --env-file .env up -d
+```
+
+## Restore the router database
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+Clear the existing contents and restore the archive:
+
+```bash
+docker run --rm \
+  -v hivenet_router_badger_data:/data \
+  -v "$PWD/backup:/backup:ro" \
+  alpine \
+  sh -c 'rm -rf /data/* && tar xzf /backup/badger-<date>.tar.gz -C /data'
+```
+
+Restart:
+
+```bash
+docker compose --env-file .env up -d
+```
+
+## Troubleshooting
+
+### An agent does not appear
+
+Check the agent logs:
+
+```bash
+docker compose \
+  -f docker-compose.agent.yml \
+  logs agent
+```
+
+Test the agent’s connection to the router:
+
+```bash
+nc -zv <router-ip> 8902
+nc -zv <router-ip> 8903
+```
+
+Check the router logs:
+
+```bash
+docker compose logs router \
+  | grep -i "registered\|agent\|error"
+```
+
+Common causes include:
+
+- a different JWT secret on the router and agent
+- an incorrect or unreachable `ROUTER_GRPC` address
+- the router advertising a libp2p address the agent cannot reach
+- a missing or incorrect router `--p2p-announce-addr` behind NAT or port translation
+- an unhealthy inference backend
+
+### Prometheus cannot scrape the router
+
+Inspect Prometheus targets:
+
+```bash
+docker compose exec prometheus \
+  wget -qO- http://localhost:9090/api/v1/targets \
+  | jq '.data.activeTargets[] | {
+      job: .labels.job,
+      health: .health,
+      lastError: .lastError
+    }'
+```
+
+Check the router endpoint from the Prometheus container:
+
+```bash
+docker compose exec prometheus \
+  wget -qO- http://router:2112/metrics \
+  | head
+```
+
+### Grafana has no metrics
+
+Confirm that Prometheus contains Hivenet Router data:
+
+```bash
+docker compose exec prometheus \
+  wget -qO- \
+  'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
+  | jq .
+```
+
+Check the service logs:
+
+```bash
+docker compose logs prometheus | tail -50
+docker compose logs grafana | tail -50
+```
+
+### Grafana has no audit logs
+
+Check Loki and Promtail:
+
+```bash
+docker compose logs loki | tail -50
+docker compose logs promtail | tail -50
+```
+
+Confirm that the router writes audit records to the shared volume:
+
+```bash
+docker compose exec router \
+  ls -la /var/log/hivenet-router
+```
+
+### Agent metrics are missing
+
+Agents do not expose a separate Prometheus endpoint for this deployment. They push metrics to the router.
+
+Inspect the routing table:
+
+```bash
+curl http://localhost:8888/admin/routing-table \
+  | jq '.agents[]'
+```
+
+If the agent is missing or unhealthy, check its backend, network connection, logs, and JWT secret.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Bare metal" href="/deploy/bare-metal">
+    Run the router and agents directly without Docker.
+  </Card>
+
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Configure a vLLM backend, model discovery, metrics, and capacity.
+  </Card>
+
+  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+    Understand the provisioned dashboards and data sources.
+  </Card>
+</CardGroup>

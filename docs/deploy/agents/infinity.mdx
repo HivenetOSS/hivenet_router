@@ -1,0 +1,784 @@
+---
+title: "Infinity agent"
+sidebarTitle: "Infinity"
+description: "Connect Infinity embedding and reranking models to Hivenet Router by running one capability-specific agent for each model."
+---
+
+Connect an Infinity server to Hivenet Router for embedding and reranking workloads.
+
+Infinity can serve several models from one process. Hivenet Router connects to that process through separate agents, with one agent representing one model and one capability.
+
+<Warning>
+  The Infinity integration does not support chat completions. Start each agent with either `--capability embedding` or `--capability reranker`.
+</Warning>
+
+## Before you start
+
+You need:
+
+- a running Hivenet Router router
+- Infinity installed or available as a Docker image
+- one or more embedding or reranking models
+- network access between the agent host and router
+- the Hivenet Router agent binary or Docker image
+- the same JWT secret used by the router
+- an NVIDIA GPU if you want CUDA inference and GPU metrics
+
+The examples use one Infinity process serving two models:
+
+| Capability | Model ID | Served model name |
+| --- | --- | --- |
+| Embeddings | `BAAI/bge-m3` | `bge-m3` |
+| Reranking | `BAAI/bge-reranker-large` | `bge-reranker-large` |
+
+They also use:
+
+```text
+Router IP: 192.168.1.100
+Router gRPC port: 50051
+Router libp2p port: 9000
+Agent IP: 192.168.1.101
+Infinity port: 7997
+```
+
+Replace these values with addresses and models from your deployment.
+
+## Start Infinity
+
+Hivenet Router expects Infinity to expose:
+
+```text
+GET /health
+GET /v1/models
+POST /v1/embeddings
+POST /v1/rerank
+```
+
+Set `INFINITY_URL_PREFIX=/v1` so the inference and model endpoints use the paths expected by Hivenet Router.
+
+<Tabs>
+  <Tab title="Docker">
+    Start one Infinity process with an embedding model and a reranking model:
+
+    ```bash
+    docker run -d \
+      --name infinity \
+      --restart unless-stopped \
+      --gpus all \
+      -p 7997:7997 \
+      -v infinity-cache:/app/.cache \
+      -e INFINITY_URL_PREFIX=/v1 \
+      michaelf34/infinity:latest \
+      v2 \
+        --model-id BAAI/bge-m3 \
+        --model-id BAAI/bge-reranker-large \
+        --served-model-name bge-m3 \
+        --served-model-name bge-reranker-large \
+        --host 0.0.0.0 \
+        --port 7997 \
+        --device cuda \
+        --dtype float16 \
+        --batch-size 32
+    ```
+
+    The named volume preserves downloaded model data between container replacements.
+
+    Follow the startup logs:
+
+    ```bash
+    docker logs -f infinity
+    ```
+
+    For CPU inference, use an appropriate CPU image and remove:
+
+    ```text
+    --gpus all
+    ```
+
+    Adjust `--device` and `--dtype` for the selected Infinity image and hardware.
+  </Tab>
+  <Tab title="Bare metal">
+    Install Infinity:
+
+    ```bash
+    pip install "infinity-emb[all]"
+    ```
+
+    Set the API prefix:
+
+    ```bash
+    export INFINITY_URL_PREFIX=/v1
+    ```
+
+    Start Infinity:
+
+    ```bash
+    nohup infinity_emb v2 \
+      --model-id BAAI/bge-m3 \
+      --model-id BAAI/bge-reranker-large \
+      --served-model-name bge-m3 \
+      --served-model-name bge-reranker-large \
+      --host 0.0.0.0 \
+      --port 7997 \
+      --device cuda \
+      --dtype float16 \
+      --batch-size 32 \
+      > ~/infinity.log 2>&1 &
+    ```
+
+    Follow the logs:
+
+    ```bash
+    tail -f ~/infinity.log
+    ```
+  </Tab>
+</Tabs>
+
+Wait until Infinity is ready:
+
+```bash
+curl -i http://localhost:7997/health
+```
+
+A ready server returns HTTP status `200`.
+
+List the exposed models:
+
+```bash
+curl http://localhost:7997/v1/models \
+  | jq '.data[] | {
+      id,
+      object
+    }'
+```
+
+The response should include:
+
+```text
+bge-m3
+bge-reranker-large
+```
+
+## Understand model names
+
+`--model-id` tells Infinity which model to load.
+
+`--served-model-name` gives that model the public name exposed through Infinity’s API.
+
+For example:
+
+```bash
+--model-id BAAI/bge-m3 \
+--served-model-name bge-m3
+```
+
+The Hivenet Router agent and API clients use:
+
+```text
+bge-m3
+```
+
+They do not need to use the original Hugging Face model ID.
+
+<Note>
+  The order of repeated `--served-model-name` values must match the order of the corresponding `--model-id` values.
+</Note>
+
+## Prepare the Hivenet Router agents
+
+You need two agents for this example:
+
+- one embedding agent for `bge-m3`
+- one reranking agent for `bge-reranker-large`
+
+Both agents connect to the same Infinity process.
+
+<Tabs>
+  <Tab title="Docker">
+    From the Hivenet Router repository, build the agent image if you have not already done so:
+
+    ```bash
+    docker build \
+      -f Dockerfile.agent \
+      -t hivenet-router/agent:latest \
+      .
+    ```
+
+    Create a directory for the shared secret and persistent identities:
+
+    ```bash
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
+    ```
+
+    Place the router’s JWT secret at:
+
+    ```text
+    /opt/hivenet-router/jwt.secret
+    ```
+
+    Protect it:
+
+    ```bash
+    chmod 600 /opt/hivenet-router/jwt.secret
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    Build the agent from the Hivenet Router repository:
+
+    ```bash
+    go build -o bin/hivenet-agent ./cmd/agent/
+    ```
+
+    Place the shared JWT secret somewhere the agents can read, for example:
+
+    ```text
+    /opt/hivenet-router/jwt.secret
+    ```
+
+    Create a writable directory for the persistent identities:
+
+    ```bash
+    sudo mkdir -p /var/lib/hivenet-router/agents
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agents
+    ```
+  </Tab>
+</Tabs>
+
+## Start the embedding agent
+
+The embedding agent represents `bge-m3` and accepts requests sent to:
+
+```text
+POST /v1/embeddings
+```
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name hivenet-router-embedding-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
+      --engine infinity \
+      --capability embedding \
+      --model bge-m3 \
+      --backend-url http://localhost:7997 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 64 \
+      --region EU-France \
+      --tags infinity,embedding \
+      --identity-path /data/embedding-agent.key
+    ```
+
+    For CPU-only inference, omit:
+
+    ```text
+    --gpus all
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/hivenet-agent \
+      --engine infinity \
+      --capability embedding \
+      --model bge-m3 \
+      --backend-url http://localhost:7997 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
+      --capacity 64 \
+      --region EU-France \
+      --tags infinity,embedding \
+      --identity-path /var/lib/hivenet-router/agents/embedding.key
+    ```
+  </Tab>
+</Tabs>
+
+## Start the reranking agent
+
+The reranking agent represents `bge-reranker-large` and accepts requests sent to:
+
+```text
+POST /v1/rerank
+```
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker run -d \
+      --name hivenet-router-reranking-agent \
+      --restart unless-stopped \
+      --network host \
+      --gpus all \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
+      --engine infinity \
+      --capability reranker \
+      --model bge-reranker-large \
+      --backend-url http://localhost:7997 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /jwt.secret \
+      --capacity 32 \
+      --region EU-France \
+      --tags infinity,reranking \
+      --identity-path /data/reranking-agent.key
+    ```
+  </Tab>
+  <Tab title="Bare metal">
+    ```bash
+    ./bin/hivenet-agent \
+      --engine infinity \
+      --capability reranker \
+      --model bge-reranker-large \
+      --backend-url http://localhost:7997 \
+      --router-grpc 192.168.1.100:50051 \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
+      --capacity 32 \
+      --region EU-France \
+      --tags infinity,reranking \
+      --identity-path /var/lib/hivenet-router/agents/reranking.key
+    ```
+  </Tab>
+</Tabs>
+
+When several agents run on the same host, each one needs:
+
+- a separate `--identity-path`
+- a unique process or container name
+
+The agents can share the same `--backend-url`. They initiate their own connections to the router, so you do not need a separate inbound agent port for each process.
+
+## Understand capabilities
+
+Hivenet Router uses the agent capability to separate different kinds of inference traffic.
+
+| Capability | Hivenet Router endpoint | Infinity endpoint |
+| --- | --- | --- |
+| `embedding` | `POST /v1/embeddings` | `POST /v1/embeddings` |
+| `reranker` | `POST /v1/rerank` | `POST /v1/rerank` |
+
+The router filters agents by capability before applying the rest of the routing policy.
+
+An embedding request cannot be sent to a reranking agent, even if both agents use Infinity or share the same backend process.
+
+Do not leave the default capability of `llm` on an Infinity agent. Infinity rejects chat-completion requests, and Hivenet Router reports a structured invalid-request error.
+
+## Set agent capacity
+
+`--capacity` controls how many concurrent requests Hivenet Router may assign to an agent.
+
+It does not change Infinity’s batching or scheduler settings.
+
+The original deployment examples use:
+
+| Agent | Example capacity |
+| --- | --- |
+| Embeddings | `64` |
+| Reranking | `32` |
+
+Treat these as starting points. The appropriate value depends on:
+
+- model size
+- accelerator and available memory
+- input length
+- batch size
+- number of models sharing the Infinity process
+- acceptable latency
+
+Because both agents share one Infinity process and one set of hardware resources, their capacities are not independent physical limits. Test the combined workload before raising either value.
+
+<Note>
+  For streaming-capable workloads, Hivenet Router releases an agent capacity slot when response headers arrive, while backend work can continue. Infinity embeddings and reranking are normally non-streaming, but the same `--capacity` value remains a routing-admission setting rather than a direct backend scheduler limit.
+</Note>
+
+## Verify both agents
+
+On the router, check health:
+
+```bash
+curl http://192.168.1.100:8080/admin/health \
+  | jq .
+```
+
+Inspect the Infinity agents:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.engine == "infinity")
+      | {
+          peer_id,
+          model: .metadata.model,
+          capability: .metadata.capability,
+          capacity: .metadata.capacity,
+          region: .metadata.region,
+          healthy: .status.healthy,
+          active_requests: .status.active_requests
+        }'
+```
+
+List the models exposed to clients:
+
+```bash
+curl http://192.168.1.100:8080/v1/models \
+  | jq '.data[] | {
+      id,
+      capability
+    }'
+```
+
+You should see one embedding model and one reranking model.
+
+## Test embeddings
+
+Send a batch embedding request:
+
+```bash
+curl -X POST \
+  http://192.168.1.100:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": [
+      "Hello world",
+      "How are you?"
+    ]
+  }'
+```
+
+A successful response contains one vector for each input:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [0.012, -0.031, 0.044],
+      "index": 0
+    }
+  ],
+  "model": "bge-m3",
+  "usage": {
+    "prompt_tokens": 5,
+    "total_tokens": 5
+  }
+}
+```
+
+The vector above is shortened for readability.
+
+## Test reranking
+
+Send a reranking request:
+
+```bash
+curl -X POST \
+  http://192.168.1.100:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-reranker-large",
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "London is the capital of the United Kingdom.",
+      "Berlin is the capital of Germany."
+    ],
+    "top_n": 2
+  }'
+```
+
+The response orders results by relevance score:
+
+```json
+{
+  "object": "rerank",
+  "results": [
+    {
+      "relevance_score": 0.99,
+      "index": 0,
+      "document": null
+    }
+  ],
+  "model": "bge-reranker-large"
+}
+```
+
+The score above is illustrative. Actual values depend on the model and input.
+
+The `index` value points to the document’s position in the original input array.
+
+## Routing behavior
+
+Hivenet Router routes embedding and reranking requests through the same policy pipeline used for language-model requests:
+
+1. Filter by model.
+2. Filter by capability.
+3. Apply static policy matches.
+4. Apply health, capacity, and dynamic gates.
+5. Rank the remaining agents.
+6. Continue through configured fallback steps if needed.
+
+A policy can target Infinity agents:
+
+```yaml
+routing_policy:
+  match:
+    engine: infinity
+    region: EU-France
+  exclude_if:
+    success_rate:
+      lt: 0.95
+  strategy: least-loaded
+```
+
+Capability filtering is automatic. You do not need a policy rule to prevent embedding traffic from reaching reranking agents.
+
+## Observability
+
+The Infinity integration does not currently scrape engine-specific metrics from the Infinity backend.
+
+Hivenet Router still exposes:
+
+- registered agent state
+- capability and model metadata
+- routed and failed request counters
+- active requests and capacity utilization
+- request success rate
+- smoothed round-trip time
+- CPU and memory metrics
+- NVIDIA GPU metrics when NVML is available
+- audit records when audit logging is enabled
+
+Embedding request rate:
+
+```promql
+rate(
+  hivenet_router_routing_requests_routed_total{
+    engine="infinity",
+    model="bge-m3"
+  }[5m]
+)
+```
+
+Reranking request rate:
+
+```promql
+rate(
+  hivenet_router_routing_requests_routed_total{
+    engine="infinity",
+    model="bge-reranker-large"
+  }[5m]
+)
+```
+
+Smoothed round-trip time:
+
+```promql
+hivenet_router_agent_srtt_ms{
+  engine="infinity"
+}
+```
+
+Inspect all Infinity-related metrics:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep 'engine="infinity"'
+```
+
+## Troubleshooting
+
+### `/v1/models` returns `404`
+
+Confirm that Infinity was started with:
+
+```bash
+INFINITY_URL_PREFIX=/v1
+```
+
+For Docker, inspect the container environment:
+
+```bash
+docker inspect infinity \
+  | jq '.[0].Config.Env'
+```
+
+Without the prefix, Infinity serves its API at different paths from those expected by Hivenet Router.
+
+Restart Infinity after changing the setting.
+
+### An agent cannot discover its model
+
+Check Infinity:
+
+```bash
+curl http://localhost:7997/health
+```
+
+List model IDs:
+
+```bash
+curl http://localhost:7997/v1/models \
+  | jq '.data[].id'
+```
+
+The returned ID must match the agent’s `--model` value exactly.
+
+### The wrong model name is exposed
+
+Check the order of:
+
+```text
+--model-id
+--served-model-name
+```
+
+Each served name corresponds to the model ID in the same position.
+
+Restart Infinity after changing the mapping.
+
+### Embedding requests are routed incorrectly
+
+Confirm that the agent uses:
+
+```bash
+--capability embedding
+```
+
+Inspect the routing table:
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[]
+      | select(.metadata.model == "bge-m3")
+      | {
+          model: .metadata.model,
+          capability: .metadata.capability,
+          engine: .metadata.engine
+        }'
+```
+
+### Reranking requests are routed incorrectly
+
+Confirm that the agent uses:
+
+```bash
+--capability reranker
+```
+
+The accepted capability value is `reranker`, while the HTTP endpoint is:
+
+```text
+/v1/rerank
+```
+
+### An agent does not register
+
+Check its logs:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker logs hivenet-router-embedding-agent
+    docker logs hivenet-router-reranking-agent
+    ```
+  </Tab>
+  <Tab title="systemd">
+    ```bash
+    sudo journalctl \
+      -u hivenet-agent \
+      -n 100 \
+      --no-pager
+    ```
+  </Tab>
+</Tabs>
+
+Test connectivity from the agent host:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Check that:
+
+- the router and agents use the same JWT secret
+- the agent host can reach the router’s gRPC and libp2p ports
+- each agent has a unique identity path
+- Infinity is healthy
+- the selected model is listed by `/v1/models`
+
+### A peer ID changes after restart
+
+Make sure each `--identity-path` points to persistent storage.
+
+For Docker:
+
+```bash
+docker inspect hivenet-router-embedding-agent \
+  | jq '.[0].Mounts'
+```
+
+For bare metal:
+
+```bash
+ls -l /var/lib/hivenet-router/agents/
+```
+
+### Requests time out
+
+The agent’s backend HTTP timeout defaults to two minutes.
+
+Increase it when large batches need more time:
+
+```bash
+--http-timeout 10m
+```
+
+Also review:
+
+- embedding or document batch size
+- input length
+- declared agent capacity
+- Infinity batch size
+- whether both models compete for the same GPU memory
+
+### GPU metrics are missing
+
+Check the host:
+
+```bash
+nvidia-smi
+```
+
+For Docker, confirm that each agent received GPU access:
+
+```bash
+docker inspect hivenet-router-embedding-agent \
+  | jq '.[0].HostConfig.DeviceRequests'
+```
+
+The agents continue to operate without NVML. They report CPU and memory metrics but omit GPU measurements.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Custom engine agent" href="/deploy/agents/custom-engine">
+    Connect another OpenAI-compatible backend to Hivenet Router.
+  </Card>
+
+  <Card title="Embeddings" href="/use-the-api/embeddings">
+    Review the embedding request and response format.
+  </Card>
+
+  <Card title="Reranking" href="/use-the-api/reranking">
+    Review reranking fields, examples, and response ordering.
+  </Card>
+</CardGroup>

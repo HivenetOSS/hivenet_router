@@ -1,0 +1,824 @@
+---
+title: "Bare-metal deployment"
+sidebarTitle: "Bare metal"
+description: "Run the Hivenet Router router and agents as native Linux services managed by systemd."
+---
+
+Run the Hivenet Router router and agents as native Linux binaries managed by systemd.
+
+This setup avoids a container runtime and gives you direct control over process supervision, filesystem permissions, logs, resource limits, and upgrades.
+
+<Note>
+  This guide uses example hostnames and private IP addresses. Replace them with addresses from your own network.
+</Note>
+
+## What you will deploy
+
+The examples use three machines:
+
+| Machine | Role | Example IP | Software |
+| --- | --- | --- | --- |
+| `router-server` | Hivenet Router router | `192.168.1.100` | Router binary |
+| `gpu-eu-1` | Inference host | `192.168.1.101` | vLLM and Hivenet Router agent |
+| `gpu-eu-2` | Inference host | `192.168.1.102` | vLLM and Hivenet Router agent |
+
+Applications send requests to the router. Each agent connects its local inference backend to the router.
+
+## Network requirements
+
+| Connection | Port | Purpose |
+| --- | --- | --- |
+| Clients → Router | `8080` | Client HTTP API |
+| Agents → Router | `50051` | gRPC authentication |
+| Agents → Router | `9000` | libp2p registration and communication |
+| Monitoring → Router | `2112` | Prometheus metrics |
+
+Restrict ports `50051` and `9000` to agent hosts.
+
+Agent hosts initiate their connections to the router and do not need to expose an inbound Hivenet Router port. Keep the metrics endpoint limited to your monitoring network.
+
+## Prerequisites
+
+You need:
+
+- Linux with systemd on the router and agent hosts
+- Go 1.25.5 or later on one build machine
+- Git, OpenSSL, SSH, `scp`, `curl`, and `jq`
+- an inference backend on each agent host
+- an NVIDIA driver on GPU hosts if you want GPU metrics
+- network access between the router and agents
+
+Go is required only to build the binaries. It does not need to be installed on the runtime hosts.
+
+This guide uses vLLM as the example backend. Hivenet Router also supports Ollama, SGLang, llama.cpp, Infinity, and custom OpenAI-compatible servers.
+
+## Build the binaries
+
+On the build machine:
+
+```bash
+git clone https://github.com/HivenetOSS/hivenet_router.git
+cd hivenet_router
+
+go build -o bin/hivenet-router ./cmd/router/
+go build -o bin/hivenet-agent ./cmd/agent/
+```
+
+Check that both binaries start:
+
+```bash
+./bin/hivenet-router --help
+./bin/hivenet-agent --help
+```
+
+## Prepare the runtime hosts
+
+Create a dedicated service account and directories before copying the binaries.
+
+### Router host
+
+On `router-server`:
+
+```bash
+sudo useradd \
+  --system \
+  --no-create-home \
+  --shell /usr/sbin/nologin \
+  hivenet-router
+```
+
+If the account already exists, `useradd` will report an error that you can ignore.
+
+Create the required directories:
+
+```bash
+sudo install -d \
+  -o root \
+  -g root \
+  -m 0755 \
+  /opt/hivenet-router
+
+sudo install -d \
+  -o root \
+  -g hivenet-router \
+  -m 0750 \
+  /etc/hivenet-router
+
+sudo install -d \
+  -o hivenet-router \
+  -g hivenet-router \
+  -m 0750 \
+  /var/lib/hivenet-router/badger \
+  /var/log/hivenet-router
+```
+
+### Agent hosts
+
+Run these commands on each inference host:
+
+```bash
+sudo useradd \
+  --system \
+  --no-create-home \
+  --shell /usr/sbin/nologin \
+  hivenet-router
+```
+
+Create the required directories:
+
+```bash
+sudo install -d \
+  -o root \
+  -g root \
+  -m 0755 \
+  /opt/hivenet-router
+
+sudo install -d \
+  -o root \
+  -g hivenet-router \
+  -m 0750 \
+  /etc/hivenet-router
+
+sudo install -d \
+  -o hivenet-router \
+  -g hivenet-router \
+  -m 0750 \
+  /var/lib/hivenet-router/agent
+```
+
+On GPU hosts, add the service account to the `video` group so it can access NVIDIA device metrics:
+
+```bash
+sudo usermod -aG video hivenet-router
+```
+
+If your distribution uses a separate `render` group for device access, add that group as well:
+
+```bash
+getent group render >/dev/null \
+  && sudo usermod -aG render hivenet-router
+```
+
+## Install the binaries
+
+Copy the router binary to the router host through a temporary location:
+
+```bash
+scp bin/hivenet-router router-server:/tmp/hivenet-router
+```
+
+On `router-server`:
+
+```bash
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/hivenet-router \
+  /opt/hivenet-router/hivenet-router
+
+rm /tmp/hivenet-router
+```
+
+Copy the agent binary to each inference host:
+
+```bash
+scp bin/hivenet-agent gpu-eu-1:/tmp/hivenet-agent
+scp bin/hivenet-agent gpu-eu-2:/tmp/hivenet-agent
+```
+
+On each inference host:
+
+```bash
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/hivenet-agent \
+  /opt/hivenet-router/hivenet-agent
+
+rm /tmp/hivenet-agent
+```
+
+Keeping the binaries owned by `root` prevents the service account from replacing its own executable.
+
+## Create and distribute the JWT secret
+
+The router and every agent must use the same JWT secret.
+
+On the build machine:
+
+```bash
+openssl rand -hex 32 > jwt.secret
+chmod 600 jwt.secret
+```
+
+Copy the secret to a temporary path on every host:
+
+```bash
+scp jwt.secret router-server:/tmp/hivenet-router-jwt.secret
+scp jwt.secret gpu-eu-1:/tmp/hivenet-router-jwt.secret
+scp jwt.secret gpu-eu-2:/tmp/hivenet-router-jwt.secret
+```
+
+On each host, install it with permissions that allow the Hivenet Router service to read it:
+
+```bash
+sudo install \
+  -o root \
+  -g hivenet-router \
+  -m 0640 \
+  /tmp/hivenet-router-jwt.secret \
+  /etc/hivenet-router/jwt.secret
+
+rm /tmp/hivenet-router-jwt.secret
+```
+
+Delete the local copy from the build machine when you no longer need it:
+
+```bash
+rm jwt.secret
+```
+
+<Warning>
+  Anyone with this secret can authenticate an agent with the router. Use your normal secrets-management and rotation process in production.
+</Warning>
+
+## Start an inference backend
+
+Run an inference backend on each agent host.
+
+For vLLM:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --host 0.0.0.0 \
+  --port 8888 \
+  --tensor-parallel-size 1 \
+  --max-num-seqs 32 \
+  --max-model-len 8192
+```
+
+Check that the backend is ready:
+
+```bash
+curl http://localhost:8888/health
+```
+
+A ready vLLM server returns HTTP status `200`.
+
+The Hivenet Router agent runs as a long-lived daemon. It can start before the backend is ready and will continue polling until it becomes available. If the backend or router later becomes unavailable, the agent waits and reconnects rather than exiting on the first transient failure.
+
+## Configure the router service
+
+Create:
+
+```text
+/etc/systemd/system/hivenet-router.service
+```
+
+with the following content:
+
+```ini
+[Unit]
+Description=Hivenet Router router
+Documentation=https://github.com/HivenetOSS/hivenet_router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hivenet-router
+Group=hivenet-router
+WorkingDirectory=/var/lib/hivenet-router
+
+ExecStart=/opt/hivenet-router/hivenet-router \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
+  --http-port :8080 \
+  --grpc-port :50051 \
+  --p2p-port 9000 \
+  --p2p-listen-addr 0.0.0.0 \
+  --metrics-port :2112 \
+  --disk-db-path /var/lib/hivenet-router/badger
+
+Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
+Environment=HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hivenet-router
+
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/hivenet-router /var/log/hivenet-router
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `--p2p-listen-addr 0.0.0.0` setting is required when agents connect from other machines. The router defaults to listening on `127.0.0.1`.
+
+<Warning>
+  `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` in this example. Replace it with administrator API-key authentication before exposing the router to shared or untrusted networks.
+</Warning>
+
+<Warning>
+  The built-in HTTP API does not terminate client-facing TLS. Put the router behind a reverse proxy or load balancer that provides HTTPS before exposing it outside a trusted network.
+</Warning>
+
+## Configure the first agent
+
+Create a host-specific environment file on `gpu-eu-1`:
+
+```text
+/etc/hivenet-router/agent.env
+```
+
+with:
+
+```bash
+ROUTER_IP=192.168.1.100
+AGENT_REGION=EU-Primary
+AGENT_CAPACITY=32
+```
+
+Protect the file:
+
+```bash
+sudo chown root:hivenet-router /etc/hivenet-router/agent.env
+sudo chmod 0640 /etc/hivenet-router/agent.env
+```
+
+Create:
+
+```text
+/etc/systemd/system/hivenet-agent.service
+```
+
+with:
+
+```ini
+[Unit]
+Description=Hivenet Router agent
+Documentation=https://github.com/HivenetOSS/hivenet_router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hivenet-router
+Group=hivenet-router
+SupplementaryGroups=video
+WorkingDirectory=/var/lib/hivenet-router/agent
+EnvironmentFile=/etc/hivenet-router/agent.env
+
+ExecStart=/opt/hivenet-router/hivenet-agent \
+  --router-grpc ${ROUTER_IP}:50051 \
+  --jwt-secret-file /etc/hivenet-router/jwt.secret \
+  --engine vllm \
+  --backend-url http://localhost:8888 \
+  --capacity ${AGENT_CAPACITY} \
+  --region ${AGENT_REGION} \
+  --identity-path /var/lib/hivenet-router/agent/identity.key
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hivenet-agent
+
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/hivenet-router/agent
+
+[Install]
+WantedBy=multi-user.target
+```
+
+<Note>
+  If the `video` group does not exist on your host, remove the `SupplementaryGroups=video` line. If your NVIDIA device permissions use another group, add that group instead.
+</Note>
+
+The important multi-machine settings are:
+
+| Setting | Purpose |
+| --- | --- |
+| `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+| `--identity-path` | Persistent key that keeps the peer ID stable across restarts |
+
+## Configure the second agent
+
+Install the same systemd service file on `gpu-eu-2`.
+
+Create `/etc/hivenet-router/agent.env` with host-specific values:
+
+```bash
+ROUTER_IP=192.168.1.100
+AGENT_REGION=EU-Secondary
+AGENT_CAPACITY=32
+```
+
+Protect it:
+
+```bash
+sudo chown root:hivenet-router /etc/hivenet-router/agent.env
+sudo chmod 0640 /etc/hivenet-router/agent.env
+```
+
+The service file itself does not need to change between hosts.
+
+## Start the services
+
+On `router-server`:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hivenet-router
+```
+
+Check its status:
+
+```bash
+sudo systemctl status hivenet-router
+sudo journalctl -fu hivenet-router
+```
+
+On each agent host:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hivenet-agent
+```
+
+Check the agent:
+
+```bash
+sudo systemctl status hivenet-agent
+sudo journalctl -fu hivenet-agent
+```
+
+## Verify the deployment
+
+On the router host, check the public liveness endpoint:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Check the operational health endpoint:
+
+```bash
+curl http://localhost:8080/admin/health | jq .
+```
+
+With both agents registered, the response should resemble:
+
+```json
+{
+  "status": "healthy",
+  "total_agents": 2,
+  "healthy_agents": 2,
+  "queue_length": 0,
+  "timestamp": 1760000000,
+  "agents": [
+    {
+      "peer_id": "12D3KooW...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Primary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    },
+    {
+      "peer_id": "12D3KooX...",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "vllm",
+      "version": "dev",
+      "capacity": 32,
+      "region": "EU-Secondary",
+      "is_healthy": true,
+      "last_seen": 1760000000
+    }
+  ]
+}
+```
+
+Peer IDs and timestamps will differ.
+
+For a fuller view of routing, latency, hardware, and engine state:
+
+```bash
+curl http://localhost:8080/admin/routing-table | jq .
+```
+
+## Send an inference request
+
+From a machine that can reach the router:
+
+```bash
+curl -X POST http://192.168.1.100:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+The router selects one of the agents serving the requested model and forwards the request to its local backend.
+
+Client authentication is disabled when no auth configuration is provided. Add API-key authentication before exposing the service beyond a trusted environment.
+
+## Add another agent host
+
+You do not need to restart the router when adding capacity.
+
+On the new host:
+
+1. Create the `hivenet-router` account and directories.
+2. Install the agent binary.
+3. Install the shared JWT secret.
+4. Create `/etc/hivenet-router/agent.env` with the router address and agent region.
+5. Install the agent systemd unit.
+6. Start the inference backend.
+7. Enable and start `hivenet-agent`.
+
+The new agent registers automatically once it can reach the router and its backend is ready.
+
+## Upgrade Hivenet Router
+
+Build the new binaries on the build machine:
+
+```bash
+git pull
+
+go build -o bin/hivenet-router ./cmd/router/
+go build -o bin/hivenet-agent ./cmd/agent/
+```
+
+### Upgrade agents
+
+When several agents serve the same model, upgrade them one at a time to preserve capacity.
+
+Copy the new agent binary:
+
+```bash
+scp bin/hivenet-agent gpu-eu-1:/tmp/hivenet-agent.new
+```
+
+On the agent host:
+
+```bash
+sudo systemctl stop hivenet-agent
+
+sudo cp \
+  /opt/hivenet-router/hivenet-agent \
+  /opt/hivenet-router/hivenet-agent.bak
+
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/hivenet-agent.new \
+  /opt/hivenet-router/hivenet-agent
+
+rm /tmp/hivenet-agent.new
+
+sudo systemctl start hivenet-agent
+sudo systemctl status hivenet-agent
+```
+
+Confirm that the agent registers again before upgrading the next host.
+
+### Upgrade the router
+
+Copy the new binary:
+
+```bash
+scp bin/hivenet-router router-server:/tmp/hivenet-router.new
+```
+
+On the router host:
+
+```bash
+sudo systemctl stop hivenet-router
+
+sudo cp \
+  /opt/hivenet-router/hivenet-router \
+  /opt/hivenet-router/hivenet-router.bak
+
+sudo install \
+  -o root \
+  -g root \
+  -m 0755 \
+  /tmp/hivenet-router.new \
+  /opt/hivenet-router/hivenet-router
+
+rm /tmp/hivenet-router.new
+
+sudo systemctl start hivenet-router
+sudo systemctl status hivenet-router
+```
+
+Check the health endpoint before returning traffic:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Roll back
+
+To restore the previous router binary:
+
+```bash
+sudo systemctl stop hivenet-router
+
+sudo mv \
+  /opt/hivenet-router/hivenet-router.bak \
+  /opt/hivenet-router/hivenet-router
+
+sudo systemctl start hivenet-router
+```
+
+Use the equivalent commands with `hivenet-agent` on an agent host.
+
+## Run an agent behind NAT
+
+Agents initiate both authentication and libp2p connectivity to the router. An agent behind NAT therefore does not need an inbound port, reverse tunnel, or public announce address.
+
+The agent host needs outbound access to:
+
+```text
+<router-host>:50051
+<router-host>:9000
+```
+
+When the router itself is behind NAT or another translated network, configure the router’s `--p2p-announce-addr` with a multiaddress the agent can reach.
+
+## Troubleshooting
+
+### A service does not start
+
+Inspect its status and recent logs:
+
+```bash
+sudo systemctl status hivenet-router
+sudo journalctl -u hivenet-router -n 100 --no-pager
+```
+
+For an agent:
+
+```bash
+sudo systemctl status hivenet-agent
+sudo journalctl -u hivenet-agent -n 100 --no-pager
+```
+
+### The router cannot read the JWT secret
+
+Check the file ownership and mode:
+
+```bash
+sudo ls -l /etc/hivenet-router/jwt.secret
+```
+
+Expected ownership and permissions:
+
+```text
+-rw-r----- root hivenet-router
+```
+
+Test access as the service account:
+
+```bash
+sudo -u hivenet-router cat /etc/hivenet-router/jwt.secret >/dev/null
+```
+
+### An agent does not register
+
+From the agent host, check the router:
+
+```bash
+nc -zv 192.168.1.100 50051
+nc -zv 192.168.1.100 9000
+```
+
+Common causes include:
+
+- the router is not listening on `0.0.0.0`
+- `ROUTER_IP` is incorrect
+- the router advertises a libp2p address the agent cannot reach
+- the router needs a correct `--p2p-announce-addr` behind NAT or port translation
+- the router or agent firewall blocks outbound agent connectivity
+- the JWT secret differs between hosts
+- the backend has not become healthy
+- the agent environment file contains an invalid value
+
+### The agent gets a new peer ID after restart
+
+Confirm that the persistent identity file exists:
+
+```bash
+sudo ls -l /var/lib/hivenet-router/agent/identity.key
+```
+
+The service account must be able to read and write this file.
+
+### GPU metrics are missing
+
+Check NVIDIA access:
+
+```bash
+nvidia-smi
+```
+
+Test access as the service account:
+
+```bash
+sudo -u hivenet-router nvidia-smi
+```
+
+Check the account’s groups:
+
+```bash
+id hivenet-router
+```
+
+If necessary:
+
+```bash
+sudo usermod -aG video hivenet-router
+sudo systemctl restart hivenet-agent
+```
+
+If NVML remains unavailable, the agent continues to report CPU and memory metrics but omits GPU metrics.
+
+### Ports are already in use
+
+```bash
+sudo ss -tlnp \
+  | grep -E '8080|50051|9000|2112'
+```
+
+### Check live routing data
+
+```bash
+curl http://192.168.1.100:8080/admin/routing-table \
+  | jq '.agents[] | {
+      peer_id,
+      model: .metadata.model,
+      engine: .metadata.engine,
+      region: .metadata.region,
+      healthy: .status.healthy,
+      active_requests: .status.active_requests,
+      srtt_ms: .universal.srtt_ms
+    }'
+```
+
+Check the routing counter:
+
+```bash
+curl http://192.168.1.100:2112/metrics \
+  | grep hivenet_router_routing_requests_routed_total
+```
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="vLLM agent" href="/deploy/agents/vllm">
+    Configure vLLM discovery, capacity, metrics, and multi-model deployments.
+  </Card>
+
+  <Card title="Configuration reference" href="/reference/configuration-reference">
+    Review every router and agent flag and environment variable.
+  </Card>
+
+  <Card title="Authentication overview" href="/security/authentication-overview">
+    Protect the client and administration APIs before production use.
+  </Card>
+</CardGroup>

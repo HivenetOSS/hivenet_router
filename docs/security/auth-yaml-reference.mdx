@@ -1,0 +1,1094 @@
+---
+title: "auth.yaml reference"
+sidebarTitle: "auth.yaml reference"
+description: "Configure static client authentication, administrator access, model restrictions, expiration, and flat or per-model quotas."
+---
+
+The `auth.yaml` file configures authentication and access control for the Hivenet Router HTTP APIs.
+
+It controls two separate surfaces:
+
+- `api` protects client-facing `/v1/*` endpoints
+- `admin` protects operator-facing `/admin/*` endpoints
+
+Agent authentication does not use this file. Router-agent trust uses the shared JWT secret configured separately on the router and agents.
+
+## Load the file
+
+Pass the path when starting the router:
+
+```bash
+./bin/hivenet-router \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  ...
+```
+
+The environment-variable equivalent is:
+
+```bash
+export HIVENET_ROUTER_AUTH_CONFIG=/etc/hivenet-router/auth.yaml
+```
+
+When no file and no client authentication mode are configured, the client API defaults to:
+
+```text
+none
+```
+
+The administration surface is secure by default. The router refuses to start with `admin.mode: none` unless:
+
+```bash
+export HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
+```
+
+<Warning>
+  The insecure administrator override exposes every `/admin/*` endpoint to any network client that can reach the router. Use it only in an isolated development environment.
+</Warning>
+
+## Top-level structure
+
+```yaml
+api:
+  mode: none
+
+admin:
+  mode: none
+```
+
+The complete shape is:
+
+```yaml
+api:
+  mode: none | api-key | dynamic
+  keys:
+    # Static client keys, used only with mode: api-key
+
+admin:
+  mode: none | api-key
+```
+
+| Section | Protects |
+| --- | --- |
+| `api` | `/v1/*` inference and model-discovery endpoints |
+| `admin` | `/admin/*` operational and management endpoints |
+
+## Mode combinations
+
+| API mode | Admin mode | Behavior |
+| --- | --- | --- |
+| `none` | `none` | Client API open; router starts only with the explicit insecure administrator override |
+| `api-key` | `none` | Client API protected; router starts only with the explicit insecure administrator override |
+| `api-key` | `api-key` | Both surfaces protected |
+| `dynamic` | `api-key` | Runtime-managed client keys and protected administration |
+| `dynamic` | `none` or omitted | Admin mode is automatically elevated to `api-key` |
+
+Dynamic API mode requires:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+The router refuses to start without an administrator key because `/admin/api-keys/*` controls the client-key registry.
+
+## Minimal static configuration
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...KJ4"
+
+      metadata:
+        name: "Acme production"
+        owner: "acme-corp"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+
+admin:
+  mode: api-key
+```
+
+Provide administrator keys separately:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="first-admin-key,second-admin-key"
+```
+
+The raw client key is not stored in the YAML file. Only its SHA-256 hash is stored.
+
+## `api` section
+
+The `api` section controls `/v1/*`.
+
+```yaml
+api:
+  mode: api-key
+  keys:
+    # One or more static key entries
+```
+
+### `api.mode`
+
+Accepted values are:
+
+| Value | Behavior |
+| --- | --- |
+| `none` | Requests do not require client credentials |
+| `api-key` | Load static client keys from `api.keys` |
+| `dynamic` | Use the in-memory registry managed through `/admin/api-keys/*` |
+
+When `mode` is `api-key`, `keys` must contain at least one valid entry.
+
+When `mode` is `dynamic`, do not define the runtime key registry in `auth.yaml`. An external service populates it through the administration API.
+
+### `api.keys`
+
+Each item under `keys` defines one static client credential:
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<sha256-hash>"
+      key_preview: "sk-...KJ4"
+
+      metadata:
+        name: "Acme production"
+        owner: "acme-corp"
+        description: "Main production application"
+        created_at: "27-07-2026"
+        expires_at: "01-01-2027"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 100
+        tokens_per_day: 500000
+```
+
+## Static key fields
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `key_hash` | Yes | SHA-256 hexadecimal hash of the raw client key |
+| `key_preview` | No | Masked value used for logs and operator identification |
+| `metadata` | Yes | Identity and lifecycle information |
+| `models` | No | Exact model allowlist |
+| `quota` | No | Flat or per-model quota configuration |
+| `max_occupancy_share` | No | Serverless occupancy-share setting; `0` is unset, otherwise valid through `1` |
+
+### `key_hash`
+
+```yaml
+key_hash: "<sha256-hash>"
+```
+
+Generate the key and hash with:
+
+```bash
+./bin/hivenet-router \
+  keygen \
+  --tenant acme-corp
+```
+
+The command prints:
+
+- the raw client key
+- its SHA-256 hash
+- a masked preview
+- a ready-to-paste YAML entry
+
+Store the raw key in a secret manager. Put only the hash in `auth.yaml`.
+
+Duplicate `key_hash` values are rejected when the file loads.
+
+Use the exact lowercase SHA-256 output produced by `hivenet-router keygen` or `sha256sum`.
+
+### `key_preview`
+
+```yaml
+key_preview: "sk-...KJ4"
+```
+
+This field is optional and informational.
+
+It can help identify the credential in static configuration and selected operational logs or displays.
+
+The dedicated audit record does not include a `key_preview` field. Static-key audit records normally have an empty `key_id`, while dynamic-key audit records use the registry entry ID.
+
+The preview is never used to authenticate a request.
+
+## `metadata`
+
+```yaml
+metadata:
+  name: "Acme production"
+  owner: "acme-corp"
+  description: "Main production application"
+  created_at: "27-07-2026"
+  expires_at: "01-01-2027"
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `name` | Yes | Human-readable key label |
+| `owner` | Yes | Tenant identity used for quotas, metrics, and audit |
+| `description` | No | Free-text operator note |
+| `created_at` | No | Informational creation date |
+| `expires_at` | No | Final valid date in `DD-MM-YYYY` format |
+
+`name` and `owner` must not be empty.
+
+### Owner identity
+
+The `owner` value becomes the tenant ID used by Hivenet Router.
+
+```yaml
+owner: "acme-corp"
+```
+
+It labels and groups:
+
+- quota buckets
+- request metrics
+- token metrics
+- audit records
+- tenant dashboards
+
+Keys with the same owner share quota state.
+
+<Warning>
+  Give keys the same owner only when they belong to the same tenant and should share quota buckets.
+
+  When several keys share an owner, keep their quota configuration consistent. Different limits attached to the same shared bucket can produce confusing behavior.
+</Warning>
+
+### Creation date
+
+```yaml
+created_at: "27-07-2026"
+```
+
+This field is informational. The current loader does not use it for authentication or validate its format.
+
+Using `DD-MM-YYYY` keeps it consistent with generated entries and static expiration dates.
+
+### Expiration date
+
+```yaml
+expires_at: "01-01-2027"
+```
+
+The format must be:
+
+```text
+DD-MM-YYYY
+```
+
+The key remains valid through the complete named day in UTC.
+
+For:
+
+```text
+01-01-2027
+```
+
+the key becomes invalid at:
+
+```text
+2027-01-02 00:00:00 UTC
+```
+
+An empty or omitted value means the key does not expire.
+
+Invalid dates prevent the configuration from loading.
+
+<Note>
+  Dynamic API-key entries use RFC 3339 timestamps instead. That format belongs to the administration API, not static `auth.yaml` entries.
+</Note>
+
+## Model allowlist
+
+Use `models` to restrict a flat-quota key to exact model names:
+
+```yaml
+models:
+  - "meta-llama/Llama-3.1-8B-Instruct"
+  - "BAAI/bge-m3"
+```
+
+An empty or omitted list means unrestricted model access:
+
+```yaml
+models: []
+```
+
+Model names are exact and case-sensitive.
+
+A model outside this list:
+
+- is hidden from `GET /v1/models`
+- returns `404` from `GET /v1/models/{model}`
+- returns `403 model_forbidden` for an inference request
+
+```json
+{
+  "error": {
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: restricted-model",
+    "source": "router"
+  }
+}
+```
+
+### Precedence with per-model quotas
+
+When `quota.per_model` is present, its model names become the effective allowlist.
+
+For example:
+
+```yaml
+models:
+  - model-a
+  - model-b
+
+quota:
+  per_model:
+    model-a:
+      requests_per_minute_per_replica: 10
+      tokens_per_day: 100000
+```
+
+The key can use only:
+
+```text
+model-a
+```
+
+The `models` list is ignored for access decisions.
+
+This gives per-model quota configuration one source of truth for both access and limits.
+
+## Flat quotas
+
+The flat quota shape applies one shared budget to every model the owner may call.
+
+```yaml
+quota:
+  requests_per_minute: 1000
+  tokens_per_day: 5000000
+  input_tokens_per_minute: 262144
+  output_tokens_per_minute: 32768
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `requests_per_minute` | No | Shared request-rate limit |
+| `tokens_per_day` | No | Shared daily language-model token budget |
+| `input_tokens_per_minute` | No | Serverless input-token rate limit per key and model |
+| `output_tokens_per_minute` | No | Serverless output-token rate limit per key and model |
+| `0` | Not applicable | Unlimited |
+
+Flat quota buckets are associated with the owner rather than the individual key.
+
+For example, two credentials with:
+
+```yaml
+owner: "acme-corp"
+```
+
+share the same request and token counters.
+
+### Request-rate behavior
+
+`requests_per_minute` uses a continuously refilling token bucket.
+
+```yaml
+requests_per_minute: 100
+```
+
+does not mean the counter resets at the start of every wall-clock minute.
+
+By default, the bucket:
+
+- can initially hold up to one minute’s configured capacity
+- deducts one unit for each admitted request
+- refills continuously at the configured rate
+
+A value of `0` disables the request-rate limit.
+
+Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the initial and maximum burst to that many seconds of the effective rate. The capacity is `floor(RPM × seconds / 60)`, with a minimum of `1`. The default `0` keeps the full-minute burst. This setting applies to flat RPM and to the live replica-scaled RPM of `quota.per_model` entries.
+
+### Daily token behavior
+
+```yaml
+tokens_per_day: 500000
+```
+
+The daily budget:
+
+- applies to language-model chat traffic
+- combines input and output tokens
+- resets at midnight UTC
+- is shared by models and keys using the same flat owner bucket
+
+A value of `0` disables the token budget.
+
+Embedding and reranking requests currently participate in request-rate limits but do not charge input against `tokens_per_day`.
+
+### Serverless key fields
+
+The flat quota shape also accepts:
+
+```yaml
+max_occupancy_share: 0.25
+quota:
+  requests_per_minute: 1000
+  tokens_per_day: 5000000
+  input_tokens_per_minute: 262144
+  output_tokens_per_minute: 32768
+```
+
+`input_tokens_per_minute` and `output_tokens_per_minute` must be non-negative. They cannot be mixed with `quota.per_model`. `max_occupancy_share` sits on the key entry rather than inside `quota`; it must be `0` (unset) or greater than `0` and at most `1`.
+
+For static keys that can reach a serverless policy, startup also checks that a nonzero `input_tokens_per_minute` is at least that policy's `max_input_tokens`. Policy and auth reloads re-check the same invariant before replacing the active configuration.
+
+At runtime for `mode: serverless` policies:
+
+- `max_occupancy_share` limits the key's simultaneous token-weighted footprint to `share × admit_budget_tokens`. It rejects immediately with `429 rate_limit_exceeded` and `Retry-After: 1`.
+- `input_tokens_per_minute` uses a continuously refilling, one-minute-capacity bucket. The learned input estimate is deducted before the daily token budget.
+- `output_tokens_per_minute` is deducted after the response. If recent output drains the bucket, the next request returns `429 rate_limit_exceeded` and `Retry-After: 1`. A single response is charged at most one minute of capacity.
+
+These limits do not run for `mode: reserved`, and `0` disables each limit.
+
+<Warning>
+  Dynamic keys are isolated by their registry key ID. Static-key authentication currently leaves that ID empty, so the handler's `anonymous` fallback makes the serverless token-rate buckets and occupancy controller shared across static keys for the same model. Treat this as a current implementation limitation when choosing static or dynamic authentication.
+</Warning>
+
+## Per-model quotas
+
+Use `quota.per_model` when models need different limits.
+
+```yaml
+quota:
+  per_model:
+    Qwen/Qwen3.6-27B:
+      requests_per_minute_per_replica: 10
+      tokens_per_day: 3000000
+
+    Qwen/Qwen3.6-35B:
+      requests_per_minute_per_replica: 5
+      tokens_per_day: 2000000
+
+    BAAI/bge-m3:
+      requests_per_minute_per_replica: 1000
+      tokens_per_day: 0
+```
+
+Each model entry requires both fields.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `requests_per_minute_per_replica` | Yes | RPM multiplied by live healthy replicas |
+| `tokens_per_day` | Yes | Absolute daily token budget for this owner and model |
+| `0` | Not applicable | Unlimited for that field |
+
+### Strict enumeration
+
+Every model the key may call must appear in `per_model`.
+
+There is:
+
+- no wildcard
+- no fallback entry
+- no implicit unlimited model
+
+A request for an unlisted model is rejected with HTTP `429`:
+
+```json
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "no quota declared for model unlisted-model on this API key",
+    "source": "router"
+  }
+}
+```
+
+Model discovery hides unlisted models, and model detail returns `404`.
+
+<Note>
+  This differs from the explicit `models` allowlist.
+
+  An explicit allowlist violation returns `403 model_forbidden` for inference. An unlisted `quota.per_model` request is rejected earlier by quota admission with `429 rate_limit_exceeded`.
+</Note>
+
+### Per-replica request limit
+
+The effective request limit is:
+
+```text
+requests_per_minute_per_replica
+× healthy agents serving the model
+```
+
+For:
+
+```yaml
+requests_per_minute_per_replica: 10
+```
+
+| Healthy agents | Effective limit |
+| --: | --: |
+| 1 | 10 RPM |
+| 3 | 30 RPM |
+| 5 | 50 RPM |
+| 0 | Rate check skipped |
+
+When no healthy replica exists, Hivenet Router skips the quota check so routing can return the more accurate availability error.
+
+The token budget does not scale with replicas.
+
+```yaml
+tokens_per_day: 3000000
+```
+
+remains three million tokens regardless of fleet size.
+
+### Do not mix quota shapes
+
+This is invalid:
+
+```yaml
+quota:
+  requests_per_minute: 100
+  tokens_per_day: 500000
+
+  per_model:
+    model-a:
+      requests_per_minute_per_replica: 10
+      tokens_per_day: 100000
+```
+
+Choose one shape:
+
+- flat quotas
+- per-model quotas
+
+The loader rejects a key that contains both.
+
+### Empty and partial entries
+
+This is invalid:
+
+```yaml
+quota:
+  per_model: {}
+```
+
+This is also invalid:
+
+```yaml
+quota:
+  per_model:
+    model-a:
+      requests_per_minute_per_replica: 10
+```
+
+Every entry must explicitly include:
+
+```text
+requests_per_minute_per_replica
+tokens_per_day
+```
+
+Use `0` when one field should be unlimited.
+
+## Token-budget enforcement
+
+Hivenet Router checks a chat request in two stages.
+
+### Before forwarding
+
+The router estimates:
+
+```text
+input tokens
++ requested maximum output tokens
+```
+
+It uses:
+
+1. `max_completion_tokens`, when provided
+2. otherwise `max_tokens`
+3. otherwise no requested output reservation
+
+The worst-case total must fit inside the remaining daily budget.
+
+This first check does not deduct the requested maximum output. It only verifies that the request could fit.
+
+After admission, Hivenet Router charges the estimated input tokens.
+
+### After the response
+
+Hivenet Router charges the actual completion tokens after the backend responds.
+
+For non-streaming responses, it uses backend usage data when available and estimates missing values when needed.
+
+For streaming responses, accounting happens after the stream finishes. The client may already have received output before final usage is known, so an over-budget stream cannot be withdrawn.
+
+### Multimodal limitation
+
+Post-response usage from a compatible backend can include image and audio token costs accurately.
+
+The pre-request estimate is primarily text based. Image and audio content may therefore be underestimated at admission.
+
+Treat token budgets as approximate admission control for multimodal requests until model-aware preflight estimation is implemented.
+
+## `admin` section
+
+The `admin` section controls `/admin/*`.
+
+```yaml
+admin:
+  mode: api-key
+```
+
+Accepted values are:
+
+| Value | Behavior |
+| --- | --- |
+| `none` | Permitted only when `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true`; endpoints then require no credentials |
+| `api-key` | Administration endpoints require a configured admin key |
+
+Administrator keys are not stored in `auth.yaml`.
+
+Provide them as raw, comma-separated values:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-key-1,admin-key-2"
+```
+
+Send one as a bearer token:
+
+```bash
+curl \
+  -H "Authorization: Bearer admin-key-1" \
+  http://localhost:8080/admin/health
+```
+
+Hivenet Router hashes the raw values when the router starts. It does not retain their plaintext form in the provider.
+
+Duplicate administrator keys are rejected.
+
+### Dynamic mode auto-elevation
+
+This configuration:
+
+```yaml
+api:
+  mode: dynamic
+
+admin:
+  mode: none
+```
+
+is treated as:
+
+```yaml
+api:
+  mode: dynamic
+
+admin:
+  mode: api-key
+```
+
+The router then requires:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+This protection cannot be disabled while dynamic client-key management is active.
+
+## Complete static example
+
+```yaml
+api:
+  mode: api-key
+
+  keys:
+    - key_hash: "<production-key-sha256>"
+      key_preview: "sk-...prod"
+
+      metadata:
+        name: "Acme production"
+        owner: "acme-corp"
+        description: "Primary production application"
+        created_at: "27-07-2026"
+
+      models: []
+
+      quota:
+        requests_per_minute: 1000
+        tokens_per_day: 5000000
+        input_tokens_per_minute: 262144
+        output_tokens_per_minute: 32768
+
+      max_occupancy_share: 0.25
+
+    - key_hash: "<beta-key-sha256>"
+      key_preview: "sk-...beta"
+
+      metadata:
+        name: "Beta application"
+        owner: "beta-team"
+        created_at: "27-07-2026"
+        expires_at: "31-12-2026"
+
+      models:
+        - "meta-llama/Llama-3.1-8B-Instruct"
+
+      quota:
+        requests_per_minute: 50
+        tokens_per_day: 100000
+
+    - key_hash: "<multi-model-key-sha256>"
+      key_preview: "sk-...multi"
+
+      metadata:
+        name: "Multi-model production"
+        owner: "platform"
+        created_at: "27-07-2026"
+
+      quota:
+        per_model:
+          Qwen/Qwen3.6-27B:
+            requests_per_minute_per_replica: 10
+            tokens_per_day: 3000000
+
+          Qwen/Qwen3.6-35B:
+            requests_per_minute_per_replica: 5
+            tokens_per_day: 2000000
+
+          BAAI/bge-m3:
+            requests_per_minute_per_replica: 1000
+            tokens_per_day: 0
+
+admin:
+  mode: api-key
+```
+
+Set administrator keys separately:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-key-1"
+```
+
+## Complete dynamic example
+
+The file can select dynamic mode without containing client keys:
+
+```yaml
+api:
+  mode: dynamic
+
+admin:
+  mode: api-key
+```
+
+Set the administrator credential:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="admin-key-1"
+```
+
+Start the router:
+
+```bash
+./bin/hivenet-router \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  ...
+```
+
+Then populate the in-memory client registry through:
+
+```text
+POST /admin/api-keys/replace
+```
+
+Dynamic entries are not persisted by this file and must be restored after a router restart.
+
+## File permissions
+
+The router process must be able to read the file, while other users should not.
+
+For a service running as `hivenet-router`:
+
+```bash
+sudo chown root:hivenet-router \
+  /etc/hivenet-router/auth.yaml
+
+sudo chmod 0640 \
+  /etc/hivenet-router/auth.yaml
+```
+
+A process running under your own user account can use:
+
+```bash
+chmod 0600 \
+  /etc/hivenet-router/auth.yaml
+```
+
+The file contains hashes rather than raw client keys, but it still exposes:
+
+- tenant names
+- model access
+- quotas
+- expiration dates
+- key previews
+- operational structure
+
+Include it only in encrypted backups.
+
+## Hot reload
+
+After editing the file, send `SIGHUP`:
+
+```bash
+sudo kill -HUP "$(pgrep hivenet-router)"
+```
+
+For Docker Compose:
+
+```bash
+docker compose kill \
+  --signal SIGHUP \
+  router
+```
+
+Hivenet Router:
+
+1. reads and parses the updated file
+2. validates every provider and static key
+3. builds replacement API and admin providers
+4. swaps them atomically
+5. resets in-memory quota limiter state
+6. republishes configured tenant quota metrics
+
+<Warning>
+  Reloading authentication rebuilds in-memory quota state. Request-rate buckets reset. Daily token usage also resets with the `memory` backend; the `badger` backend preserves and restores daily token state.
+</Warning>
+
+In-flight requests continue using the provider they already reached.
+
+If parsing or validation fails, the previous providers remain active.
+
+### Dynamic-mode reload
+
+When the router already uses dynamic client authentication:
+
+- the dynamic client registry is preserved
+- the administration provider is reloaded
+- switching to static or no-auth mode is rejected
+
+Changing between static and dynamic client authentication requires a router restart.
+
+<Note>
+  SIGHUP rebuilds administrator authentication from the current process environment.
+
+  Editing a systemd `EnvironmentFile` does not change the environment of an already running process. Restart the router after changing `HIVENET_ROUTER_ADMIN_API_KEYS`.
+</Note>
+
+## Configuration precedence
+
+When `--auth-config-file` is set, the file controls the API mode.
+
+The environment variable:
+
+```text
+HIVENET_ROUTER_AUTH_MODE
+```
+
+is used only when no auth file is configured.
+
+| Configuration | Result |
+| --- | --- |
+| No file and no `HIVENET_ROUTER_AUTH_MODE` | Client API defaults to `none`; router startup fails for insecure admin unless the explicit override is set |
+| No file and `HIVENET_ROUTER_AUTH_MODE=dynamic` | Dynamic API; admin auto-elevated to `api-key` |
+| File configured | File controls `api.mode` and `admin.mode` |
+| File plus `HIVENET_ROUTER_AUTH_MODE` | File API mode takes precedence |
+
+Administrator key values always come from:
+
+```text
+HIVENET_ROUTER_ADMIN_API_KEYS
+```
+
+when admin mode is `api-key`.
+
+## Validation failures
+
+The router rejects the configuration at startup or reload when it finds issues such as:
+
+- unknown API or admin modes
+- `api-key` mode with an empty key list
+- an empty `key_hash`
+- duplicate static key hashes
+- an empty metadata name
+- an empty metadata owner
+- an invalid static expiration date
+- mixed flat and per-model quota shapes
+- negative input or output token-per-minute values
+- `max_occupancy_share` outside `(0, 1]` when set
+- a serverless key whose nonzero `input_tokens_per_minute` is below the policy `max_input_tokens`
+- an empty `per_model` map
+- an empty model name in `per_model`
+- a per-model entry missing one quota field
+- negative per-model quota values
+- admin mode `api-key` without `HIVENET_ROUTER_ADMIN_API_KEYS`
+- admin mode `none` without `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true`
+- duplicate administrator keys
+
+On startup, a validation error stops the router.
+
+During SIGHUP reload, a validation error leaves the previous authentication providers active.
+
+## Troubleshooting
+
+### The router says the key list is empty
+
+When using:
+
+```yaml
+api:
+  mode: api-key
+```
+
+define at least one item under:
+
+```yaml
+api:
+  keys:
+```
+
+For dynamic mode, use:
+
+```yaml
+api:
+  mode: dynamic
+```
+
+instead.
+
+### A static key always returns `401`
+
+Check that:
+
+- the application sends the raw key rather than its hash
+- `key_hash` was generated from the exact raw value
+- the key has not expired
+- the updated file loaded successfully
+- the request reaches the intended router
+- the authorization header is preserved by proxies
+
+Generate a fresh key rather than editing hashes manually.
+
+### A key receives `403 model_forbidden`
+
+The key uses the explicit `models` allowlist and the requested model is absent.
+
+Check exact spelling and capitalization.
+
+### A per-model key receives `429`
+
+Read the error message.
+
+When it says:
+
+```text
+no quota declared for model <model> on this API key
+```
+
+add an exact entry under:
+
+```yaml
+quota:
+  per_model:
+```
+
+or use a flat quota shape instead.
+
+### The router rejects an expiration date
+
+Static dates must use:
+
+```text
+DD-MM-YYYY
+```
+
+Valid:
+
+```yaml
+expires_at: "31-12-2026"
+```
+
+Invalid:
+
+```yaml
+expires_at: "2026-12-31"
+```
+
+### SIGHUP does not apply the new mode
+
+Changing between static and dynamic authentication requires a router restart.
+
+SIGHUP supports changes within the current mode, such as:
+
+- adding or revoking static keys
+- changing model restrictions
+- changing quotas
+- changing static expirations
+- rebuilding administrator keys from the current environment
+
+### Administration endpoints remain open
+
+Set:
+
+```yaml
+admin:
+  mode: api-key
+```
+
+and provide:
+
+```bash
+export HIVENET_ROUTER_ADMIN_API_KEYS="<admin-key>"
+```
+
+Then restart the router if you changed its process environment.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Model restrictions" href="/security/model-restrictions">
+    Design model access and discovery boundaries for applications and tenants.
+  </Card>
+
+  <Card title="Key rotation" href="/security/key-rotation">
+    Rotate static, dynamic, administrator, agent, and provider credentials.
+  </Card>
+
+  <Card title="Audit logging" href="/observability/audit-logging">
+    Record authenticated owners, key identifiers, models, and request outcomes.
+  </Card>
+</CardGroup>

@@ -121,9 +121,9 @@ Clients should therefore handle:
 | `model_forbidden` | `403` | `router` | The client key’s explicit allowlist does not permit the model |
 | `model_not_found` | `404` | `router` | The model is not registered or is deliberately hidden from the caller |
 | Not guaranteed | `413` | Server | The request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
-| `rate_limit_exceeded` | `429` | `router` | RPM quota exhausted or strict per-model quota entry missing |
+| `rate_limit_exceeded` | `429` | `router` | RPM, serverless per-key occupancy, ITPM, or OTPM limit exhausted, or strict per-model quota entry missing |
 | `token_limit_exceeded` | `429` | `router` | Daily token admission or output accounting rejected the request |
-| `concurrency_limit_exceeded` | `429` | `router` | Model occupancy or in-flight admission budget remained full |
+| `concurrency_limit_exceeded` | `429` | `router` | Model occupancy or in-flight budget remained full, or the healthy serving pool breached `shed_if` |
 | `no_agents_available` | `503` | `router` | The policy chain found no eligible agent |
 | `no_capacity` | `503` | `router` | Eligible agents exist but their declared request slots are full |
 | `agent_disconnected` | `503` | `router` | The selected agent could not be reached |
@@ -389,7 +389,7 @@ Do not retry the unchanged request.
 HTTP 429
 ```
 
-This code has two different triggers.
+This code covers request-rate admission, serverless per-key admission, and a missing strict per-model quota declaration.
 
 #### RPM bucket exhausted
 
@@ -420,6 +420,16 @@ Retry-After
 ```
 
 header, so the client must choose its own retry timing.
+
+#### Serverless per-key limits
+
+For a `mode: serverless` policy, this code also reports:
+
+- `per-key occupancy share exceeded, please retry`
+- `input token rate exceeded, please retry`
+- `output token rate exceeded, please retry`
+
+These responses include `Retry-After: 1`. Occupancy and input-token limits reject the current request. Output tokens are charged after a response finishes, so an exhausted output bucket rejects a subsequent request.
 
 #### Missing per-model quota declaration
 
@@ -550,7 +560,10 @@ HTTP 429
 Retry-After: 1
 ```
 
-The request would exceed the model's token-weighted occupancy budget or `max_inflight` limit, and capacity did not become available within `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`.
+This response is used when either:
+
+- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available within `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`; or
+- aggregate healthy-pool engine pressure breached a configured `shed_if` threshold before queueing.
 
 ```json
 {
@@ -1047,6 +1060,7 @@ Hivenet Router can add the following headers.
 | `X-RateLimit-Remaining-Requests` | Finite RPM quota | Remaining request-bucket capacity |
 | `X-RateLimit-Remaining-Tokens` | Finite daily token budget | Remaining token budget known at that stage |
 | `Retry-After` | `concurrency_limit_exceeded` | Retry delay in seconds; the current value is `1` |
+| `Retry-After` | Serverless per-key `rate_limit_exceeded` | Retry delay in seconds; the current value is `1` |
 
 Unlimited quota values are omitted rather than represented as negative numbers.
 

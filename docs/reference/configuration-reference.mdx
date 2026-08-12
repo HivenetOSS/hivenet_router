@@ -540,8 +540,9 @@ These settings do not have equivalent router command-line flags.
 | `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Empty | Anthropic credential for provider fallback |
 | `HIVENET_ROUTER_AUDIT_LOG_PATH` | `/var/log/hivenet-router/audit.jsonl` | Structured audit-log path |
 | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
-| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.85` | Fraction of `admit_budget_tokens` available for occupancy admission; valid range `(0, 1]` |
+| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of `admit_budget_tokens` available for occupancy admission; valid range `(0, 1]` |
 | `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | Maximum time an over-budget request waits for occupancy to free; `0` rejects immediately |
+| `HIVENET_ROUTER_RPM_BURST_SECONDS` | `0` | RPM bucket burst window in seconds; `0` keeps a full minute of burst capacity, valid range `[0, 60)` |
 | `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | `false` | Set to `true` to permit unauthenticated `/admin/*` endpoints when administrator mode is `none`; development and testing only |
 
 ### `HIVENET_ROUTER_AUTH_MODE`
@@ -623,9 +624,11 @@ to disable it. A reverse proxy may enforce a smaller limit before the request re
 
 ### Admission environment variables
 
-`HIVENET_ROUTER_ADMIT_FRACTION` scales a policy's `admit_budget_tokens` before the router admits token-weighted occupancy. It defaults to `0.85`; invalid values or values outside `(0, 1]` leave the default unchanged.
+`HIVENET_ROUTER_ADMIT_FRACTION` scales a policy's `admit_budget_tokens` before the router admits token-weighted occupancy. It defaults to `0.90`; invalid values or values outside `(0, 1]` leave the default unchanged.
 
 `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` bounds how long an over-budget request waits for occupancy to free. It uses Go duration syntax, defaults to `250ms`, and accepts `0` for immediate rejection. Negative or invalid values leave the default unchanged.
+
+`HIVENET_ROUTER_RPM_BURST_SECONDS` changes the burst capacity of both flat and per-model RPM buckets. With a value from `1` through `59`, burst capacity is `floor(effective RPM × seconds / 60)`, with a minimum of `1`. The default `0` preserves the legacy full-minute burst. Invalid values and values outside `[0, 60)` leave that default unchanged.
 
 See [Admission control](/routing/admission-control) for policy fields, footprint calculation, and error responses.
 
