@@ -265,6 +265,16 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 					pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out before provider fallback could be attempted", domain.SourceRouter)
 					return
 				}
+				// The provider serves this request off-box on the operator's cloud
+				// account: it consumes no local KV cache, so free the occupancy
+				// reservation now rather than holding phantom load against the local
+				// budget for the provider call's duration — fallback fires exactly
+				// when the local pool is degraded and admission headroom matters
+				// most. Release is idempotent, so the handler's own deferred release
+				// stays safe.
+				if pending.Reservation != nil {
+					pending.Reservation.Release()
+				}
 				if resp, provErr := p.tryProviderFallback(pending, fp.Engine, fp.Model); provErr == nil {
 					p.metrics.RequestRouted("cloud", fp.Engine, fp.Model, pending.TenantID)
 					p.metrics.PolicyProviderFallbackRouted(pending.Request.Model)

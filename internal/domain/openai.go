@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // New ChatRequest that covers text generation, vision and audio, with extensible fields for future use.
@@ -29,6 +30,14 @@ type ChatRequest struct {
 	// dialect (absent from Messages). Kept raw because it may be either a plain
 	// string or an array of text content blocks; SystemText decodes both.
 	System json.RawMessage `json:"system,omitempty"`
+
+	// Tools holds the tool/function definitions (both dialects use "tools").
+	// Kept raw: the router never interprets them, but their JSON is rendered
+	// into the prompt by the backend and tokenized like any other input, so the
+	// token estimator must count these bytes — an agentic request can carry tens
+	// of KB of tool schemas that would otherwise be invisible to admission and
+	// would poison the learned tokens-per-byte ratio.
+	Tools json.RawMessage `json:"tools,omitempty"`
 
 	// Sampling & Controls
 	Temperature float64 `json:"temperature,omitempty"`
@@ -82,7 +91,7 @@ func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
 }
 
 type ContentPart struct {
-	Type       string            `json:"type"`                  // "text", "image_url", "input_audio"
+	Type       string            `json:"type"`                  // "text", "image_url", "input_audio" (OpenAI); "image" (Anthropic)
 	Text       string            `json:"text,omitempty"`        // If type is "text"
 	ImageURL   *ImageURLConfig   `json:"image_url,omitempty"`   // If type is "image_url"
 	InputAudio *InputAudioConfig `json:"input_audio,omitempty"` // If type is "input_audio"
@@ -122,6 +131,20 @@ type ChatResponse struct {
 	Body        io.ReadCloser `json:"-"` // non-nil for streaming responses; handler must Close
 }
 
+// providerProcessedByPrefix marks a response served by a cloud provider
+// fallback (OpenAI/Anthropic) instead of a local agent; the providers stamp
+// ProcessedBy as "provider:<engine>".
+const providerProcessedByPrefix = "provider:"
+
+// ServedByProvider reports whether this response came from the cloud provider
+// fallback rather than a local GPU replica. Provider tokens are billed to the
+// operator's provider account and consume no local KV cache or decode
+// throughput, so the local-resource accounting (OTPM charge, estimator
+// learning) must skip them.
+func (r *ChatResponse) ServedByProvider() bool {
+	return strings.HasPrefix(r.ProcessedBy, providerProcessedByPrefix)
+}
+
 // Choice represents a response choice
 type Choice struct {
 	Index        int      `json:"index"`
@@ -134,6 +157,39 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// UnmarshalJSON also accepts the Anthropic usage shape (input_tokens /
+// output_tokens, no total), normalizing it into the OpenAI-named fields.
+// Without this, every /v1/messages response parsed as zero usage, so the
+// Anthropic dialect silently escaped output metering, OTPM charging, the
+// occupancy true-up, and estimator learning. Marshaling is unchanged (OpenAI
+// names); TotalTokens is synthesized when absent so "usage present" checks
+// (TotalTokens > 0) hold for both dialects.
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	u.PromptTokens = raw.PromptTokens
+	u.CompletionTokens = raw.CompletionTokens
+	u.TotalTokens = raw.TotalTokens
+	if u.PromptTokens == 0 && raw.InputTokens > 0 {
+		u.PromptTokens = raw.InputTokens
+	}
+	if u.CompletionTokens == 0 && raw.OutputTokens > 0 {
+		u.CompletionTokens = raw.OutputTokens
+	}
+	if u.TotalTokens == 0 && u.PromptTokens+u.CompletionTokens > 0 {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+	return nil
 }
 
 type Message struct {
@@ -229,26 +285,32 @@ func SystemText(req *ChatRequest) string {
 }
 
 // PromptTextBytes returns the total bytes of estimable prompt text — message
-// content plus any top-level system prompt — and the message count, for the
-// token estimator. Non-text content (images) is not byte-estimable and is
-// bounded separately by the per-request image cap.
+// content, any top-level system prompt, and the raw tool-definition JSON — and
+// the message count, for the token estimator. Tool schemas are rendered into
+// the prompt and tokenized by the backend, so counting their bytes keeps the
+// estimate (and the learned ratio, which divides exact prompt_tokens by these
+// bytes) honest for agentic requests. Non-text content (images) is not
+// byte-estimable and is bounded separately by the per-request image cap.
 func PromptTextBytes(req *ChatRequest) (textBytes, messageCount int) {
 	for _, s := range GetMessageSlice(req.Messages) {
 		textBytes += len(s)
 	}
 	textBytes += len(SystemText(req))
+	textBytes += len(req.Tools)
 	return textBytes, len(req.Messages)
 }
 
-// CountImages returns the number of image_url content parts across all messages.
-// Text-only messages (Content is a plain string) carry no images and contribute
-// zero. Used by the per-request image cap; audio and text parts are ignored.
+// CountImages returns the number of image content parts across all messages:
+// OpenAI "image_url" parts and Anthropic "image" blocks (the /v1/messages
+// dialect) both count, so neither dialect can slip images past the per-request
+// image cap. Text-only messages (Content is a plain string) carry no images and
+// contribute zero. Audio and text parts are ignored.
 func CountImages(messages []ChatCompletionMessage) int {
 	count := 0
 	for _, message := range messages {
 		if parts, ok := message.Content.([]ContentPart); ok {
 			for _, part := range parts {
-				if part.Type == "image_url" {
+				if part.Type == "image_url" || part.Type == "image" {
 					count++
 				}
 			}

@@ -3,7 +3,11 @@
 
 package policy
 
-import "hivenet_router/internal/domain"
+import (
+	"slices"
+
+	"hivenet_router/internal/domain"
+)
 
 // Policy is the top-level routing configuration loaded from a YAML file.
 // It contains a primary routing step, an optional fallback chain, and an
@@ -40,9 +44,13 @@ type Policy struct {
 	MaxInputTokens int `yaml:"max_input_tokens" json:"max_input_tokens,omitempty"`
 	// ImagesMax rejects any single request carrying more images than this.
 	ImagesMax int `yaml:"images_max" json:"images_max,omitempty"`
-	// AdmitBudgetTokens caps the total KV-cache tokens in flight per replica.
+	// AdmitBudgetTokens caps the KV-cache tokens in flight PER REPLICA (the
+	// benchmark-certified capacity of one box). At enforcement the router scales
+	// it by the number of healthy replicas serving the model, so the pool's
+	// admit budget grows and shrinks with the pool.
 	AdmitBudgetTokens int `yaml:"admit_budget_tokens" json:"admit_budget_tokens,omitempty"`
-	// MaxInflight caps the number of concurrent in-flight requests per replica.
+	// MaxInflight caps concurrent in-flight requests PER REPLICA; scaled by the
+	// healthy replica count at enforcement, like AdmitBudgetTokens.
 	MaxInflight int `yaml:"max_inflight" json:"max_inflight,omitempty"`
 	// ShedIf holds front-door shed thresholds; only kv_cache_utilization and
 	// waiting_requests are accepted (see knownShedIfFields in loader.go).
@@ -72,6 +80,24 @@ func (p *Policy) EffectiveMode() PolicyMode {
 // IsServerless reports whether per-key caps apply to this policy's replicas.
 func (p *Policy) IsServerless() bool {
 	return p.EffectiveMode() == ModeServerless
+}
+
+// GovernsAnyOf reports whether a key restricted to keyModels could send a
+// request governed by this policy: a key with no model list may call any
+// model, a policy with no Models list is the global policy governing every
+// model, and otherwise the two sets must intersect. Shared by the startup,
+// reload, and admin-API cross-config validations so they agree on
+// reachability.
+func (p *Policy) GovernsAnyOf(keyModels []string) bool {
+	if len(keyModels) == 0 || len(p.Models) == 0 {
+		return true
+	}
+	for _, km := range keyModels {
+		if slices.Contains(p.Models, km) {
+			return true
+		}
+	}
+	return false
 }
 
 // FallbackProvider configures a last-resort closed-source model provider.

@@ -165,3 +165,44 @@ func TestMeter_HandlesSplitWrites(t *testing.T) {
 		t.Errorf("expected the split event to be parsed and counted, got completion=%d", completion)
 	}
 }
+
+// TestMeter_ParsesAnthropicEvents verifies the meter reads the Anthropic
+// /v1/messages SSE dialect: exact input_tokens from message_start, cumulative
+// output_tokens from message_delta, and streamed text from content_block_delta
+// — so Anthropic streams get exact usage (metering, OTPM, estimator learning)
+// instead of silently falling back to estimation.
+func TestMeter_ParsesAnthropicEvents(t *testing.T) {
+	m := router.NewSSETokenMeter()
+	var streamed string
+	m.SetContentObserver(func(delta string) { streamed += delta })
+
+	chunks := []string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":42,"output_tokens":1}}}` + "\n\n",
+		"event: content_block_delta\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n",
+		"event: content_block_delta\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}` + "\n\n",
+		"event: message_delta\n",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}` + "\n\n",
+	}
+	for _, c := range chunks {
+		if _, err := m.Write([]byte(c)); err != nil {
+			t.Fatalf("Write returned error: %v", err)
+		}
+	}
+
+	if !m.HaveUsage() {
+		t.Fatal("Anthropic message_start must mark usage as exact")
+	}
+	prompt, completion := m.Tokens(nil)
+	if prompt != 42 {
+		t.Errorf("prompt = %d, want 42 (message_start input_tokens)", prompt)
+	}
+	if completion != 9 {
+		t.Errorf("completion = %d, want 9 (final message_delta output_tokens)", completion)
+	}
+	if streamed != "Hello world" {
+		t.Errorf("content observer saw %q, want %q", streamed, "Hello world")
+	}
+}

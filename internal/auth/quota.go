@@ -6,6 +6,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -281,6 +282,48 @@ func (l *InMemoryLimiter) Reset() {
 	l.dailyBuckets.Range(func(k, _ any) bool { l.dailyBuckets.Delete(k); return true })
 }
 
+// SweepIdle evicts limiter state that carries no information, bounding memory
+// when keys are minted programmatically (every key×model pair that ever made a
+// request otherwise lives in these maps until restart). Returns how many
+// entries were removed.
+//
+//   - An RPM bucket is evicted once it is full: a token bucket refills within
+//     its burst window, so a full bucket is byte-for-byte what a fresh one
+//     would be. Eviction is lossless up to one race: requests that loaded the
+//     limiter pointer in the instant the sweep deleted it deduct on the
+//     orphaned bucket, and those deductions are forgotten when the next
+//     request recreates a fresh one. That forgives at most the requests in
+//     flight during that microsecond window, once per sweep — negligible
+//     against any per-minute rate, and not worth the tombstone protocol that
+//     true losslessness would need.
+//   - A daily bucket is evicted once its UTC day has passed: rollover discards
+//     its counter anyway, so a stale-day bucket is dead weight.
+func (l *InMemoryLimiter) SweepIdle() int {
+	removed := 0
+	now := time.Now()
+	l.rpmLimiters.Range(func(k, v any) bool {
+		lim := v.(*rate.Limiter)
+		if lim.TokensAt(now) >= float64(lim.Burst()) {
+			l.rpmLimiters.Delete(k)
+			removed++
+		}
+		return true
+	})
+	today := utcDayIndex()
+	l.dailyBuckets.Range(func(k, v any) bool {
+		b := v.(*dailyBucket)
+		b.mu.Lock()
+		stale := b.day != today
+		b.mu.Unlock()
+		if stale {
+			l.dailyBuckets.Delete(k)
+			removed++
+		}
+		return true
+	})
+	return removed
+}
+
 // utcDayIndex returns the number of complete UTC days since the Unix epoch.
 func utcDayIndex() int {
 	return int(time.Now().UTC().Unix() / 86400)
@@ -419,6 +462,25 @@ func (l *BadgerLimiter) Flush() {
 		b.mu.Unlock()
 		return true
 	})
+}
+
+// SweepIdle extends the in-memory sweep with the badger preload gates: an
+// initOnce entry is keyed by "(bucket):(dayIndex)" and exists to make the
+// first touch of a bucket on a given day re-read the persisted counter. Past
+// days' gates will never fire again, so they are dropped. Today's gates (and
+// today's daily buckets) are deliberately kept — deleting either would let a
+// bucket reappear without its persisted used-count.
+func (l *BadgerLimiter) SweepIdle() int {
+	removed := l.InMemoryLimiter.SweepIdle()
+	todaySuffix := fmt.Sprintf(":%d", utcDayIndex())
+	l.initOnce.Range(func(k, _ any) bool {
+		if !strings.HasSuffix(k.(string), todaySuffix) {
+			l.initOnce.Delete(k)
+			removed++
+		}
+		return true
+	})
+	return removed
 }
 
 // StartPeriodicFlush launches a background goroutine that calls Flush on every

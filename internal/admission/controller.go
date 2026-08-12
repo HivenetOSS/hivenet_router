@@ -19,6 +19,7 @@ package admission
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -80,6 +81,10 @@ type modelState struct {
 	budget      int64         // last effective budget seen, for the utilization gauge
 	maxInflight int           // last max_inflight seen, for the concurrency gauge
 	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
+
+	// lastActive is the unix-nano time of the last stateFor lookup, read by
+	// SweepIdle. Atomic so the janitor never contends with the hot path.
+	lastActive atomic.Int64
 }
 
 func (c *Controller) stateFor(model string) *modelState {
@@ -90,7 +95,36 @@ func (c *Controller) stateFor(model string) *modelState {
 		s = &modelState{c: c, model: model, notify: make(chan struct{})}
 		c.models[model] = s
 	}
+	s.lastActive.Store(time.Now().UnixNano())
 	return s
+}
+
+// SweepIdle evicts model states that hold nothing in flight and have not been
+// touched for at least ttl, returning how many were removed. This bounds the
+// map on controllers whose key space is unbounded (the per-key occupancy
+// controller is keyed by key×model, and keys can be minted programmatically);
+// an evicted state carries no history — its counters were zero — so recreation
+// on the next request is indistinguishable from having kept it.
+//
+// stateFor stamps lastActive before the caller reserves, so with a ttl of
+// minutes a state can only be evicted long after any admit/release cycle that
+// references it; a reservation still in flight keeps sumW/count non-zero and
+// is never evicted.
+func (c *Controller) SweepIdle(ttl time.Duration) int {
+	cutoff := time.Now().Add(-ttl).UnixNano()
+	removed := 0
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for model, s := range c.models {
+		s.mu.Lock()
+		idle := s.sumW == 0 && s.count == 0 && s.lastActive.Load() < cutoff
+		s.mu.Unlock()
+		if idle {
+			delete(c.models, model)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Admit reserves footprint tokens for a request against model's budget, parking

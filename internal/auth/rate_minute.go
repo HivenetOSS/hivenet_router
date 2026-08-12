@@ -89,3 +89,21 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 func (l *MinuteRateLimiter) Reset() {
 	l.buckets.Range(func(k, _ any) bool { l.buckets.Delete(k); return true })
 }
+
+// SweepIdle evicts every full bucket, bounding memory when keys are minted
+// programmatically. A tokens-per-minute bucket refills completely within one
+// minute of idleness, so a full bucket is identical to the fresh one the next
+// request would create — eviction is lossless. Returns how many were removed.
+func (l *MinuteRateLimiter) SweepIdle() int {
+	removed := 0
+	now := time.Now()
+	l.buckets.Range(func(k, v any) bool {
+		lim := v.(*rate.Limiter)
+		if lim.TokensAt(now) >= float64(lim.Burst()) {
+			l.buckets.Delete(k)
+			removed++
+		}
+		return true
+	})
+	return removed
+}

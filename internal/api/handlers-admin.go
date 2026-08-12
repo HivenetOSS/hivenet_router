@@ -221,21 +221,28 @@ type apiKeyEntryRequest struct {
 	ExpiresAt     string      `json:"expires_at"`
 	AllowedModels []string    `json:"allowed_models"`
 	Quota         apiKeyQuota `json:"quota"`
+
+	// MaxOccupancyShare is the key-level serverless occupancy share, matching
+	// the static auth.yaml field of the same name (it sits outside quota there
+	// too, because it is a fraction of the replica pool's admit budget rather
+	// than a per-minute rate). Valid range (0, 1]; 0 means unset.
+	MaxOccupancyShare float64 `json:"max_occupancy_share"`
 }
 
 // upsertAPIKeyRequest is the JSON body for PUT /admin/api-keys/:id.
 // Wraps a key entry plus the registry version. The :id URL parameter is the
 // source of truth for the entry ID; any id field in the body is ignored.
 type upsertAPIKeyRequest struct {
-	Version       string      `json:"version"`
-	KeyHash       string      `json:"key_hash"`
-	KeyPreview    string      `json:"key_preview"`
-	Owner         string      `json:"owner"`
-	Name          string      `json:"name"`
-	Enabled       bool        `json:"enabled"`
-	ExpiresAt     string      `json:"expires_at"`
-	AllowedModels []string    `json:"allowed_models"`
-	Quota         apiKeyQuota `json:"quota"`
+	Version           string      `json:"version"`
+	KeyHash           string      `json:"key_hash"`
+	KeyPreview        string      `json:"key_preview"`
+	Owner             string      `json:"owner"`
+	Name              string      `json:"name"`
+	Enabled           bool        `json:"enabled"`
+	ExpiresAt         string      `json:"expires_at"`
+	AllowedModels     []string    `json:"allowed_models"`
+	Quota             apiKeyQuota `json:"quota"`
+	MaxOccupancyShare float64     `json:"max_occupancy_share"` // see apiKeyEntryRequest
 }
 
 // replaceAPIKeysRequest is the JSON body for POST /admin/api-keys/replace.
@@ -251,12 +258,15 @@ type replaceAPIKeysRequest struct {
 func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 	expiresAt, err := auth.ParseExpiresAtRFC3339(k.ExpiresAt)
 	if err != nil {
-		return auth.DynamicKeyEntry{}, err
+		return auth.DynamicKeyEntry{}, fmt.Errorf("invalid expires_at: %w", err)
 	}
 	quota, err := k.Quota.Validate(fmt.Sprintf("key %q", k.ID))
 	if err != nil {
 		return auth.DynamicKeyEntry{}, err
 	}
+	// The share sits at the key level, like the static auth.yaml field; the
+	// registry validates its (0,1] range on every mutation.
+	quota.MaxOccupancyShare = k.MaxOccupancyShare
 	return auth.DynamicKeyEntry{
 		ID:            k.ID,
 		KeyHash:       k.KeyHash,
@@ -268,6 +278,35 @@ func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 		AllowedModels: k.AllowedModels,
 		Quota:         quota,
 	}, nil
+}
+
+// validateKeyAdmission runs the cross-config admission invariants for one
+// dynamic key against the policies currently in force — the same check static
+// auth.yaml keys get at startup and on reload: on a serverless policy the key
+// can reach, its ITPM bucket must hold at least one maximum-size prompt, or
+// the cap silently shrinks the model's usable context for that key (the D16
+// failure). Rejecting at upsert keeps the misconfiguration out of the
+// registry, mirroring how the static loader refuses to start on it.
+func (h *Handlers) validateKeyAdmission(e auth.DynamicKeyEntry) error {
+	if h.executor == nil {
+		return nil
+	}
+	check := func(p *policy.Policy) error {
+		if p == nil || !p.IsServerless() || p.MaxInputTokens <= 0 || !p.GovernsAnyOf(e.AllowedModels) {
+			return nil
+		}
+		label := fmt.Sprintf("key %q on serverless models %v", e.ID, p.Models)
+		return auth.ValidateITPMCoversMaxInput(label, e.Quota.InputTokensPerMinute, p.MaxInputTokens)
+	}
+	if err := check(h.executor.GetPolicy()); err != nil {
+		return err
+	}
+	for _, p := range h.executor.GetNamedPolicies() {
+		if err := check(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeRegistryError translates a registry-level error into a 409 (stale
@@ -301,18 +340,23 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		return
 	}
 	entry, err := apiKeyEntryRequest{
-		ID:            c.Param("id"),
-		KeyHash:       req.KeyHash,
-		KeyPreview:    req.KeyPreview,
-		Owner:         req.Owner,
-		Name:          req.Name,
-		Enabled:       req.Enabled,
-		ExpiresAt:     req.ExpiresAt,
-		AllowedModels: req.AllowedModels,
-		Quota:         req.Quota,
+		ID:                c.Param("id"),
+		KeyHash:           req.KeyHash,
+		KeyPreview:        req.KeyPreview,
+		Owner:             req.Owner,
+		Name:              req.Name,
+		Enabled:           req.Enabled,
+		ExpiresAt:         req.ExpiresAt,
+		AllowedModels:     req.AllowedModels,
+		Quota:             req.Quota,
+		MaxOccupancyShare: req.MaxOccupancyShare,
 	}.toEntry()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.validateKeyAdmission(entry); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if err := h.keyRegistry.Upsert(req.Version, entry); err != nil {
@@ -370,7 +414,11 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	for i, k := range req.Keys {
 		entry, err := k.toEntry()
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("key[%d]: invalid expires_at: %s", i, err)})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("key[%d]: %s", i, err)})
+			return
+		}
+		if err := h.validateKeyAdmission(entry); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("key[%d]: %s", i, err)})
 			return
 		}
 		entries = append(entries, entry)

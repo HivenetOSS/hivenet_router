@@ -183,3 +183,31 @@ func runAndRespond(t *testing.T, h *api.Handlers, c *gin.Context, q chan *domain
 	}
 	<-done
 }
+
+// TestB4_ShareScalesWithHealthyReplicas verifies the per-key occupancy share is
+// a fraction of the replica-scaled pool budget — the same pool the global gate
+// admits against — so a key's slice grows with the pool. With two healthy
+// replicas, share 0.40 of a 1000-per-replica budget is 800; a 504-token
+// footprint that a single replica's share (400) would deny must pass.
+func TestB4_ShareScalesWithHealthyReplicas(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	exec := policy.NewExecutor(nil, nil, serverless(1000), 0, 0)
+	h := api.NewHandlers(
+		nil, nil, q, time.Second,
+		exec, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
+		func(string) int { return 2 }, nil,
+		admission.NewController(1.0, 0),
+		nil,
+		admission.NewController(1.0, 0),
+		auth.NewMinuteRateLimiter(),
+		nil, nil,
+	)
+	c, w := newCtx("/v1/chat/completions", b2Body(500)) // footprint 504
+	withKey(c, auth.QuotaLimits{MaxOccupancyShare: 0.40})
+
+	runAndRespond(t, h, c, q)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 within the scaled per-key share, got %d", w.Code)
+	}
+}

@@ -5,7 +5,6 @@ package router
 
 import (
 	"fmt"
-	"slices"
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/config"
@@ -88,17 +87,28 @@ func ValidateAdmissionInvariants(policies []*policy.Policy, keys []auth.APIKeyEn
 }
 
 // keyReachesPolicy reports whether a key could send a request to a model
-// governed by policy p. A key with no Models list may call any model; a policy
-// with no Models list governs every model (the global/default policy). Otherwise
-// the two model sets must intersect.
+// governed by policy p (see policy.GovernsAnyOf — shared with the admin API's
+// per-key validation so the two checks cannot drift).
 func keyReachesPolicy(k auth.APIKeyEntry, p *policy.Policy) bool {
-	if len(k.Models) == 0 || len(p.Models) == 0 {
-		return true
+	return p.GovernsAnyOf(k.Models)
+}
+
+// dynamicKeysAsEntries converts the dynamic registry's current keys into the
+// config-shaped entries ValidateAdmissionInvariants consumes, carrying the one
+// field the cross-config check reads (the flat ITPM bucket) plus the model
+// list and a label. Nil registry (static/no-auth mode) yields nil.
+func dynamicKeysAsEntries(reg *auth.DynamicKeyProvider) []auth.APIKeyEntry {
+	if reg == nil {
+		return nil
 	}
-	for _, km := range k.Models {
-		if slices.Contains(p.Models, km) {
-			return true
-		}
+	keys := reg.ListKeys()
+	out := make([]auth.APIKeyEntry, 0, len(keys))
+	for _, e := range keys {
+		out = append(out, auth.APIKeyEntry{
+			KeyPreview: e.ID,
+			Models:     e.AllowedModels,
+			Quota:      auth.QuotaConfig{InputTokensPerMinute: e.Quota.InputTokensPerMinute},
+		})
 	}
-	return false
+	return out
 }

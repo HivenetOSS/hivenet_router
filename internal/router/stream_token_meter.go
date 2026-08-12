@@ -23,9 +23,10 @@ import (
 // by the time the totals are known, so the caller deducts from the budget and
 // records metrics after the stream completes — it cannot reject mid-stream.
 //
-// Anthropic (/v1/messages) events use a different shape (usage in message_start /
-// message_delta); until that is parsed, those streams fall back to the
-// text-accumulation estimate, which omits the system prompt and non-text blocks.
+// Anthropic (/v1/messages) events are parsed too: message_start carries the
+// exact input_tokens, message_delta the cumulative output_tokens, and
+// content_block_delta the streamed text — so both dialects yield exact usage
+// and live content observation.
 //
 // Exported so the streaming token metering can be tested in isolation.
 type SSETokenMeter struct {
@@ -92,8 +93,12 @@ func (m *SSETokenMeter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// sseChunk is the minimal subset of an OpenAI streaming chunk we need: the
-// per-delta text content and the optional terminal usage object.
+// sseChunk is the minimal union of the OpenAI and Anthropic streaming shapes we
+// need. OpenAI: per-delta text under choices[].delta.content plus the optional
+// terminal usage object. Anthropic: message_start carries usage.input_tokens
+// under "message", content_block_delta carries text under a top-level "delta",
+// and message_delta carries the cumulative usage.output_tokens at the top
+// level. The field sets do not collide, so one struct decodes both dialects.
 type sseChunk struct {
 	Choices []struct {
 		Delta struct {
@@ -103,7 +108,18 @@ type sseChunk struct {
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		InputTokens      int `json:"input_tokens"`  // Anthropic message_delta (rare here)
+		OutputTokens     int `json:"output_tokens"` // Anthropic message_delta (cumulative)
 	} `json:"usage"`
+	Message *struct { // Anthropic message_start
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+	Delta *struct { // Anthropic content_block_delta
+		Text string `json:"text"`
+	} `json:"delta"`
 }
 
 func (m *SSETokenMeter) parseLine(line []byte) {
@@ -124,19 +140,43 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 		m.usagePrompt = c.Usage.PromptTokens
 		m.usageCompletion = c.Usage.CompletionTokens
 	}
+	// Anthropic message_start: the exact prompt count arrives before any output.
+	// Usage is exact from this point; output_tokens is refined by message_delta.
+	if c.Message != nil && c.Message.Usage.InputTokens > 0 {
+		m.haveUsage = true
+		m.usagePrompt = c.Message.Usage.InputTokens
+		if c.Message.Usage.OutputTokens > m.usageCompletion {
+			m.usageCompletion = c.Message.Usage.OutputTokens
+		}
+	}
+	// Anthropic message_delta: cumulative output count; the last one wins.
+	if c.Usage != nil && c.Usage.OutputTokens > m.usageCompletion {
+		m.usageCompletion = c.Usage.OutputTokens
+		if c.Usage.InputTokens > 0 {
+			m.usagePrompt = c.Usage.InputTokens
+			m.haveUsage = true
+		}
+	}
+	deliver := func(text string) {
+		m.content.WriteString(text)
+		if m.onContent != nil {
+			m.onContent(text)
+		}
+	}
 	for _, ch := range c.Choices {
 		if ch.Delta.Content != "" {
-			m.content.WriteString(ch.Delta.Content)
-			if m.onContent != nil {
-				m.onContent(ch.Delta.Content)
-			}
+			deliver(ch.Delta.Content)
 		}
+	}
+	if c.Delta != nil && c.Delta.Text != "" {
+		deliver(c.Delta.Text)
 	}
 }
 
 // HaveUsage reports whether the stream carried an exact backend usage object
-// (stream_options.include_usage). When false, Tokens returns an estimate, which
-// the caller must not feed back into the learned estimator.
+// (OpenAI stream_options.include_usage, or Anthropic message_start/
+// message_delta). When false, Tokens returns an estimate, which the caller must
+// not feed back into the learned estimator.
 func (m *SSETokenMeter) HaveUsage() bool { return m.haveUsage }
 
 // Tokens returns the prompt and completion token counts for the stream. It
