@@ -6,7 +6,7 @@ sidebarTitle: "Claude Code"
 
 Claude Code can use Hivenet Router as an Anthropic-format inference gateway.
 
-Claude Code sends requests to the router’s:
+Claude Code sends requests to the routerâ€™s:
 
 ```text
 POST /v1/messages
@@ -119,10 +119,10 @@ Make the Hivenet Router agent register the same value:
 
 The value must match across:
 
-- vLLM’s `--served-model-name`
-- the Hivenet Router agent’s registered model
+- vLLMâ€™s `--served-model-name`
+- the Hivenet Router agentâ€™s registered model
 - the Claude Code model mapping
-- the API key’s model restrictions or per-model quotas
+- the API keyâ€™s model restrictions or per-model quotas
 
 ## Test the backend directly
 
@@ -264,7 +264,6 @@ unset ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL="https://router.example.com"
 export ANTHROPIC_AUTH_TOKEN="<hivenet-router-api-key>"
 
-export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
@@ -350,7 +349,6 @@ Claude Code uses built-in model aliases for different kinds of work.
 
 | Alias | Environment variable | Typical use |
 | --- | --- | --- |
-| `fable` | `ANTHROPIC_DEFAULT_FABLE_MODEL` | Long or difficult tasks where available |
 | `opus` | `ANTHROPIC_DEFAULT_OPUS_MODEL` | Complex reasoning and planning |
 | `sonnet` | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Main coding work |
 | `haiku` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Faster and background tasks |
@@ -358,7 +356,6 @@ Claude Code uses built-in model aliases for different kinds of work.
 You may map every alias to one model:
 
 ```bash
-export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
@@ -367,7 +364,6 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
 Or map them to different Hivenet Router models:
 
 ```bash
-export ANTHROPIC_DEFAULT_FABLE_MODEL="code-model-large"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="code-model-large"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="code-model-standard"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="code-model-fast"
@@ -378,7 +374,7 @@ Every mapped model must:
 - appear in `/v1/models` for the client key
 - be registered by a healthy `llm` agent
 - support the request features Claude Code sends
-- be included in the key’s model restrictions or per-model quotas
+- be included in the keyâ€™s model restrictions or per-model quotas
 
 Map `haiku` even when you intend to work mainly through `sonnet` or `opus`. Claude Code can use the Haiku alias for background functionality.
 
@@ -458,7 +454,6 @@ A user-wide configuration can look like:
   "env": {
     "ANTHROPIC_BASE_URL": "https://router.example.com",
     "ANTHROPIC_AUTH_TOKEN": "<hivenet-router-api-key>",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "hivenet-router-code-model"
@@ -491,7 +486,6 @@ For short-lived or externally managed keys, configure:
   "apiKeyHelper": "~/bin/get-hivenet-router-key.sh",
   "env": {
     "ANTHROPIC_BASE_URL": "https://router.example.com",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "hivenet-router-code-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "hivenet-router-code-model"
@@ -631,10 +625,10 @@ The complete path must preserve streaming:
 
 ```text
 Claude Code
-  → reverse proxy
-  → Hivenet Router router
-  → Hivenet Router agent
-  → inference backend
+  â†’ reverse proxy
+  â†’ Hivenet Router router
+  â†’ Hivenet Router agent
+  â†’ inference backend
 ```
 
 When output appears only after the model finishes, check:
@@ -707,7 +701,6 @@ unset ANTHROPIC_API_KEY
 export ANTHROPIC_BASE_URL="https://router.example.com"
 export ANTHROPIC_AUTH_TOKEN="<hivenet-router-api-key>"
 
-export ANTHROPIC_DEFAULT_FABLE_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="hivenet-router-code-model"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="hivenet-router-code-model"
@@ -734,7 +727,6 @@ For a normal Anthropic session, start Claude Code without the Hivenet Router var
 env \
   -u ANTHROPIC_BASE_URL \
   -u ANTHROPIC_AUTH_TOKEN \
-  -u ANTHROPIC_DEFAULT_FABLE_MODEL \
   -u ANTHROPIC_DEFAULT_OPUS_MODEL \
   -u ANTHROPIC_DEFAULT_SONNET_MODEL \
   -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
@@ -901,7 +893,7 @@ Test the backend directly to isolate it from Hivenet Router.
 
 Upgrade the backend and test the current Claude Code request against it directly.
 
-Do not begin by pinning an old Claude Code release. First confirm whether the backend’s current Anthropic Messages implementation accepts the system-content shape the client sends.
+Do not begin by pinning an old Claude Code release. First confirm whether the backendâ€™s current Anthropic Messages implementation accepts the system-content shape the client sends.
 
 ### The backend rejects `thinking` or `adaptive`
 
@@ -927,7 +919,7 @@ This may disable context management and newer tool features.
 
 ### Claude Code retries and Hivenet Router later reports no eligible agent
 
-Inspect the backend’s first error.
+Inspect the backendâ€™s first error.
 
 A backend rejection that Hivenet Router treats as retryable can cause the request session to try other agents and exclude agents that already failed.
 
@@ -998,7 +990,6 @@ Use the mapped aliases:
 /model sonnet
 /model opus
 /model haiku
-/model fable
 ```
 
 Or configure:
