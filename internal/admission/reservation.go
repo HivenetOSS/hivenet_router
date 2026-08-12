@@ -50,11 +50,19 @@ func (r *Reservation) Adjust(delta int) {
 	if r.released {
 		return
 	}
-	r.weight += int64(delta)
-	if r.weight < 0 {
-		r.weight = 0
+	// Never free more than this reservation holds: applying a larger negative
+	// delta to the shared sum would subtract other reservations' weight too. The
+	// same capped delta is applied to both the reservation and the shared sum so
+	// they stay consistent.
+	d := int64(delta)
+	if d < -r.weight {
+		d = -r.weight
 	}
-	r.state.adjust(int64(delta))
+	if d == 0 {
+		return
+	}
+	r.weight += d
+	r.state.adjust(d)
 }
 
 // Release returns the reservation's full footprint to the budget. It is safe to

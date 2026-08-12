@@ -10,7 +10,10 @@
 // hop on the hot path.
 package tokenizer
 
-import "sync"
+import (
+	"math"
+	"sync"
+)
 
 const (
 	// coldStartCharsPerToken is the assumed density before any sample. Code
@@ -64,7 +67,9 @@ func (e *Estimator) ratioFor(model string) float64 {
 // learned tokens-per-byte ratio. The result is floored at a per-message overhead
 // so a request with no estimable text is still counted.
 func (e *Estimator) Estimate(model string, textBytes, messageCount int) int {
-	est := int(float64(textBytes) * e.ratioFor(model))
+	// Round up: for admission control, under-estimating is the unsafe direction,
+	// so bias the fractional token toward more headroom, not less.
+	est := int(math.Ceil(float64(textBytes) * e.ratioFor(model)))
 	if floor := messageCount * perMessageOverhead; est < floor {
 		est = floor
 	}

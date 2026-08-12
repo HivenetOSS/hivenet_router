@@ -376,11 +376,11 @@ func (h *Handlers) AdminHealth(c *gin.Context) {
 // (/v1/chat/completions) and Anthropic (/v1/messages) dialects. It routes by the
 // top-level "model" field and forwards the ORIGINAL request bytes to a healthy
 // "llm" agent at the SAME path, so the backend's native endpoint answers without
-// schema translation. Token budgeting is exact for OpenAI bodies; for other
-// dialects the input estimate is best-effort — it inspects only OpenAI message
-// fields, so it may undercount (e.g. it does not see Anthropic's top-level
-// "system" or non-text content blocks) — while output-token enforcement and
-// per-tenant token metrics still apply via the processor.
+// schema translation. The input estimate covers OpenAI message text and the
+// Anthropic top-level "system" prompt, learns each model's tokens-per-byte ratio
+// from backend usage, and is trued up against the exact prompt_tokens on
+// completion; image token cost is not byte-estimable and is bounded by the image
+// cap instead.
 func (h *Handlers) Passthrough(c *gin.Context) {
 	m := reqMeta{start: time.Now()}
 
@@ -405,10 +405,14 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.enforceShedPressure(c, req.Model) {
 		return
 	}
+	// Compute the input estimate once, so the value reserved for occupancy and the
+	// value the reservation is later trued up against are identical — the shared
+	// estimator can shift between calls as other requests complete.
+	inputEstimate := h.estimatePromptTokens(&req)
 	// Occupancy admit budget. The reservation is released on every exit path
 	// below via this single defer — success, error, timeout, disconnect, and the
 	// daily-budget reject that may follow — so a slot is never leaked.
-	reservation, admitted := h.enforceOccupancyBudget(c, &req)
+	reservation, admitted := h.enforceOccupancyBudget(c, &req, inputEstimate)
 	if !admitted {
 		return
 	}
@@ -444,8 +448,8 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.TokensPerDay = m.tpd
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
-	pending.Path = path                                         // forward to the backend's native endpoint at this path
-	pending.EstimatedInputTokens = h.estimatePromptTokens(&req) // for the reservation true-up
+	pending.Path = path                          // forward to the backend's native endpoint at this path
+	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -570,7 +574,7 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest) b
 // ok=true means the gate is inert for this model — nothing to release, nothing
 // rejected. On a serverless replica it holds a second, per-key reservation for
 // the key's occupancy share alongside the global budget.
-func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest) (admission.Reservations, bool) {
+func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatRequest, inputEstimate int) (admission.Reservations, bool) {
 	var rs admission.Reservations
 	if h.executor == nil {
 		return rs, true
@@ -585,7 +589,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	}
 	// Declared output is reserved up front; an undeclared request reserves only
 	// its input and grows live (grows=true), matching how the processor meters it.
-	footprint := h.estimatePromptTokens(req) + declared
+	footprint := inputEstimate + declared
 	grows := declared == 0
 
 	// Global occupancy budget (all replicas).

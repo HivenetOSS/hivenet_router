@@ -184,6 +184,35 @@ func TestTrueUpAdjustsOccupancy(t *testing.T) {
 	}
 }
 
+// TestTrueUpCannotFreeOtherReservations verifies a negative true-up larger than
+// the reservation's own weight is capped, so it never subtracts other in-flight
+// reservations' weight from the shared occupancy sum.
+func TestTrueUpCannotFreeOtherReservations(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	ctx := context.Background()
+
+	other := c.Admit(ctx, model, 300, false, 1_000_000, 0) // co-tenant, must be preserved
+	r := c.Admit(ctx, model, 100, false, 1_000_000, 0)
+	if sumW, _ := c.Occupancy(model); sumW != 400 {
+		t.Fatalf("occupancy = %d, want 400", sumW)
+	}
+
+	// An oversized negative true-up (−1000) may only free r's own 100.
+	r.Adjust(-1000)
+	if sumW, _ := c.Occupancy(model); sumW != 300 {
+		t.Errorf("occupancy = %d, want 300 (only r's weight freed, co-tenant preserved)", sumW)
+	}
+	// The co-tenant's weight is intact: releasing it drops the sum to zero.
+	other.Release()
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 1 {
+		t.Errorf("after co-tenant release occupancy = %d/%d, want 0/1 (r still in flight)", sumW, count)
+	}
+	r.Release()
+	if sumW, count := c.Occupancy(model); sumW != 0 || count != 0 {
+		t.Errorf("after both release occupancy = %d/%d, want 0/0", sumW, count)
+	}
+}
+
 // TestTrueUpAfterReleaseNoOp verifies a late true-up (after the request finished)
 // cannot corrupt occupancy.
 func TestTrueUpAfterReleaseNoOp(t *testing.T) {
