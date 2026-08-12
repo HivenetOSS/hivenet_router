@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"hivenet_router/internal/tokenizer"
@@ -33,6 +34,25 @@ func TestColdStartDensity(t *testing.T) {
 	}
 	if got <= 800 {
 		t.Errorf("cold-start estimate %d must exceed the len/4 value 800 (denser code assumption)", got)
+	}
+}
+
+// TestEstimateRoundsUp verifies the estimate rounds a fractional token up, so it
+// never under-counts at a tight admission boundary.
+func TestEstimateRoundsUp(t *testing.T) {
+	e := tokenizer.NewEstimator()
+	// 100 bytes × cold ratio 0.3125 = 31.25 → ceil 32 (above the 4-token floor).
+	if got := e.Estimate(model, 100, 1); got != 32 {
+		t.Errorf("estimate = %d, want 32 (ceil of 31.25)", got)
+	}
+}
+
+// TestEstimatePerMessageFloor verifies a textless request is charged the
+// per-message overhead rather than zero.
+func TestEstimatePerMessageFloor(t *testing.T) {
+	e := tokenizer.NewEstimator()
+	if got := e.Estimate(model, 0, 3); got != 12 { // 3 messages × 4 overhead
+		t.Errorf("floored estimate = %d, want 12", got)
 	}
 }
 
@@ -94,6 +114,24 @@ func TestCodingCorpusErrorUnderFewPercent(t *testing.T) {
 		t.Errorf("learned-estimator error on the coding corpus = %.1f%%, want < 5%%", learnedErr*100)
 	}
 	t.Logf("coding-corpus mean error: len/4 = %.1f%%, learned = %.1f%%", legacyErr*100, learnedErr*100)
+}
+
+// TestEstimatorConcurrentAccess exercises the estimator from many goroutines
+// under the race detector — it is shared across all in-flight requests, which
+// estimate and observe concurrently.
+func TestEstimatorConcurrentAccess(t *testing.T) {
+	e := tokenizer.NewEstimator()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.Observe(model, 1000, 300)
+			_ = e.Estimate(model, 1000, 1)
+			_ = e.RatioFor(model)
+		}()
+	}
+	wg.Wait()
 }
 
 func relErr(estimate, truth int) float64 {

@@ -127,6 +127,26 @@ func TestGrowthObserver_ChargesFloorOfCumulativeBytes(t *testing.T) {
 	}
 }
 
+// TestMeter_HaveUsage verifies the exactness signal the handler uses to decide
+// whether to feed a streaming prompt count into the learned estimator.
+func TestMeter_HaveUsage(t *testing.T) {
+	withUsage := router.NewSSETokenMeter()
+	if _, err := withUsage.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !withUsage.HaveUsage() {
+		t.Error("HaveUsage must be true after a backend usage chunk")
+	}
+
+	noUsage := router.NewSSETokenMeter()
+	if _, err := noUsage.Write([]byte(`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if noUsage.HaveUsage() {
+		t.Error("HaveUsage must be false when the stream carried no usage object")
+	}
+}
+
 // TestMeter_HandlesSplitWrites verifies that an SSE event split across multiple
 // Write calls (as happens with TCP/stream chunking) is still parsed once the
 // terminating newline arrives.

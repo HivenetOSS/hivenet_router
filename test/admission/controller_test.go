@@ -213,6 +213,35 @@ func TestTrueUpCannotFreeOtherReservations(t *testing.T) {
 	}
 }
 
+// TestReservationsTrueUpFansOut verifies a bundled true-up reaches every held
+// reservation — the global occupancy budget and the per-key share both correct
+// to the same exact input.
+func TestReservationsTrueUpFansOut(t *testing.T) {
+	global := admission.NewController(1.0, 0)
+	perKey := admission.NewController(1.0, 0)
+	ctx := context.Background()
+
+	g := global.Admit(ctx, model, 100, false, 1_000_000, 0)
+	k := perKey.Admit(ctx, "key\x00"+model, 100, false, 1_000_000, 0)
+	rs := admission.Reservations{g, k}
+
+	rs.Adjust(150 - 100) // exact 150, estimated 100
+	if s, _ := global.Occupancy(model); s != 150 {
+		t.Errorf("global occupancy = %d, want 150", s)
+	}
+	if s, _ := perKey.Occupancy("key\x00" + model); s != 150 {
+		t.Errorf("per-key occupancy = %d, want 150", s)
+	}
+
+	rs.Release()
+	if s, _ := global.Occupancy(model); s != 0 {
+		t.Errorf("global occupancy after release = %d, want 0", s)
+	}
+	if s, _ := perKey.Occupancy("key\x00" + model); s != 0 {
+		t.Errorf("per-key occupancy after release = %d, want 0", s)
+	}
+}
+
 // TestTrueUpAfterReleaseNoOp verifies a late true-up (after the request finished)
 // cannot corrupt occupancy.
 func TestTrueUpAfterReleaseNoOp(t *testing.T) {

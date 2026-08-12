@@ -4,7 +4,9 @@
 package api_test
 
 import (
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,5 +127,52 @@ func TestDoesNotLearnFromEstimatedUsage(t *testing.T) {
 	}
 	if after := est.RatioFor(b2Model); after != before {
 		t.Errorf("estimated (non-exact) usage must not move the ratio: %.4f → %.4f", before, after)
+	}
+}
+
+// streamLearn drives a streaming response with the given prompt-token totals and
+// exact flag, then reports whether the estimator's ratio for the model moved.
+func streamLearn(t *testing.T, promptTokens int, exact bool) (before, after float64) {
+	t.Helper()
+	q := make(chan *domain.PendingRequest, 1)
+	est := tokenizer.NewEstimator()
+	h := learnHandler(q, est)
+	before = est.RatioFor(b2Model)
+	c, w := newCtx("/v1/chat/completions", b2Body(0))
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		// Mimic the processor's streaming meter: publish the totals + exactness
+		// before handing back a streaming body.
+		pending.StreamedPromptTokens.Store(int64(promptTokens))
+		pending.StreamedPromptExact.Store(exact)
+		pending.Response <- &domain.ChatResponse{Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n"))}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	return before, est.RatioFor(b2Model)
+}
+
+// TestLearnsFromStreamingExactUsage verifies the streaming path learns when the
+// prompt count came from a real backend usage object.
+func TestLearnsFromStreamingExactUsage(t *testing.T) {
+	before, after := streamLearn(t, 50, true)
+	if after <= before {
+		t.Errorf("streaming exact usage must move the ratio: %.4f → %.4f", before, after)
+	}
+}
+
+// TestDoesNotLearnFromStreamingEstimate verifies the streaming path does NOT
+// learn when the prompt count is a fallback estimate (no include_usage).
+func TestDoesNotLearnFromStreamingEstimate(t *testing.T) {
+	before, after := streamLearn(t, 50, false)
+	if after != before {
+		t.Errorf("streaming estimate (non-exact) must not move the ratio: %.4f → %.4f", before, after)
 	}
 }
