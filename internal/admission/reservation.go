@@ -63,3 +63,25 @@ func (r *Reservation) Weight() int64 {
 	defer r.mu.Unlock()
 	return r.weight
 }
+
+// Reservations bundles the reservations a single request holds — the global
+// occupancy budget plus, on a serverless replica, the per-key occupancy share —
+// so the handler releases them together and the processor grows them together.
+// It satisfies domain.Reservation. A nil or empty slice is a valid no-op, so the
+// handler can always attach and defer-release it unconditionally.
+type Reservations []*Reservation
+
+// Grow forwards streamed output growth to every held reservation.
+func (rs Reservations) Grow(tokens int) {
+	for _, r := range rs {
+		r.Grow(tokens)
+	}
+}
+
+// Release returns every held reservation to its budget. Idempotent per
+// reservation, so calling it more than once is safe.
+func (rs Reservations) Release() {
+	for _, r := range rs {
+		r.Release()
+	}
+}

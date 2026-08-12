@@ -152,6 +152,26 @@ func TestSmallBudgetFlooredNotDisabled(t *testing.T) {
 	}
 }
 
+// TestPerKeyOversubscriptionIsIndependent models the per-key occupancy share:
+// three keys each capped at 0.40 of a 1000-token budget (400 each) all admit
+// their full share concurrently, because per-key buckets are independent — the
+// shares are intentionally oversubscribed (3 × 400 = 1200 > 1000). Box safety is
+// the separate global budget, not the sum of shares.
+func TestPerKeyOversubscriptionIsIndependent(t *testing.T) {
+	c := admission.NewController(1.0, 0) // per-key controller: no fraction, no park
+	ctx := context.Background()
+	const perKeyBudget = 400 // 0.40 × 1000
+	for _, key := range []string{"keyA\x00m", "keyB\x00m", "keyC\x00m"} {
+		if c.Admit(ctx, key, perKeyBudget, false, perKeyBudget, 0) == nil {
+			t.Errorf("key %q must admit its full 0.40 share independently", key)
+		}
+	}
+	// Each key is at its own cap; a second request on any key is denied.
+	if c.Admit(ctx, "keyA\x00m", 1, false, perKeyBudget, 0) != nil {
+		t.Error("a key already at its share must be denied more")
+	}
+}
+
 // TestParkTimeoutRejects verifies a request that never gets room is rejected when
 // the park window expires.
 func TestParkTimeoutRejects(t *testing.T) {

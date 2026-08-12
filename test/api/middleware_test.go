@@ -154,7 +154,7 @@ func newPolicyHandlers() *api.Handlers {
 		stor, nil, nil, 2*time.Second,
 		exec, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil,
+		nil, nil, nil, nil,
 	)
 }
 

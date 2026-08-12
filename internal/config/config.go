@@ -92,6 +92,15 @@ type Config struct {
 	// Env: HIVENET_ROUTER_ADMIT_PARK_TIMEOUT (a Go duration, e.g. "250ms").
 	AdmitParkTimeout time.Duration
 
+	// RPMBurstSeconds sizes the per-key RPM token bucket's burst as that many
+	// seconds of the rate, instead of a full minute. 0 (default) keeps the legacy
+	// full-minute burst; a short certified window (e.g. 10) stops a key from
+	// spending its whole minute's quota in one instant — the anti-flood burst
+	// control for serverless keys. Range [0,60); values outside keep the legacy
+	// full-minute burst.
+	// Env: HIVENET_ROUTER_RPM_BURST_SECONDS
+	RPMBurstSeconds int
+
 	// Auth configuration file path.
 	// Path to auth.yaml; if empty both /v1/* and /admin/* default to mode: none.
 	// Env: HIVENET_ROUTER_AUTH_CONFIG
@@ -215,6 +224,11 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_ADMIT_PARK_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
 			cfg.AdmitParkTimeout = d
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_RPM_BURST_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n < 60 {
+			cfg.RPMBurstSeconds = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_SESSION_TTL"); v != "" {

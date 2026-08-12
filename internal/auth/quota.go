@@ -79,12 +79,16 @@ func bucketKey(tenantID, model string) string {
 func NewRateLimiter(cfg *config.Config, store DailyQuotaStore) (RateLimiter, error) {
 	switch cfg.QuotaBackend {
 	case "", "memory":
-		return NewInMemoryLimiter(), nil
+		l := NewInMemoryLimiter()
+		l.SetRPMBurstWindow(cfg.RPMBurstSeconds)
+		return l, nil
 	case "badger":
 		if store == nil {
 			return nil, fmt.Errorf("quota backend 'badger' requires a DailyQuotaStore (BadgerStorage must be initialised first)")
 		}
-		return NewBadgerLimiter(store), nil
+		l := NewBadgerLimiter(store)
+		l.SetRPMBurstWindow(cfg.RPMBurstSeconds)
+		return l, nil
 	default:
 		return nil, fmt.Errorf("unknown quota backend %q: valid values are 'memory' (default) or 'badger'", cfg.QuotaBackend)
 	}
@@ -110,6 +114,33 @@ type InMemoryLimiter struct {
 	// tenant ID and the new cumulative used count for today. Nil-safe.
 	// Set once at startup via SetOnTokensUsed before any requests arrive.
 	onTokensUsed func(tenantID string, used int)
+
+	// rpmBurstSeconds sizes the RPM token bucket's burst as that many seconds of
+	// the rate, instead of a full minute. 0 (or >= 60) keeps the legacy
+	// full-minute burst. A short certified window (e.g. 10s) closes the hole
+	// where a key could spend its entire minute's quota in one instant. Set once
+	// at startup via SetRPMBurstWindow before any request is handled.
+	rpmBurstSeconds int
+}
+
+// SetRPMBurstWindow sets the RPM burst window in seconds (see rpmBurstSeconds).
+// Must be called before the limiter handles any requests.
+func (l *InMemoryLimiter) SetRPMBurstWindow(seconds int) {
+	l.rpmBurstSeconds = seconds
+}
+
+// rpmBurst returns the token-bucket burst for a per-minute request rate. With a
+// window of 0 or >= 60 the burst is a full minute's quota (legacy x/time/rate
+// default). A shorter window enforces the certified burst instead —
+// rpm × window / 60, floored at 1.
+func (l *InMemoryLimiter) rpmBurst(rpm int) int {
+	if l.rpmBurstSeconds <= 0 || l.rpmBurstSeconds >= 60 {
+		return rpm
+	}
+	if b := rpm * l.rpmBurstSeconds / 60; b > 1 {
+		return b
+	}
+	return 1
 }
 
 // SetOnTokensUsed registers a callback that fires after every successful token
@@ -224,12 +255,12 @@ func (l *InMemoryLimiter) getOrCreateRPM(bucket string, rpm int) *rate.Limiter {
 		if lim.Limit() != r {
 			lim.SetLimit(r)
 		}
-		if lim.Burst() != rpm {
-			lim.SetBurst(rpm)
+		if burst := l.rpmBurst(rpm); lim.Burst() != burst {
+			lim.SetBurst(burst)
 		}
 		return lim
 	}
-	lim := rate.NewLimiter(r, rpm) // burst = full minute's quota
+	lim := rate.NewLimiter(r, l.rpmBurst(rpm)) // burst = certified window (default: full minute)
 	actual, _ := l.rpmLimiters.LoadOrStore(bucket, lim)
 	return actual.(*rate.Limiter)
 }
