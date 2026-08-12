@@ -289,9 +289,13 @@ func (l *InMemoryLimiter) Reset() {
 //
 //   - An RPM bucket is evicted once it is full: a token bucket refills within
 //     its burst window, so a full bucket is byte-for-byte what a fresh one
-//     would be — eviction is lossless. (A racing request that just loaded the
-//     limiter can at worst have one deduction land on the orphaned bucket,
-//     forgiving a single request per sweep — negligible against any real rate.)
+//     would be. Eviction is lossless up to one race: requests that loaded the
+//     limiter pointer in the instant the sweep deleted it deduct on the
+//     orphaned bucket, and those deductions are forgotten when the next
+//     request recreates a fresh one. That forgives at most the requests in
+//     flight during that microsecond window, once per sweep — negligible
+//     against any per-minute rate, and not worth the tombstone protocol that
+//     true losslessness would need.
 //   - A daily bucket is evicted once its UTC day has passed: rollover discards
 //     its counter anyway, so a stale-day bucket is dead weight.
 func (l *InMemoryLimiter) SweepIdle() int {
