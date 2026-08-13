@@ -1,7 +1,7 @@
 ---
 title: "auth.yaml reference"
-sidebarTitle: "auth.yaml reference"
 description: "Configure static client authentication, administrator access, model restrictions, expiration, and flat or per-model quotas."
+sidebarTitle: "auth.yaml reference"
 ---
 
 The `auth.yaml` file configures authentication and access control for the Hivenet Router HTTP APIs.
@@ -465,9 +465,11 @@ quota:
 - **Input tokens per minute (ITPM)** uses a continuously refilling, one-minute-capacity bucket. The same learned estimate used by B1 and occupancy is deducted before the daily budget, so an ITPM rejection does not spend daily tokens. Cached prompt prefixes currently count in full.
 - **Output tokens per minute (OTPM)** is charged from exact completion usage after a local response. Output is not reserved. If recent output drains the bucket, the next request returns `429 rate_limit_exceeded`. One response can drain at most one minute of capacity.
 - **Occupancy share** limits the key's simultaneous token-weighted footprint to:
+
   ```text
   max_occupancy_share × admit_budget_tokens × healthy_replicas
   ```
+
   The per-key fairness controller intentionally does not apply `HIVENET_ROUTER_ADMIT_FRACTION`. The global B2 controller still applies that fraction and remains the safety limit for the pool.
 
 These limits do not run for `mode: reserved`, and `0` disables each limit. Their shares may be deliberately oversubscribed and do not need to add up to `1`. B4 rejections set `Retry-After: 1`; the ordinary request-per-minute limiter uses the same `rate_limit_exceeded` code without that header.

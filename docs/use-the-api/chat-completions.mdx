@@ -1,6 +1,6 @@
 ---
-title: "Chat completions and messages"
 Slug: "api/chat-completions"
+title: "Chat completions and messages"
 description: "Send OpenAI-compatible chat-completion and Anthropic Messages requests through Hivenet Router, with streaming, routing, authentication, and quota enforcement."
 sidebarTitle: "Chat completions"
 ---
@@ -396,9 +396,7 @@ API keys can enforce:
 
 Before routing, Hivenet Router checks the request-rate quota. Independently of key quotas, LLM generation also passes the model's [admission gates](/routing/admission-control): per-request input and image caps, live pool-pressure shedding, and replica-scaled occupancy limits. These protect the serving pool even when the key has unlimited quotas.
 
-Independently of per-key quotas, every request also passes the [admission gates](/routing/admission-control) for its model: the per-request input and image caps, the front-door pressure shed, and the KV-occupancy budget. These protect the serving pool as a whole and apply even to keys with unlimited quotas.
-
-When a daily token budget is configured, the router estimates the prompt and checks whether the remaining budget can cover:
+When a daily token budget is configured, it also estimates the prompt and checks whether the remaining budget can cover:
 
 ```text
 estimated input tokens + requested maximum output tokens

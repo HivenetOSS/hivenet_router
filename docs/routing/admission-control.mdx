@@ -165,9 +165,11 @@ api:
 ```
 
 - `max_occupancy_share` limits the key's in-flight footprint to:
+
   ```text
   max_occupancy_share × admit_budget_tokens × healthy_replicas
   ```
+
   This fairness limit intentionally does **not** apply `HIVENET_ROUTER_ADMIT_FRACTION`. It rejects immediately with `429 rate_limit_exceeded`; the global B2 budget remains the box-safety limit.
 - `input_tokens_per_minute` is a continuously refilling one-minute bucket charged from the shared input estimate before the daily budget.
 - `output_tokens_per_minute` is charged after a local response. If recent output drains the bucket, the next request is rejected. One response can drain at most one minute of capacity.
