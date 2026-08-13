@@ -1069,82 +1069,84 @@ Before loading a policy, check that:
 
 ## Troubleshooting
 
-### The router rejects the policy
+<AccordionGroup>
+  <Accordion title="The router rejects the policy">
+    Check its logs for the first validation error.
 
-Check its logs for the first validation error.
+    Common causes include:
 
-Common causes include:
+    - missing `strategy`
+    - unsupported strategy
+    - unknown metric field
+    - missing comparison operator
+    - several operators on one metric
+    - missing provider engine or model
+    - provider API key not configured
+    - invalid YAML indentation
+  </Accordion>
 
-- missing `strategy`
-- unsupported strategy
-- unknown metric field
-- missing comparison operator
-- several operators on one metric
-- missing provider engine or model
-- provider API key not configured
-- invalid YAML indentation
+  <Accordion title="A policy file is ignored">
+    For a named file, check that:
 
-### A policy file is ignored
+    - its extension is `.yaml` or `.yml`
+    - it contains a non-empty `models` array
+    - another file does not already claim one of its models
+    - it passed YAML and policy validation
+  </Accordion>
 
-For a named file, check that:
+  <Accordion title="A model uses the global policy">
+    Confirm that the model name in the file exactly matches the model registered by the agent:
 
-- its extension is `.yaml` or `.yml`
-- it contains a non-empty `models` array
-- another file does not already claim one of its models
-- it passed YAML and policy validation
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/models \
+      -H "Authorization: Bearer <admin-api-key>" \
+      | jq -r '.data[].id'
+    ```
 
-### A model uses the global policy
+    Model names are case-sensitive.
+  </Accordion>
 
-Confirm that the model name in the file exactly matches the model registered by the agent:
+  <Accordion title="A gate does not exclude an agent">
+    Inspect the live value:
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/models \
-  -H "Authorization: Bearer <admin-api-key>" \
-  | jq -r '.data[].id'
-```
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      -H "Authorization: Bearer <admin-api-key>" \
+      | jq '.agents[]'
+    ```
 
-Model names are case-sensitive.
+    The metric may be unavailable, use another unit, or remain unset until the agent has served requests.
+  </Accordion>
 
-### A gate does not exclude an agent
+  <Accordion title="A changed policy does not take effect">
+    File changes are not watched continuously.
 
-Inspect the live value:
+    Send `SIGHUP`:
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  -H "Authorization: Bearer <admin-api-key>" \
-  | jq '.agents[]'
-```
+    ```bash
+    sudo kill -HUP "$(pgrep hivenet-router)"
+    ```
 
-The metric may be unavailable, use another unit, or remain unset until the agent has served requests.
-
-### A changed policy does not take effect
-
-File changes are not watched continuously.
-
-Send `SIGHUP`:
-
-```bash
-sudo kill -HUP "$(pgrep hivenet-router)"
-```
-
-Then inspect the router logs for the reload result.
+    Then inspect the router logs for the reload result.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Fallback chains" href="/routing/fallback-chains">
+<Columns cols={3}>
+  <Card title="Fallback chains" icon="link" href="/routing/fallback-chains">
     Build ordered local alternatives with independent filters and retry budgets.
   </Card>
 
-  <Card title="Provider fallback" href="/routing/provider-fallback">
+  <Card title="Provider fallback" icon="cloud-arrow-up" href="/routing/provider-fallback">
     Configure OpenAI or Anthropic as a final fallback for chat requests.
   </Card>
 
-  <Card title="Policy gates" href="/routing/policy-gates">
+  <Card title="Policy gates" icon="filter" href="/routing/policy-gates">
     Review practical gate patterns for health, latency, cache, and hardware pressure.
   </Card>
-</CardGroup>
+</Columns>
