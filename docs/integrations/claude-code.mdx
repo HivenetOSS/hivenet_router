@@ -775,255 +775,257 @@ Give Claude Code its own client key when you need its traffic separated from oth
 
 ## Troubleshooting
 
-### Claude Code opens the login screen
+<AccordionGroup>
+  <Accordion title="Claude Code opens the login screen">
+    The gateway credential did not reach the process.
 
-The gateway credential did not reach the process.
+    Check:
 
-Check:
-
-```bash
-echo "$ANTHROPIC_BASE_URL"
-echo "${ANTHROPIC_AUTH_TOKEN:+set}"
-```
-
-Then start Claude Code from the same shell.
-
-Run `/status` after it opens.
-
-### `/status` shows no Anthropic base URL
-
-Claude Code is not using the Hivenet Router endpoint.
-
-Check for:
-
-- a missing environment variable
-- a settings-file override
-- an editor or launcher with another environment
-- a misspelled variable name
-
-### Requests return `401`
-
-Use:
-
-```text
-ANTHROPIC_AUTH_TOKEN
-```
-
-rather than only:
-
-```text
-ANTHROPIC_API_KEY
-```
-
-Confirm that the raw Hivenet Router client key is being sent, not its SHA-256 hash.
-
-Test it directly:
-
-```bash
-curl \
-  -H "Authorization: Bearer <hivenet-router-api-key>" \
-  https://router.example.com/v1/models
-```
-
-### Requests return a plain `404`
-
-Check the base URL.
-
-It should not end in:
-
-```text
-/v1
-```
-
-Also confirm that the request reaches:
-
-```text
-/v1/messages
-```
-
-rather than an unsupported path.
-
-### The router returns `model_not_found`
-
-Compare the configured alias with:
-
-```bash
-curl \
-  -H "Authorization: Bearer <hivenet-router-api-key>" \
-  https://router.example.com/v1/models \
-  | jq -r '.data[].id'
-```
-
-Check:
-
-- capitalization
-- punctuation
-- served-model alias
-- agent `--model`
-- API-key model access
-- agent health
-
-### The backend returns `404` for `/v1/messages`
-
-The backend does not implement the Anthropic Messages endpoint.
-
-A backend that supports only:
-
-```text
-/v1/chat/completions
-```
-
-cannot serve Claude Code through the current Hivenet Router passthrough.
-
-Use an Anthropic-compatible backend or another coding client that speaks OpenAI Chat Completions.
-
-### Text works but tools fail
-
-Check that:
-
-- the model supports structured tool calls
-- vLLM uses `--enable-auto-tool-choice`
-- the selected `--tool-call-parser` matches the model
-- the backend returns Anthropic-format tool-use blocks
-- the model follows tool schemas reliably
-
-Test the backend directly to isolate it from Hivenet Router.
-
-### The backend rejects `system` messages
-
-Upgrade the backend and test the current Claude Code request against it directly.
-
-Do not begin by pinning an old Claude Code release. First confirm whether the backend’s current Anthropic Messages implementation accepts the system-content shape the client sends.
-
-### The backend rejects `thinking` or `adaptive`
-
-Update the backend first.
-
-As a compatibility test:
-
-```bash
-export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
-```
-
-Restart Claude Code after changing the variable.
-
-### The backend rejects beta fields
-
-As a temporary diagnostic:
-
-```bash
-export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
-```
-
-This may disable context management and newer tool features.
-
-### Claude Code retries and Hivenet Router later reports no eligible agent
-
-Inspect the backend’s first error.
-
-A backend rejection that Hivenet Router treats as retryable can cause the request session to try other agents and exclude agents that already failed.
-
-Check:
-
-<Tabs>
-  <Tab title="Router">
     ```bash
-    docker compose logs router \
-      | grep -iE "messages|policy|failed|exhaust"
+    echo "$ANTHROPIC_BASE_URL"
+    echo "${ANTHROPIC_AUTH_TOKEN:+set}"
     ```
-  </Tab>
-  <Tab title="Agent">
+
+    Then start Claude Code from the same shell.
+
+    Run `/status` after it opens.
+  </Accordion>
+
+  <Accordion title="`/status` shows no Anthropic base URL">
+    Claude Code is not using the Hivenet Router endpoint.
+
+    Check for:
+
+    - a missing environment variable
+    - a settings-file override
+    - an editor or launcher with another environment
+    - a misspelled variable name
+  </Accordion>
+
+  <Accordion title="Requests return `401`">
+    Use:
+
+    ```text
+    ANTHROPIC_AUTH_TOKEN
+    ```
+
+    rather than only:
+
+    ```text
+    ANTHROPIC_API_KEY
+    ```
+
+    Confirm that the raw Hivenet Router client key is being sent, not its SHA-256 hash.
+
+    Test it directly:
+
     ```bash
-    docker compose logs <agent-service> \
-      | tail -100
+    curl \
+      -H "Authorization: Bearer <hivenet-router-api-key>" \
+      https://router.example.com/v1/models
     ```
-  </Tab>
-  <Tab title="vLLM">
+  </Accordion>
+
+  <Accordion title="Requests return a plain `404`">
+    Check the base URL.
+
+    It should not end in:
+
+    ```text
+    /v1
+    ```
+
+    Also confirm that the request reaches:
+
+    ```text
+    /v1/messages
+    ```
+
+    rather than an unsupported path.
+  </Accordion>
+
+  <Accordion title="The router returns `model_not_found`">
+    Compare the configured alias with:
+
     ```bash
-    docker compose logs <vllm-service> \
-      | tail -100
+    curl \
+      -H "Authorization: Bearer <hivenet-router-api-key>" \
+      https://router.example.com/v1/models \
+      | jq -r '.data[].id'
     ```
-  </Tab>
-</Tabs>
 
-The most useful validation message often appears in the backend log.
+    Check:
 
-### Streaming arrives only after completion
+    - capitalization
+    - punctuation
+    - served-model alias
+    - agent `--model`
+    - API-key model access
+    - agent health
+  </Accordion>
 
-Check:
+  <Accordion title="The backend returns `404` for `/v1/messages`">
+    The backend does not implement the Anthropic Messages endpoint.
 
-- backend SSE behavior
-- Hivenet Router agent version
-- reverse-proxy buffering
-- proxy read and idle timeouts
-- response `Content-Type`
+    A backend that supports only:
 
-Test the backend and router separately with streaming curl requests.
+    ```text
+    /v1/chat/completions
+    ```
 
-### Token counting fails
+    cannot serve Claude Code through the current Hivenet Router passthrough.
 
-Test the backend directly:
+    Use an Anthropic-compatible backend or another coding client that speaks OpenAI Chat Completions.
+  </Accordion>
 
-```bash
-curl -i -X POST \
-  http://localhost:8888/v1/messages/count_tokens \
-  -H "Content-Type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{
-    "model": "hivenet-router-code-model",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello"
-      }
-    ]
-  }'
-```
+  <Accordion title="Text works but tools fail">
+    Check that:
 
-Claude Code can estimate context locally when token counting is unavailable, but backend support gives more accurate results.
+    - the model supports structured tool calls
+    - vLLM uses `--enable-auto-tool-choice`
+    - the selected `--tool-call-parser` matches the model
+    - the backend returns Anthropic-format tool-use blocks
+    - the model follows tool schemas reliably
 
-### The model picker does not show Hivenet Router models
+    Test the backend directly to isolate it from Hivenet Router.
+  </Accordion>
 
-Use the mapped aliases:
+  <Accordion title="The backend rejects `system` messages">
+    Upgrade the backend and test the current Claude Code request against it directly.
 
-```text
-/model sonnet
-/model opus
-/model haiku
-```
+    Do not begin by pinning an old Claude Code release. First confirm whether the backend’s current Anthropic Messages implementation accepts the system-content shape the client sends.
+  </Accordion>
 
-Or configure:
+  <Accordion title="The backend rejects `thinking` or `adaptive`">
+    Update the backend first.
 
-```text
-ANTHROPIC_CUSTOM_MODEL_OPTION
-```
+    As a compatibility test:
 
-Gateway discovery ignores typical open-model IDs that do not begin with `claude` or `anthropic`.
+    ```bash
+    export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+    ```
+
+    Restart Claude Code after changing the variable.
+  </Accordion>
+
+  <Accordion title="The backend rejects beta fields">
+    As a temporary diagnostic:
+
+    ```bash
+    export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+    ```
+
+    This may disable context management and newer tool features.
+  </Accordion>
+
+  <Accordion title="Claude Code retries and Hivenet Router later reports no eligible agent">
+    Inspect the backend’s first error.
+
+    A backend rejection that Hivenet Router treats as retryable can cause the request session to try other agents and exclude agents that already failed.
+
+    Check:
+
+    <Tabs>
+      <Tab title="Router">
+        ```bash
+        docker compose logs router \
+          | grep -iE "messages|policy|failed|exhaust"
+        ```
+      </Tab>
+      <Tab title="Agent">
+        ```bash
+        docker compose logs <agent-service> \
+          | tail -100
+        ```
+      </Tab>
+      <Tab title="vLLM">
+        ```bash
+        docker compose logs <vllm-service> \
+          | tail -100
+        ```
+      </Tab>
+    </Tabs>
+
+    The most useful validation message often appears in the backend log.
+  </Accordion>
+
+  <Accordion title="Streaming arrives only after completion">
+    Check:
+
+    - backend SSE behavior
+    - Hivenet Router agent version
+    - reverse-proxy buffering
+    - proxy read and idle timeouts
+    - response `Content-Type`
+
+    Test the backend and router separately with streaming curl requests.
+  </Accordion>
+
+  <Accordion title="Token counting fails">
+    Test the backend directly:
+
+    ```bash
+    curl -i -X POST \
+      http://localhost:8888/v1/messages/count_tokens \
+      -H "Content-Type: application/json" \
+      -H "anthropic-version: 2023-06-01" \
+      -d '{
+        "model": "hivenet-router-code-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello"
+          }
+        ]
+      }'
+    ```
+
+    Claude Code can estimate context locally when token counting is unavailable, but backend support gives more accurate results.
+  </Accordion>
+
+  <Accordion title="The model picker does not show Hivenet Router models">
+    Use the mapped aliases:
+
+    ```text
+    /model sonnet
+    /model opus
+    /model haiku
+    ```
+
+    Or configure:
+
+    ```text
+    ANTHROPIC_CUSTOM_MODEL_OPTION
+    ```
+
+    Gateway discovery ignores typical open-model IDs that do not begin with `claude` or `anthropic`.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="OpenCode" href="/integrations/open-code">
+<Columns cols={3}>
+  <Card title="OpenCode" icon="code" href="/integrations/open-code">
     Connect a coding agent through OpenAI Chat Completions.
   </Card>
 
-  <Card title="Use from code" href="/integrations/use-from-code">
+  <Card title="Use from code" icon="code-branch" href="/integrations/use-from-code">
     Call Hivenet Router from SDKs, scripts, and custom applications.
   </Card>
 
-  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+  <Card title="Chat completions and messages" icon="messages" href="/use-the-api/chat-completions">
     Review the Anthropic and OpenAI inference paths.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Configure model access, quotas, expiration, and credential rotation.
   </Card>
 
-  <Card title="vLLM agent" href="/deploy/agents/vllm">
+  <Card title="vLLM agent" icon="server" href="/deploy/agents/vllm">
     Deploy and register the backend serving Claude Code requests.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="clipboard-list" href="/observability/audit-logging">
     Investigate Claude Code requests by tenant, model, status, and agent.
   </Card>
-</CardGroup>
+</Columns>
