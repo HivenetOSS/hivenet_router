@@ -80,42 +80,43 @@ export HIVENET_ROUTER_JWT_SECRET="<shared-secret>"
 
 An agent joins the network in two stages.
 
-### 1. Authenticate over gRPC
+<Steps>
+  <Step title="Authenticate over gRPC">
+    The agent:
 
-The agent:
+    1. creates a JWT signed with HMAC-SHA256
+    2. includes its libp2p peer ID as the JWT subject
+    3. connects to the router’s gRPC authentication endpoint
+    4. verifies the router’s pinned TLS public key
+    5. sends the JWT and its agent metadata
 
-1. creates a JWT signed with HMAC-SHA256
-2. includes its libp2p peer ID as the JWT subject
-3. connects to the router’s gRPC authentication endpoint
-4. verifies the router’s pinned TLS public key
-5. sends the JWT and its agent metadata
+    The router:
 
-The router:
+    1. verifies the JWT signature
+    2. validates its issuer, issue time, expiry, and subject
+    3. validates required agent metadata
+    4. creates a random session token
+    5. returns the session token, router libp2p addresses, and runtime configuration
 
-1. verifies the JWT signature
-2. validates its issuer, issue time, expiry, and subject
-3. validates required agent metadata
-4. creates a random session token
-5. returns the session token, router libp2p addresses, and runtime configuration
+    The gRPC endpoint uses TLS 1.3.
 
-The gRPC endpoint uses TLS 1.3.
+    Hivenet Router deterministically derives an Ed25519 certificate and public key from the shared JWT secret using HKDF-SHA256. The agent pins that public key, so the deployment does not need a separate certificate authority or pre-distributed gRPC certificate files.
 
-Hivenet Router deterministically derives an Ed25519 certificate and public key from the shared JWT secret using HKDF-SHA256. The agent pins that public key, so the deployment does not need a separate certificate authority or pre-distributed gRPC certificate files.
+    A router and agent using different secrets fail the TLS identity check before registration.
+  </Step>
+  <Step title="Register over libp2p">
+    After gRPC authentication, the agent connects to the router’s libp2p endpoint and presents the session token.
 
-A router and agent using different secrets fail the TLS identity check before registration.
+    The router links:
 
-### 2. Register over libp2p
+    - the authenticated agent identity
+    - the agent’s libp2p peer ID
+    - its registered model and metadata
+    - the short-lived session
 
-After gRPC authentication, the agent connects to the router’s libp2p endpoint and presents the session token.
-
-The router links:
-
-- the authenticated agent identity
-- the agent’s libp2p peer ID
-- its registered model and metadata
-- the short-lived session
-
-Router-agent traffic then uses libp2p with Noise encryption.
+    Router-agent traffic then uses libp2p with Noise encryption.
+  </Step>
+</Steps>
 
 ## Agent metadata validation
 
@@ -576,106 +577,108 @@ Compromise has different consequences:
 
 ## Troubleshooting
 
-### An agent reports a TLS key mismatch
+<AccordionGroup>
+  <Accordion title="An agent reports a TLS key mismatch">
+    The router and agent are using different JWT secrets.
 
-The router and agent are using different JWT secrets.
+    Compare their secret files without printing their contents:
 
-Compare their secret files without printing their contents:
+    ```bash
+    sha256sum /etc/hivenet-router/jwt.secret
+    ```
 
-```bash
-sha256sum /etc/hivenet-router/jwt.secret
-```
+    The hashes must match.
 
-The hashes must match.
+    Restart the affected process after correcting the secret.
+  </Accordion>
 
-Restart the affected process after correcting the secret.
+  <Accordion title="The router rejects the agent metadata">
+    Check the agent logs for the field named in the rejection.
 
-### The router rejects the agent metadata
+    Required values include:
 
-Check the agent logs for the field named in the rejection.
+    - model
+    - positive capacity
+    - version
+    - engine
+    - region
+    - organization
+  </Accordion>
 
-Required values include:
+  <Accordion title="A client receives `401 unauthorized`">
+    Check that:
 
-- model
-- positive capacity
-- version
-- engine
-- region
-- organization
+    - the correct key is being sent
+    - the header uses the expected value
+    - the router loaded the intended auth configuration
+    - the static key has not expired
+    - a dynamic key is enabled and present after the latest router restart
+    - the request is reaching the intended router environment
 
-### A client receives `401 unauthorized`
+    Do not expect the response to distinguish these cases. Check operator logs and configuration.
+  </Accordion>
 
-Check that:
+  <Accordion title="A valid client key receives `403 model_forbidden`">
+    Authentication succeeded, but the key may not use the requested model.
 
-- the correct key is being sent
-- the header uses the expected value
-- the router loaded the intended auth configuration
-- the static key has not expired
-- a dynamic key is enabled and present after the latest router restart
-- the request is reaching the intended router environment
+    Review:
 
-Do not expect the response to distinguish these cases. Check operator logs and configuration.
+    - `models` for static keys
+    - `allowed_models` for dynamic keys
+    - `quota.per_model`
+    - exact model spelling and capitalization
+  </Accordion>
 
-### A valid client key receives `403 model_forbidden`
+  <Accordion title="Administration requests receive `401`">
+    Client and administration credentials are separate.
 
-Authentication succeeded, but the key may not use the requested model.
+    Confirm that:
 
-Review:
+    ```yaml
+    admin:
+      mode: api-key
+    ```
 
-- `models` for static keys
-- `allowed_models` for dynamic keys
-- `quota.per_model`
-- exact model spelling and capitalization
+    and that the submitted value appears in:
 
-### Administration requests receive `401`
+    ```text
+    HIVENET_ROUTER_ADMIN_API_KEYS
+    ```
 
-Client and administration credentials are separate.
+    Restart the router after changing the environment variable.
+  </Accordion>
 
-Confirm that:
+  <Accordion title="Static changes do not take effect">
+    Send `SIGHUP`:
 
-```yaml
-admin:
-  mode: api-key
-```
+    ```bash
+    sudo kill -HUP "$(pgrep hivenet-router)"
+    ```
 
-and that the submitted value appears in:
+    Then inspect the router logs for parsing or validation errors.
 
-```text
-HIVENET_ROUTER_ADMIN_API_KEYS
-```
+    Dynamic registry entries are not reloaded from `auth.yaml`.
+  </Accordion>
 
-Restart the router after changing the environment variable.
+  <Accordion title="Dynamic keys disappear">
+    The dynamic registry is stored in memory.
 
-### Static changes do not take effect
-
-Send `SIGHUP`:
-
-```bash
-sudo kill -HUP "$(pgrep hivenet-router)"
-```
-
-Then inspect the router logs for parsing or validation errors.
-
-Dynamic registry entries are not reloaded from `auth.yaml`.
-
-### Dynamic keys disappear
-
-The dynamic registry is stored in memory.
-
-Repopulate it through the administration API after every router restart.
+    Repopulate it through the administration API after every router restart.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="API keys" href="/security/api-keys">
+<Columns cols={3}>
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Generate, configure, manage, and revoke static and dynamic client keys.
   </Card>
 
-  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+  <Card title="auth.yaml reference" icon="file-code" href="/security/auth-yaml-reference">
     Review the complete static authentication and quota schema.
   </Card>
 
-  <Card title="Key rotation" href="/security/key-rotation">
+  <Card title="Key rotation" icon="rotate" href="/security/key-rotation">
     Rotate agent, client, administrator, and provider credentials safely.
   </Card>
-</CardGroup>
+</Columns>
