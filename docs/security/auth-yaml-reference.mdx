@@ -184,7 +184,7 @@ api:
 | `metadata` | Yes | Identity and lifecycle information |
 | `models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
-| `max_occupancy_share` | No | Serverless occupancy-share setting; `0` is unset, otherwise valid through `1` |
+| `max_occupancy_share` | No | Serverless key-level share of the replica-scaled KV occupancy capacity; `0` is unset, otherwise valid through `1` |
 
 ### `key_hash`
 
@@ -394,9 +394,11 @@ quota:
 | --- | --- | --- |
 | `requests_per_minute` | No | Shared request-rate limit |
 | `tokens_per_day` | No | Shared daily language-model token budget |
-| `input_tokens_per_minute` | No | Serverless input-token rate limit per key and model |
-| `output_tokens_per_minute` | No | Serverless output-token rate limit per key and model |
+| `input_tokens_per_minute` | No | Serverless per-key input-token rate, charged before forwarding |
+| `output_tokens_per_minute` | No | Serverless per-key output-token rate, metered after local responses |
 | `0` | Not applicable | Unlimited |
+
+The two per-minute token fields are available only in the flat quota shape. They cannot be combined with `quota.per_model`, and negative values are rejected.
 
 Flat quota buckets are associated with the owner rather than the individual key.
 
@@ -445,9 +447,9 @@ A value of `0` disables the token budget.
 
 Embedding and reranking requests currently participate in request-rate limits but do not charge input against `tokens_per_day`.
 
-### Serverless key fields
+### Serverless per-key caps
 
-The flat quota shape also accepts:
+When the effective policy uses `mode: serverless`, the flat quota shape and key entry accept:
 
 ```yaml
 max_occupancy_share: 0.25
@@ -458,21 +460,35 @@ quota:
   output_tokens_per_minute: 32768
 ```
 
-`input_tokens_per_minute` and `output_tokens_per_minute` must be non-negative. They cannot be mixed with `quota.per_model`. `max_occupancy_share` sits on the key entry rather than inside `quota`; it must be `0` (unset) or greater than `0` and at most `1`.
+`max_occupancy_share` sits on the key entry rather than inside `quota` because it is a fraction of pool capacity rather than a rate. The runtime behavior is:
 
-For static keys that can reach a serverless policy, startup also checks that a nonzero `input_tokens_per_minute` is at least that policy's `max_input_tokens`. Policy and auth reloads re-check the same invariant before replacing the active configuration.
+- **Input tokens per minute (ITPM)** uses a continuously refilling, one-minute-capacity bucket. The same learned estimate used by B1 and occupancy is deducted before the daily budget, so an ITPM rejection does not spend daily tokens. Cached prompt prefixes currently count in full.
+- **Output tokens per minute (OTPM)** is charged from exact completion usage after a local response. Output is not reserved. If recent output drains the bucket, the next request returns `429 rate_limit_exceeded`. One response can drain at most one minute of capacity.
+- **Occupancy share** limits the key's simultaneous token-weighted footprint to:
+  ```text
+  max_occupancy_share × admit_budget_tokens × healthy_replicas
+  ```
+  The per-key fairness controller intentionally does not apply `HIVENET_ROUTER_ADMIT_FRACTION`. The global B2 controller still applies that fraction and remains the safety limit for the pool.
 
-At runtime for `mode: serverless` policies:
+These limits do not run for `mode: reserved`, and `0` disables each limit. Their shares may be deliberately oversubscribed and do not need to add up to `1`. B4 rejections set `Retry-After: 1`; the ordinary request-per-minute limiter uses the same `rate_limit_exceeded` code without that header.
 
-- `max_occupancy_share` limits the key's simultaneous token-weighted footprint to `share × admit_budget_tokens`. It rejects immediately with `429 rate_limit_exceeded` and `Retry-After: 1`.
-- `input_tokens_per_minute` uses a continuously refilling, one-minute-capacity bucket. The learned input estimate is deducted before the daily token budget.
-- `output_tokens_per_minute` is deducted after the response. If recent output drains the bucket, the next request returns `429 rate_limit_exceeded` and `Retry-After: 1`. A single response is charged at most one minute of capacity.
-
-These limits do not run for `mode: reserved`, and `0` disables each limit.
+Provider fallback retains the pre-routing ITPM charge but does not charge provider output to OTPM.
 
 <Warning>
   Dynamic keys are isolated by their registry key ID. Static-key authentication currently leaves that ID empty, so the handler's `anonymous` fallback makes the serverless token-rate buckets and occupancy controller shared across static keys for the same model. Treat this as a current implementation limitation when choosing static or dynamic authentication.
 </Warning>
+
+### Cross-config validation
+
+The router validates these invariants at startup, on SIGHUP reload of auth or policy files, and on dynamic `PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` writes:
+
+1. `max_occupancy_share` must be `0` (unset) or in `(0, 1]`.
+2. Input and output token-per-minute values cannot be negative.
+3. For every serverless model the key can reach, a nonzero `input_tokens_per_minute` must be at least the policy's `max_input_tokens`.
+
+An invalid dynamic write returns HTTP `400`. An invalid reload leaves the previous valid auth and policy configuration active.
+
+The repository's `auth.DeriveKeyDefaults` helper calculates suggested B4 values from certified model limits. The router does not load `router_limits.yaml` or call that helper while loading `auth.yaml`; provisioning tooling must write the derived values into each key entry.
 
 ## Per-model quotas
 

@@ -272,7 +272,7 @@ When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
 <Note>
   The current embedding path does not charge input or output tokens against the daily token quota. It records successful embedding requests with zero input and output tokens for quota accounting.
 
-  Embedding requests are also exempt from the [admission gates](/routing/admission-control) (per-request token caps, KV-occupancy budget, per-key token rates) by design: those gates model KV-cache-bound generation, which prefill-only embedding work does not do. The request-rate quota, body-size cap, and agent concurrency limits are the protections on this path.
+  Embedding requests are also exempt from the [LLM admission gates](/routing/admission-control), including per-request token caps, KV-occupancy budgets, and serverless token rates. These gates model KV-cache-bound generation, which prefill-only embedding work does not perform. Request-rate, body-size, and agent-concurrency limits still protect this path.
 </Note>
 
 ## Routing policies

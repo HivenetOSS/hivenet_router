@@ -12,11 +12,11 @@ The admission-control metrics show why requests are rejected and how close each 
 | --- | --- | --- | --- |
 | `hivenet_router_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by an admission gate |
 | `hivenet_router_admission_occupancy_tokens` | Gauge | `model` | Current weighted in-flight token sum |
-| `hivenet_router_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens` |
+| `hivenet_router_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas` |
 | `hivenet_router_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
-| `hivenet_router_admission_max_inflight` | Gauge | `model` | Configured `max_inflight`; `0` means no count backstop |
+| `hivenet_router_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas`; `0` means no count backstop |
 
-The global occupancy controller updates all four gauges when a request is admitted, released, adjusted to exact input usage, or grown by streamed output.
+The global occupancy controller updates all four gauges when a request is admitted, released, adjusted to exact input usage, or grown by streamed output. The healthy-replica count is recomputed for each admission and floored at `1`, so the budget and backstop gauges follow the live serving pool.
 
 Per-tenant RPM rejects also increment `hivenet_router_tenant_rate_limited_total` in addition to the unified `b4_rpm` reason below.
 

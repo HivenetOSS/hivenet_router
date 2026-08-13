@@ -141,7 +141,8 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Hardware | GPU, CPU, and system memory |
 | Policies | Primary routing, fallback, exhaustion, reloads, and connection resets |
 | Queue | Requests waiting for agent capacity |
-| Tenant, quota, and admission | Requests, tokens, limits, last use, admission occupancy, and rejection reasons |
+| Tenant and quota | Requests, tokens, limits, last use, and quota failures |
+| Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -1254,6 +1255,34 @@ increase(
 
   Investigate any increase rather than treating it as a harmless background error.
 </Warning>
+
+## Admission-control metrics
+
+The LLM admission gates publish one rejection counter and four live pool gauges:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_router_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
+| `hivenet_router_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
+| `hivenet_router_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling |
+| `hivenet_router_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
+| `hivenet_router_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
+
+The `reason` label identifies the gate:
+
+| Reason | Trigger |
+| --- | --- |
+| `b1` | Input-token or image-count cap |
+| `b2` | Global occupancy budget or in-flight backstop |
+| `b3` | Live pool-pressure shed |
+| `b4_occupancy` | Serverless per-key occupancy share |
+| `b4_itpm` | Serverless per-key input tokens per minute |
+| `b4_otpm` | Serverless per-key output tokens per minute |
+| `b4_rpm` | Request-per-minute limit |
+
+The budget and backstop gauges can change as healthy replicas join or leave. Existing reservations remain visible in the occupancy gauges while the new denominators affect subsequent admissions.
+
+`POST /v1/messages/count_tokens`, embedding, and reranking requests do not enter B1 through B4, so they do not change these occupancy gauges. See [Admission control metrics](/observability/admission-control-metrics) for panel queries and alert interpretation.
 
 ## Per-request duration by agent
 

@@ -840,8 +840,8 @@ Response:
 | `enabled` | Yes | Whether the key may authenticate |
 | `expires_at` | No | RFC 3339 timestamp; empty means no expiry |
 | `allowed_models` | No | Model allowlist; empty means unrestricted |
-| `quota` | No | Flat or per-model quota configuration; the flat shape also accepts the serverless `input_tokens_per_minute` / `output_tokens_per_minute` caps |
-| `max_occupancy_share` | No | Serverless occupancy share, fraction of a model pool's admit budget in (0, 1]; 0 means unset. Key-level, mirroring the `auth.yaml` field |
+| `quota` | No | Flat or per-model quota configuration; the flat shape also accepts serverless input and output tokens per minute |
+| `max_occupancy_share` | No | Serverless key-level share of replica-scaled KV occupancy; `0` is unset, otherwise valid through `1` |
 
 A stale version returns HTTP `409`:
 
@@ -856,13 +856,15 @@ A key hash cannot belong to two different IDs. Delete the existing entry before 
 
 ### Admission validation on key writes
 
-`PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants the static `auth.yaml` loader enforces at startup, returning HTTP `400` instead of accepting a key that would misbehave silently:
+`PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants as static configuration:
 
-- `max_occupancy_share` outside (0, 1] is rejected (a share above 1 would let one key out-reserve the whole pool).
-- Negative `input_tokens_per_minute` / `output_tokens_per_minute` are rejected.
-- On every `mode: serverless` model the key can reach, `input_tokens_per_minute` must be at least the policy's `max_input_tokens` — a smaller bucket can never admit a full-context prompt, so it would silently cap the usable context for that key.
+- `max_occupancy_share` must be `0` or in `(0, 1]`.
+- `input_tokens_per_minute` and `output_tokens_per_minute` cannot be negative.
+- For every reachable `mode: serverless` model, a nonzero `input_tokens_per_minute` must be at least that policy's `max_input_tokens`.
 
-The reverse direction holds too: a policy reload that would break these invariants against the keys currently registered (static or dynamic) is rejected, keeping the previous policies active. See [Admission control](/routing/admission-control).
+A violation returns HTTP `400` and leaves the registry unchanged. Policy reloads run the reverse check against both static and dynamic keys; a policy that would invalidate an existing key is rejected and the previous policy remains active.
+
+The API stores the values supplied by the caller. It does not load `router_limits.yaml` or invoke `auth.DeriveKeyDefaults` automatically.
 
 ### Use per-model quotas
 
@@ -1074,9 +1076,12 @@ Response:
     "allowed_models": [
       "meta-llama/Llama-3.1-8B-Instruct"
     ],
+    "max_occupancy_share": 0.4,
     "quota": {
       "requests_per_minute": 1000,
-      "tokens_per_day": 1000000
+      "tokens_per_day": 1000000,
+      "input_tokens_per_minute": 524288,
+      "output_tokens_per_minute": 47424
     }
   }
 }
