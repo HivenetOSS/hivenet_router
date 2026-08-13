@@ -90,7 +90,7 @@ Or query the Prometheus API:
 
 ```bash
 curl \
-  http://localhost:9090/use-the-api/v1/targets \
+  http://localhost:9090/api/v1/targets \
   | jq '.data.activeTargets[] | {
       scrape_url: .scrapeUrl,
       health,
@@ -142,7 +142,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Policies | Primary routing, fallback, exhaustion, reloads, and connection resets |
 | Queue | Requests waiting for agent capacity |
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
-| Admission control | Gate rejections by reason, live occupancy vs budget, in-flight concurrency |
+| Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -160,6 +160,8 @@ Several metrics include labels such as:
 - `engine`
 
 These labels make operational breakdowns possible, but each distinct label combination creates another Prometheus time series.
+
+Admission-control metrics use only `model`, or `reason` and `model`. They do not expose tenant or key identity.
 
 <Warning>
   Do not use unbounded or frequently changing values for agent metadata.
@@ -1256,17 +1258,31 @@ increase(
 
 ## Admission-control metrics
 
-The admission gates publish a rejection counter and live occupancy gauges:
+The LLM admission gates publish one rejection counter and four live pool gauges:
 
-| Metric | Type | Labels |
-| --- | --- | --- |
-| `hivenet_router_admission_rejections_total` | counter | `reason`, `model` |
-| `hivenet_router_admission_occupancy_tokens` | gauge | `model` |
-| `hivenet_router_admission_budget_tokens` | gauge | `model` |
-| `hivenet_router_admission_inflight_requests` | gauge | `model` |
-| `hivenet_router_admission_max_inflight` | gauge | `model` |
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_router_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
+| `hivenet_router_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
+| `hivenet_router_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling |
+| `hivenet_router_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
+| `hivenet_router_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
 
-The `reason` label attributes each rejection to the gate that produced it (`b1`, `b2`, `b3`, `b4_occupancy`, `b4_itpm`, `b4_otpm`, `b4_rpm`). See [Admission control metrics](/observability/admission-control-metrics) for the full label semantics and panel queries, and [Admission control](/routing/admission-control) for the gates themselves.
+The `reason` label identifies the gate:
+
+| Reason | Trigger |
+| --- | --- |
+| `b1` | Input-token or image-count cap |
+| `b2` | Global occupancy budget or in-flight backstop |
+| `b3` | Live pool-pressure shed |
+| `b4_occupancy` | Serverless per-key occupancy share |
+| `b4_itpm` | Serverless per-key input tokens per minute |
+| `b4_otpm` | Serverless per-key output tokens per minute |
+| `b4_rpm` | Request-per-minute limit |
+
+The budget and backstop gauges can change as healthy replicas join or leave. Existing reservations remain visible in the occupancy gauges while the new denominators affect subsequent admissions.
+
+`POST /v1/messages/count_tokens`, embedding, and reranking requests do not enter B1 through B4, so they do not change these occupancy gauges. See [Admission control metrics](/observability/admission-control-metrics) for panel queries and alert interpretation.
 
 ## Per-request duration by agent
 
@@ -1407,10 +1423,10 @@ The thresholds below are examples. Adjust them to your hardware, workload, and s
 
 ```yaml
 groups:
-  - name: mycoroute
+  - name: hivenet-router
 
     rules:
-      - alert: MycorouteAgentUnhealthy
+      - alert: HivenetRouterAgentUnhealthy
 
         expr: |
           hivenet_router_routing_agent_healthy == 0
@@ -1428,7 +1444,7 @@ groups:
 ### High routing failure rate
 
 ```yaml
-      - alert: MycorouteHighRoutingFailureRate
+      - alert: HivenetRouterHighRoutingFailureRate
 
         expr: |
           (
@@ -1467,7 +1483,7 @@ groups:
 ### KV-cache pressure
 
 ```yaml
-      - alert: MycorouteKVCachePressure
+      - alert: HivenetRouterKVCachePressure
 
         expr: |
           hivenet_router_agent_engine_kv_cache_utilization > 0.90
@@ -1485,7 +1501,7 @@ groups:
 ### GPU temperature
 
 ```yaml
-      - alert: MycorouteGPUHighTemperature
+      - alert: HivenetRouterGPUHighTemperature
 
         expr: |
           hivenet_router_agent_gpu_temperature_celsius > 85
@@ -1503,7 +1519,7 @@ groups:
 ### Policy exhaustion
 
 ```yaml
-      - alert: MycoroutePolicyExhaustion
+      - alert: HivenetRouterPolicyExhaustion
 
         expr: |
           sum by (model) (
@@ -1525,7 +1541,7 @@ groups:
 ### Quota persistence failure
 
 ```yaml
-      - alert: MycorouteQuotaPersistenceFailure
+      - alert: HivenetRouterQuotaPersistenceFailure
 
         expr: |
           increase(
@@ -1546,12 +1562,12 @@ Recording rules can simplify expensive or frequently reused dashboard queries.
 
 ```yaml
 groups:
-  - name: mycoroute-recording
+  - name: hivenet-router-recording
 
     interval: 30s
 
     rules:
-      - record: mycoroute:model_request_rate5m
+      - record: hivenet_router:model_request_rate5m
 
         expr: |
           sum by (model) (
@@ -1560,7 +1576,7 @@ groups:
             )
           )
 
-      - record: mycoroute:model_failure_rate5m
+      - record: hivenet_router:model_failure_rate5m
 
         expr: |
           sum by (model) (
@@ -1569,7 +1585,7 @@ groups:
             )
           )
 
-      - record: mycoroute:model_p95_ttft_seconds5m
+      - record: hivenet_router:model_p95_ttft_seconds5m
 
         expr: |
           histogram_quantile(

@@ -6,7 +6,7 @@ sidebarTitle: "Ollama"
 
 Connect an Ollama server to Hivenet Router by running an agent beside the backend.
 
-The agent checks Ollama through its `/use-the-api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
+The agent checks Ollama through its `/api/tags` endpoint, registers one available model with the router, and forwards chat-completion requests to Ollama’s OpenAI-compatible API.
 
 <Warning>
   One Hivenet Router agent represents one model. If your Ollama server contains several models, pin each agent to a model with `--model` and run a separate agent process for each one.
@@ -129,7 +129,7 @@ Replace these values with addresses and model names from your deployment.
 Check that the Ollama server is ready:
 
 ```bash
-curl http://localhost:11434/use-the-api/tags \
+curl http://localhost:11434/api/tags \
   | jq .
 ```
 
@@ -144,27 +144,27 @@ The response should contain the model you pulled.
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent agent identity:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
 
     Place the router’s JWT secret at:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Protect it:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
   </Tab>
   <Tab title="Bare metal">
@@ -177,14 +177,14 @@ The response should contain the model you pulled.
     Place the router’s JWT secret somewhere the agent can read, for example:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Create a writable directory for the persistent agent identity:
 
     ```bash
-    sudo mkdir -p /var/lib/mycoroute/agent
-    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    sudo mkdir -p /var/lib/hivenet-router/agent
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agent
     ```
   </Tab>
 </Tabs>
@@ -201,9 +201,9 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --engine ollama \
       --model llama3.1:8b \
       --backend-url http://localhost:11434 \
@@ -229,10 +229,10 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
       --model llama3.1:8b \
       --backend-url http://localhost:11434 \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 5 \
       --region EU-France \
-      --identity-path /var/lib/mycoroute/agent/identity.key
+      --identity-path /var/lib/hivenet-router/agent/identity.key
     ```
   </Tab>
 </Tabs>
@@ -267,7 +267,7 @@ Policies can match these values when selecting agents.
 If you omit `--model`, the agent requests:
 
 ```text
-GET <backend-url>/use-the-api/tags
+GET <backend-url>/api/tags
 ```
 
 It registers the first model returned by Ollama.
@@ -305,7 +305,7 @@ For the first model:
   --engine ollama \
   --model llama3.1:8b \
   --backend-url http://localhost:11434 \
-  --identity-path /var/lib/mycoroute/agent/llama-8b.key \
+  --identity-path /var/lib/hivenet-router/agent/llama-8b.key \
   ...
 ```
 
@@ -316,7 +316,7 @@ For another model:
   --engine ollama \
   --model mistral:7b \
   --backend-url http://localhost:11434 \
-  --identity-path /var/lib/mycoroute/agent/mistral-7b.key \
+  --identity-path /var/lib/hivenet-router/agent/mistral-7b.key \
   ...
 ```
 
@@ -414,7 +414,7 @@ View metrics through the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep mycoroute
+  | grep hivenet-router
 ```
 
 View current agent state:
@@ -455,13 +455,13 @@ ollama pull llama3.1:8b
 Check the endpoint used by the agent:
 
 ```bash
-curl http://localhost:11434/use-the-api/tags \
+curl http://localhost:11434/api/tags \
   | jq .
 ```
 
 ### The wrong model is registered
 
-When `--model` is omitted, the agent registers the first model returned by `/use-the-api/tags`.
+When `--model` is omitted, the agent registers the first model returned by `/api/tags`.
 
 Restart the agent with an explicit model:
 
@@ -492,7 +492,7 @@ Explicit tags such as `:8b` or `:7b` are preserved.
 Check the server:
 
 ```bash
-curl http://localhost:11434/use-the-api/tags
+curl http://localhost:11434/api/tags
 ```
 
 For a Linux process, inspect its log:
@@ -585,7 +585,7 @@ docker inspect hivenet-agent \
 For bare metal:
 
 ```bash
-ls -l /var/lib/mycoroute/agent/identity.key
+ls -l /var/lib/hivenet-router/agent/identity.key
 ```
 
 ### GPU metrics are missing

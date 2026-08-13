@@ -304,14 +304,15 @@ meta-llama/Llama-3.1-8B-Instruct
 
 It does not need a Hivenet Router allowlist entry for the external provider model.
 
-Request and token accounting remains associated with the original requested model and tenant, but a provider-served request is deliberately **not** charged as local load:
+Request identity and observability remain associated with the original requested model and tenant, but provider work does not consume local GPU resources:
 
-- Charges taken **before routing** stand: the per-key request-rate deduction, the input-tokens-per-minute charge, and the daily input-token reservation. They are the key's plan limits and apply regardless of which backend answers.
-- The **KV-occupancy reservation is released** the moment the request is handed to the provider — provider traffic consumes the provider's account, not local GPU memory.
-- Provider output is **not** charged against the per-key output-tokens-per-minute cap, and provider usage never feeds the router's learned token estimator (the provider's tokenizer differs from the local model's).
-- The provider-reported usage is still recorded in the per-tenant Prometheus token counters and the audit log, attributed to the original model, so billing and observability see the real consumption.
+- The request-per-minute deduction, input-tokens-per-minute charge, and daily input reservation taken before routing remain in place.
+- The global and per-key occupancy reservations are released as soon as routing hands the request to the provider.
+- Provider output does not charge the local output-tokens-per-minute bucket, and provider usage does not train the local model's learned estimator.
+- The provider path does not perform the normal post-response daily output-token deduction. Only the input reservation taken before routing affects the daily bucket.
+- Provider-reported input and output usage is still recorded in tenant Prometheus counters and the audit log, attributed to the originally requested model.
 
-See [Admission control](/routing/admission-control) for the full accounting model.
+These are current implementation semantics rather than a claim that provider and local accounting are interchangeable. See [Admission control](/routing/admission-control) for the complete admission model.
 
 ## OpenAI fallback
 

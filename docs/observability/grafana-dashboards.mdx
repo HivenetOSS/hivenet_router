@@ -11,8 +11,8 @@ The repository includes three dashboards:
 | Dashboard | UID | Data source | Purpose |
 | --- | --- | --- | --- |
 | Hivenet Router Router | `hivenet-router` | Prometheus | Agents, routing, hardware, and engine state |
-| Hivenet Router — Tenant Quota | `mycoroute-tenants` | Prometheus | Tenant activity, quotas, tokens, and latency |
-| Hivenet Router Audit | `mycoroute-audit` | Loki | Structured request records and errors |
+| Hivenet Router — Tenant Quota | `hivenet-router-tenants` | Prometheus | Tenant activity, quotas, tokens, and latency |
+| Hivenet Router Audit | `hivenet-router-audit` | Loki | Structured request records and errors |
 
 Grafana also includes a Tempo data source for exploring distributed traces.
 
@@ -88,13 +88,13 @@ http://<router-host>:3000/d/hivenet-router/
 ### Tenant quota dashboard
 
 ```text
-http://<router-host>:3000/d/mycoroute-tenants/
+http://<router-host>:3000/d/hivenet-router-tenants/
 ```
 
 ### Audit dashboard
 
 ```text
-http://<router-host>:3000/d/mycoroute-audit/
+http://<router-host>:3000/d/hivenet-router-audit/
 ```
 
 Grafana may add a human-readable dashboard name and organization query parameter to the URL after opening it.
@@ -519,7 +519,7 @@ deploy/grafana/provisioning/dashboards/
 Files:
 
 ```text
-mycoroute.json
+hivenet-router.json
 tenants.json
 audit.json
 dashboard.yml
@@ -593,7 +593,7 @@ In Grafana:
 Import:
 
 ```text
-deploy/grafana/provisioning/dashboards/mycoroute.json
+deploy/grafana/provisioning/dashboards/hivenet-router.json
 deploy/grafana/provisioning/dashboards/tenants.json
 deploy/grafana/provisioning/dashboards/audit.json
 ```
@@ -686,7 +686,7 @@ histogram_quantile(
 Audit failures:
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | status_code >= 400
 ```
@@ -789,7 +789,7 @@ Check the Prometheus target:
 ```bash
 docker compose exec prometheus \
   wget -qO- \
-  http://localhost:9090/use-the-api/v1/targets \
+  http://localhost:9090/api/v1/targets \
   | jq '.data.activeTargets[] | {
       health,
       lastError
@@ -801,7 +801,7 @@ Query one registration metric:
 ```bash
 docker compose exec prometheus \
   wget -qO- \
-  'http://localhost:9090/use-the-api/v1/query?query=hivenet_router_routing_agent_info' \
+  'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
   | jq .
 ```
 
@@ -872,7 +872,7 @@ Confirm that audit records exist:
 
 ```bash
 docker compose exec router \
-  ls -la /var/log/mycoroute
+  ls -la /var/log/hivenet-router
 ```
 
 Check Promtail:
@@ -894,7 +894,7 @@ Query Loki through its API:
 ```bash
 docker compose exec grafana \
   wget -qO- \
-  'http://loki:3100/loki/use-the-api/v1/query?query=%7Bjob%3D%22mycoroute%22%2Clog_type%3D%22audit%22%7D' \
+  'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
   | head
 ```
 

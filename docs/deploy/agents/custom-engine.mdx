@@ -138,27 +138,27 @@ If the backend uses another internal identifier, configure an alias or compatibi
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent identity:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
 
     Place the router’s JWT secret at:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Protect it:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
   </Tab>
   <Tab title="Bare metal">
@@ -171,14 +171,14 @@ If the backend uses another internal identifier, configure an alias or compatibi
     Place the shared JWT secret somewhere the agent can read, for example:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Create a writable directory for the persistent identity:
 
     ```bash
-    sudo mkdir -p /var/lib/mycoroute/agent
-    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    sudo mkdir -p /var/lib/hivenet-router/agent
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agent
     ```
   </Tab>
 </Tabs>
@@ -193,9 +193,9 @@ If the backend uses another internal identifier, configure an alias or compatibi
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --engine custom \
       --backend-url http://localhost:8000 \
       --health-url http://localhost:8000/health \
@@ -221,12 +221,12 @@ If the backend uses another internal identifier, configure an alias or compatibi
       --health-url http://localhost:8000/health \
       --model meta-llama/Llama-3.1-8B-Instruct \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 32 \
       --region EU-Custom \
       --organization ml-team \
       --machine custom-worker-1 \
-      --identity-path /var/lib/mycoroute/agent/identity.key
+      --identity-path /var/lib/hivenet-router/agent/identity.key
     ```
   </Tab>
 </Tabs>
@@ -623,7 +623,7 @@ docker inspect hivenet-agent \
 For bare metal:
 
 ```bash
-ls -l /var/lib/mycoroute/agent/identity.key
+ls -l /var/lib/hivenet-router/agent/identity.key
 ```
 
 ## Next steps

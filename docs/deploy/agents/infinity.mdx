@@ -200,27 +200,27 @@ Both agents connect to the same Infinity process.
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent identities:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
 
     Place the router’s JWT secret at:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Protect it:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
   </Tab>
   <Tab title="Bare metal">
@@ -233,14 +233,14 @@ Both agents connect to the same Infinity process.
     Place the shared JWT secret somewhere the agents can read, for example:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Create a writable directory for the persistent identities:
 
     ```bash
-    sudo mkdir -p /var/lib/mycoroute/agents
-    sudo chown "$USER":"$USER" /var/lib/mycoroute/agents
+    sudo mkdir -p /var/lib/hivenet-router/agents
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agents
     ```
   </Tab>
 </Tabs>
@@ -257,13 +257,13 @@ POST /v1/embeddings
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-embedding-agent \
+      --name hivenet-router-embedding-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --engine infinity \
       --capability embedding \
       --model bge-m3 \
@@ -290,11 +290,11 @@ POST /v1/embeddings
       --model bge-m3 \
       --backend-url http://localhost:7997 \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 64 \
       --region EU-France \
       --tags infinity,embedding \
-      --identity-path /var/lib/mycoroute/agents/embedding.key
+      --identity-path /var/lib/hivenet-router/agents/embedding.key
     ```
   </Tab>
 </Tabs>
@@ -311,13 +311,13 @@ POST /v1/rerank
   <Tab title="Docker">
     ```bash
     docker run -d \
-      --name mycoroute-reranking-agent \
+      --name hivenet-router-reranking-agent \
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --engine infinity \
       --capability reranker \
       --model bge-reranker-large \
@@ -338,11 +338,11 @@ POST /v1/rerank
       --model bge-reranker-large \
       --backend-url http://localhost:7997 \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 32 \
       --region EU-France \
       --tags infinity,reranking \
-      --identity-path /var/lib/mycoroute/agents/reranking.key
+      --identity-path /var/lib/hivenet-router/agents/reranking.key
     ```
   </Tab>
 </Tabs>
@@ -686,8 +686,8 @@ Check its logs:
 <Tabs>
   <Tab title="Docker">
     ```bash
-    docker logs mycoroute-embedding-agent
-    docker logs mycoroute-reranking-agent
+    docker logs hivenet-router-embedding-agent
+    docker logs hivenet-router-reranking-agent
     ```
   </Tab>
   <Tab title="systemd">
@@ -722,14 +722,14 @@ Make sure each `--identity-path` points to persistent storage.
 For Docker:
 
 ```bash
-docker inspect mycoroute-embedding-agent \
+docker inspect hivenet-router-embedding-agent \
   | jq '.[0].Mounts'
 ```
 
 For bare metal:
 
 ```bash
-ls -l /var/lib/mycoroute/agents/
+ls -l /var/lib/hivenet-router/agents/
 ```
 
 ### Requests time out
@@ -761,7 +761,7 @@ nvidia-smi
 For Docker, confirm that each agent received GPU access:
 
 ```bash
-docker inspect mycoroute-embedding-agent \
+docker inspect hivenet-router-embedding-agent \
   | jq '.[0].HostConfig.DeviceRequests'
 ```
 

@@ -60,7 +60,7 @@ List the models visible to the intended key:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[] | [
       .id,
@@ -77,7 +77,7 @@ Send a direct request before adding Open WebUI:
 ```bash
 curl -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "<llm-model-id>",
@@ -96,7 +96,7 @@ Then test streaming:
 ```bash
 curl -N -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "<llm-model-id>",
@@ -242,7 +242,7 @@ In Open WebUI:
     Open WebUI sends it upstream as:
 
     ```http
-    Authorization: Bearer <mycoroute-api-key>
+    Authorization: Bearer <hivenet-router-api-key>
     ```
   </Step>
   <Step title="Filter the model list">
@@ -411,7 +411,7 @@ Compare the configured list with:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -423,13 +423,13 @@ When several Open WebUI connections contain models with the same ID, add a conne
 For example:
 
 ```text
-mycoroute/
+hivenet-router/
 ```
 
 A model may then appear in Open WebUI as:
 
 ```text
-mycoroute/chat-model-standard
+hivenet-router/chat-model-standard
 ```
 
 Open WebUI uses the prefix to distinguish the model in its own interface.
@@ -650,7 +650,7 @@ Configure:
 ```text
 RAG_EMBEDDING_ENGINE=openai
 RAG_OPENAI_API_BASE_URL=https://router.example.com/v1
-RAG_OPENAI_API_KEY=<mycoroute-api-key>
+RAG_OPENAI_API_KEY=<hivenet-router-api-key>
 RAG_EMBEDDING_MODEL=<embedding-model-id>
 ```
 
@@ -694,7 +694,7 @@ Hivenet Router currently applies request-rate quotas to embedding requests but d
 ```bash
 curl -X POST \
   https://router.example.com/v1/embeddings \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "<embedding-model-id>",
@@ -714,7 +714,7 @@ Configure an external reranker:
 RAG_RERANKING_ENGINE=external
 RAG_RERANKING_MODEL=<reranker-model-id>
 RAG_EXTERNAL_RERANKER_URL=https://router.example.com/v1/rerank
-RAG_EXTERNAL_RERANKER_API_KEY=<mycoroute-api-key>
+RAG_EXTERNAL_RERANKER_API_KEY=<hivenet-router-api-key>
 ```
 
 The URL must include the complete endpoint:
@@ -779,7 +779,7 @@ services:
 
     environment:
       OPENAI_API_BASE_URL: "https://router.example.com/v1"
-      OPENAI_API_KEY: "${MYCOROUTE_API_KEY}"
+      OPENAI_API_KEY: "${HIVENET_ROUTER_API_KEY}"
       ENABLE_OLLAMA_API: "False"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"
 ```
@@ -787,7 +787,7 @@ services:
 Store the raw key outside the Compose file:
 
 ```text
-MYCOROUTE_API_KEY=<mycoroute-api-key>
+HIVENET_ROUTER_API_KEY=<hivenet-router-api-key>
 ```
 
 Protect the environment file:
@@ -949,7 +949,7 @@ Search its audit records:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   tenant_id="open-webui"
 }
@@ -990,7 +990,7 @@ Test the same URL and key directly:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models
 ```
 
@@ -1009,7 +1009,7 @@ Check the live catalog:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq .
 ```

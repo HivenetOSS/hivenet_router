@@ -354,7 +354,7 @@ The normal agent lifecycle is:
 The agent’s identity file should remain persistent across restarts:
 
 ```bash
---identity-path /var/lib/mycoroute/agent-identity.key
+--identity-path /var/lib/hivenet-router/agent-identity.key
 ```
 
 A stable peer ID lets the router restore the agent’s earlier latency and counter history.
@@ -385,7 +385,7 @@ Both sides derive the same Ed25519 key material from the shared secret using HKD
 The current derivation uses:
 
 ```text
-Salt: mycoroute-grpc-tls-v2
+Salt: hivenet-router-grpc-tls-v2
 Info: ed25519
 ```
 
@@ -421,8 +421,8 @@ Hivenet Router uses two namespaced libp2p HTTP protocols.
 
 | Protocol | Hosted by | Purpose |
 | --- | --- | --- |
-| `/mycoroute/router/1.0.0` | Router | Registration, heartbeat, and routing signals |
-| `/mycoroute/inference/1.0.0` | Agent side of the established connection | Inference request forwarding |
+| `/hivenet_router/router/1.0.0` | Router | Registration, heartbeat, and routing signals |
+| `/hivenet_router/inference/1.0.0` | Agent side of the established connection | Inference request forwarding |
 
 libp2p encrypts peer streams with Noise.
 
@@ -597,29 +597,42 @@ requests_per_minute_per_replica
 
 When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error.
 
-### 4. Model authorization and admission gates
+### 4. Model authorization and admission
 
 The handler:
 
 - parses the top-level `model`
 - checks the key’s effective model allowlist
-- estimates input tokens with the per-model learned estimator (message text, Anthropic `system` prompt, tool JSON)
-- applies the [admission gates](/routing/admission-control) in order: the per-request input/image caps (400 `input_too_long`), the front-door KV-pressure shed, the KV-occupancy admit budget with its `max_inflight` backstop (429 `concurrency_limit_exceeded`, brief parking), and — on serverless policies — the per-key occupancy share and token-per-minute caps (429 `rate_limit_exceeded`)
+- computes one learned input estimate from message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON
+- applies B1 request caps and B3 live pool-pressure shedding
+- reserves the replica-scaled B2 occupancy budget and `max_inflight` backstop
+- on serverless policies, applies the key's B4 occupancy share and token-per-minute caps
 - checks the worst-case input plus requested output against the daily budget
 - charges admitted prompt tokens
 - preserves the original request bytes and headers
 
+The effective B2 pool limits are:
+
+```text
+token budget = floor(admit fraction × admit_budget_tokens × healthy replicas)
+request backstop = max_inflight × healthy replicas
+```
+
+The B4 occupancy share uses `share × admit_budget_tokens × healthy replicas` without the admit fraction. B4 is a per-key fairness control; B2 remains the pool-safety limit.
+
 #### Reservation lifetime
 
-When the KV-occupancy gate admits a request, it books a slice of the model’s occupancy budget — a *reservation* that stays held from admission until the request fully finishes. Over that lifetime the reservation is:
+An occupancy reservation stays attached to the request until it finishes:
 
-- **Grown as output streams.** If the client did not declare `max_tokens`, the router cannot size the output ahead of time, so it reserves an estimate and enlarges the reservation as real output tokens stream out. The booking flexes to match what is actually generated.
-- **Reconciled to the true input size.** Admission uses the *estimated* input token count. When the backend reports its exact `prompt_tokens`, the router corrects the reservation to that figure — the true-up — replacing the estimate with the real number.
-- **Released on every exit path.** Success, error, timeout, or client disconnect all return the reservation so the budget is freed for the next request. One case releases it early: when a request fails over to a cloud provider, the reservation is dropped the moment routing leaves the local backends, because provider generation consumes no local KV cache.
+- Declared output is reserved up front through `max_completion_tokens` or `max_tokens`.
+- Undeclared output grows the reservation as tokens stream.
+- Exact backend input usage replaces the estimated input portion when available.
+- Success, error, timeout, and client disconnect release the global and per-key reservations.
+- Provider fallback releases them early as soon as routing leaves the local pool.
 
-#### `count_tokens` is exempt
+#### Count-tokens exemption
 
-`POST /v1/messages/count_tokens` runs no model and consumes no KV cache — it only reports how many tokens a prompt *would* use. It therefore skips every admission gate (input/image caps, KV-pressure shed, occupancy budget, per-key token rates) and charges no token quota, since there is no generation to protect. It remains a stateless tokenizer lookup, guarded only by the request-rate quota so the endpoint cannot be flooded with counting calls.
+`POST /v1/messages/count_tokens` performs no generation and holds no KV cache. It skips B1 through B4 and the daily token budget, avoiding double charges for clients that count a prompt before sending it. The request-per-minute limiter still protects the endpoint.
 
 ### 5. Global request queue
 
@@ -1150,8 +1163,8 @@ The main implementation areas are:
 | --- | --- |
 | Router startup and lifecycle | `cmd/router/main.go`, `internal/router/router.go` |
 | Agent lifecycle and proxy | `cmd/agent/main.go`, `internal/agent/agent.go` |
-| HTTP routes and middleware | `internal/use-the-api/server.go`, `internal/use-the-api/middleware.go` |
-| Inference handlers | `internal/use-the-api/handlers.go` |
+| HTTP routes and middleware | `internal/api/server.go`, `internal/api/middleware.go` |
+| Inference handlers | `internal/api/handlers.go` |
 | Request dispatch and forwarding | `internal/router/processor.go` |
 | Agent registry | `internal/router/registry.go` |
 | Routing policy | `internal/policy/` |

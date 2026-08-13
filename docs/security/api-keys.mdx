@@ -241,7 +241,7 @@ import os
 
 from openai import OpenAI
 
-api_key = os.environ["MYCOROUTE_API_KEY"]
+api_key = os.environ["HIVENET_ROUTER_API_KEY"]
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
@@ -264,7 +264,7 @@ print(response.choices[0].message.content)
 Set the key outside the source code:
 
 ```bash
-export MYCOROUTE_API_KEY="sk-hivenet-..."
+export HIVENET_ROUTER_API_KEY="sk-hivenet-..."
 ```
 
 ## Restrict models
@@ -309,19 +309,31 @@ The flat quota shape applies one request and token budget to every model the own
 quota:
   requests_per_minute: 1000
   tokens_per_day: 1000000
-  input_tokens_per_minute: 524288    # serverless deployments only
-  output_tokens_per_minute: 47424    # serverless deployments only
+  input_tokens_per_minute: 524288
+  output_tokens_per_minute: 47424
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `requests_per_minute` | Shared request-rate ceiling |
 | `tokens_per_day` | Shared daily chat-token budget |
-| `input_tokens_per_minute` | Per-key input-token rate; applies only on `mode: serverless` policies |
-| `output_tokens_per_minute` | Per-key output-token rate, metered from real usage; applies only on `mode: serverless` policies |
+| `input_tokens_per_minute` | Serverless per-key input-token rate, charged before forwarding |
+| `output_tokens_per_minute` | Serverless per-key output-token rate, metered after local responses |
 | `0` | Unlimited |
 
-Serverless keys can additionally declare a key-level `max_occupancy_share` — the fraction of a model pool's KV-occupancy budget the key may hold in flight at once. See [Admission control](/routing/admission-control) and the [auth YAML reference](/security/auth-yaml-reference) for the full semantics, derivation rules, and the validation invariants (`input_tokens_per_minute` must cover one maximum-size prompt on every serverless model the key can reach).
+The input and output rate fields apply only when the effective model policy uses `mode: serverless`. They cannot be combined with `quota.per_model`.
+
+A serverless key can also declare `max_occupancy_share` at the key level, alongside `quota`:
+
+```yaml
+max_occupancy_share: 0.4
+```
+
+The value limits the key's token-weighted work to `share × admit_budget_tokens × healthy_replicas`. It deliberately does not apply `HIVENET_ROUTER_ADMIT_FRACTION`; the global occupancy gate remains the pool-safety limit.
+
+For every reachable serverless model, a nonzero `input_tokens_per_minute` must be at least the policy's `max_input_tokens`. The router validates this and the occupancy-share range at startup, during reloads, and on dynamic admin key writes.
+
+The `auth.DeriveKeyDefaults` helper can calculate suggested values from certified model limits. The current runtime does not load `router_limits.yaml` or apply those defaults automatically.
 
 The flat quota bucket is keyed by:
 
@@ -337,7 +349,11 @@ This has an important consequence:
   Use different owner values when keys require independent quota buckets.
 </Warning>
 
-The request-rate limiter uses a token bucket. It begins with up to one minute’s configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Operators can shrink the burst window below a full minute with `HIVENET_ROUTER_RPM_BURST_SECONDS`, so a key cannot spend its entire minute’s quota in one instant.
+The request-rate limiter uses a token bucket. It begins with up to one minute's configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the burst window; `0` preserves the full-minute capacity.
+
+<Warning>
+  Dynamic keys have stable IDs, so serverless occupancy and token-rate state is isolated per key. Static-key authentication currently leaves the key ID empty, causing static keys to share the `anonymous` B4 state for a model. See the [auth YAML reference](/security/auth-yaml-reference) before using static keys with serverless limits.
+</Warning>
 
 The daily token counter resets at midnight UTC.
 

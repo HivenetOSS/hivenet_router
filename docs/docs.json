@@ -15,9 +15,10 @@
         "group": "Getting started",
         "pages": [
           "getting-started/introduction",
+          "getting-started/why-hivenet-router",
           "quickstart",
           "getting-started/architecture-overview",
-          "getting-started/mycoroute-hivenet-inference-api-compute"
+          "getting-started/hivenet-services"
         ]
       },
       {
@@ -110,59 +111,8 @@
           "project/project-overview",
           "project/contributing",
           "project/code-of-conduct",
-          "project/license"
-        ]
-      },
-      {
-        "group": "Migration leftovers",
-        "hidden": true,
-        "pages": [
-          "getting-started/why-mycoroute",
-          "api/chat-completions",
-          "api/embeddings",
-          "api/reranking",
-          "api/models-list",
-          "api/admin-endpoints",
-          "api/chat-completions",
-          "api/embeddings",
-          "api/reranking",
-          "api/models",
-          "api/admin-endpoints",
-          "routing/hardware-aware-routing",
-          "routing/routing-concepts",
-          "routing/policy-yaml-reference",
-          "routing/fallback-chains",
-          "routing/provider-fallback",
-          "routing/policy-gates",
-          "security/authentication-overview",
-          "security/auth-yaml-reference",
-          "security/api-keys",
-          "security/model-restrictions",
-          "security/key-rotation",
-          "observability/prometheus-metrics",
-          "observability/grafana-dashboards",
-          "observability/audit-logging",
-          "observability/hardware-metrics",
-          "observability/engine-metrics",
-          "integrations/overview",
-          "integrations/opencode",
-          "integrations/open-webui",
-          "integrations/using-from-code",
-          "reference/rfc-6298-latency-tracking",
           "project/security-policy",
-          {
-            "group": "Agent deployment",
-            "pages": [
-              "deploy/agents/vllm",
-              "deploy/agents/ollama",
-              "deploy/agents/sglang",
-              "deploy/agents/llama-cpp",
-              "deploy/agents/infinity",
-              "deploy/agents/custom-engine"
-            ]
-          },
-          "deploy/docker-compose",
-          "deploy/bare-metal"
+          "project/license"
         ]
       }
     ]
@@ -206,5 +156,62 @@
     }
   },
   "description": "Open-source routing for self-hosted and distributed AI inference.",
-  "redirects": []
+  "redirects": [
+    {
+      "source": "/getting-started/mycoroute-hivenet-inference-api-compute",
+      "destination": "/getting-started/hivenet-services"
+    },
+    {
+      "source": "/getting-started/why-mycoroute",
+      "destination": "/getting-started/why-hivenet-router"
+    },
+    {
+      "source": "/api/chat-completions",
+      "destination": "/use-the-api/chat-completions"
+    },
+    {
+      "source": "/api/embeddings",
+      "destination": "/use-the-api/embeddings"
+    },
+    {
+      "source": "/api/reranking",
+      "destination": "/use-the-api/reranking"
+    },
+    {
+      "source": "/api/models",
+      "destination": "/use-the-api/models"
+    },
+    {
+      "source": "/api/models-list",
+      "destination": "/use-the-api/models"
+    },
+    {
+      "source": "/api/admin-endpoints",
+      "destination": "/use-the-api/admin-endpoints"
+    },
+    {
+      "source": "/integrations/overview",
+      "destination": "/integrations/integrations-overview"
+    },
+    {
+      "source": "/integrations/opencode",
+      "destination": "/integrations/open-code"
+    },
+    {
+      "source": "/integrations/open-webui",
+      "destination": "/integrations/open-web-ui"
+    },
+    {
+      "source": "/integrations/using-from-code",
+      "destination": "/integrations/use-from-code"
+    },
+    {
+      "source": "/routing/hardware-aware-routing",
+      "destination": "/observability/hardware-aware-routing"
+    },
+    {
+      "source": "/reference/rfc-6298-latency-tracking",
+      "destination": "/observability/latency-tracking"
+    }
+  ]
 }

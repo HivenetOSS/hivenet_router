@@ -80,18 +80,18 @@ Before starting the stack, change this line in both `docker-compose.yml` and `do
 Replace it with:
 
 ```yaml
-- HIVENET_ROUTER_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
+- HIVENET_ROUTER_JWT_SECRET=${HIVENET_ROUTER_JWT_SECRET:?Set HIVENET_ROUTER_JWT_SECRET}
 ```
 
 The names use different capitalization deliberately:
 
-- `MYCOROUTE_JWT_SECRET` is the host-side variable read by Docker Compose.
+- `HIVENET_ROUTER_JWT_SECRET` is the host-side variable read by Docker Compose.
 - `HIVENET_ROUTER_JWT_SECRET` is the environment variable read inside the Hivenet Router container.
 
 Create a `.env` file on the router host:
 
 ```bash
-printf 'MYCOROUTE_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
+printf 'HIVENET_ROUTER_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
 chmod 600 .env
 ```
 
@@ -124,7 +124,7 @@ environment:
 
     ```bash
     git clone https://github.com/HivenetOSS/hivenet_router.git
-    cd mycoroute
+    cd hivenet_router
     ```
 
     Make the JWT substitution described above in `docker-compose.yml`, then create the `.env` file.
@@ -229,7 +229,7 @@ Repeat these steps on every machine that runs an inference backend.
 
     ```bash
     git clone https://github.com/HivenetOSS/hivenet_router.git
-    cd mycoroute
+    cd hivenet_router
     ```
 
     Run the host setup script:
@@ -237,8 +237,7 @@ Repeat these steps on every machine that runs an inference backend.
     ```bash
     chmod +x scripts/setup-agent-host.sh
     
-    sudo MYCOROUTE_ROUTER_IP=192.168.1.100 \
-      ./scripts/setup-agent-host.sh
+    sudo ./scripts/setup-agent-host.sh
     ```
 
     Replace `192.168.1.100` with the router’s reachable IP address.
@@ -294,14 +293,14 @@ Repeat these steps on every machine that runs an inference backend.
     Copy the router’s `.env` file to the agent host through a secure channel:
 
     ```bash
-    scp router-server:/path/to/mycoroute/.env .
+    scp router-server:/path/to/hivenet-router/.env .
     chmod 600 .env
     ```
 
     Make the same JWT substitution in `docker-compose.agent.yml`:
 
     ```yaml
-    - HIVENET_ROUTER_JWT_SECRET=${MYCOROUTE_JWT_SECRET:?Set MYCOROUTE_JWT_SECRET}
+    - HIVENET_ROUTER_JWT_SECRET=${HIVENET_ROUTER_JWT_SECRET:?Set HIVENET_ROUTER_JWT_SECRET}
     ```
   </Step>
   <Step title="Update and start the agent">
@@ -372,7 +371,7 @@ The agent Compose file accepts:
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `ROUTER_GRPC` | Yes | None | Router gRPC authentication address |
-| `MYCOROUTE_JWT_SECRET` | Yes | None | Shared router-agent secret used during Compose substitution |
+| `HIVENET_ROUTER_JWT_SECRET` | Yes | None | Shared router-agent secret used during Compose substitution |
 | `AGENT_REGION` | No | `EU-France` | Region exposed as agent metadata |
 | `AGENT_CAPACITY` | No | `10` | Maximum concurrent requests declared by the agent |
 | `MACHINE` | No | `Unknown` | Machine identifier used in metadata and metrics |
@@ -461,13 +460,13 @@ For runtime-managed keys, add these container environment variables to the route
 ```yaml
 environment:
   - HIVENET_ROUTER_AUTH_MODE=dynamic
-  - HIVENET_ROUTER_ADMIN_API_KEYS=${MYCOROUTE_ADMIN_API_KEYS:?Set MYCOROUTE_ADMIN_API_KEYS}
+  - HIVENET_ROUTER_ADMIN_API_KEYS=${HIVENET_ROUTER_ADMIN_API_KEYS:?Set HIVENET_ROUTER_ADMIN_API_KEYS}
 ```
 
 Add the corresponding host-side value to `.env`:
 
 ```text
-MYCOROUTE_ADMIN_API_KEYS=<secure-admin-key>
+HIVENET_ROUTER_ADMIN_API_KEYS=<secure-admin-key>
 ```
 
 Admin authentication is mandatory in dynamic mode. The router refuses to start without an admin key because the admin endpoints manage the API-key registry itself.
@@ -595,11 +594,11 @@ Create a backup directory:
 mkdir -p backup
 ```
 
-The default volume names assume the Compose project is named `mycoroute`. Confirm the actual names first:
+The default volume names assume the Compose project is named `hivenet-router`. Confirm the actual names first:
 
 ```bash
 docker volume ls \
-  --filter label=com.docker.compose.project=mycoroute
+  --filter label=com.docker.compose.project=hivenet-router
 ```
 
 Back up the router database:
@@ -702,7 +701,7 @@ Inspect Prometheus targets:
 
 ```bash
 docker compose exec prometheus \
-  wget -qO- http://localhost:9090/use-the-api/v1/targets \
+  wget -qO- http://localhost:9090/api/v1/targets \
   | jq '.data.activeTargets[] | {
       job: .labels.job,
       health: .health,
@@ -725,7 +724,7 @@ Confirm that Prometheus contains Hivenet Router data:
 ```bash
 docker compose exec prometheus \
   wget -qO- \
-  'http://localhost:9090/use-the-api/v1/query?query=hivenet_router_routing_agent_info' \
+  'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
   | jq .
 ```
 
@@ -749,7 +748,7 @@ Confirm that the router writes audit records to the shared volume:
 
 ```bash
 docker compose exec router \
-  ls -la /var/log/mycoroute
+  ls -la /var/log/hivenet-router
 ```
 
 ### Agent metrics are missing

@@ -1,189 +1,229 @@
 ---
 title: "Admission control"
-description: "How Hivenet Router bounds KV-cache occupancy and per-key token rates before work enters the inference queue — the gate pipeline, the token estimator, and every limit it enforces."
+description: "Configure request caps, pool pressure shedding, token-weighted occupancy, and serverless per-key limits."
 sidebarTitle: "Admission control"
 ---
 
-Admission control decides whether a request may enter the inference queue *now*. It complements routing: routing chooses which agent serves an admitted request; admission control bounds the total and per-key load so that the box never enters the regime where a KV-cache-bound engine silently degrades.
+Hivenet Router applies admission checks before an LLM request enters the routing queue or reaches an inference backend. The checks reject inputs that cannot fit, shed work when the serving pool is under pressure, and limit token-weighted work already in flight.
 
-## Why token-weighted admission
+Admission control applies to:
 
-A GPU inference box under overload does not crash or return errors — the engine (vLLM and peers) **preempts, queues, or swaps**, and every request still returns HTTP 200 while latency inflates many-fold. The resource that decides latency is **instantaneous KV-cache occupancy**: the tokens held on the GPU right now. Request counts and daily totals cannot see it — a chat turn (~3K tokens) and a full-context coding request (~250K tokens) both count as "1 request", and three 250K requests in the same second overflow a ~409K-token pool while every per-minute gauge stays green.
+- `POST /v1/chat/completions`
+- `POST /v1/messages`
 
-The router therefore admits on **tokens in flight**, not request counts. Requests-per-minute and tokens-per-day are kept for the jobs they are good at (tiny-request flood guard, commercial budget); the occupancy budget is the gate that protects the latency SLO.
+`POST /v1/messages/count_tokens` is deliberately exempt. It runs no model and consumes no KV cache, so it skips the input and image caps, pressure shed, occupancy budgets, per-key token rates, and daily token budget. It remains protected by the request-per-minute limiter.
 
-The gates are **engine-agnostic**: B1, B2, and B4 are pure router-side counters whose only engine-supplied number is the KV capacity in tokens — measured by benchmarking whatever engine is deployed, not read from an engine API — so they work unchanged in front of vLLM, SGLang, or any other KV-cache-bound engine. B3 is the one telemetry-coupled gate, and it fails open when an engine does not report the signals.
+Embedding and reranking requests are also exempt because these gates model KV-cache-bound generation. Their request-rate, body-size, and agent-concurrency protections still apply.
 
-## The gate pipeline
+## Gate order
 
-Every `/v1/chat/completions` and `/v1/messages` request passes the gates in this order (`internal/api/handlers.go` `Passthrough`). Ordering is deliberate: cheap, deterministic rejections come first, and nothing charges the tenant's daily budget until every cheaper gate has passed.
+After authentication and the request-per-minute check, the LLM handler evaluates:
 
-| # | Gate | Scope | Rejection |
-| --- | --- | --- | --- |
-| 0 | Per-key RPM (middleware) | every key | 429 `rate_limit_exceeded` |
-| 1 | **B1** — per-request caps (input tokens, images) | all replicas | 400 `input_too_long` |
-| 2 | **B3** — front-door KV-pressure shed | all replicas | 429 `concurrency_limit_exceeded` |
-| 3 | **B2** — occupancy admit budget + `max_inflight` backstop | all replicas | 429 `concurrency_limit_exceeded` |
-| 4 | **B4** — per-key occupancy share | serverless only | 429 `rate_limit_exceeded` |
-| 5 | **B4** — per-key OTPM (non-deducting check), then ITPM (deducting) | serverless only | 429 `rate_limit_exceeded` |
-| 6 | Daily token budget (input reserved up front) | keys with `tokens_per_day` | 429 `token_limit_exceeded` |
+1. **B1: request caps** — input-token and image-count limits
+2. **B3: pressure shed** — live pressure across healthy replicas
+3. **B2: pool occupancy** — token-weighted occupancy and `max_inflight`
+4. **B4: serverless key limits** — per-key occupancy share, output-rate state, and input tokens per minute
+5. **Daily token admission** — the existing tenant token budget
 
-Not every 429 carries a `Retry-After` header: `concurrency_limit_exceeded` (B2/B3) always sets it, `rate_limit_exceeded` sets it for the serverless B4 caps but **not** for the front-door RPM limiter, and `token_limit_exceeded` (daily budget) never sets it. Clients should honor `Retry-After` when present and fall back to their own backoff otherwise. Every rejection increments `hivenet_router_admission_rejections_total{reason, model}` — see [Admission control metrics](/observability/admission-control-metrics).
+If a later check rejects the request, every occupancy reservation already taken is released.
 
-## The footprint formula
+## Configure a policy
 
-B2 and the per-key occupancy share charge each in-flight request a **footprint** `w`:
+Admission fields live at the top level of a global or per-model policy:
 
-```text
-w = input_estimate + declared_output
+```yaml
+models:
+  - Qwen/Qwen3.6-27B-A3B
 
-declared_output = max_tokens (or max_completion_tokens), reserved up front
-                = 0 if undeclared — the reservation then GROWS as output streams,
-                  charged from the live SSE deltas
+mode: reserved
+max_input_tokens: 131072
+images_max: 8
+admit_budget_tokens: 262144
+max_inflight: 16
 
-admit while:  Σ w  (over in-flight requests)  +  w_new  ≤  budget
+routing_policy:
+  match:
+    engine: vllm
+  strategy: least-loaded
 ```
 
-- **Declared `max_tokens`** is reserved in full at admission (the OpenAI/Azure posture): a client cannot under-declare and then blow the pool mid-stream, and over-declaring only self-limits its own admission.
-- **Undeclared `max_tokens`** reserves only the input, then grows per streamed output chunk (the Anthropic posture) — on vLLM an undeclared request may generate up to `max_model_len − input`, so a fake reservation would either truncate honest long outputs or pessimistically reserve the whole pool. A negative `max_tokens` is treated as undeclared.
-- The reservation is **released exactly once** on every exit path — success, error, timeout, client disconnect — and **released early** when the request fails over to a [cloud provider fallback](/routing/provider-fallback), since a provider-served request consumes no local KV cache.
-- When the backend reports exact `usage.prompt_tokens`, the reservation is **trued up** by `exact − estimate` and the exact count feeds the estimator (see below).
+All four numeric limits are optional. `0` or an omitted field disables that check. Negative values make policy validation fail. `admit_budget_tokens` and `max_inflight` are **per-replica** limits that the router scales to the number of healthy replicas serving the model.
 
-## B1 — per-request caps
-
-The policy fields `max_input_tokens` and `images_max` bound the worst single request; either breach is a 400 `input_too_long` (not retryable — the request must shrink).
-
-- The input check uses the **same estimate B2 reserves** (learned per-model ratio over message text, the Anthropic top-level `system` prompt, and tool-definition JSON), so the two gates never disagree about a request's size.
-- Images are bounded by **count**, not tokens — image token cost is not byte-estimable, so `images_max` is the cap. Both the OpenAI `image_url` part and the Anthropic `image` block count.
-- There is deliberately **no output clamp**: the engine already bounds output at `max_model_len − input`, and clamping declared outputs while undeclared ones live-meter would punish the honest client. The benchmark's "admitted/certified output" numbers are disclosure bands, never router caps.
-
-## B2 — the occupancy admit budget
-
-The core gate. Per model, the router tracks the weighted in-flight sum `Σw` and admits while it fits the **effective pool budget**:
-
-```text
-pool_budget = admit_fraction × admit_budget_tokens × healthy_replicas
-```
-
-- `admit_budget_tokens` (policy) is the **per-replica** KV token capacity certified by the benchmark (`router_limits.yaml kv_occupancy.admit_budget_tokens`).
-- `admit_fraction` (router config, default **0.90**) leaves headroom for token-estimate error. It shipped at 0.85 and was raised to 0.90 once the learned estimator + true-up replaced the `len/4` heuristic (which under-counted coding inputs by ~20%).
-- `healthy_replicas` scales the budget to the live pool, recomputed per request and floored at 1 — so the budget tracks replicas joining and leaving, and zero healthy replicas cannot zero the budget (which would read as "gate off"). Routing spreads the admitted load; a single hot replica is handled by the per-agent `exclude_if` gates and B3, not by this counter.
-- `max_inflight` (policy) is a plain per-replica concurrency backstop from `max(concurrency.soak_running_p95_per_sku)`, scaled by the same replica count.
-
-An over-budget request whose own footprint could ever fit **parks** for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default 250ms) waiting for a release, then rejects with 429 + `Retry-After`. A request whose footprint alone exceeds the budget rejects immediately — parking cannot save it.
-
-### How many requests fit
-
-Concurrent capacity is **arithmetic, not a curve**: when all requests are roughly the same size `s`, the pool holds `min(floor(pool_budget / s), max_inflight × replicas)` of them. With a single replica and a ~409K-token effective budget:
-
-| Request size (input + output) | Fits concurrently |
+| Field | Current behavior |
 | --- | --- |
-| 250K (full-context coding) | 1 |
-| 64K | ~6 |
-| 16K | ~24 |
-| ~3K (chat turn) | ~130 → capped by `max_inflight` |
+| `max_input_tokens` | Rejects a request when the learned prompt estimate exceeds the limit |
+| `images_max` | Rejects a request carrying more images than the limit |
+| `admit_budget_tokens` | Per-replica token-weighted occupancy capacity |
+| `max_inflight` | Per-replica in-flight request-count backstop |
 
-Mixed traffic shares the same weighted sum — one 250K request displaces ~80 chat turns. This is why three full-context requests arriving together can 429 while hundreds of chat turns flow freely, and why declaring an accurate `max_tokens` matters: the reservation is the footprint.
+## One input estimate
 
-## B3 — front-door KV-pressure shed
+The router computes one prompt estimate and uses it consistently for B1, occupancy admission, serverless input tokens per minute, daily input admission, and the later exact-usage correction.
 
-B2 works from estimates; B3 reads the **live engine signal**. When the mean KV-cache utilization or waiting-request count across the model's healthy replicas breaches the policy's `shed_if` thresholds, new requests are rejected at the door with 429 rather than queued into an already-saturated pool.
+The estimate includes:
+
+- text in OpenAI- and Anthropic-style message content
+- the Anthropic top-level `system` prompt, as a string or text-block array
+- raw `tools` JSON, because tool schemas become part of the model prompt
+- a small per-message overhead, including for textless messages
+
+The estimator starts at one token per 3.2 bytes and learns a separate tokens-per-byte ratio for each model from exact backend usage. New observations use an EWMA weight of `0.2` and are clamped to `0.05` through `1.0` tokens per byte so one abnormal report cannot poison later estimates. The learned state resets when the router restarts.
+
+OpenAI usage fields (`prompt_tokens`, `completion_tokens`) and Anthropic fields (`input_tokens`, `output_tokens`) are normalized to the same internal totals. Streaming Anthropic `message_start` and `message_delta` usage is also recognized.
+
+Image content is not byte-estimable. The router counts OpenAI `image_url` parts and Anthropic `image` blocks separately through `images_max`. Image-bearing requests still receive an exact occupancy true-up, but they are not used to train the text ratio.
+
+## B1: request caps
+
+The router checks the learned input estimate and image count independently. A breach returns HTTP `400` with `input_too_long`:
+
+```json
+{
+  "error": {
+    "code": "input_too_long",
+    "message": "input is 140000 tokens, over the model limit of 131072",
+    "source": "router"
+  }
+}
+```
+
+Reducing only `max_tokens` does not fix this response. Reduce the input text, tool definitions, or number of images. Hivenet Router does not impose its own output-token cap.
+
+## B2: pool occupancy
+
+For each model, the router maintains a token-weighted occupancy total and an in-flight request count. The effective pool limits are:
+
+```text
+token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
+                     × admit_budget_tokens
+                     × healthy_replicas)
+
+request backstop = max_inflight × healthy_replicas
+```
+
+The healthy-replica count is recomputed for each request and floored at `1`. This keeps the gate active when no healthy replica is currently reported, while routing can still return the more specific availability error.
+
+`HIVENET_ROUTER_ADMIT_FRACTION` defaults to `0.90` and accepts values greater than `0` and at most `1`. Invalid values leave the default unchanged.
+
+A request's initial token footprint is:
+
+```text
+estimated input tokens + declared maximum output tokens
+```
+
+`max_completion_tokens` is preferred, with `max_tokens` as the fallback. A negative output value is treated as undeclared for occupancy accounting rather than reducing the footprint.
+
+If output is undeclared, the reservation starts with the input estimate and grows as output streams. When the backend reports exact input usage, the router replaces the estimated input portion with the exact count. Success, error, timeout, and client disconnect all release the reservation.
+
+When a request does not fit, it waits for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. The default is `250ms`; `0` rejects immediately. If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded`:
+
+```json
+{
+  "error": {
+    "code": "concurrency_limit_exceeded",
+    "message": "server at capacity for this model, please retry",
+    "source": "router"
+  }
+}
+```
+
+Retry this error with bounded exponential backoff and jitter.
+
+## B3: front-door shedding
+
+Use `shed_if` to reject new work before queueing when the healthy serving pool is already under pressure:
 
 ```yaml
 shed_if:
-  kv_cache_utilization: { gt: 0.90 }   # aligned with admit_fraction
-  waiting_requests:     { gt: 20 }
+  kv_cache_utilization:
+    gt: 0.90
+  waiting_requests:
+    gt: 20
 ```
 
-- The signal is the **mean** across healthy replicas (a single hot replica is routing's job, shedding is warranted only when the pool as a whole is under pressure).
-- A missing signal **fails open**: engines that do not report KV utilization simply skip that dimension, and B2's static budget carries the safety.
-- Only `kv_cache_utilization` and `waiting_requests` are accepted in `shed_if`; an unknown field is a load-time error (a typo must not silently disable the shed).
-- The threshold gates **admission, not decode growth**: requests admitted below it keep allocating KV blocks as they generate, so shedding lowers the *rate* of preemption rather than eliminating it. 0.90 is more permissive than the industry de-facto 0.80, leaning on the learned estimator's accuracy; if the engine's preemption counter (e.g. vLLM's `num_preemptions_total`) climbs, the estimate is running optimistic — lower the threshold toward 0.80 to restore the cushion.
+The router averages each available signal across healthy agents serving the requested model. If any configured threshold fails, it returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded` with the message `model is under high load, please retry`.
 
-## B4 — serverless per-key caps
+Missing engine signals pass the gate. A single hot replica should normally be handled by per-agent `exclude_if`; `shed_if` is for pressure across the pool.
 
-Applied only when the governing policy declares `mode: serverless` (many keys sharing replicas). On `mode: reserved` (default — one client rents the whole replica) the ITPM/OTPM/occupancy-share caps are inert; B1/B2/B3 still protect the box. RPM is the exception — it is a front-door quota that runs in every mode (see below).
+## B4: serverless key limits
 
-| Cap | Field | Mechanism |
-| --- | --- | --- |
-| Requests/min | `quota.requests_per_minute` | **enforced at the front door (pre-routing), not gated by mode** — listed here to show the full per-key rate picture, but it is the same quota that guards every request. Token bucket; burst = certified window via `HIVENET_ROUTER_RPM_BURST_SECONDS`, not the library's full-minute default |
-| Input tokens/min | `quota.input_tokens_per_minute` | bucket charged with the admission estimate **before** the daily budget, so a rate rejection never spends daily tokens |
-| Output tokens/min | `quota.output_tokens_per_minute` | metered **post-hoc** from real usage (never reserved); a key that over-produces is held off on its *next* request |
-| Occupancy share | `max_occupancy_share` (key-level) | the key's in-flight `Σw` must fit `share × pool_budget` — the same replica-scaled pool B2 admits against |
+`mode` accepts `reserved` and `serverless`; omitting it selects `reserved`. B1, B2, and B3 run in either mode. Serverless mode additionally enables these key fields:
 
-B4 is **fairness and anti-abuse, not box protection** — the caps are deliberately oversubscribed (three keys with share 0.40 = 1.2×; do not make them "add up"), because B2/B3 are the safety. Two invariants are validated at load, on reload, and on every admin-API key mutation:
+```yaml
+api:
+  mode: api-key
+  keys:
+    - key_hash: "<sha256>"
+      key_preview: "sk-hivenet-...abcd"
+      metadata:
+        name: "Shared tenant"
+        owner: "tenant-a"
+      max_occupancy_share: 0.25
+      quota:
+        input_tokens_per_minute: 262144
+        output_tokens_per_minute: 32768
+```
 
-- `max_occupancy_share` ∈ (0, 1], 0 meaning unset — above 1 one key could out-reserve the pool.
-- `input_tokens_per_minute ≥ max_input_tokens` on every serverless model the key can reach — a smaller bucket can *never* admit a full-context prompt and silently becomes a context cap. The router refuses to start, refuses the reload, and returns 400 from the admin API rather than accept it.
+- `max_occupancy_share` limits the key's in-flight footprint to:
 
-Per-model default derivation rules (recompute per campaign; never copy another model's constants): share = `max(max_model_len/admit_budget, 0.40)`; ITPM = `clamp(share × itpm_ceiling, 2 × max_input_tokens, itpm_ceiling)`; OTPM = `share × otpm_ceiling`; RPM ≈ `2 × max(sellable_rpm)`. The reference implementation is `auth.DeriveKeyDefaults` (`internal/auth/derive.go`).
+  ```text
+  max_occupancy_share × admit_budget_tokens × healthy_replicas
+  ```
 
-## The token estimator
+  This fairness limit intentionally does **not** apply `HIVENET_ROUTER_ADMIT_FRACTION`. It rejects immediately with `429 rate_limit_exceeded`; the global B2 budget remains the box-safety limit.
+- `input_tokens_per_minute` is a continuously refilling one-minute bucket charged from the shared input estimate before the daily budget.
+- `output_tokens_per_minute` is charged after a local response. If recent output drains the bucket, the next request is rejected. One response can drain at most one minute of capacity.
 
-Admission is only as good as its input estimate. The router uses a **per-model learned ratio** instead of a fixed heuristic (`internal/tokenizer/estimator.go`):
+The key limits are fairness and anti-abuse controls and may be deliberately oversubscribed. Their configured shares do not need to add up to `1`.
 
-- **Estimate** = `ceil(text_bytes × ratio)`, floored at 4 tokens per message so a textless (image/tool-only) request is still counted. `text_bytes` covers message text, the Anthropic top-level `system` prompt, and the raw `tools` JSON (tool schemas are rendered into the prompt and tokenized by the backend).
-- **Cold start** assumes 3.2 chars/token (code density), not 4 — `len/4` under-counts coding inputs by ~20%.
-- **Learning**: each exact `usage.prompt_tokens` from a backend response folds `prompt_tokens ÷ text_bytes` into the model's ratio via EWMA (α = 0.2). Samples are clamped to 0.05–1.0 tokens/byte so one unmodeled request cannot swing the ratio.
-- **Learning guards** — the estimator only learns from samples that describe *this model's text tokenizer*: fallback estimates are never fed back (it would relearn its own heuristic), image-carrying requests are skipped (image tokens would inflate the text ratio), and provider-fallback responses are skipped (a different tokenizer).
-- **True-up**: on completion the in-flight reservation is corrected by `exact − estimate`, capped so it can never free more than the reservation holds.
-- Both usage dialects are parsed: OpenAI (`prompt_tokens`/`completion_tokens`, streaming via `stream_options.include_usage`) and Anthropic (`input_tokens`/`output_tokens`, streaming via `message_start`/`message_delta` events).
+The input and output buckets are independent for each key-and-model combination. A zero value disables the corresponding cap. B4 rejections return `429 rate_limit_exceeded` with `Retry-After: 1`. The ordinary request-per-minute limiter uses the same error code but does not set `Retry-After`.
 
-The exact per-model tokenizer embedded in the router (phase 2) is deliberately deferred; no synchronous backend `/tokenize` call sits on the admission path.
+<Warning>
+  Dynamic keys have a stable key ID, so the three serverless controls are isolated per key. Static-key authentication does not currently populate a key ID; the handler falls back to `anonymous`. As a result, static keys share these B4 token buckets and occupancy state for a model in the audited source. Do not describe them as isolated per-static-key controls until the runtime supplies a distinct static key ID.
+</Warning>
 
-## What is exempt
+## Validation and derived defaults
 
-- **`/v1/messages/count_tokens`** skips B1–B4 entirely: it is a stateless tokenizer lookup that holds no KV cache and generates nothing, and clients that count before sending (Claude Code's pattern) would otherwise be billed twice per request. It charges no token quota — including the daily budget — and is guarded by the per-key RPM flood limit alone.
-- **Provider-fallback traffic** (OpenAI/Anthropic cloud): the occupancy reservation is released the moment the request leaves the local pool, and provider-served responses charge no OTPM and never teach the estimator. RPM, ITPM, and the daily input charge still apply — they are taken before routing and are the key's commercial plan limits regardless of who serves.
-- **Embeddings and reranking** (`/v1/embeddings`, `/v1/rerank`) bypass admission control and token metering entirely — the gates model KV-cache-bound *generation*, which prefill-only workloads do not do. They are protected by RPM, the body-size cap, and the concurrency/queue gates only. This is a stated scope decision, not an oversight.
+The router validates the cross-config serverless invariants at startup, during auth and policy reloads, and for dynamic `PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` writes:
 
-## Housekeeping
+- `max_occupancy_share` must be `0` (unset) or greater than `0` and at most `1`.
+- input and output token-per-minute values cannot be negative.
+- a nonzero `input_tokens_per_minute` must be at least `max_input_tokens` for every reachable serverless model.
 
-Per-key limiter state (RPM/ITPM/OTPM buckets, occupancy counters, daily counters) is garbage-collected by the router's 5-minute GC tick, losslessly: rate buckets are evicted only when full (a full bucket is identical to the fresh one the next request creates), daily counters only after their UTC day passes, occupancy states only when empty and idle for 15 minutes. Cumulative usage history is unaffected — it lives in the [Prometheus tenant counters](/observability/prometheus-metrics) and the [audit log](/observability/audit-logging), never in these maps.
+Invalid dynamic writes return HTTP `400`; an invalid reload leaves the previous valid configuration active.
 
-## Configuration
+The repository includes `auth.DeriveKeyDefaults` to calculate suggested B4 values from certified model limits. The router does not load a model's `router_limits.yaml` or call this helper while loading `auth.yaml`. Operators or provisioning tooling must write the resulting values into the key configuration.
 
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Scales `admit_budget_tokens` into the effective budget; range (0,1] |
-| `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | How long an over-budget request waits for occupancy to free before 429 (0 = reject immediately) |
-| `HIVENET_ROUTER_RPM_BURST_SECONDS` | `0` | RPM bucket burst window in seconds; 0 or ≥60 keeps the legacy full-minute burst |
+## Provider fallback accounting
 
-Per-model limits live in the [policy YAML](/routing/policy-yaml-reference) (`mode`, `max_input_tokens`, `images_max`, `admit_budget_tokens`, `max_inflight`, `shed_if`); per-key caps live in the [auth YAML](/security/auth-yaml-reference) (`quota.*_tokens_per_minute`, `max_occupancy_share`). Every benchmark-derived number loads from the model's `router_limits.yaml` — never hardcode one.
+Provider fallback consumes no local KV cache or decode throughput. When routing leaves the local pool, the router releases the global and per-key occupancy reservations immediately. Request-rate, input-token-per-minute, and daily input charges taken before routing remain in place.
 
-## Admission errors
+Provider output does not charge the local OTPM bucket or train the local model's estimator. The provider path also does not perform the normal post-response daily output deduction. Provider-reported usage is still recorded in Prometheus tenant counters and the audit log under the originally requested model.
 
-| Error | HTTP | Meaning | Client behavior |
-| --- | --- | --- | --- |
-| `input_too_long` | 400 | Prompt over `max_input_tokens`, or images over `images_max`. | Reduce the payload. Retrying unchanged will not help. |
-| `concurrency_limit_exceeded` | 429 | Occupancy budget, `max_inflight`, or the front-door shed. | Retry with backoff + jitter; honor `Retry-After`. |
-| `rate_limit_exceeded` | 429 | A per-key cap (RPM, ITPM, OTPM, occupancy share). | Retry with backoff, or spread work across keys/time. |
-| `token_limit_exceeded` | 429 | Daily token budget exhausted. | Do not retry until UTC midnight. |
+## Idle-state cleanup
 
-## Client guidance
-
-- Apply exponential backoff with jitter to 429s; bound retries so a saturated fleet does not receive a retry storm.
-- Declare `max_tokens` when you know your output size — a declared request admits or rejects instantly instead of growing into a mid-stream squeeze on the pool.
-- Track `input_too_long` separately from the 429 family: it needs a smaller request, not a retry.
-- Use separate API keys for workloads that need distinct occupancy or rate budgets.
-- Keep client timeouts longer than the configured parking window.
+Every five minutes, the router removes full rate buckets, daily buckets from a past UTC day, and occupancy state that has held no requests for at least 15 minutes. This bounds memory when dynamic keys are created frequently. Cumulative metrics and audit history are unaffected.
 
 ## Related pages
 
 <CardGroup cols={2}>
   <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
-    The per-model admission fields: mode, caps, budget, shed thresholds.
+    Review every routing and admission field.
   </Card>
 
-  <Card title="Auth YAML reference" href="/security/auth-yaml-reference">
-    Per-key quotas: RPM, ITPM, OTPM, occupancy share, daily tokens.
-  </Card>
-
-  <Card title="Admission control metrics" href="/observability/admission-control-metrics">
-    Occupancy vs budget, in-flight concurrency, and 429s by reason.
+  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+    Configure RPM, daily token, and serverless per-key limits.
   </Card>
 
   <Card title="Error codes" href="/reference/error-codes">
-    Handle router, agent, backend, and admission failures consistently.
+    Handle admission, routing, and backend failures.
+  </Card>
+
+  <Card title="Configuration reference" href="/reference/configuration-reference">
+    Review admission environment variables and defaults.
+  </Card>
+
+  <Card title="Admission control metrics" href="/observability/admission-control-metrics">
+    Monitor occupancy, budgets, concurrency, and rejections by gate.
   </Card>
 </CardGroup>

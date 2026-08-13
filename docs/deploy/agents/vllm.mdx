@@ -1,6 +1,6 @@
 ---
 title: "vLLM agent"
-description: "Connect a vLLM backend to Mycoroute, configure model discovery and capacity, and expose vLLM metrics for routing and observability."
+description: "Connect a vLLM backend to Hivenet Router, configure model discovery and capacity, and expose vLLM metrics for routing and observability."
 sidebarTitle: "vLLM"
 ---
 
@@ -110,27 +110,27 @@ The model ID returned here is the value clients must use when sending requests t
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent agent identity:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
 
     Place the router’s JWT secret at:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Protect it:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
   </Tab>
   <Tab title="Bare metal">
@@ -143,14 +143,14 @@ The model ID returned here is the value clients must use when sending requests t
     Place the shared JWT secret somewhere the agent process can read, for example:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Create a writable directory for the persistent agent identity:
 
     ```bash
-    sudo mkdir -p /var/lib/mycoroute/agent
-    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    sudo mkdir -p /var/lib/hivenet-router/agent
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agent
     ```
   </Tab>
 </Tabs>
@@ -165,9 +165,9 @@ The model ID returned here is the value clients must use when sending requests t
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/app/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/app/data \
+      hivenet-router/agent:latest \
       --engine vllm \
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
@@ -189,12 +189,12 @@ The model ID returned here is the value clients must use when sending requests t
       --engine vllm \
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 256 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
-      --identity-path /var/lib/mycoroute/agent/identity.key
+      --identity-path /var/lib/hivenet-router/agent/identity.key
     ```
   </Tab>
 </Tabs>
@@ -264,7 +264,7 @@ If one backend exposes multiple models, start one agent process for each model:
   --engine vllm \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --backend-url http://localhost:8888 \
-  --identity-path /var/lib/mycoroute/agent/llama-8b.key \
+  --identity-path /var/lib/hivenet-router/agent/llama-8b.key \
   ...
 ```
 
@@ -275,7 +275,7 @@ Start the second agent with a different model and identity:
   --engine vllm \
   --model meta-llama/Llama-3.1-70B-Instruct \
   --backend-url http://localhost:8888 \
-  --identity-path /var/lib/mycoroute/agent/llama-70b.key \
+  --identity-path /var/lib/hivenet-router/agent/llama-70b.key \
   ...
 ```
 
@@ -540,7 +540,7 @@ docker inspect hivenet-agent \
 For bare metal:
 
 ```bash
-ls -l /var/lib/mycoroute/agent/identity.key
+ls -l /var/lib/hivenet-router/agent/identity.key
 ```
 
 ### Metrics are missing

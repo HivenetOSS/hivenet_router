@@ -19,6 +19,7 @@ Use these endpoints to inspect agents, models, storage, and routing state; updat
 | `GET` | `/health` | Public process liveness |
 | `GET` | `/admin/health` | Router and agent health summary |
 | `GET` | `/admin/routing-table` | Complete live agent state |
+| `GET` | `/admin/registration-stream` | Server-sent event feed of agent registration changes |
 | `GET` | `/admin/models` | Unfiltered operator model catalog |
 | `GET` | `/admin/models/{model}` | Unfiltered model and agent detail |
 | `GET` | `/admin/storage` | BadgerDB counts, size, and garbage collection |
@@ -68,14 +69,14 @@ Admin keys are comma-separated. The router hashes them at startup and does not r
 For client commands, store one key in a convenient shell variable:
 
 ```bash
-export MYCOROUTE_ADMIN_KEY="first-admin-key"
+export HIVENET_ROUTER_ADMIN_API_KEY="first-admin-key"
 ```
 
 Then send it as a bearer token:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/health
 ```
 
@@ -132,7 +133,7 @@ GET /admin/health
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/health \
   | jq .
 ```
@@ -198,7 +199,7 @@ This endpoint combines:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq .
 ```
@@ -305,7 +306,7 @@ A shortened response resembles:
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[]
       | select(.status.healthy == false)
@@ -322,7 +323,7 @@ curl -s \
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[]
       | select(
@@ -339,7 +340,7 @@ curl -s \
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,
@@ -347,6 +348,40 @@ curl -s \
       srtt_ms: .universal.srtt_ms
     }'
 ```
+
+## Registration stream
+
+```text
+GET /admin/registration-stream
+```
+
+This long-lived Server-Sent Events response publishes settled agent registration changes. It is useful for schedulers that need to react faster than polling the routing table.
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
+  http://localhost:8080/admin/registration-stream
+```
+
+Each event is one `data:` frame containing JSON:
+
+```text
+data: {"event_type":"registered","deployment_id":"deploy-42","replica_id":"replica-3","agent_id":"12D3Koo...","timestamp":"2026-08-11T09:30:00Z"}
+```
+
+| Field | Description |
+| --- | --- |
+| `event_type` | `registered` or `unregistered` |
+| `deployment_id` | Logical deployment supplied by the agent |
+| `replica_id` | Stable replica identifier supplied by the agent |
+| `agent_id` | libp2p peer ID, included for diagnostics |
+| `timestamp` | Event time in RFC 3339 JSON form |
+
+The `(deployment_id, replica_id)` pair is the external scheduler join key. The server sends an SSE comment every 25 seconds to keep idle connections alive.
+
+<Note>
+  This endpoint is a change feed, not a complete snapshot. Each subscriber has a bounded buffer, and a slow subscriber can miss events rather than block agent registration. Read `/admin/routing-table` when connecting and whenever you need to resynchronize authoritative state.
+</Note>
 
 ## Operator model catalog
 
@@ -370,7 +405,7 @@ List every registered model:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/models \
   | jq '.data[].id'
 ```
@@ -379,7 +414,7 @@ Read one model and its agent list:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   "http://localhost:8080/admin/models/Qwen/Qwen3.6-27B-A3B" \
   | jq .
 ```
@@ -399,7 +434,7 @@ GET /admin/storage
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/storage \
   | jq .
 ```
@@ -458,7 +493,7 @@ This endpoint clears persisted per-agent lifetime metrics so dashboards begin fr
 
 ```bash
 curl -X POST \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/metrics/reset
 ```
 
@@ -506,7 +541,7 @@ GET /admin/policy
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/policy \
   | jq .
 ```
@@ -523,7 +558,7 @@ Send the policy as YAML:
 
 ```bash
 curl -X PUT \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   -H "Content-Type: text/yaml" \
   --data-binary '
 routing_policy:
@@ -577,7 +612,7 @@ GET /admin/policy/models
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/policy/models \
   | jq .
 ```
@@ -615,7 +650,7 @@ GET /admin/policy/models/{name}
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/policy/models/gpt-oss \
   | jq .
 ```
@@ -630,7 +665,7 @@ PUT /admin/policy/models/{name}
 
 ```bash
 curl -X PUT \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   -H "Content-Type: text/yaml" \
   --data-binary '
 models:
@@ -678,7 +713,7 @@ DELETE /admin/policy/models/{name}
 
 ```bash
 curl -X DELETE \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/policy/models/gpt-oss
 ```
 
@@ -763,7 +798,7 @@ The URL parameter is the source of truth for the entry ID.
 
 ```bash
 curl -X PUT \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
     \"version\": \"rev_00000002\",
@@ -776,12 +811,9 @@ curl -X PUT \
     \"allowed_models\": [
       \"meta-llama/Llama-3.1-8B-Instruct\"
     ],
-    \"max_occupancy_share\": 0.4,
     \"quota\": {
       \"requests_per_minute\": 1000,
-      \"tokens_per_day\": 1000000,
-      \"input_tokens_per_minute\": 524288,
-      \"output_tokens_per_minute\": 47424
+      \"tokens_per_day\": 1000000
     }
   }" \
   http://localhost:8080/admin/api-keys/acme-prod
@@ -805,8 +837,8 @@ Response:
 | `enabled` | Yes | Whether the key may authenticate |
 | `expires_at` | No | RFC 3339 timestamp; empty means no expiry |
 | `allowed_models` | No | Model allowlist; empty means unrestricted |
-| `quota` | No | Flat or per-model quota configuration; the flat shape also accepts the serverless `input_tokens_per_minute` / `output_tokens_per_minute` caps |
-| `max_occupancy_share` | No | Serverless occupancy share, fraction of a model pool's admit budget in (0, 1]; 0 means unset. Key-level, mirroring the `auth.yaml` field |
+| `quota` | No | Flat or per-model quota configuration; the flat shape also accepts serverless input and output tokens per minute |
+| `max_occupancy_share` | No | Serverless key-level share of replica-scaled KV occupancy; `0` is unset, otherwise valid through `1` |
 
 A stale version returns HTTP `409`:
 
@@ -821,13 +853,15 @@ A key hash cannot belong to two different IDs. Delete the existing entry before 
 
 ### Admission validation on key writes
 
-`PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants the static `auth.yaml` loader enforces at startup, returning HTTP `400` instead of accepting a key that would misbehave silently:
+`PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants as static configuration:
 
-- `max_occupancy_share` outside (0, 1] is rejected (a share above 1 would let one key out-reserve the whole pool).
-- Negative `input_tokens_per_minute` / `output_tokens_per_minute` are rejected.
-- On every `mode: serverless` model the key can reach, `input_tokens_per_minute` must be at least the policy's `max_input_tokens` — a smaller bucket can never admit a full-context prompt, so it would silently cap the usable context for that key.
+- `max_occupancy_share` must be `0` or in `(0, 1]`.
+- `input_tokens_per_minute` and `output_tokens_per_minute` cannot be negative.
+- For every reachable `mode: serverless` model, a nonzero `input_tokens_per_minute` must be at least that policy's `max_input_tokens`.
 
-The reverse direction holds too: a policy reload that would break these invariants against the keys currently registered (static or dynamic) is rejected, keeping the previous policies active. See [Admission control](/routing/admission-control).
+A violation returns HTTP `400` and leaves the registry unchanged. Policy reloads run the reverse check against both static and dynamic keys; a policy that would invalidate an existing key is rejected and the previous policy remains active.
+
+The API stores the values supplied by the caller. It does not load `router_limits.yaml` or invoke `auth.DeriveKeyDefaults` automatically.
 
 ### Use per-model quotas
 
@@ -873,7 +907,7 @@ DELETE /admin/api-keys/{id}?version={version}
 
 ```bash
 curl -X DELETE \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   "http://localhost:8080/admin/api-keys/acme-prod?version=rev_00000003"
 ```
 
@@ -899,7 +933,7 @@ Use this endpoint to bootstrap or reconcile the entire in-memory registry.
 
 ```bash
 curl -X POST \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "version": "rev_00000004",
@@ -954,7 +988,7 @@ GET /admin/api-keys/version
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/api-keys/version \
   | jq .
 ```
@@ -976,7 +1010,7 @@ GET /admin/api-keys
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/api-keys \
   | jq .
 ```
@@ -1019,7 +1053,7 @@ GET /admin/api-keys/{id}
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/api-keys/acme-prod \
   | jq .
 ```
@@ -1039,9 +1073,12 @@ Response:
     "allowed_models": [
       "meta-llama/Llama-3.1-8B-Instruct"
     ],
+    "max_occupancy_share": 0.4,
     "quota": {
       "requests_per_minute": 1000,
-      "tokens_per_day": 1000000
+      "tokens_per_day": 1000000,
+      "input_tokens_per_minute": 524288,
+      "output_tokens_per_minute": 47424
     }
   }
 }
@@ -1073,7 +1110,7 @@ When a body exceeds its route limit, the current handler returns HTTP `400` with
 Missing or invalid admin credentials return HTTP `401` with a bearer challenge:
 
 ```text
-WWW-Authenticate: Bearer realm="mycoroute"
+WWW-Authenticate: Bearer realm="hivenet-router"
 ```
 
 Response:

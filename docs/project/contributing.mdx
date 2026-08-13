@@ -52,7 +52,7 @@ Clone the repository:
 git clone \
   https://github.com/HivenetOSS/hivenet_router.git
 
-cd mycoroute
+cd hivenet_router
 ```
 
 Build the complete module:
@@ -91,7 +91,7 @@ The main implementation areas are:
 | --- | --- |
 | `cmd/router/` | Router entry point and process startup |
 | `cmd/agent/` | Agent entry point and process startup |
-| `internal/use-the-api/` | HTTP routes, handlers, middleware, and audit behavior |
+| `internal/api/` | HTTP routes, handlers, middleware, and audit behavior |
 | `internal/auth/` | Client, administrator, agent, and quota authentication |
 | `internal/router/` | Agent registry, request processing, forwarding, and queueing |
 | `internal/policy/` | Routing policies, gates, fallback chains, and selection |

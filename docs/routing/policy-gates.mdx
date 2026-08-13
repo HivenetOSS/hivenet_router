@@ -78,7 +78,7 @@ List the operator model catalog:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/models \
   | jq -r '.data[].id'
 ```
@@ -87,7 +87,7 @@ Check the model registered by each agent:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       peer_id,
@@ -132,7 +132,7 @@ Check the health summary:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/health \
   | jq .
 ```
@@ -141,7 +141,7 @@ Inspect the two health fields separately:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,
@@ -203,7 +203,7 @@ even if the request uses the same model name.
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,
@@ -285,7 +285,7 @@ Inspect live metadata:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,
@@ -429,7 +429,7 @@ Inspect active requests and capacity:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,
@@ -920,7 +920,7 @@ For example, inspect cache use:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
   http://localhost:8080/admin/routing-table \
   | jq '.agents[] | {
       model: .metadata.model,

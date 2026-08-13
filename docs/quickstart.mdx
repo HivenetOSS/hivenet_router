@@ -59,8 +59,8 @@ The compiled Hivenet Router binaries do not require Go on the target machines.
 On each router and agent machine, create the Hivenet Router directory:
 
 ```bash
-sudo mkdir -p /opt/mycoroute
-sudo chown "$USER":"$USER" /opt/mycoroute
+sudo mkdir -p /opt/hivenet-router
+sudo chown "$USER":"$USER" /opt/hivenet-router
 ```
 
 Run these commands on:
@@ -76,7 +76,7 @@ On the build machine:
 
 ```bash
 git clone https://github.com/HivenetOSS/hivenet_router.git
-cd mycoroute
+cd hivenet_router
 
 go build -o bin/hivenet-router ./cmd/router/
 go build -o bin/hivenet-agent ./cmd/agent/
@@ -85,15 +85,15 @@ go build -o bin/hivenet-agent ./cmd/agent/
 Copy the router binary:
 
 ```bash
-scp bin/hivenet-router router-server:/opt/mycoroute/
+scp bin/hivenet-router router-server:/opt/hivenet-router/
 ```
 
 Copy the agent binary to each inference host:
 
 ```bash
-scp bin/hivenet-agent gpu-eu-1:/opt/mycoroute/
-scp bin/hivenet-agent gpu-eu-2:/opt/mycoroute/
-scp bin/hivenet-agent gpu-us-1:/opt/mycoroute/
+scp bin/hivenet-agent gpu-eu-1:/opt/hivenet-router/
+scp bin/hivenet-agent gpu-eu-2:/opt/hivenet-router/
+scp bin/hivenet-agent gpu-us-1:/opt/hivenet-router/
 ```
 
 ## Create the shared JWT secret
@@ -110,16 +110,16 @@ chmod 600 jwt.secret
 Copy it to every machine:
 
 ```bash
-scp jwt.secret router-server:/opt/mycoroute/jwt.secret
-scp jwt.secret gpu-eu-1:/opt/mycoroute/jwt.secret
-scp jwt.secret gpu-eu-2:/opt/mycoroute/jwt.secret
-scp jwt.secret gpu-us-1:/opt/mycoroute/jwt.secret
+scp jwt.secret router-server:/opt/hivenet-router/jwt.secret
+scp jwt.secret gpu-eu-1:/opt/hivenet-router/jwt.secret
+scp jwt.secret gpu-eu-2:/opt/hivenet-router/jwt.secret
+scp jwt.secret gpu-us-1:/opt/hivenet-router/jwt.secret
 ```
 
 Set restrictive permissions on each machine:
 
 ```bash
-chmod 600 /opt/mycoroute/jwt.secret
+chmod 600 /opt/hivenet-router/jwt.secret
 ```
 
 <Warning>
@@ -173,7 +173,7 @@ ollama pull llama3.1:8b
 Check that Ollama is ready:
 
 ```bash
-curl http://localhost:11434/use-the-api/tags
+curl http://localhost:11434/api/tags
 ```
 
 The endpoint should return HTTP status `200` and a list containing `llama3.1:8b`.
@@ -183,22 +183,22 @@ The endpoint should return HTTP status `200` and a list containing `llama3.1:8b`
 On `router-server`, prepare the persistent database directory:
 
 ```bash
-sudo mkdir -p /var/lib/mycoroute/badger
-sudo chown "$USER":"$USER" /var/lib/mycoroute/badger
+sudo mkdir -p /var/lib/hivenet-router/badger
+sudo chown "$USER":"$USER" /var/lib/hivenet-router/badger
 ```
 
 Start the router with unauthenticated administrator endpoints enabled for this isolated quickstart:
 
 ```bash
 HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true \
-/opt/mycoroute/hivenet-router \
-  --jwt-secret-file /opt/mycoroute/jwt.secret \
+/opt/hivenet-router/hivenet-router \
+  --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --http-port :8080 \
   --grpc-port :50051 \
   --p2p-port 9000 \
   --p2p-listen-addr 0.0.0.0 \
   --metrics-port :2112 \
-  --disk-db-path /var/lib/mycoroute/badger
+  --disk-db-path /var/lib/hivenet-router/badger
 ```
 
 The `--p2p-listen-addr 0.0.0.0` flag allows agents on other machines to reach the router’s libp2p endpoint.
@@ -250,14 +250,14 @@ The full response also includes a Unix timestamp.
 On `gpu-eu-1`:
 
 ```bash
-/opt/mycoroute/hivenet-agent \
+/opt/hivenet-router/hivenet-agent \
   --router-grpc 192.168.1.100:50051 \
-  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
   --capacity 32 \
   --region EU-Primary \
-  --identity-path /opt/mycoroute/agent_identity.key
+  --identity-path /opt/hivenet-router/agent_identity.key
 ```
 
 ## Start the second vLLM agent
@@ -265,14 +265,14 @@ On `gpu-eu-1`:
 On `gpu-eu-2`:
 
 ```bash
-/opt/mycoroute/hivenet-agent \
+/opt/hivenet-router/hivenet-agent \
   --router-grpc 192.168.1.100:50051 \
-  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
   --capacity 32 \
   --region EU-Secondary \
-  --identity-path /opt/mycoroute/agent_identity.key
+  --identity-path /opt/hivenet-router/agent_identity.key
 ```
 
 ## Start the Ollama agent
@@ -280,14 +280,14 @@ On `gpu-eu-2`:
 On `gpu-us-1`:
 
 ```bash
-/opt/mycoroute/hivenet-agent \
+/opt/hivenet-router/hivenet-agent \
   --router-grpc 192.168.1.100:50051 \
-  --jwt-secret-file /opt/mycoroute/jwt.secret \
+  --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine ollama \
   --backend-url http://localhost:11434 \
   --capacity 5 \
   --region US-Primary \
-  --identity-path /opt/mycoroute/agent_identity.key
+  --identity-path /opt/hivenet-router/agent_identity.key
 ```
 
 This example gives the Ollama agent a capacity of `5`. Set capacity according to the concurrency your backend can handle.
@@ -453,7 +453,7 @@ curl http://localhost:8888/health
 Check Ollama:
 
 ```bash
-curl http://localhost:11434/use-the-api/tags
+curl http://localhost:11434/api/tags
 ollama ps
 ```
 
@@ -462,7 +462,7 @@ ollama ps
 Confirm that every machine has the same secret:
 
 ```bash
-sha256sum /opt/mycoroute/jwt.secret
+sha256sum /opt/hivenet-router/jwt.secret
 ```
 
 The hash should be identical on the router and every agent host.

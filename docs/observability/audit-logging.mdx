@@ -36,7 +36,7 @@ These high-frequency infrastructure requests do not carry useful inference or te
 The default file is:
 
 ```text
-/var/log/mycoroute/audit.jsonl
+/var/log/hivenet-router/audit.jsonl
 ```
 
 Each request produces one JSON object on one line:
@@ -331,21 +331,21 @@ Check startup logs whenever the audit file remains empty.
 
 ## Bare-metal permissions
 
-Create a protected directory for a service running as `mycoroute`:
+Create a protected directory for a service running as `hivenet-router`:
 
 ```bash
 sudo install -d \
-  -o mycoroute \
-  -g mycoroute \
+  -o hivenet-router \
+  -g hivenet-router \
   -m 0750 \
-  /var/log/mycoroute
+  /var/log/hivenet-router
 ```
 
 Set the environment variable in the router service:
 
 ```ini
 [Service]
-Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
+Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
 ```
 
 Hivenet Router creates the file when it starts.
@@ -362,7 +362,7 @@ Check the result:
 
 ```bash
 sudo ls -l \
-  /var/log/mycoroute/audit.jsonl
+  /var/log/hivenet-router/audit.jsonl
 ```
 
 ## Docker Compose pipeline
@@ -374,7 +374,7 @@ The router writes to a named volume:
 ```yaml
 router:
   volumes:
-    - audit_logs:/var/log/mycoroute
+    - audit_logs:/var/log/hivenet-router
 ```
 
 Promtail mounts the same volume read-only:
@@ -382,7 +382,7 @@ Promtail mounts the same volume read-only:
 ```yaml
 promtail:
   volumes:
-    - audit_logs:/var/log/mycoroute:ro
+    - audit_logs:/var/log/hivenet-router:ro
 ```
 
 The volume declaration is:
@@ -403,7 +403,7 @@ Check that the router writes records:
 ```bash
 docker compose exec router \
   tail -n 5 \
-  /var/log/mycoroute/audit.jsonl
+  /var/log/hivenet-router/audit.jsonl
 ```
 
 Check Promtail:
@@ -435,9 +435,9 @@ The audit job reads only the JSONL file:
         - localhost
 
       labels:
-        job: mycoroute
+        job: hivenet-router
         log_type: audit
-        __path__: /var/log/mycoroute/audit.jsonl
+        __path__: /var/log/hivenet-router/audit.jsonl
 
   pipeline_stages:
     - json:
@@ -459,7 +459,7 @@ The audit job reads only the JSONL file:
 The resulting Loki stream selector is:
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
 ```
 
 Promtail promotes these JSON fields to labels:
@@ -507,14 +507,14 @@ Any pipeline change also requires corresponding dashboard-variable and query upd
 ### All audit records
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
 ```
 
 ### Errors
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | status_code >= 400
 ```
@@ -523,7 +523,7 @@ You can also use the promoted label:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   level="error"
 }
@@ -533,7 +533,7 @@ You can also use the promoted label:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   tenant_id="acme-corp"
 }
@@ -544,7 +544,7 @@ You can also use the promoted label:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   model="meta-llama/Llama-3.1-8B-Instruct"
 }
@@ -556,7 +556,7 @@ You can also use the promoted label:
 `request_id` is not a Loki label, so parse the JSON field:
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | request_id =
       "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a"
@@ -565,7 +565,7 @@ You can also use the promoted label:
 ### One trace
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | trace_id =
       "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -574,7 +574,7 @@ You can also use the promoted label:
 ### Slow requests
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | latency_ms > 5000
 ```
@@ -583,7 +583,7 @@ You can also use the promoted label:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   error_code="unauthorized"
 }
@@ -594,7 +594,7 @@ You can also use the promoted label:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   error_code="model_forbidden"
 }
@@ -604,7 +604,7 @@ You can also use the promoted label:
 ### Provider fallback requests
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | agent_id =~ "provider:.*"
 ```
@@ -617,7 +617,7 @@ You can also use the promoted label:
 sum by (status_code) (
   rate(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit"
     }[5m]
   )
@@ -632,7 +632,7 @@ Because `status_code` is a promoted label in the repository configuration, it re
 sum(
   rate(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit",
       level="error"
     }[5m]
@@ -642,7 +642,7 @@ sum(
 sum(
   rate(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit"
     }[5m]
   )
@@ -655,7 +655,7 @@ sum(
 sum by (model) (
   count_over_time(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit"
     }[1h]
   )
@@ -668,7 +668,7 @@ sum by (model) (
 sum by (tenant_id) (
   sum_over_time(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit"
     }
       | json
@@ -685,7 +685,7 @@ sum by (tenant_id) (
 avg by (tenant_id) (
   avg_over_time(
     {
-      job="mycoroute",
+      job="hivenet-router",
       log_type="audit"
     }
       | json
@@ -702,7 +702,7 @@ avg by (tenant_id) (
 quantile_over_time(
   0.95,
   {
-    job="mycoroute",
+    job="hivenet-router",
     log_type="audit"
   }
     | json
@@ -717,7 +717,7 @@ quantile_over_time(
 The provisioned dashboard is available at:
 
 ```text
-http://<router-host>:3000/d/mycoroute-audit/
+http://<router-host>:3000/d/hivenet-router-audit/
 ```
 
 It includes:
@@ -751,7 +751,7 @@ A practical investigation flow is:
 For example:
 
 ```logql
-{job="mycoroute", log_type="audit"}
+{job="hivenet-router", log_type="audit"}
   | json
   | request_id =
       "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a"
@@ -798,11 +798,11 @@ A rotation method that renames the file and creates a new one can leave the rout
 For a simple bare-metal setup, use `copytruncate`:
 
 ```text
-/etc/logrotate.d/mycoroute
+/etc/logrotate.d/hivenet-router
 ```
 
 ```conf
-/var/log/mycoroute/audit.jsonl {
+/var/log/hivenet-router/audit.jsonl {
     daily
     rotate 30
     compress
@@ -886,15 +886,15 @@ Confirm that the router process can create the directory and file.
 For systemd:
 
 ```bash
-sudo -u mycoroute \
-  touch /var/log/mycoroute/test-write
+sudo -u hivenet-router \
+  touch /var/log/hivenet-router/test-write
 ```
 
 Remove the test file afterward:
 
 ```bash
 sudo rm \
-  /var/log/mycoroute/test-write
+  /var/log/hivenet-router/test-write
 ```
 
 ### Audit JSON appears in application stdout
@@ -910,7 +910,7 @@ Check that the shared file is visible:
 ```bash
 docker compose exec promtail \
   tail -n 5 \
-  /var/log/mycoroute/audit.jsonl
+  /var/log/hivenet-router/audit.jsonl
 ```
 
 Inspect Promtail logs:
@@ -929,7 +929,7 @@ Query the labels API:
 ```bash
 docker compose exec grafana \
   wget -qO- \
-  http://loki:3100/loki/use-the-api/v1/labels
+  http://loki:3100/loki/api/v1/labels
 ```
 
 Then query the stream:
@@ -937,14 +937,14 @@ Then query the stream:
 ```bash
 docker compose exec grafana \
   wget -qO- \
-  'http://loki:3100/loki/use-the-api/v1/query?query=%7Bjob%3D%22mycoroute%22%2Clog_type%3D%22audit%22%7D' \
+  'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
   | head
 ```
 
 Check that Promtail uses:
 
 ```text
-job="mycoroute"
+job="hivenet-router"
 log_type="audit"
 ```
 

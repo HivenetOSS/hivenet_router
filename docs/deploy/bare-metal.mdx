@@ -58,7 +58,7 @@ On the build machine:
 
 ```bash
 git clone https://github.com/HivenetOSS/hivenet_router.git
-cd mycoroute
+cd hivenet_router
 
 go build -o bin/hivenet-router ./cmd/router/
 go build -o bin/hivenet-agent ./cmd/agent/
@@ -84,7 +84,7 @@ sudo useradd \
   --system \
   --no-create-home \
   --shell /usr/sbin/nologin \
-  mycoroute
+  hivenet-router
 ```
 
 If the account already exists, `useradd` will report an error that you can ignore.
@@ -96,20 +96,20 @@ sudo install -d \
   -o root \
   -g root \
   -m 0755 \
-  /opt/mycoroute
+  /opt/hivenet-router
 
 sudo install -d \
   -o root \
-  -g mycoroute \
+  -g hivenet-router \
   -m 0750 \
-  /etc/mycoroute
+  /etc/hivenet-router
 
 sudo install -d \
-  -o mycoroute \
-  -g mycoroute \
+  -o hivenet-router \
+  -g hivenet-router \
   -m 0750 \
-  /var/lib/mycoroute/badger \
-  /var/log/mycoroute
+  /var/lib/hivenet-router/badger \
+  /var/log/hivenet-router
 ```
 
 ### Agent hosts
@@ -121,7 +121,7 @@ sudo useradd \
   --system \
   --no-create-home \
   --shell /usr/sbin/nologin \
-  mycoroute
+  hivenet-router
 ```
 
 Create the required directories:
@@ -131,32 +131,32 @@ sudo install -d \
   -o root \
   -g root \
   -m 0755 \
-  /opt/mycoroute
+  /opt/hivenet-router
 
 sudo install -d \
   -o root \
-  -g mycoroute \
+  -g hivenet-router \
   -m 0750 \
-  /etc/mycoroute
+  /etc/hivenet-router
 
 sudo install -d \
-  -o mycoroute \
-  -g mycoroute \
+  -o hivenet-router \
+  -g hivenet-router \
   -m 0750 \
-  /var/lib/mycoroute/agent
+  /var/lib/hivenet-router/agent
 ```
 
 On GPU hosts, add the service account to the `video` group so it can access NVIDIA device metrics:
 
 ```bash
-sudo usermod -aG video mycoroute
+sudo usermod -aG video hivenet-router
 ```
 
 If your distribution uses a separate `render` group for device access, add that group as well:
 
 ```bash
 getent group render >/dev/null \
-  && sudo usermod -aG render mycoroute
+  && sudo usermod -aG render hivenet-router
 ```
 
 ## Install the binaries
@@ -175,7 +175,7 @@ sudo install \
   -g root \
   -m 0755 \
   /tmp/hivenet-router \
-  /opt/mycoroute/hivenet-router
+  /opt/hivenet-router/hivenet-router
 
 rm /tmp/hivenet-router
 ```
@@ -195,7 +195,7 @@ sudo install \
   -g root \
   -m 0755 \
   /tmp/hivenet-agent \
-  /opt/mycoroute/hivenet-agent
+  /opt/hivenet-router/hivenet-agent
 
 rm /tmp/hivenet-agent
 ```
@@ -216,9 +216,9 @@ chmod 600 jwt.secret
 Copy the secret to a temporary path on every host:
 
 ```bash
-scp jwt.secret router-server:/tmp/mycoroute-jwt.secret
-scp jwt.secret gpu-eu-1:/tmp/mycoroute-jwt.secret
-scp jwt.secret gpu-eu-2:/tmp/mycoroute-jwt.secret
+scp jwt.secret router-server:/tmp/hivenet-router-jwt.secret
+scp jwt.secret gpu-eu-1:/tmp/hivenet-router-jwt.secret
+scp jwt.secret gpu-eu-2:/tmp/hivenet-router-jwt.secret
 ```
 
 On each host, install it with permissions that allow the Hivenet Router service to read it:
@@ -226,12 +226,12 @@ On each host, install it with permissions that allow the Hivenet Router service 
 ```bash
 sudo install \
   -o root \
-  -g mycoroute \
+  -g hivenet-router \
   -m 0640 \
-  /tmp/mycoroute-jwt.secret \
+  /tmp/hivenet-router-jwt.secret \
   /etc/hivenet-router/jwt.secret
 
-rm /tmp/mycoroute-jwt.secret
+rm /tmp/hivenet-router-jwt.secret
 ```
 
 Delete the local copy from the build machine when you no longer need it:
@@ -288,21 +288,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mycoroute
-Group=mycoroute
-WorkingDirectory=/var/lib/mycoroute
+User=hivenet-router
+Group=hivenet-router
+WorkingDirectory=/var/lib/hivenet-router
 
-ExecStart=/opt/mycoroute/hivenet-router \
+ExecStart=/opt/hivenet-router/hivenet-router \
   --jwt-secret-file /etc/hivenet-router/jwt.secret \
   --http-port :8080 \
   --grpc-port :50051 \
   --p2p-port 9000 \
   --p2p-listen-addr 0.0.0.0 \
   --metrics-port :2112 \
-  --disk-db-path /var/lib/mycoroute/badger
+  --disk-db-path /var/lib/hivenet-router/badger
 
-Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/mycoroute/audit.jsonl
-Environment=mycoroute_ALLOW_INSECURE_ADMIN=true
+Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
+Environment=HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true
 
 Restart=on-failure
 RestartSec=5s
@@ -317,7 +317,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/mycoroute /var/log/mycoroute
+ReadWritePaths=/var/lib/hivenet-router /var/log/hivenet-router
 
 [Install]
 WantedBy=multi-user.target
@@ -326,7 +326,7 @@ WantedBy=multi-user.target
 The `--p2p-listen-addr 0.0.0.0` setting is required when agents connect from other machines. The router defaults to listening on `127.0.0.1`.
 
 <Warning>
-  `mycoroute_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` in this example. Replace it with administrator API-key authentication before exposing the router to shared or untrusted networks.
+  `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true` permits unauthenticated access to `/admin/*` in this example. Replace it with administrator API-key authentication before exposing the router to shared or untrusted networks.
 </Warning>
 
 <Warning>
@@ -352,7 +352,7 @@ AGENT_CAPACITY=32
 Protect the file:
 
 ```bash
-sudo chown root:mycoroute /etc/hivenet-router/agent.env
+sudo chown root:hivenet-router /etc/hivenet-router/agent.env
 sudo chmod 0640 /etc/hivenet-router/agent.env
 ```
 
@@ -373,20 +373,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mycoroute
-Group=mycoroute
+User=hivenet-router
+Group=hivenet-router
 SupplementaryGroups=video
-WorkingDirectory=/var/lib/mycoroute/agent
+WorkingDirectory=/var/lib/hivenet-router/agent
 EnvironmentFile=/etc/hivenet-router/agent.env
 
-ExecStart=/opt/mycoroute/hivenet-agent \
+ExecStart=/opt/hivenet-router/hivenet-agent \
   --router-grpc ${ROUTER_IP}:50051 \
   --jwt-secret-file /etc/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
   --capacity ${AGENT_CAPACITY} \
   --region ${AGENT_REGION} \
-  --identity-path /var/lib/mycoroute/agent/identity.key
+  --identity-path /var/lib/hivenet-router/agent/identity.key
 
 Restart=on-failure
 RestartSec=10s
@@ -401,7 +401,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/mycoroute/agent
+ReadWritePaths=/var/lib/hivenet-router/agent
 
 [Install]
 WantedBy=multi-user.target
@@ -433,7 +433,7 @@ AGENT_CAPACITY=32
 Protect it:
 
 ```bash
-sudo chown root:mycoroute /etc/hivenet-router/agent.env
+sudo chown root:hivenet-router /etc/hivenet-router/agent.env
 sudo chmod 0640 /etc/hivenet-router/agent.env
 ```
 
@@ -561,7 +561,7 @@ You do not need to restart the router when adding capacity.
 
 On the new host:
 
-1. Create the `mycoroute` account and directories.
+1. Create the `hivenet-router` account and directories.
 2. Install the agent binary.
 3. Install the shared JWT secret.
 4. Create `/etc/hivenet-router/agent.env` with the router address and agent region.
@@ -598,15 +598,15 @@ On the agent host:
 sudo systemctl stop hivenet-agent
 
 sudo cp \
-  /opt/mycoroute/hivenet-agent \
-  /opt/mycoroute/hivenet-agent.bak
+  /opt/hivenet-router/hivenet-agent \
+  /opt/hivenet-router/hivenet-agent.bak
 
 sudo install \
   -o root \
   -g root \
   -m 0755 \
   /tmp/hivenet-agent.new \
-  /opt/mycoroute/hivenet-agent
+  /opt/hivenet-router/hivenet-agent
 
 rm /tmp/hivenet-agent.new
 
@@ -630,15 +630,15 @@ On the router host:
 sudo systemctl stop hivenet-router
 
 sudo cp \
-  /opt/mycoroute/hivenet-router \
-  /opt/mycoroute/hivenet-router.bak
+  /opt/hivenet-router/hivenet-router \
+  /opt/hivenet-router/hivenet-router.bak
 
 sudo install \
   -o root \
   -g root \
   -m 0755 \
   /tmp/hivenet-router.new \
-  /opt/mycoroute/hivenet-router
+  /opt/hivenet-router/hivenet-router
 
 rm /tmp/hivenet-router.new
 
@@ -660,8 +660,8 @@ To restore the previous router binary:
 sudo systemctl stop hivenet-router
 
 sudo mv \
-  /opt/mycoroute/hivenet-router.bak \
-  /opt/mycoroute/hivenet-router
+  /opt/hivenet-router/hivenet-router.bak \
+  /opt/hivenet-router/hivenet-router
 
 sudo systemctl start hivenet-router
 ```
@@ -710,13 +710,13 @@ sudo ls -l /etc/hivenet-router/jwt.secret
 Expected ownership and permissions:
 
 ```text
--rw-r----- root mycoroute
+-rw-r----- root hivenet-router
 ```
 
 Test access as the service account:
 
 ```bash
-sudo -u mycoroute cat /etc/hivenet-router/jwt.secret >/dev/null
+sudo -u hivenet-router cat /etc/hivenet-router/jwt.secret >/dev/null
 ```
 
 ### An agent does not register
@@ -744,7 +744,7 @@ Common causes include:
 Confirm that the persistent identity file exists:
 
 ```bash
-sudo ls -l /var/lib/mycoroute/agent/identity.key
+sudo ls -l /var/lib/hivenet-router/agent/identity.key
 ```
 
 The service account must be able to read and write this file.
@@ -760,19 +760,19 @@ nvidia-smi
 Test access as the service account:
 
 ```bash
-sudo -u mycoroute nvidia-smi
+sudo -u hivenet-router nvidia-smi
 ```
 
 Check the account’s groups:
 
 ```bash
-id mycoroute
+id hivenet-router
 ```
 
 If necessary:
 
 ```bash
-sudo usermod -aG video mycoroute
+sudo usermod -aG video hivenet-router
 sudo systemctl restart hivenet-agent
 ```
 
@@ -804,7 +804,7 @@ Check the routing counter:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep mycoroute_routing_requests_routed_total
+  | grep hivenet_router_routing_requests_routed_total
 ```
 
 ## Next steps

@@ -1,6 +1,6 @@
 ---
 title: "SGLang agent"
-description: "Connect an SGLang backend to Mycoroute and expose cache, queue, and time-to-first-token metrics for routing."
+description: "Connect an SGLang backend to Hivenet Router and expose cache, queue, and time-to-first-token metrics for routing."
 sidebarTitle: "SGLang"
 ---
 
@@ -130,27 +130,27 @@ The model ID returned here is the value clients must use when sending requests t
     ```bash
     docker build \
       -f Dockerfile.agent \
-      -t mycoroute/agent:latest \
+      -t hivenet-router/agent:latest \
       .
     ```
 
     Create a directory for the shared secret and persistent agent identity:
 
     ```bash
-    sudo mkdir -p /opt/mycoroute
-    sudo chown "$USER":"$USER" /opt/mycoroute
+    sudo mkdir -p /opt/hivenet-router
+    sudo chown "$USER":"$USER" /opt/hivenet-router
     ```
 
     Place the router’s JWT secret at:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Protect it:
 
     ```bash
-    chmod 600 /opt/mycoroute/jwt.secret
+    chmod 600 /opt/hivenet-router/jwt.secret
     ```
   </Tab>
   <Tab title="Bare metal">
@@ -163,14 +163,14 @@ The model ID returned here is the value clients must use when sending requests t
     Place the shared JWT secret somewhere the agent process can read, for example:
 
     ```text
-    /opt/mycoroute/jwt.secret
+    /opt/hivenet-router/jwt.secret
     ```
 
     Create a writable directory for the persistent agent identity:
 
     ```bash
-    sudo mkdir -p /var/lib/mycoroute/agent
-    sudo chown "$USER":"$USER" /var/lib/mycoroute/agent
+    sudo mkdir -p /var/lib/hivenet-router/agent
+    sudo chown "$USER":"$USER" /var/lib/hivenet-router/agent
     ```
   </Tab>
 </Tabs>
@@ -185,9 +185,9 @@ The model ID returned here is the value clients must use when sending requests t
       --restart unless-stopped \
       --network host \
       --gpus all \
-      -v /opt/mycoroute/jwt.secret:/jwt.secret:ro \
-      -v /opt/mycoroute:/data \
-      mycoroute/agent:latest \
+      -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
+      -v /opt/hivenet-router:/data \
+      hivenet-router/agent:latest \
       --engine sglang \
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
@@ -209,12 +209,12 @@ The model ID returned here is the value clients must use when sending requests t
       --engine sglang \
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
-      --jwt-secret-file /opt/mycoroute/jwt.secret \
+      --jwt-secret-file /opt/hivenet-router/jwt.secret \
       --capacity 20 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
-      --identity-path /var/lib/mycoroute/agent/identity.key
+      --identity-path /var/lib/hivenet-router/agent/identity.key
     ```
   </Tab>
 </Tabs>
@@ -570,7 +570,7 @@ docker inspect hivenet-agent \
 For bare metal:
 
 ```bash
-ls -l /var/lib/mycoroute/agent/identity.key
+ls -l /var/lib/hivenet-router/agent/identity.key
 ```
 
 ### Requests time out

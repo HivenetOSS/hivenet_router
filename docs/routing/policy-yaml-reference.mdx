@@ -14,13 +14,12 @@ Policies use YAML and can apply globally or to specific models.
 models:
   - meta-llama/Llama-3.1-8B-Instruct
 
-# Admission control (all fields optional; zero = gate disabled)
-mode: serverless                 # reserved (default) | serverless
-max_input_tokens: 262144         # B1: reject larger prompts with 400 input_too_long
-images_max: 10                   # B1: reject requests carrying more images
-admit_budget_tokens: 408987      # B2: per-replica KV-occupancy budget (tokens)
-max_inflight: 37                 # B2: per-replica concurrent-request backstop
-shed_if:                         # B3: front-door 429 on live engine pressure
+mode: reserved
+max_input_tokens: 131072
+images_max: 8
+admit_budget_tokens: 262144
+max_inflight: 16
+shed_if:
   kv_cache_utilization:
     gt: 0.90
   waiting_requests:
@@ -65,12 +64,12 @@ fallback_provider:
 | Field | Type | Required | Purpose |
 | --- | --- | --- | --- |
 | `models` | Array of strings | For per-model policy documents | Models that use this policy |
-| `mode` | String | No (default `reserved`) | Admission profile: `serverless` activates per-key caps |
-| `max_input_tokens` | Integer | No (0 = disabled) | Per-request prompt cap (admission gate B1) |
-| `images_max` | Integer | No (0 = disabled) | Per-request image-count cap (admission gate B1) |
-| `admit_budget_tokens` | Integer | No (0 = disabled) | Per-replica KV-occupancy budget (admission gate B2) |
-| `max_inflight` | Integer | No (0 = disabled) | Per-replica in-flight request backstop (admission gate B2) |
-| `shed_if` | Object | No | Front-door shed thresholds (admission gate B3) |
+| `mode` | String | No | Admission profile: `reserved` (default) or `serverless` |
+| `max_input_tokens` | Integer | No | Maximum learned prompt estimate per request; `0` disables B1 |
+| `images_max` | Integer | No | Maximum images per request; `0` disables the image check |
+| `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` disables the token budget |
+| `max_inflight` | Integer | No | Per-replica in-flight request backstop; `0` disables the count limit |
+| `shed_if` | Object | No | Front-door thresholds for aggregate healthy-pool engine pressure |
 | `routing_policy` | Object | Yes | Primary local routing step |
 | `fallback_chain` | Array | No | Ordered local fallback steps |
 | `fallback_provider` | Object | No | Final external provider fallback |
@@ -85,49 +84,66 @@ It is required for named per-model policy documents.
 
 ## Admission control fields
 
-These fields configure the [admission gates](/routing/admission-control) for every model the policy governs. All are optional — a zero/absent value disables that gate, so a routing-only policy passes unchanged.
+The admission fields are top-level properties of the policy, not fields inside `routing_policy`. They apply to `POST /v1/chat/completions` and `POST /v1/messages`; the count-tokens, embedding, and reranking paths are exempt.
 
 ```yaml
-mode: serverless
-max_input_tokens: 262144
-images_max: 10
-admit_budget_tokens: 408987
-max_inflight: 37
+mode: reserved
+max_input_tokens: 131072
+images_max: 8
+admit_budget_tokens: 262144
+max_inflight: 16
 shed_if:
-  kv_cache_utilization: { gt: 0.90 }
-  waiting_requests:     { gt: 20 }
+  kv_cache_utilization:
+    gt: 0.90
+  waiting_requests:
+    gt: 20
 ```
+
+All numeric limits default to `0`, which disables the corresponding check. Negative values are rejected. `mode` defaults to `reserved` and accepts only `reserved` or `serverless`.
 
 ### `mode`
 
-| Value | Meaning |
-| --- | --- |
-| `reserved` (default) | One client rents the whole replica: circuit-breaker gates only (B1/B2/B3), no per-key caps. |
-| `serverless` | Many keys share the replicas: the same circuit breaker **plus** the per-key caps (B4) declared on each key in `auth.yaml`. |
-
-An empty `mode` is normalised to `reserved` at load; any other value is a load-time error.
+`reserved` enables the shared B1, B2, and B3 safety gates without serverless per-key caps. `serverless` enables the same safety gates plus the B4 fields resolved from the authenticated key. An empty value is normalized to `reserved`; any other value is a load-time error.
 
 ### `max_input_tokens` and `images_max`
 
-Per-request hard caps (B1); a breach is a 400 `input_too_long`. The token check uses the router's learned admission estimate (message text + Anthropic `system` prompt + tool-definition JSON); images are counted (`image_url` parts and Anthropic `image` blocks). There is deliberately no output-token field — the router never clamps `max_tokens`.
+These are the B1 hard caps. The token check uses the same learned estimate used by occupancy and token quotas. It includes message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON. The image check counts OpenAI `image_url` parts and Anthropic `image` blocks. Either breach returns HTTP `400 input_too_long`.
 
 ### `admit_budget_tokens` and `max_inflight`
 
-Both are **per-replica** numbers from the model's benchmark artifact (`router_limits.yaml`: `kv_occupancy.admit_budget_tokens` and `max(concurrency.soak_running_p95_per_sku)`). At enforcement the router scales each by the count of healthy replicas serving the model and applies the admit fraction:
+Both values are per replica. The router recomputes the number of healthy replicas for every request and floors that count at `1`:
 
 ```text
-effective budget = HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas
+effective token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
+                               × admit_budget_tokens
+                               × healthy_replicas)
+
+effective request backstop = max_inflight × healthy_replicas
 ```
 
-A request is admitted while the model's weighted in-flight token sum plus its own footprint fits the effective budget and the in-flight count fits the scaled `max_inflight`; otherwise it parks briefly, then 429 `concurrency_limit_exceeded`.
+Over-budget requests may park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` before the router returns `429 concurrency_limit_exceeded`. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
+
+Benchmark-derived values are not loaded automatically from `router_limits.yaml`. Operators or provisioning tooling must copy the certified per-model values into the policy.
 
 ### `shed_if`
 
-Front-door shed thresholds (B3), evaluated against the **mean** live engine pressure across the model's healthy replicas. Exactly two fields are accepted — `kv_cache_utilization` and `waiting_requests` — each with exactly one comparison operator (`gt`, `lt`, `gte`, `lte`); an unknown field or operator count is a load-time error, so a typo cannot silently disable the shed. A replica pool that reports neither signal passes (the gate fails open and B2's static budget carries the safety). This is additive to the per-agent `exclude_if` routing gates: `exclude_if` drops one hot agent from the candidate pool, `shed_if` rejects new work at the door when the whole pool is saturated.
+```yaml
+shed_if:
+  kv_cache_utilization:
+    gt: 0.90
+  waiting_requests:
+    gt: 8
+```
 
-### Validation
+The loader accepts only `kv_cache_utilization` and `waiting_requests` in `shed_if`, with exactly one of `gt`, `lt`, `gte`, or `lte` per field. At admission, the router averages each reported signal across healthy agents serving the requested model. Missing signals pass. If a threshold fails, the router returns `429 concurrency_limit_exceeded` with `Retry-After: 1` before queueing the request.
 
-Negative values for any cap are a load-time error. Cross-config invariants that span this file and `auth.yaml` (a serverless key's `input_tokens_per_minute` must cover `max_input_tokens`) are checked at startup, on every SIGHUP reload of either file, and on admin-API key mutations — the offending config is rejected rather than silently capping context. See [Auth YAML reference](/security/auth-yaml-reference).
+This is additive to per-agent `exclude_if` gates. Use `exclude_if` to remove an unhealthy or overloaded replica from a routing step; use `shed_if` to stop admitting new work when the serving pool as a whole is under pressure.
+
+### Cross-config validation
+
+At startup and on auth or policy reload, the router validates every static and dynamic key against the effective serverless policies. Dynamic admin writes run the same checks. A configured occupancy share must be in `(0, 1]`, and a nonzero `input_tokens_per_minute` must be at least `max_input_tokens` for every reachable serverless model. Invalid reloads leave the previous policy active.
+
+See [Admission control](/routing/admission-control) for request-footprint calculation, parking, per-key limits, and error responses.
 
 ## Primary routing policy
 

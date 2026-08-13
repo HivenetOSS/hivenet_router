@@ -57,7 +57,7 @@ List the models available to the intended client key:
 
 ```bash
 curl \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -82,7 +82,7 @@ For vLLM, automatic tool calling normally requires:
 vllm serve <model-source> \
   --host 0.0.0.0 \
   --port 8888 \
-  --served-model-name mycoroute-code-model \
+  --served-model-name hivenet-router-code-model \
   --enable-auto-tool-choice \
   --tool-call-parser <model-specific-parser>
 ```
@@ -117,7 +117,7 @@ Register the same public model ID with the Hivenet Router agent:
 ./bin/hivenet-agent \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --model mycoroute-code-model \
+  --model hivenet-router-code-model \
   --router-grpc <router-host>:50051 \
   --jwt-secret-file /etc/hivenet-router/jwt.secret
 ```
@@ -137,10 +137,10 @@ Before configuring Pi, test the complete Hivenet Router request path:
 ```bash
 curl -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",
@@ -156,10 +156,10 @@ Then test streaming:
 ```bash
 curl -N -X POST \
   https://router.example.com/v1/chat/completions \
-  -H "Authorization: Bearer <mycoroute-api-key>" \
+  -H "Authorization: Bearer <hivenet-router-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mycoroute-code-model",
+    "model": "hivenet-router-code-model",
     "messages": [
       {
         "role": "user",
@@ -227,15 +227,15 @@ Create the configuration:
 ```json
 {
   "providers": {
-    "mycoroute": {
+    "hivenet-router": {
       "baseUrl": "https://router.example.com/v1",
       "api": "openai-completions",
       "authHeader": true,
-      "apiKey": "$MYCOROUTE_API_KEY",
+      "apiKey": "$HIVENET_ROUTER_API_KEY",
 
       "models": [
         {
-          "id": "mycoroute-code-model",
+          "id": "hivenet-router-code-model",
           "name": "Hivenet Router code model",
           "reasoning": false,
           "input": [
@@ -259,7 +259,7 @@ Create the configuration:
 Replace:
 
 - `https://router.example.com` with the router address
-- `mycoroute-code-model` with an exact model ID from `/v1/models`
+- `hivenet-router-code-model` with an exact model ID from `/v1/models`
 - `contextWindow` with the usable context size
 - `maxTokens` with the supported maximum output
 
@@ -268,20 +268,20 @@ Replace:
 Export the raw Hivenet Router client key:
 
 ```bash
-export MYCOROUTE_API_KEY="<mycoroute-api-key>"
+export HIVENET_ROUTER_API_KEY="<hivenet-router-api-key>"
 ```
 
 Verify that the variable is present without printing it:
 
 ```bash
-test -n "$MYCOROUTE_API_KEY" \
-  && echo "MYCOROUTE_API_KEY is set"
+test -n "$HIVENET_ROUTER_API_KEY" \
+  && echo "HIVENET_ROUTER_API_KEY is set"
 ```
 
 The configuration value:
 
 ```json
-"apiKey": "$MYCOROUTE_API_KEY"
+"apiKey": "$HIVENET_ROUTER_API_KEY"
 ```
 
 resolves the environment variable when Pi sends a request.
@@ -295,7 +295,7 @@ The provider setting:
 makes Pi send the resolved credential as:
 
 ```http
-Authorization: Bearer <mycoroute-api-key>
+Authorization: Bearer <hivenet-router-api-key>
 ```
 
 Do not put:
@@ -308,7 +308,7 @@ Do not put:
 in this variable.
 
 <Note>
-  `MYCOROUTE_API_KEY` is a client-side environment variable chosen for this guide.
+  `HIVENET_ROUTER_API_KEY` is a client-side environment variable chosen for this guide.
 
   It does not need to follow the case-sensitive `HIVENET_ROUTER_*` convention used by the Hivenet Router process.
 </Note>
@@ -327,7 +327,7 @@ or:
 
 ```json
 {
-  "apiKey": "!pass show services/mycoroute/pi"
+  "apiKey": "!pass show services/hivenet-router/pi"
 }
 ```
 
@@ -349,22 +349,22 @@ Use a wrapper script when the secret command needs:
 
 ```json
 "providers": {
-  "mycoroute": {}
+  "hivenet-router": {}
 }
 ```
 
-`mycoroute` is Pi’s local provider ID.
+`hivenet-router` is Pi’s local provider ID.
 
 It is used by:
 
 ```bash
-pi --provider mycoroute
+pi --provider hivenet-router
 ```
 
 and by full model references such as:
 
 ```text
-mycoroute/mycoroute-code-model
+hivenet-router/hivenet-router-code-model
 ```
 
 The provider ID does not need to match a router, tenant, or organization name.
@@ -446,14 +446,14 @@ Pi then sends the resolved `apiKey` value in the standard bearer header Hivenet 
 ### Model ID
 
 ```json
-"id": "mycoroute-code-model"
+"id": "hivenet-router-code-model"
 ```
 
 Pi sends this value unchanged:
 
 ```json
 {
-  "model": "mycoroute-code-model"
+  "model": "hivenet-router-code-model"
 }
 ```
 
@@ -537,11 +537,11 @@ Add every model that should appear in Pi:
 ```json
 {
   "providers": {
-    "mycoroute": {
+    "hivenet-router": {
       "baseUrl": "https://router.example.com/v1",
       "api": "openai-completions",
       "authHeader": true,
-      "apiKey": "$MYCOROUTE_API_KEY",
+      "apiKey": "$HIVENET_ROUTER_API_KEY",
 
       "models": [
         {
@@ -568,7 +568,7 @@ Each ID must appear in the live Hivenet Router model catalog for the Pi API key:
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
@@ -587,8 +587,8 @@ Set the default provider and model:
 
 ```json
 {
-  "defaultProvider": "mycoroute",
-  "defaultModel": "mycoroute-code-model"
+  "defaultProvider": "hivenet-router",
+  "defaultModel": "hivenet-router-code-model"
 }
 ```
 
@@ -604,7 +604,7 @@ For example:
 
 ```json
 {
-  "defaultProvider": "mycoroute",
+  "defaultProvider": "hivenet-router",
   "defaultModel": "code-model-large"
 }
 ```
@@ -726,11 +726,11 @@ Put the override on one model:
 ```json
 {
   "providers": {
-    "mycoroute": {
+    "hivenet-router": {
       "baseUrl": "https://router.example.com/v1",
       "api": "openai-completions",
       "authHeader": true,
-      "apiKey": "$MYCOROUTE_API_KEY",
+      "apiKey": "$HIVENET_ROUTER_API_KEY",
 
       "models": [
         {
@@ -822,13 +822,13 @@ A complete application restart is normally unnecessary for model-list changes.
 List models matching the provider:
 
 ```bash
-pi --list-models mycoroute
+pi --list-models hivenet-router
 ```
 
 A result may include:
 
 ```text
-mycoroute/mycoroute-code-model
+hivenet-router/hivenet-router-code-model
 ```
 
 If the model does not appear, check that:
@@ -875,29 +875,29 @@ Open the model picker:
 Select:
 
 ```text
-mycoroute/mycoroute-code-model
+hivenet-router/hivenet-router-code-model
 ```
 
 You can also choose the model from the command line:
 
 ```bash
 pi \
-  --model mycoroute/mycoroute-code-model
+  --model hivenet-router/hivenet-router-code-model
 ```
 
 Or specify provider and model separately:
 
 ```bash
 pi \
-  --provider mycoroute \
-  --model mycoroute-code-model
+  --provider hivenet-router \
+  --model hivenet-router-code-model
 ```
 
 For a non-interactive smoke test:
 
 ```bash
 pi \
-  --model mycoroute/mycoroute-code-model \
+  --model hivenet-router/hivenet-router-code-model \
   -p \
   "Reply with the word connected."
 ```
@@ -910,7 +910,7 @@ For the first integration test, limit the available tools:
 
 ```bash
 pi \
-  --model mycoroute/mycoroute-code-model \
+  --model hivenet-router/hivenet-router-code-model \
   --tools read,grep,find,ls \
   -p \
   "Inspect this project and summarize its structure."
@@ -931,13 +931,13 @@ After the read-only test succeeds, start Pi normally in a disposable directory:
 
 ```bash
 mkdir -p \
-  /tmp/mycoroute-pi-test
+  /tmp/hivenet-router-pi-test
 
 cd \
-  /tmp/mycoroute-pi-test
+  /tmp/hivenet-router-pi-test
 
 pi \
-  --model mycoroute/mycoroute-code-model
+  --model hivenet-router/hivenet-router-code-model
 ```
 
 Ask:
@@ -958,7 +958,7 @@ Remove the directory afterward:
 
 ```bash
 rm -rf \
-  /tmp/mycoroute-pi-test
+  /tmp/hivenet-router-pi-test
 ```
 
 Text generation can work while tool calling remains broken. The complete loop is the meaningful compatibility test.
@@ -1162,7 +1162,7 @@ Search its audit records in Loki:
 
 ```logql
 {
-  job="mycoroute",
+  job="hivenet-router",
   log_type="audit",
   tenant_id="pi-development"
 }
@@ -1205,13 +1205,13 @@ jq . \
 List matching models:
 
 ```bash
-pi --list-models mycoroute
+pi --list-models hivenet-router
 ```
 
 Check that:
 
 - the file is in the active Pi configuration directory
-- `providers.mycoroute` exists
+- `providers.hivenet-router` exists
 - `baseUrl` ends in `/v1`
 - `api` is `openai-completions`
 - `authHeader` is `true`
@@ -1226,7 +1226,7 @@ Open `/model` again after editing the file.
 Check the variable:
 
 ```bash
-test -n "$MYCOROUTE_API_KEY" \
+test -n "$HIVENET_ROUTER_API_KEY" \
   && echo set \
   || echo missing
 ```
@@ -1234,13 +1234,13 @@ test -n "$MYCOROUTE_API_KEY" \
 The configuration must include the `$`:
 
 ```json
-"apiKey": "$MYCOROUTE_API_KEY"
+"apiKey": "$HIVENET_ROUTER_API_KEY"
 ```
 
 This is a literal string rather than environment interpolation:
 
 ```json
-"apiKey": "MYCOROUTE_API_KEY"
+"apiKey": "HIVENET_ROUTER_API_KEY"
 ```
 
 ### Hivenet Router returns `401 Unauthorized`
@@ -1256,7 +1256,7 @@ Test the same value directly:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models
 ```
 
@@ -1295,12 +1295,12 @@ rather than `openai-responses`.
 Compare Pi’s configuration with the live catalog:
 
 ```bash
-pi --list-models mycoroute
+pi --list-models hivenet-router
 ```
 
 ```bash
 curl \
-  -H "Authorization: Bearer $MYCOROUTE_API_KEY" \
+  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
   https://router.example.com/v1/models \
   | jq -r '.data[].id'
 ```
