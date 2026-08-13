@@ -16,6 +16,7 @@ import (
 
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
+	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/tokenizer"
@@ -88,5 +89,46 @@ func TestCountTokens_SkipsAdmissionGates(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestCountTokens_SkipsDailyBudget verifies /v1/messages/count_tokens neither
+// checks nor charges the daily token budget: counting a prompt bigger than the
+// remaining budget must still succeed, and the budget must be untouched after —
+// a count-then-send client would otherwise pay for every prompt twice.
+func TestCountTokens_SkipsDailyBudget(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	lim := auth.NewInMemoryLimiter()
+	exec := policy.NewExecutor(nil, nil, &policy.Policy{}, 0, 0)
+	h := api.NewHandlers(
+		nil, nil, q, time.Second,
+		exec, nil, nil, lim,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+		admission.NewController(1.0, 0), nil, nil, nil,
+		nil, tokenizer.NewEstimator(),
+	)
+	// The 400-byte prompt estimates to ~125 tokens — far over a 10-token daily
+	// budget, so the same body on /v1/messages would be a 429 token_limit_exceeded.
+	const tpd = 10
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("a", 400) + `"}]}`)
+	c, w := newCtx("/v1/messages/count_tokens", body)
+	c.Set("tenant_id", "t1")
+	c.Set("quota_limits", auth.QuotaLimits{TokensPerDay: tpd})
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"input_tokens":123}`)}
+	case <-time.After(time.Second):
+		t.Fatal("count_tokens request was not enqueued — the daily budget rejected it")
+	}
+	<-done
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %s)", w.Code, w.Body.String())
+	}
+	if remaining, err := lim.RemainingTokens("t1", "", tpd); err != nil || remaining != tpd {
+		t.Errorf("count_tokens must not charge the daily budget; remaining=%d (want %d), err=%v", remaining, tpd, err)
 	}
 }

@@ -118,7 +118,7 @@ The exact per-model tokenizer embedded in the router (phase 2) is deliberately d
 
 ## What is exempt
 
-- **`/v1/messages/count_tokens`** skips B1–B4 entirely: it is a stateless tokenizer lookup that holds no KV cache and generates nothing, and clients that count before sending (Claude Code's pattern) would otherwise be billed twice per request. The per-key RPM flood guard still covers it.
+- **`/v1/messages/count_tokens`** skips B1–B4 entirely: it is a stateless tokenizer lookup that holds no KV cache and generates nothing, and clients that count before sending (Claude Code's pattern) would otherwise be billed twice per request. It charges no token quota — including the daily budget — and is guarded by the per-key RPM flood limit alone.
 - **Provider-fallback traffic** (OpenAI/Anthropic cloud): the occupancy reservation is released the moment the request leaves the local pool, and provider-served responses charge no OTPM and never teach the estimator. RPM, ITPM, and the daily input charge still apply — they are taken before routing and are the key's commercial plan limits regardless of who serves.
 - **Embeddings and reranking** (`/v1/embeddings`, `/v1/rerank`) bypass admission control and token metering entirely — the gates model KV-cache-bound *generation*, which prefill-only workloads do not do. They are protected by RPM, the body-size cap, and the concurrency/queue gates only. This is a stated scope decision, not an oversight.
 
