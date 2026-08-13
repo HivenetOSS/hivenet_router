@@ -496,103 +496,105 @@ Errors use the standard envelope:
 
 ## Troubleshooting
 
-### A model is missing from the list
+<AccordionGroup>
+  <Accordion title="A model is missing from the list">
+    Check the public view with the intended API key:
 
-Check the public view with the intended API key:
+    ```bash
+    curl http://localhost:8080/v1/models \
+      -H "Authorization: Bearer <api-key>" \
+      | jq -r '.data[].id'
+    ```
 
-```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer <api-key>" \
-  | jq -r '.data[].id'
-```
+    Then check the operator view:
 
-Then check the operator view:
+    ```bash
+    curl http://localhost:8080/admin/models \
+      -H "Authorization: Bearer <admin-api-key>" \
+      | jq -r '.data[].id'
+    ```
 
-```bash
-curl http://localhost:8080/admin/models \
-  -H "Authorization: Bearer <admin-api-key>" \
-  | jq -r '.data[].id'
-```
+    If the model appears only in the admin response, review:
 
-If the model appears only in the admin response, review:
+    - `quota.per_model`
+    - `allowed_models`
+    - which API key is being sent
+    - whether inference and admin authentication use different keys
+  </Accordion>
 
-- `quota.per_model`
-- `allowed_models`
-- which API key is being sent
-- whether inference and admin authentication use different keys
+  <Accordion title="The model is listed but cannot serve requests">
+    Check:
 
-### The model is listed but cannot serve requests
+    ```bash
+    curl http://localhost:8080/v1/models/<model> \
+      | jq '.agents | {
+          total,
+          healthy,
+          total_capacity
+        }'
+    ```
 
-Check:
+    Then inspect the live routing table:
 
-```bash
-curl http://localhost:8080/v1/models/<model> \
-  | jq '.agents | {
-      total,
-      healthy,
-      total_capacity
-    }'
-```
+    ```bash
+    curl http://localhost:8080/admin/routing-table \
+      -H "Authorization: Bearer <admin-api-key>" \
+      | jq '.agents[]
+          | select(.metadata.model == "<model>")'
+    ```
 
-Then inspect the live routing table:
+    Common causes include:
 
-```bash
-curl http://localhost:8080/admin/routing-table \
-  -H "Authorization: Bearer <admin-api-key>" \
-  | jq '.agents[]
-      | select(.metadata.model == "<model>")'
-```
+    - all agents are unhealthy
+    - all healthy agents are at capacity
+    - a routing policy excludes the agents
+    - the requested capability does not match
+    - the API key cannot invoke the model
+  </Accordion>
 
-Common causes include:
+  <Accordion title="The capability is wrong">
+    Check whether agents sharing the model name were started with different capability values.
 
-- all agents are unhealthy
-- all healthy agents are at capacity
-- a routing policy excludes the agents
-- the requested capability does not match
-- the API key cannot invoke the model
+    Use separate model names for language-model, embedding, and reranking registrations.
+  </Accordion>
 
-### The capability is wrong
+  <Accordion title="Display metadata is inconsistent">
+    Make sure every agent serving the model uses the same:
 
-Check whether agents sharing the model name were started with different capability values.
+    ```text
+    --llm-pretty-name
+    --llm-info
+    ```
 
-Use separate model names for language-model, embedding, and reranking registrations.
+    Hivenet Router uses the first non-empty values found while aggregating the catalog.
+  </Accordion>
 
-### Display metadata is inconsistent
+  <Accordion title="Capacity looks higher than available capacity">
+    `total_capacity` is the sum of the agents’ declared maximum capacity.
 
-Make sure every agent serving the model uses the same:
+    It does not subtract:
 
-```text
---llm-pretty-name
---llm-info
-```
+    - active requests
+    - unhealthy-agent capacity
+    - policy exclusions
+    - backend queue pressure
 
-Hivenet Router uses the first non-empty values found while aggregating the catalog.
-
-### Capacity looks higher than available capacity
-
-`total_capacity` is the sum of the agents’ declared maximum capacity.
-
-It does not subtract:
-
-- active requests
-- unhealthy-agent capacity
-- policy exclusions
-- backend queue pressure
-
-Use `/admin/routing-table` for live state.
+    Use `/admin/routing-table` for live state.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Admin endpoints" href="/use-the-api/admin-endpoints">
+<Columns cols={3}>
+  <Card title="Admin endpoints" icon="screwdriver-wrench" href="/use-the-api/admin-endpoints">
     Inspect the complete operator catalog, routing table, storage, policies, and API keys.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Control which models each client can discover and invoke.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Understand how matching agents are filtered and selected for inference.
   </Card>
-</CardGroup>
+</Columns>

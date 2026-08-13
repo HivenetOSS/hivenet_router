@@ -376,114 +376,116 @@ See [Error codes](/reference/error-codes) for the complete reference.
 
 ## Troubleshooting
 
-### The model is not found
+<AccordionGroup>
+  <Accordion title="The model is not found">
+    List available embedding models:
 
-List available embedding models:
+    ```bash
+    curl http://localhost:8080/v1/models \
+      | jq '.data[]
+          | select(.capability == "embedding")'
+    ```
 
-```bash
-curl http://localhost:8080/v1/models \
-  | jq '.data[]
-      | select(.capability == "embedding")'
-```
+    Check that:
 
-Check that:
+    - the agent uses `--capability embedding`
+    - the requested model matches the registered model exactly
+    - the agent is healthy
+    - the API key may access the model
+  </Accordion>
 
-- the agent uses `--capability embedding`
-- the requested model matches the registered model exactly
-- the agent is healthy
-- the API key may access the model
+  <Accordion title="The request reaches the wrong backend type">
+    Inspect the agent registration:
 
-### The request reaches the wrong backend type
+    ```bash
+    curl http://localhost:8080/admin/routing-table \
+      | jq '.agents[]
+          | select(.metadata.model == "bge-m3")
+          | {
+              model: .metadata.model,
+              capability: .metadata.capability,
+              engine: .metadata.engine
+            }'
+    ```
 
-Inspect the agent registration:
+    The capability must be:
 
-```bash
-curl http://localhost:8080/admin/routing-table \
-  | jq '.agents[]
-      | select(.metadata.model == "bge-m3")
-      | {
-          model: .metadata.model,
-          capability: .metadata.capability,
-          engine: .metadata.engine
-        }'
-```
+    ```text
+    embedding
+    ```
 
-The capability must be:
+    Use distinct model names if the same model identifier would otherwise be registered under different capabilities.
+  </Accordion>
 
-```text
-embedding
-```
+  <Accordion title="The backend rejects the input">
+    Test the backend directly:
 
-Use distinct model names if the same model identifier would otherwise be registered under different capabilities.
+    ```bash
+    curl -X POST \
+      http://localhost:7997/v1/embeddings \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "bge-m3",
+        "input": "Test input"
+      }'
+    ```
 
-### The backend rejects the input
+    A backend may reject:
 
-Test the backend directly:
+    - empty strings
+    - unsupported input formats
+    - batches that are too large
+    - inputs above the model’s token limit
+    - unsupported optional fields
+  </Accordion>
 
-```bash
-curl -X POST \
-  http://localhost:7997/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "bge-m3",
-    "input": "Test input"
-  }'
-```
+  <Accordion title="The batch response has fewer items than expected">
+    Check the backend response directly.
 
-A backend may reject:
+    Hivenet Router does not combine, remove, reorder, or deduplicate input strings. It returns the successful backend response as received.
+  </Accordion>
 
-- empty strings
-- unsupported input formats
-- batches that are too large
-- inputs above the model’s token limit
-- unsupported optional fields
+  <Accordion title="Requests time out">
+    Reduce the batch size or increase the router and agent request timeout where appropriate.
 
-### The batch response has fewer items than expected
+    The agent’s backend HTTP timeout defaults to two minutes:
 
-Check the backend response directly.
+    ```bash
+    --http-timeout 10m
+    ```
 
-Hivenet Router does not combine, remove, reorder, or deduplicate input strings. It returns the successful backend response as received.
+    Also check:
 
-### Requests time out
+    - model loading state
+    - backend queue pressure
+    - agent capacity
+    - input length
+    - accelerator memory
+  </Accordion>
 
-Reduce the batch size or increase the router and agent request timeout where appropriate.
+  <Accordion title="The request is rate-limited">
+    Check the returned header:
 
-The agent’s backend HTTP timeout defaults to two minutes:
+    ```text
+    X-RateLimit-Remaining-Requests
+    ```
 
-```bash
---http-timeout 10m
-```
-
-Also check:
-
-- model loading state
-- backend queue pressure
-- agent capacity
-- input length
-- accelerator memory
-
-### The request is rate-limited
-
-Check the returned header:
-
-```text
-X-RateLimit-Remaining-Requests
-```
-
-Review the quota assigned to the API key and the per-model quota entry when per-model quotas are enabled.
+    Review the quota assigned to the API key and the per-model quota entry when per-model quotas are enabled.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Reranking" href="/use-the-api/reranking">
+<Columns cols={3}>
+  <Card title="Reranking" icon="arrow-down-wide-short" href="/use-the-api/reranking">
     Score and reorder documents by relevance to a query.
   </Card>
 
-  <Card title="Models" href="/use-the-api/models">
+  <Card title="Models" icon="list" href="/use-the-api/models">
     Discover models, capabilities, engines, and healthy capacity.
   </Card>
 
-  <Card title="Infinity agent" href="/deploy/agents/infinity">
+  <Card title="Infinity agent" icon="microchip" href="/deploy/agents/infinity">
     Configure embedding and reranking models through Infinity.
   </Card>
-</CardGroup>
+</Columns>
