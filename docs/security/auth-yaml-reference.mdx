@@ -462,7 +462,7 @@ api:
       tokens_per_day: 5000000
 ```
 
-- **ITPM** is a continuously refilling token bucket (rate = limit/60 per second, capacity = one minute). It is charged with the request's estimated input tokens *before* the daily budget, so a rate rejection never spends daily tokens.
+- **ITPM** is a continuously refilling token bucket (rate = limit/60 per second, capacity = one minute). It is charged with the request's estimated input tokens *before* the daily budget, so a rate rejection never spends daily tokens. Note that **cached prompt prefixes currently count in full toward ITPM** — a discount for engine-cached tokens is a planned refinement — so agentic clients that resend a long, stable prefix every turn spend their ITPM faster than the GPU-side cost would suggest. Size such keys' ITPM (or a per-key override) with that in mind.
 - **OTPM** is metered after each response from the real completion tokens — output is never reserved up front, so a long response spread over minutes is not penalised; a key that over-produces is held off on its next request instead.
 - **`max_occupancy_share`** bounds the key's token-weighted in-flight sum to `share × (admit_fraction × admit_budget_tokens × healthy replicas)` — the same pool the global occupancy gate admits against.
 - The caps are **fairness/anti-abuse, deliberately oversubscribed** — box safety is the occupancy budget and the shed gate, so do not size shares to "add up" to 1.0.

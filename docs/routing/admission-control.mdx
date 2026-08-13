@@ -12,6 +12,8 @@ A GPU inference box under overload does not crash or return errors — the engin
 
 The router therefore admits on **tokens in flight**, not request counts. Requests-per-minute and tokens-per-day are kept for the jobs they are good at (tiny-request flood guard, commercial budget); the occupancy budget is the gate that protects the latency SLO.
 
+The gates are **engine-agnostic**: B1, B2, and B4 are pure router-side counters whose only engine-supplied number is the KV capacity in tokens — measured by benchmarking whatever engine is deployed, not read from an engine API — so they work unchanged in front of vLLM, SGLang, or any other KV-cache-bound engine. B3 is the one telemetry-coupled gate, and it fails open when an engine does not report the signals.
+
 ## The gate pipeline
 
 Every `/v1/chat/completions` and `/v1/messages` request passes the gates in this order (`internal/api/handlers.go` `Passthrough`). Ordering is deliberate: cheap, deterministic rejections come first, and nothing charges the tenant's daily budget until every cheaper gate has passed.
@@ -69,6 +71,19 @@ pool_budget = admit_fraction × admit_budget_tokens × healthy_replicas
 - `max_inflight` (policy) is a plain per-replica concurrency backstop from `max(concurrency.soak_running_p95_per_sku)`, scaled by the same replica count.
 
 An over-budget request whose own footprint could ever fit **parks** for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default 250ms) waiting for a release, then rejects with 429 + `Retry-After`. A request whose footprint alone exceeds the budget rejects immediately — parking cannot save it.
+
+### How many requests fit
+
+Concurrent capacity is **arithmetic, not a curve**: when all requests are roughly the same size `s`, the pool holds `min(floor(pool_budget / s), max_inflight × replicas)` of them. With a single replica and a ~409K-token effective budget:
+
+| Request size (input + output) | Fits concurrently |
+| --- | --- |
+| 250K (full-context coding) | 1 |
+| 64K | ~6 |
+| 16K | ~24 |
+| ~3K (chat turn) | ~130 → capped by `max_inflight` |
+
+Mixed traffic shares the same weighted sum — one 250K request displaces ~80 chat turns. This is why three full-context requests arriving together can 429 while hundreds of chat turns flow freely, and why declaring an accurate `max_tokens` matters: the reservation is the footprint.
 
 ## B3 — front-door KV-pressure shed
 
