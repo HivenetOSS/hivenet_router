@@ -30,93 +30,72 @@ description: "Open-source routing for self-hosted and distributed AI inference."
   </div>
 </div>
 
-<div className="max-w-5xl mx-auto px-6 pb-20">
-  <div className="mb-8">
-    <h2 className="text-2xl font-medium tracking-tight text-gray-900 dark:text-zinc-50">
-      Explore the docs
-    </h2>
-
-    <p className="mt-2 text-gray-600 dark:text-zinc-400">
-      Start with the system overview or go directly to deployment, routing,
-      and API guidance.
-    </p>
-  </div>
-
-  <Columns cols={2}>
-    <Card title="Introduction" icon="book-open" color="#FF9A33" href="/getting-started/introduction">
-      Learn what Hivenet Router does, when it is useful, and what it does not
-      provide.
-    </Card>
-
-    <Card title="Quickstart" icon="rocket" color="#FF9A33" href="/quickstart">
-      Deploy a router and agents, then send your first routed inference
-      request.
-    </Card>
-
-    <Card title="Architecture overview" icon="network-wired" color="#FF9A33" href="/getting-started/architecture-overview">
-      Understand the router, agents, control plane, data plane, storage,
-      and request flow.
-    </Card>
-
-    <Card title="Hivenet Router and Hivenet services" icon="arrows-split-up-and-left" color="#FF9A33" href="/getting-started/hivenet-services">
-      See how Hivenet Router differs from Hivenet Inference API and Compute
-      with Hivenet.
-    </Card>
-  </Columns>
-</div>
-
-Hivenet Router is an open-source router for self-hosted AI inference, maintained by Hivenet.
-
-It puts one client-facing API in front of multiple inference servers. A central router tracks the health, load, latency, models, and capabilities of connected agents, then forwards each request according to your routing policies.
+Hivenet Router is an open-source project maintained by Hivenet. It puts one client-facing API in front of multiple inference servers and routes each request using current agent health, load, latency, model, and capability data.
 
 <Warning>
   Hivenet Router is currently in alpha. Interfaces, configuration, and deployment workflows may change as the project develops.
 </Warning>
 
-## Start here
+## How it works
 
-<CardGroup cols={2}>
-  <Card title="Introduction" href="/getting-started/introduction">
-    Understand what Hivenet Router does and when to use it.
+<Columns cols={3}>
+  <Card title="Connect" icon="link" color="#FF9A33">
+    Agents connect inference backends to the router and report their models, capabilities, capacity, health, and live signals.
   </Card>
 
-  <Card title="Quickstart" href="/quickstart">
-    Deploy a router and an agent and send your first request.
+  <Card title="Route" icon="route" color="#FF9A33">
+    The router applies model and capability constraints, policy gates, ranking, queues, retries, and fallback.
   </Card>
 
-  <Card title="Architecture overview" href="/getting-started/architecture-overview">
-    See the control plane, data plane, and request flow.
+  <Card title="Observe" icon="chart-line" color="#FF9A33">
+    Prometheus metrics, Grafana dashboards, traces, and audit records show how requests move through the fleet.
+  </Card>
+</Columns>
+
+## Start building
+
+<Columns cols={2}>
+  <Card title="Quickstart" icon="rocket" color="#FF9A33" href="/quickstart">
+    Deploy a router and three agents, then send and observe your first routed inference request.
   </Card>
 
-  <Card title="Docker quickstart" href="/deploy/docker-quickstart">
-    Deploy a router and two vLLM agents with Docker.
-  </Card>
-</CardGroup>
-
-## Explore by topic
-
-<CardGroup cols={2}>
-  <Card title="Deploy" icon="server" href="/deploy/docker-quickstart">
-    Install the router and agents on Docker, Docker Compose, or bare metal.
+  <Card title="Architecture overview" icon="network-wired" color="#FF9A33" href="/getting-started/architecture-overview">
+    Understand the control plane, data plane, storage, authentication, and request flow.
   </Card>
 
-  <Card title="Routing and policies" icon="route" href="/routing/routing-concepts">
-    Filter and rank agents with YAML policies and fallback chains.
+  <Card title="Docker quickstart" icon="server" color="#FF9A33" href="/deploy/docker-quickstart">
+    Run a router and two vLLM agents across Linux hosts with Docker.
   </Card>
 
-  <Card title="Security and auth" icon="lock" href="/security/authentication-overview">
-    Authenticate agents and clients, enforce quotas, and rotate keys.
+  <Card title="Use the API" icon="code" color="#FF9A33" href="/use-the-api/chat-completions">
+    Send chat, embedding, reranking, model-list, and administration requests.
+  </Card>
+</Columns>
+
+## Explore by task
+
+<Columns cols={3}>
+  <Card title="Routing and policies" icon="route" href="/routing/routing-concepts" horizontal>
+    Filter, rank, queue, and fall back across agents.
   </Card>
 
-  <Card title="Observability" icon="chart-line" href="/observability/prometheus-metrics">
-    Monitor routing, agents, engines, and hardware with Prometheus and Grafana.
+  <Card title="Security and auth" icon="lock" href="/security/authentication-overview" horizontal>
+    Authenticate agents and clients and enforce access controls.
   </Card>
 
-  <Card title="Integrations" icon="plug" href="/integrations/integrations-overview">
-    Connect Hivenet Router to Claude Code, OpenCode, Open WebUI, and more.
+  <Card title="Observability" icon="chart-line" href="/observability/observability-overview" horizontal>
+    Monitor router, agent, engine, and hardware behavior.
   </Card>
 
-  <Card title="Reference" icon="book" href="/reference/detailed-architecture">
-    Configuration schema, error codes, and performance characteristics.
+  <Card title="Integrations" icon="plug" href="/integrations/integrations-overview" horizontal>
+    Connect Claude Code, OpenCode, Pi, Open WebUI, and applications.
   </Card>
-</CardGroup>
+
+  <Card title="Reference" icon="book" href="/reference/configuration-reference" horizontal>
+    Look up configuration, architecture, errors, and performance.
+  </Card>
+
+  <Card title="Project" icon="users" href="/project/project-overview" horizontal>
+    Contribute, report security issues, and review project policies.
+  </Card>
+</Columns>

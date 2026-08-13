@@ -60,6 +60,24 @@ Use `hivenet-router`, `hivenet-agent`, `HIVENET_ROUTER_*`, and `sk-hivenet-*` wh
 
 Avoid unsupported claims, promotional language, and invented examples that appear to be guaranteed behavior.
 
+## Presentation system
+
+Use Mintlify components to clarify structure, meaning, or choice. Do not add components only for decoration.
+
+- Use `<Note>` for neutral supporting information that does not fit naturally in the main flow.
+- Use `<Info>` for behavior, prerequisites, or caveats the reader must understand.
+- Use `<Tip>` for optional shortcuts and improvements.
+- Use `<Warning>` when ignoring the content can break a deployment, expose access, or produce an unsafe configuration.
+- Use `<Danger>` only for destructive, irreversible, or security-critical actions.
+- Use `<Check>` to confirm that a procedure or verification succeeded.
+- Use `<Steps>` only for actions or events with a meaningful sequence.
+- Use `<Tabs>` for mutually exclusive choices or parallel variants, not to hide prerequisite or safety information.
+- Use `<CodeGroup>` for equivalent code or command alternatives.
+- Use `<AccordionGroup>` for troubleshooting, edge cases, and secondary detail. Keep core instructions and limitations visible.
+- Use `<Columns>` and `<Card>` for overview and navigation choices. Do not turn reference tables or ordinary paragraphs into cards.
+
+Keep callout meaning consistent across pages. Core requirements must remain understandable when a reader scans only the headings and visible text.
+
 ## Page structure
 
 Every MDX page must have valid frontmatter containing a clear title and description.
