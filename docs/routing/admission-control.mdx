@@ -11,19 +11,37 @@ Admission control applies to:
 - `POST /v1/chat/completions`
 - `POST /v1/messages`
 
-`POST /v1/messages/count_tokens` is deliberately exempt. It runs no model and consumes no KV cache, so it skips the input and image caps, pressure shed, occupancy budgets, per-key token rates, and daily token budget. It remains protected by the request-per-minute limiter.
+<Info>
+  `POST /v1/messages/count_tokens` is deliberately exempt. It runs no model and consumes no KV cache, so it skips the input and image caps, pressure shed, occupancy budgets, per-key token rates, and daily token budget. It remains protected by the request-per-minute limiter.
 
-Embedding and reranking requests are also exempt because these gates model KV-cache-bound generation. Their request-rate, body-size, and agent-concurrency protections still apply.
+  Embedding and reranking requests are also exempt because these gates model KV-cache-bound generation. Their request-rate, body-size, and agent-concurrency protections still apply.
+</Info>
 
 ## Gate order
 
 After authentication and the request-per-minute check, the LLM handler evaluates:
 
-1. **B1: request caps** — input-token and image-count limits
-2. **B3: pressure shed** — live pressure across healthy replicas
-3. **B2: pool occupancy** — token-weighted occupancy and `max_inflight`
-4. **B4: serverless key limits** — per-key occupancy share, output-rate state, and input tokens per minute
-5. **Daily token admission** — the existing tenant token budget
+<Steps>
+  <Step title="B1: Request caps">
+    Enforce the model’s input-token and image-count limits.
+  </Step>
+
+  <Step title="B3: Pressure shed">
+    Evaluate live pressure across healthy replicas before the request enters the queue.
+  </Step>
+
+  <Step title="B2: Pool occupancy">
+    Reserve token-weighted occupancy and enforce the `max_inflight` request backstop.
+  </Step>
+
+  <Step title="B4: Serverless key limits">
+    In serverless mode, check the key’s occupancy share, output-rate state, and input tokens per minute.
+  </Step>
+
+  <Step title="Daily token admission">
+    Apply the existing tenant token budget after the admission-specific gates pass.
+  </Step>
+</Steps>
 
 If a later check rejects the request, every occupancy reservation already taken is released.
 
@@ -143,7 +161,9 @@ shed_if:
 
 The router averages each available signal across healthy agents serving the requested model. If any configured threshold fails, it returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded` with the message `model is under high load, please retry`.
 
-Missing engine signals pass the gate. A single hot replica should normally be handled by per-agent `exclude_if`; `shed_if` is for pressure across the pool.
+<Info>
+  Missing engine signals pass the gate. A single hot replica should normally be handled by per-agent `exclude_if`; `shed_if` is for pressure across the pool.
+</Info>
 
 ## B4: serverless key limits
 
@@ -206,24 +226,24 @@ Every five minutes, the router removes full rate buckets, daily buckets from a p
 
 ## Related pages
 
-<CardGroup cols={2}>
-  <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
+<Columns cols={2}>
+  <Card title="Policy YAML reference" icon="file-code" href="/routing/policy-yaml-reference">
     Review every routing and admission field.
   </Card>
 
-  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+  <Card title="auth.yaml reference" icon="key" href="/security/auth-yaml-reference">
     Configure RPM, daily token, and serverless per-key limits.
   </Card>
 
-  <Card title="Error codes" href="/reference/error-codes">
+  <Card title="Error codes" icon="triangle-exclamation" href="/reference/error-codes">
     Handle admission, routing, and backend failures.
   </Card>
 
-  <Card title="Configuration reference" href="/reference/configuration-reference">
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration-reference">
     Review admission environment variables and defaults.
   </Card>
 
-  <Card title="Admission control metrics" href="/observability/admission-control-metrics">
+  <Card title="Admission control metrics" icon="chart-line" href="/observability/admission-control-metrics">
     Monitor occupancy, budgets, concurrency, and rejections by gate.
   </Card>
-</CardGroup>
+</Columns>

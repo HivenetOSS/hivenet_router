@@ -13,23 +13,52 @@ This page covers process-level router and agent configuration.
 
 See [auth.yaml reference](/security/auth-yaml-reference) and [Policy YAML reference](/routing/policy-yaml-reference) for the file schemas.
 
+## Find a setting
+
+<Columns cols={3}>
+  <Card title="Router network" icon="network-wired" href="#router-network-settings">
+    Listener addresses, libp2p discovery, timeouts, and persistence.
+  </Card>
+
+  <Card title="Routing and backpressure" icon="route" href="#router-routing-and-backpressure-settings">
+    Queue limits, retries, policies, sessions, and admission controls.
+  </Card>
+
+  <Card title="Security and authentication" icon="lock" href="#router-security-and-authentication-settings">
+    JWT secrets, client authentication, quotas, and audit output.
+  </Card>
+
+  <Card title="Agent backend" icon="microchip" href="#agent-backend-settings">
+    Inference engines, models, capabilities, and backend timeouts.
+  </Card>
+
+  <Card title="Agent telemetry" icon="chart-line" href="#agent-telemetry-settings">
+    Hardware sampling, routing signals, identity, and metadata.
+  </Card>
+
+  <Card title="Reload or restart" icon="rotate" href="#reload-or-restart">
+    See which changes are live-reloadable and which require a restart.
+  </Card>
+</Columns>
+
 ## View the installed options
 
 Use the binary’s built-in help to confirm the options available in the version you deployed:
 
-```bash
+<CodeGroup>
+
+```bash Router
 ./bin/hivenet-router --help
 ```
 
-```bash
+```bash Agent
 ./bin/hivenet-agent --help
 ```
 
-For API-key generation:
-
-```bash
+```bash Key generation
 ./bin/hivenet-router keygen --help
 ```
+</CodeGroup>
 
 <Note>
   The environment-variable prefix is exactly:
@@ -683,6 +712,8 @@ Changing the path requires a router restart.
 
 The complete current router flag set is:
 
+<Accordion title="Show all router flags" description="Flag, environment variable, and default value" icon="sliders">
+
 | Flag | Environment variable | Default |
 | --- | --- | --- |
 | `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` |
@@ -710,6 +741,8 @@ The complete current router flag set is:
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` contains the raw value | Required |
 | `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | Empty |
+
+</Accordion>
 
 ## Agent backend settings
 
@@ -1022,6 +1055,8 @@ See [Hardware metrics](/observability/hardware-metrics).
 
 The complete current agent flag set is:
 
+<Accordion title="Show all agent flags" description="Flag, environment variable, and default value" icon="sliders">
+
 | Flag | Environment variable | Default |
 | --- | --- | --- |
 | `--engine` | — | `vllm` |
@@ -1052,6 +1087,8 @@ The complete current agent flag set is:
 | `--hide-llm` | — | `false` |
 | `--llm-pretty-name` | — | Empty |
 | `--llm-info` | — | Empty |
+
+</Accordion>
 
 ## Logging configuration
 
@@ -1262,7 +1299,12 @@ Inspect the router logs after reload.
 
 An invalid file leaves the previous valid configuration active, but the attempted change has not taken effect.
 
-## Router startup example
+## Startup examples
+
+<Tabs>
+  <Tab title="Router">
+
+### Router startup example
 
 ```bash
 ./bin/hivenet-router \
@@ -1294,7 +1336,11 @@ This example:
 - uses a policy directory
 - persists state outside the working directory
 
-## vLLM agent example
+  </Tab>
+
+  <Tab title="vLLM agent">
+
+### vLLM agent example
 
 ```bash
 ./bin/hivenet-agent \
@@ -1320,7 +1366,11 @@ This example:
 
 The example does not set `--router-p2p`. The current agent receives the router’s dialable libp2p address during gRPC authentication.
 
-## Custom-engine example
+  </Tab>
+
+  <Tab title="Custom engine">
+
+### Custom-engine example
 
 ```bash
 ./bin/hivenet-agent \
@@ -1341,6 +1391,9 @@ The example does not set `--router-p2p`. The current agent receives the router�
 ```
 
 A custom engine must implement the client-facing endpoint used by the request. Hivenet Router does not translate its API schema.
+
+  </Tab>
+</Tabs>
 
 ## Generate a static client key
 
@@ -1373,28 +1426,28 @@ Store the raw key in a secret manager. Put only the generated hash in `auth.yaml
 
 ## Next steps
 
-<CardGroup cols={2}>
-  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+<Columns cols={2}>
+  <Card title="auth.yaml reference" icon="key" href="/security/auth-yaml-reference">
     Configure static keys, administrator access, model restrictions, and quotas.
   </Card>
 
-  <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
+  <Card title="Policy YAML reference" icon="route" href="/routing/policy-yaml-reference">
     Configure primary routing, fallback chains, provider fallback, and gates.
   </Card>
 
-  <Card title="Detailed architecture" href="/reference/detailed-architecture">
+  <Card title="Detailed architecture" icon="sitemap" href="/reference/detailed-architecture">
     See where each configuration value affects the running system.
   </Card>
 
-  <Card title="Error codes" href="/reference/error-codes">
+  <Card title="Error codes" icon="triangle-exclamation" href="/reference/error-codes">
     Diagnose startup, authentication, routing, and backend failures.
   </Card>
 
-  <Card title="Key rotation" href="/security/key-rotation">
+  <Card title="Key rotation" icon="rotate" href="/security/key-rotation">
     Rotate client, administrator, agent, and provider credentials.
   </Card>
 
-  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+  <Card title="Prometheus metrics" icon="chart-line" href="/observability/prometheus-metrics">
     Verify runtime behavior after configuration changes.
   </Card>
-</CardGroup>
+</Columns>
