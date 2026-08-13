@@ -1027,282 +1027,284 @@ sum by (tenant_id, model) (
 
 ## Troubleshooting
 
-### The Hivenet Router provider does not appear
+<AccordionGroup>
+  <Accordion title="The Hivenet Router provider does not appear">
+    Check the merged configuration:
 
-Check the merged configuration:
+    ```bash
+    opencode debug config \
+      | jq '.provider.hivenet-router'
+    ```
 
-```bash
-opencode debug config \
-  | jq '.provider.hivenet-router'
-```
+    Check that:
 
-Check that:
+    - the file is in a supported configuration location
+    - the JSON is valid
+    - `hivenet-router` is included in `enabled_providers`
+    - it is not also present in `disabled_providers`
+    - the current project does not override the provider
 
-- the file is in a supported configuration location
-- the JSON is valid
-- `hivenet-router` is included in `enabled_providers`
-- it is not also present in `disabled_providers`
-- the current project does not override the provider
+    OpenCode configurations are merged, so a project file can override a global setting.
+  </Accordion>
 
-OpenCode configurations are merged, so a project file can override a global setting.
+  <Accordion title="OpenCode reports `ProviderModelNotFoundError`">
+    Model references must use:
 
-### OpenCode reports `ProviderModelNotFoundError`
+    ```text
+    provider/model
+    ```
 
-Model references must use:
+    For example:
 
-```text
-provider/model
-```
+    ```text
+    hivenet-router/hivenet-router-code-model
+    ```
 
-For example:
+    The provider prefix must match:
 
-```text
-hivenet-router/hivenet-router-code-model
-```
+    ```json
+    "provider": {
+      "hivenet-router": {}
+    }
+    ```
 
-The provider prefix must match:
+    The model suffix must match a key under:
 
-```json
-"provider": {
-  "hivenet-router": {}
-}
-```
+    ```json
+    "provider": {
+      "hivenet-router": {
+        "models": {}
+      }
+    }
+    ```
 
-The model suffix must match a key under:
+    List the loaded models:
 
-```json
-"provider": {
-  "hivenet-router": {
-    "models": {}
-  }
-}
-```
+    ```bash
+    opencode models hivenet-router
+    ```
+  </Accordion>
 
-List the loaded models:
+  <Accordion title="Hivenet Router returns `401 Unauthorized`">
+    Check that:
 
-```bash
-opencode models hivenet-router
-```
+    - `HIVENET_ROUTER_API_KEY` contains the raw client key
+    - the variable reached the OpenCode process
+    - the key has not expired
+    - the configured `apiKey` uses the correct environment-variable name
 
-### Hivenet Router returns `401 Unauthorized`
+    Test the same value directly:
 
-Check that:
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      https://router.example.com/v1/models
+    ```
+  </Accordion>
 
-- `HIVENET_ROUTER_API_KEY` contains the raw client key
-- the variable reached the OpenCode process
-- the key has not expired
-- the configured `apiKey` uses the correct environment-variable name
+  <Accordion title="Requests reach `/v1/responses`">
+    The wrong provider adapter is configured.
 
-Test the same value directly:
+    Use:
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  https://router.example.com/v1/models
-```
+    ```json
+    "npm": "@ai-sdk/openai-compatible"
+    ```
 
-### Requests reach `/v1/responses`
+    Hivenet Router supports:
 
-The wrong provider adapter is configured.
+    ```text
+    POST /v1/chat/completions
+    ```
 
-Use:
+    but not:
 
-```json
-"npm": "@ai-sdk/openai-compatible"
-```
+    ```text
+    POST /v1/responses
+    ```
+  </Accordion>
 
-Hivenet Router supports:
+  <Accordion title="Requests return a plain `404`">
+    Check the base URL.
 
-```text
-POST /v1/chat/completions
-```
+    It must end in:
 
-but not:
+    ```text
+    /v1
+    ```
 
-```text
-POST /v1/responses
-```
+    but not:
 
-### Requests return a plain `404`
+    ```text
+    /v1/chat/completions
+    ```
 
-Check the base URL.
+    Inspect the reverse-proxy access log to confirm the final path.
+  </Accordion>
 
-It must end in:
+  <Accordion title="Hivenet Router returns `model_not_found`">
+    Compare:
 
-```text
-/v1
-```
+    ```bash
+    opencode models hivenet-router
+    ```
 
-but not:
+    with:
 
-```text
-/v1/chat/completions
-```
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      https://router.example.com/v1/models \
+      | jq -r '.data[].id'
+    ```
 
-Inspect the reverse-proxy access log to confirm the final path.
+    Check:
 
-### Hivenet Router returns `model_not_found`
+    - capitalization
+    - slashes and punctuation
+    - backend served-model alias
+    - agent registration
+    - client-key model access
+    - agent health
+  </Accordion>
 
-Compare:
+  <Accordion title="Text works but file or shell tools do not">
+    The likely issue is model or backend tool-call support.
 
-```bash
-opencode models hivenet-router
-```
+    Check that:
 
-with:
+    - the model supports tools
+    - vLLM uses `--enable-auto-tool-choice`
+    - the configured parser matches the model
+    - the backend returns OpenAI-format `tool_calls`
+    - OpenCode permissions allow or ask for the operation
+    - the model follows tool schemas reliably
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  https://router.example.com/v1/models \
-  | jq -r '.data[].id'
-```
+    Test the backend directly with a Chat Completions request containing a `tools` array.
+  </Accordion>
 
-Check:
+  <Accordion title="A tool call appears as plain text">
+    The backend did not convert the model output into a structured OpenAI tool call.
 
-- capitalization
-- slashes and punctuation
-- backend served-model alias
-- agent registration
-- client-key model access
-- agent health
+    Review:
 
-### Text works but file or shell tools do not
+    - tool-call parser
+    - chat template
+    - model family
+    - backend version
+    - streaming tool-call support
 
-The likely issue is model or backend tool-call support.
+    The router forwards the response it receives. It does not parse plain model text into tool calls.
+  </Accordion>
 
-Check that:
+  <Accordion title="OpenCode uses an unexpected model">
+    Inspect:
 
-- the model supports tools
-- vLLM uses `--enable-auto-tool-choice`
-- the configured parser matches the model
-- the backend returns OpenAI-format `tool_calls`
-- OpenCode permissions allow or ask for the operation
-- the model follows tool schemas reliably
+    ```bash
+    opencode debug config \
+      | jq '{
+          model,
+          small_model,
+          enabled_providers
+        }'
+    ```
 
-Test the backend directly with a Chat Completions request containing a `tools` array.
+    Also check:
 
-### A tool call appears as plain text
+    - the `-m` CLI flag
+    - the model selected through `/models`
+    - project-level overrides
+    - agent-specific model settings
+    - command-specific model settings
 
-The backend did not convert the model output into a structured OpenAI tool call.
+    OpenCode gives a command-line model selection precedence over the configured default.
+  </Accordion>
 
-Review:
+  <Accordion title="Background requests fail">
+    Check the configured:
 
-- tool-call parser
-- chat template
-- model family
-- backend version
-- streaming tool-call support
+    ```json
+    "small_model"
+    ```
 
-The router forwards the response it receives. It does not parse plain model text into tool calls.
+    The small model must:
 
-### OpenCode uses an unexpected model
+    - be defined under the provider
+    - appear in Hivenet Router’s client catalog
+    - be permitted by the API key
+    - have an available `llm` agent
 
-Inspect:
+    Using the main model for `small_model` is valid when no separate lightweight model is available.
+  </Accordion>
 
-```bash
-opencode debug config \
-  | jq '{
-      model,
-      small_model,
-      enabled_providers
-    }'
-```
+  <Accordion title="OpenCode cannot modify files">
+    Check the permission prompt and configuration:
 
-Also check:
+    ```json
+    "permission": {
+      "edit": "ask",
+      "bash": "ask"
+    }
+    ```
 
-- the `-m` CLI flag
-- the model selected through `/models`
-- project-level overrides
-- agent-specific model settings
-- command-specific model settings
+    The `edit` permission also covers file creation and patch operations. The operation may be waiting for approval rather than failing.
+  </Accordion>
 
-OpenCode gives a command-line model selection precedence over the configured default.
+  <Accordion title="Output stops or hangs during streaming">
+    Test the same model directly with streaming curl.
 
-### Background requests fail
+    Check:
 
-Check the configured:
+    - backend SSE output
+    - reverse-proxy buffering
+    - proxy timeout
+    - router request timeout
+    - agent logs
+    - OpenCode logs
 
-```json
-"small_model"
-```
+    OpenCode logs are stored under:
 
-The small model must:
+    ```text
+    ~/.local/share/opencode/log/
+    ```
 
-- be defined under the provider
-- appear in Hivenet Router’s client catalog
-- be permitted by the API key
-- have an available `llm` agent
+    Run with debug output:
 
-Using the main model for `small_model` is valid when no separate lightweight model is available.
+    ```bash
+    opencode \
+      --print-logs \
+      --log-level DEBUG
+    ```
+  </Accordion>
 
-### OpenCode cannot modify files
+  <Accordion title="A backend request is rejected with `invalid_parameter`">
+    Hivenet Router now treats structured backend validation failures such as invalid parameters or context-length errors as non-retryable request failures.
 
-Check the permission prompt and configuration:
+    It returns the error without trying every other agent serving the same model.
 
-```json
-"permission": {
-  "edit": "ask",
-  "bash": "ask"
-}
-```
+    Inspect the backend message and correct:
 
-The `edit` permission also covers file creation and patch operations. The operation may be waiting for approval rather than failing.
+    - context length
+    - output limit
+    - unsupported tool fields
+    - unsupported roles
+    - model-specific parameters
+  </Accordion>
 
-### Output stops or hangs during streaming
+  <Accordion title="Requests return `504 request_timeout`">
+    The request exceeded Hivenet Router’s deadline.
 
-Test the same model directly with streaming curl.
+    Check:
 
-Check:
+    - model startup state
+    - prompt and requested output size
+    - backend queue depth
+    - router-side capacity queueing
+    - current `--request-timeout`
 
-- backend SSE output
-- reverse-proxy buffering
-- proxy timeout
-- router request timeout
-- agent logs
-- OpenCode logs
-
-OpenCode logs are stored under:
-
-```text
-~/.local/share/opencode/log/
-```
-
-Run with debug output:
-
-```bash
-opencode \
-  --print-logs \
-  --log-level DEBUG
-```
-
-### A backend request is rejected with `invalid_parameter`
-
-Hivenet Router now treats structured backend validation failures such as invalid parameters or context-length errors as non-retryable request failures.
-
-It returns the error without trying every other agent serving the same model.
-
-Inspect the backend message and correct:
-
-- context length
-- output limit
-- unsupported tool fields
-- unsupported roles
-- model-specific parameters
-
-### Requests return `504 request_timeout`
-
-The request exceeded Hivenet Router’s deadline.
-
-Check:
-
-- model startup state
-- prompt and requested output size
-- backend queue depth
-- router-side capacity queueing
-- current `--request-timeout`
-
-Increase the timeout only after confirming that the backend is progressing normally.
+    Increase the timeout only after confirming that the backend is progressing normally.
+  </Accordion>
+</AccordionGroup>
 
 ## Read the relevant logs
 
@@ -1345,28 +1347,28 @@ Request-schema and tool-parser failures usually appear most clearly in the backe
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Pi" href="/integrations/pi">
+<Columns cols={3}>
+  <Card title="Pi" icon="terminal" href="/integrations/pi">
     Connect another terminal coding agent through OpenAI Chat Completions.
   </Card>
 
-  <Card title="Open WebUI" href="/integrations/open-web-ui">
+  <Card title="Open WebUI" icon="browser" href="/integrations/open-web-ui">
     Add a browser-based chat interface backed by Hivenet Router.
   </Card>
 
-  <Card title="Use from code" href="/integrations/use-from-code">
+  <Card title="Use from code" icon="code-branch" href="/integrations/use-from-code">
     Call Hivenet Router from SDKs, scripts, and custom services.
   </Card>
 
-  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+  <Card title="Chat completions and messages" icon="messages" href="/use-the-api/chat-completions">
     Review request forwarding, streaming, headers, and error behavior.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Configure model access, quotas, expiration, and rotation.
   </Card>
 
-  <Card title="vLLM agent" href="/deploy/agents/vllm">
+  <Card title="vLLM agent" icon="server" href="/deploy/agents/vllm">
     Deploy and register an OpenAI-compatible inference backend.
   </Card>
-</CardGroup>
+</Columns>
