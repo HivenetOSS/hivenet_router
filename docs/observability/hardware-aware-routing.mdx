@@ -1016,110 +1016,112 @@ Use thresholds with practical headroom rather than treating a single decimal poi
 
 ## Troubleshooting
 
-### A GPU-tier policy matches nothing
+<AccordionGroup>
+  <Accordion title="A GPU-tier policy matches nothing">
+    Check the registered metadata:
 
-Check the registered metadata:
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq -r '.agents[].metadata.gpu_model'
+    ```
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq -r '.agents[].metadata.gpu_model'
-```
+    Check exact spelling, capitalization, and whitespace.
 
-Check exact spelling, capitalization, and whitespace.
+    Hivenet Router does not populate `gpu_model` automatically.
+  </Accordion>
 
-Hivenet Router does not populate `gpu_model` automatically.
+  <Accordion title="A VRAM requirement cannot be expressed">
+    Hivenet Router does not support an absolute VRAM match.
 
-### A VRAM requirement cannot be expressed
+    Use an operator-defined tag such as:
 
-Hivenet Router does not support an absolute VRAM match.
+    ```text
+    vram-80gb
+    ```
 
-Use an operator-defined tag such as:
+    or a carefully standardized `gpu_model` value.
 
-```text
-vram-80gb
-```
+    Use `gpu_vram_used_percent` only for live pressure, not total device capacity.
+  </Accordion>
 
-or a carefully standardized `gpu_model` value.
+  <Accordion title="A hardware gate does not exclude an agent">
+    The metric may be missing.
 
-Use `gpu_vram_used_percent` only for live pressure, not total device capacity.
+    Check the routing-table hardware object.
 
-### A hardware gate does not exclude an agent
+    Also verify the units:
 
-The metric may be missing.
+    | Prometheus | Policy |
+    | --- | --- |
+    | `95` | `0.95` |
+    | `82°C` | `82` |
 
-Check the routing-table hardware object.
+    Missing metrics pass.
+  </Accordion>
 
-Also verify the units:
+  <Accordion title="One hot GPU excludes a multi-GPU agent">
+    This is expected.
 
-| Prometheus | Policy |
-| --- | --- |
-| `95` | `0.95` |
-| `82°C` | `82` |
+    Hivenet Router uses the highest temperature, utilization, and VRAM fraction across the GPUs reported by the agent.
 
-Missing metrics pass.
+    Restrict collection with `--gpu-devices-file` if the agent should represent only a subset of the host’s devices.
+  </Accordion>
 
-### One hot GPU excludes a multi-GPU agent
+  <Accordion title="Power cannot be used in `exclude_if`">
+    GPU power is currently an observability metric only.
 
-This is expected.
+    Use static hardware metadata, tags, or one of the supported dynamic gate fields.
+  </Accordion>
 
-Hivenet Router uses the highest temperature, utilization, and VRAM fraction across the GPUs reported by the agent.
+  <Accordion title="The preferred tier is skipped">
+    Check the earlier hard constraints:
 
-Restrict collection with `--gpu-devices-file` if the agent should represent only a subset of the host’s devices.
+    - requested model
+    - capability
+    - agent health
+    - static metadata
+    - previous failures
+    - declared capacity
 
-### Power cannot be used in `exclude_if`
+    A hardware match does not make an agent eligible when it fails one of those checks.
+  </Accordion>
 
-GPU power is currently an observability metric only.
+  <Accordion title="Fallback traffic rises after adding gates">
+    Inspect:
 
-Use static hardware metadata, tags, or one of the supported dynamic gate fields.
+    - policy-exhaustion logs
+    - current metric distributions
+    - missing-metric behavior
+    - preferred-tier capacity
+    - threshold units
+    - whether one agent reports a persistent outlier
 
-### The preferred tier is skipped
+    Relax one condition at a time rather than removing the complete policy.
+  </Accordion>
 
-Check the earlier hard constraints:
+  <Accordion title="Hardware data appears stale">
+    Check agent logs for collection errors and confirm the latest heartbeat.
 
-- requested model
-- capability
-- agent health
-- static metadata
-- previous failures
-- declared capacity
+    The current system does not expose a dedicated hardware-snapshot age metric.
 
-A hardware match does not make an agent eligible when it fails one of those checks.
-
-### Fallback traffic rises after adding gates
-
-Inspect:
-
-- policy-exhaustion logs
-- current metric distributions
-- missing-metric behavior
-- preferred-tier capacity
-- threshold units
-- whether one agent reports a persistent outlier
-
-Relax one condition at a time rather than removing the complete policy.
-
-### Hardware data appears stale
-
-Check agent logs for collection errors and confirm the latest heartbeat.
-
-The current system does not expose a dedicated hardware-snapshot age metric.
-
-A healthy heartbeat does not prove that every recent hardware sample succeeded.
+    A healthy heartbeat does not prove that every recent hardware sample succeeded.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+<Columns cols={3}>
+  <Card title="Prometheus metrics" icon="chart-line" href="/observability/prometheus-metrics">
     Query the live hardware, engine, latency, capacity, and routing signals used in these policies.
   </Card>
 
-  <Card title="Policy gates" href="/routing/policy-gates">
+  <Card title="Policy gates" icon="filter" href="/routing/policy-gates">
     Review the exact evaluation behavior and all supported gate fields.
   </Card>
 
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+  <Card title="Hardware metrics" icon="microchip" href="/observability/hardware-metrics">
     Understand how GPU, CPU, memory, temperature, and power values are collected.
   </Card>
-</CardGroup>
+</Columns>
