@@ -29,20 +29,20 @@ A direct connection may be simpler for a single static backend with one trusted 
 
 The router coordinates requests; it does not replace the inference engines that execute them. Agents report model and hardware capacity, while routing policies decide which healthy targets are eligible. Admission control decides whether eligible capacity can accept more work.
 
-<CardGroup cols={2}>
-  <Card title="Architecture overview" href="/getting-started/architecture-overview">
+<Columns cols={2}>
+  <Card title="Architecture overview" icon="sitemap" href="/getting-started/architecture-overview">
     See how routers, agents, and inference engines work together.
   </Card>
 
-  <Card title="Hivenet services" href="/getting-started/hivenet-services">
+  <Card title="Hivenet services" icon="layer-group" href="/getting-started/hivenet-services">
     Compare Hivenet Router with hosted Hivenet inference and compute services.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how policies, candidates, and fallback behavior shape a request.
   </Card>
 
-  <Card title="Admission control" href="/routing/admission-control">
+  <Card title="Admission control" icon="shield-check" href="/routing/admission-control">
     Understand request limits and occupancy protection.
   </Card>
-</CardGroup>
+</Columns>

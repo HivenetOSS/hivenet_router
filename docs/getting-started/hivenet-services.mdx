@@ -12,6 +12,20 @@ The main difference is who operates each layer.
 - With **Hivenet Inference API**, Hivenet operates the inference service behind a managed API.
 - With **Compute with Hivenet**, you rent infrastructure and decide what software to run on it.
 
+<Columns cols={3}>
+  <Card title="Hivenet Router" icon="route">
+    Self-hosted routing for your own inference backends.
+  </Card>
+
+  <Card title="Hivenet Inference API" icon="cloud">
+    Managed inference endpoint operated by Hivenet.
+  </Card>
+
+  <Card title="Compute with Hivenet" icon="server">
+    Rented GPU and CPU infrastructure you operate.
+  </Card>
+</Columns>
+
 <Note>
   These docs cover Hivenet Router. Information about Hivenet Inference API and Compute with Hivenet is included here only to explain where Hivenet Router fits.
 </Note>
@@ -112,12 +126,12 @@ You can also combine them where appropriate. For example, you might run Hivenet 
 
 ## Continue with Hivenet Router
 
-<CardGroup cols={2}>
-  <Card title="Quickstart" href="/quickstart">
+<Columns cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
     Deploy a router and agents, then send your first routed request.
   </Card>
 
-  <Card title="Architecture overview" href="/getting-started/architecture-overview">
+  <Card title="Architecture overview" icon="sitemap" href="/getting-started/architecture-overview">
     See how the router, agents, control plane, and data plane work together.
   </Card>
-</CardGroup>
+</Columns>
