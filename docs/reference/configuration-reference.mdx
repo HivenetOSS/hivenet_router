@@ -37,6 +37,9 @@ Complete reference for all Router and Agent CLI flags and environment variables.
 | `--remove-after` | — | `30s` | Remove agent after this without a heartbeat |
 | `--max-concurrent` | — | `50` | Max concurrent in-flight request forwards |
 | `--heartbeat-interval` | — | `5s` | Expected heartbeat cadence sent to agents in `RouterConfig` |
+| `HIVENET_ROUTER_ADMIT_FRACTION` | — | `0.90` | Scales a model's `admit_budget_tokens` into the effective occupancy budget (admission gate B2). Range (0,1]; out-of-range values keep the default. Shipped at 0.85, raised to 0.90 with the learned token estimator |
+| `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | — | `250ms` | How long an over-budget request waits for occupancy to free before 429 (Go duration; `0` rejects immediately) |
+| `HIVENET_ROUTER_RPM_BURST_SECONDS` | — | `0` | Per-key RPM bucket burst window in seconds. `0` or ≥60 keeps the legacy full-minute burst; a short certified window (e.g. `10`) stops a key from spending its whole minute's quota in one instant |
 
 > **`--p2p-max-conns-per-ip` and agents behind a shared NAT.** go-libp2p's resource manager caps concurrent connections from a single source IP at **8** by default. When agents reach the router through one shared egress IP — e.g. a Kubernetes SNAT gateway, a Docker bridge, or any NAT — they all count against that single bucket, so the **9th agent's connection is accepted at TCP but reset during the Noise handshake** (the agent logs `failed to negotiate security protocol: EOF`). This flag raises that per-IP ceiling (default `32`). Keep it **≥ 2× the number of agents behind a single egress IP**, not equal to the agent count: a restarting agent briefly holds both its old (not yet timed out, see `--remove-after`) and its new connection, so a fleet-wide rollout transiently needs up to ~2× the slots. Agents that present distinct source IPs each get their own bucket and are unaffected.
 

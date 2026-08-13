@@ -404,10 +404,11 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// shared estimator can shift between calls as other requests complete.
 	inputEstimate := h.estimatePromptTokens(&req)
 	// /v1/messages/count_tokens is a stateless tokenizer lookup: it holds no KV
-	// cache and generates nothing, so charging it against the occupancy budget or
-	// the per-key token buckets would double-bill every client that counts before
-	// it sends (Claude Code does exactly that). It skips the admission gates and
-	// is guarded by the per-key RPM flood limit alone.
+	// cache and generates nothing, so charging it against the occupancy budget,
+	// the per-key token buckets, or the daily token budget would double-bill
+	// every client that counts before it sends (Claude Code does exactly that).
+	// It skips the admission gates and the token quotas and is guarded by the
+	// per-key RPM flood limit alone.
 	countOnly := path == "/v1/messages/count_tokens"
 	var reservation admission.Reservations
 	if !countOnly {
@@ -443,7 +444,10 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !countOnly && !h.enforcePerKeyRates(c, &req, m, inputEstimate) {
 		return
 	}
-	if !h.reserveInputBudget(c, &req, m) {
+	// count_tokens is also exempt from the daily token budget: it generates
+	// nothing, and a count-then-send client would otherwise pay for every
+	// prompt twice (once counted, once sent).
+	if !countOnly && !h.reserveInputBudget(c, &req, m) {
 		return
 	}
 	if !captureRawBody(c, &req, m.requestID) {
