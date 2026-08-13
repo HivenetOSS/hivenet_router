@@ -10,23 +10,23 @@ The repository’s root [`CONTRIBUTING.md`](https://github.com/HivenetOSS/hivene
 
 By participating in the project, you agree to follow the [Code of conduct](/project/code-of-conduct).
 
-<CardGroup cols={2}>
-  <Card title="Report a bug" href="https://github.com/HivenetOSS/hivenet_router/issues">
+<Columns cols={2}>
+  <Card title="Report a bug" icon="bug" href="https://github.com/HivenetOSS/hivenet_router/issues">
     Share a reproducible problem with the affected version, configuration, and relevant logs.
   </Card>
 
-  <Card title="Propose a feature" href="https://github.com/HivenetOSS/hivenet_router/issues">
+  <Card title="Propose a feature" icon="lightbulb" href="https://github.com/HivenetOSS/hivenet_router/issues">
     Describe the use case and expected behavior before investing in a substantial implementation.
   </Card>
 
-  <Card title="Improve the documentation" href="https://github.com/HivenetOSS/hivenet_router/tree/main/docs">
+  <Card title="Improve the documentation" icon="book" href="https://github.com/HivenetOSS/hivenet_router/tree/main/docs">
     Correct stale commands, clarify behavior, improve examples, or add missing troubleshooting guidance.
   </Card>
 
-  <Card title="Open a pull request" href="https://github.com/HivenetOSS/hivenet_router/pulls">
+  <Card title="Open a pull request" icon="code-pull-request" href="https://github.com/HivenetOSS/hivenet_router/pulls">
     Submit a focused change with tests, verification details, and a clear explanation of the problem it solves.
   </Card>
-</CardGroup>
+</Columns>
 
 ## Development requirements
 
@@ -343,12 +343,20 @@ Useful documentation contributions include:
 
 When editing an existing technical page:
 
-1. Treat the current implementation as the source of truth.
-2. Preserve exact commands, flags, endpoints, schemas, and units.
-3. Distinguish verified behavior from guidance or interpretation.
-4. Do not add product claims that the repository does not support.
-5. Update related pages when one behavior affects several guides.
-6. Check internal links and sidebar placement.
+<Steps>
+  <Step title="Treat the current implementation as the source of truth.">
+  </Step>
+  <Step title="Preserve exact commands, flags, endpoints, schemas, and units.">
+  </Step>
+  <Step title="Distinguish verified behavior from guidance or interpretation.">
+  </Step>
+  <Step title="Do not add product claims that the repository does not support.">
+  </Step>
+  <Step title="Update related pages when one behavior affects several guides.">
+  </Step>
+  <Step title="Check internal links and sidebar placement.">
+  </Step>
+</Steps>
 
 When documentation and code disagree, verify the relevant implementation before deciding which one needs to change.
 
@@ -554,28 +562,28 @@ Before submitting:
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Canonical contribution guide" href="https://github.com/HivenetOSS/hivenet_router/blob/main/CONTRIBUTING.md">
+<Columns cols={3}>
+  <Card title="Canonical contribution guide" icon="book" href="https://github.com/HivenetOSS/hivenet_router/blob/main/CONTRIBUTING.md">
     Read the authoritative repository version of the contribution instructions.
   </Card>
 
-  <Card title="Code of conduct" href="/project/code-of-conduct">
+  <Card title="Code of conduct" icon="handshake" href="/project/code-of-conduct">
     Review the standards applying to project participation.
   </Card>
 
-  <Card title="License" href="/project/license">
+  <Card title="License" icon="scale-balanced" href="/project/license">
     Review the Apache License 2.0 terms applying to contributions.
   </Card>
 
-  <Card title="GitHub issues" href="https://github.com/HivenetOSS/hivenet_router/issues">
+  <Card title="GitHub issues" icon="circle-dot" href="https://github.com/HivenetOSS/hivenet_router/issues">
     Report bugs and discuss feature proposals.
   </Card>
 
-  <Card title="Pull requests" href="https://github.com/HivenetOSS/hivenet_router/pulls">
+  <Card title="Pull requests" icon="code-pull-request" href="https://github.com/HivenetOSS/hivenet_router/pulls">
     Review current work or submit a focused change.
   </Card>
 
-  <Card title="Detailed architecture" href="/reference/detailed-architecture">
+  <Card title="Detailed architecture" icon="sitemap" href="/reference/detailed-architecture">
     Understand the components and request paths affected by a code change.
   </Card>
-</CardGroup>
+</Columns>
