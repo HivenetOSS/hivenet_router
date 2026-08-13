@@ -1193,270 +1193,272 @@ Use the request or trace ID from an audit record to investigate one failed tool 
 
 ## Troubleshooting
 
-### The provider or model does not appear
+<AccordionGroup>
+  <Accordion title="The provider or model does not appear">
+    Check the configuration file:
 
-Check the configuration file:
+    ```bash
+    jq . \
+      ~/.pi/agent/models.json
+    ```
 
-```bash
-jq . \
-  ~/.pi/agent/models.json
-```
+    List matching models:
 
-List matching models:
+    ```bash
+    pi --list-models hivenet-router
+    ```
 
-```bash
-pi --list-models hivenet-router
-```
+    Check that:
 
-Check that:
+    - the file is in the active Pi configuration directory
+    - `providers.hivenet-router` exists
+    - `baseUrl` ends in `/v1`
+    - `api` is `openai-completions`
+    - `authHeader` is `true`
+    - `models` contains at least one entry
+    - each model has an `id`
+    - the API-key value can be resolved
 
-- the file is in the active Pi configuration directory
-- `providers.hivenet-router` exists
-- `baseUrl` ends in `/v1`
-- `api` is `openai-completions`
-- `authHeader` is `true`
-- `models` contains at least one entry
-- each model has an `id`
-- the API-key value can be resolved
+    Open `/model` again after editing the file.
+  </Accordion>
 
-Open `/model` again after editing the file.
+  <Accordion title="Pi reports that no API key is available">
+    Check the variable:
 
-### Pi reports that no API key is available
+    ```bash
+    test -n "$HIVENET_ROUTER_API_KEY" \
+      && echo set \
+      || echo missing
+    ```
 
-Check the variable:
+    The configuration must include the `$`:
 
-```bash
-test -n "$HIVENET_ROUTER_API_KEY" \
-  && echo set \
-  || echo missing
-```
+    ```json
+    "apiKey": "$HIVENET_ROUTER_API_KEY"
+    ```
 
-The configuration must include the `$`:
+    This is a literal string rather than environment interpolation:
 
-```json
-"apiKey": "$HIVENET_ROUTER_API_KEY"
-```
+    ```json
+    "apiKey": "HIVENET_ROUTER_API_KEY"
+    ```
+  </Accordion>
 
-This is a literal string rather than environment interpolation:
+  <Accordion title="Hivenet Router returns `401 Unauthorized`">
+    Check that:
 
-```json
-"apiKey": "HIVENET_ROUTER_API_KEY"
-```
+    - the variable contains the raw client key
+    - the key has not expired
+    - the key belongs to client authentication
+    - the variable reached the Pi process
 
-### Hivenet Router returns `401 Unauthorized`
+    Test the same value directly:
 
-Check that:
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      https://router.example.com/v1/models
+    ```
+  </Accordion>
 
-- the variable contains the raw client key
-- the key has not expired
-- the key belongs to client authentication
-- the variable reached the Pi process
+  <Accordion title="Requests return a plain `404`">
+    Check the base URL.
 
-Test the same value directly:
+    It should be:
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  https://router.example.com/v1/models
-```
+    ```text
+    https://router.example.com/v1
+    ```
 
-### Requests return a plain `404`
+    not:
 
-Check the base URL.
+    ```text
+    https://router.example.com
+    ```
 
-It should be:
+    and not:
 
-```text
-https://router.example.com/v1
-```
+    ```text
+    https://router.example.com/v1/chat/completions
+    ```
 
-not:
+    Also confirm that the provider uses:
 
-```text
-https://router.example.com
-```
+    ```json
+    "api": "openai-completions"
+    ```
 
-and not:
+    rather than `openai-responses`.
+  </Accordion>
 
-```text
-https://router.example.com/v1/chat/completions
-```
+  <Accordion title="Hivenet Router returns `model_not_found`">
+    Compare Pi’s configuration with the live catalog:
 
-Also confirm that the provider uses:
+    ```bash
+    pi --list-models hivenet-router
+    ```
 
-```json
-"api": "openai-completions"
-```
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      https://router.example.com/v1/models \
+      | jq -r '.data[].id'
+    ```
 
-rather than `openai-responses`.
+    Check:
 
-### Hivenet Router returns `model_not_found`
+    - capitalization
+    - punctuation and slashes
+    - backend served-model name
+    - agent registration
+    - key model access
+    - agent health
+  </Accordion>
 
-Compare Pi’s configuration with the live catalog:
+  <Accordion title="Text works but tools do not">
+    Check that:
 
-```bash
-pi --list-models hivenet-router
-```
+    - the model supports tool calling
+    - the backend uses a model-appropriate tool parser
+    - vLLM was started with `--enable-auto-tool-choice`
+    - the chat template supports tool and tool-result messages
+    - the backend returns structured `tool_calls`
+    - the model follows the schemas reliably
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  https://router.example.com/v1/models \
-  | jq -r '.data[].id'
-```
+    Test the backend directly with a Chat Completions request containing a `tools` array.
 
-Check:
+    Hivenet Router forwards the response. It does not convert plain model text into a structured tool call.
+  </Accordion>
 
-- capitalization
-- punctuation and slashes
-- backend served-model name
-- agent registration
-- key model access
-- agent health
+  <Accordion title="Tool calls appear as text">
+    The backend parser did not recognize the model’s tool syntax.
 
-### Text works but tools do not
+    Review:
 
-Check that:
+    - model family
+    - tool-call parser
+    - chat template
+    - backend version
+    - streaming tool-call support
 
-- the model supports tool calling
-- the backend uses a model-appropriate tool parser
-- vLLM was started with `--enable-auto-tool-choice`
-- the chat template supports tool and tool-result messages
-- the backend returns structured `tool_calls`
-- the model follows the schemas reliably
+    Inspect the backend logs first.
+  </Accordion>
 
-Test the backend directly with a Chat Completions request containing a `tools` array.
+  <Accordion title="The backend rejects the `developer` role">
+    Add:
 
-Hivenet Router forwards the response. It does not convert plain model text into a structured tool call.
+    ```json
+    "compat": {
+      "supportsDeveloperRole": false
+    }
+    ```
 
-### Tool calls appear as text
+    to the provider or affected model.
 
-The backend parser did not recognize the model’s tool syntax.
+    Open `/model` again to reload the configuration.
+  </Accordion>
 
-Review:
+  <Accordion title="The backend rejects `reasoning_effort`">
+    Add:
 
-- model family
-- tool-call parser
-- chat template
-- backend version
-- streaming tool-call support
+    ```json
+    "compat": {
+      "supportsReasoningEffort": false
+    }
+    ```
 
-Inspect the backend logs first.
+    Do this only for models or backends that reject the field.
+  </Accordion>
 
-### The backend rejects the `developer` role
+  <Accordion title="The backend rejects `max_completion_tokens`">
+    Add:
 
-Add:
+    ```json
+    "compat": {
+      "maxTokensField": "max_tokens"
+    }
+    ```
 
-```json
-"compat": {
-  "supportsDeveloperRole": false
-}
-```
+    Current vLLM supports both fields, but other OpenAI-compatible servers may not.
+  </Accordion>
 
-to the provider or affected model.
+  <Accordion title="Streaming usage causes a validation error">
+    Add:
 
-Open `/model` again to reload the configuration.
+    ```json
+    "compat": {
+      "supportsUsageInStreaming": false
+    }
+    ```
 
-### The backend rejects `reasoning_effort`
+    This prevents Pi from requesting the final streaming usage block.
+  </Accordion>
 
-Add:
+  <Accordion title="Pi compacts too early">
+    Increase the configured:
 
-```json
-"compat": {
-  "supportsReasoningEffort": false
-}
-```
+    ```json
+    "contextWindow"
+    ```
 
-Do this only for models or backends that reject the field.
+    only when the deployed backend genuinely accepts the larger context.
 
-### The backend rejects `max_completion_tokens`
+    Check the backend’s effective maximum model length.
+  </Accordion>
 
-Add:
+  <Accordion title="The backend rejects the prompt as too long">
+    Reduce:
 
-```json
-"compat": {
-  "maxTokensField": "max_tokens"
-}
-```
+    - `contextWindow`
+    - `maxTokens`
+    - included project context
+    - requested output
 
-Current vLLM supports both fields, but other OpenAI-compatible servers may not.
+    An accurate context configuration lets Pi compact before the request reaches the backend limit.
+  </Accordion>
 
-### Streaming usage causes a validation error
+  <Accordion title="Output arrives only after completion">
+    Test streaming directly with curl.
 
-Add:
+    Then check:
 
-```json
-"compat": {
-  "supportsUsageInStreaming": false
-}
-```
+    - backend SSE behavior
+    - reverse-proxy buffering
+    - proxy read and idle timeouts
+    - Hivenet Router request timeout
+    - agent logs
+  </Accordion>
 
-This prevents Pi from requesting the final streaming usage block.
+  <Accordion title="Pi modifies files without asking">
+    This is expected behavior.
 
-### Pi compacts too early
+    Pi does not have a built-in permission-prompt system.
 
-Increase the configured:
+    Restart it with restricted tools:
 
-```json
-"contextWindow"
-```
+    ```bash
+    pi \
+      --tools read,grep,find,ls
+    ```
 
-only when the deployed backend genuinely accepts the larger context.
+    Use a container, virtual machine, or equivalent sandbox when tools need stronger boundaries.
+  </Accordion>
 
-Check the backend’s effective maximum model length.
+  <Accordion title="Requests return `504 request_timeout`">
+    The request exceeded the Hivenet Router deadline.
 
-### The backend rejects the prompt as too long
+    Check:
 
-Reduce:
+    - backend readiness
+    - prompt size
+    - output size
+    - engine queue depth
+    - router-side capacity queueing
+    - current request timeout
 
-- `contextWindow`
-- `maxTokens`
-- included project context
-- requested output
-
-An accurate context configuration lets Pi compact before the request reaches the backend limit.
-
-### Output arrives only after completion
-
-Test streaming directly with curl.
-
-Then check:
-
-- backend SSE behavior
-- reverse-proxy buffering
-- proxy read and idle timeouts
-- Hivenet Router request timeout
-- agent logs
-
-### Pi modifies files without asking
-
-This is expected behavior.
-
-Pi does not have a built-in permission-prompt system.
-
-Restart it with restricted tools:
-
-```bash
-pi \
-  --tools read,grep,find,ls
-```
-
-Use a container, virtual machine, or equivalent sandbox when tools need stronger boundaries.
-
-### Requests return `504 request_timeout`
-
-The request exceeded the Hivenet Router deadline.
-
-Check:
-
-- backend readiness
-- prompt size
-- output size
-- engine queue depth
-- router-side capacity queueing
-- current request timeout
-
-Increase the deadline only after confirming that the backend is progressing normally.
+    Increase the deadline only after confirming that the backend is progressing normally.
+  </Accordion>
+</AccordionGroup>
 
 ## Read the relevant logs
 

@@ -984,218 +984,220 @@ Compare the audit records with visible user actions to identify background title
 
 ## Troubleshooting
 
-### The connection verification fails
+<AccordionGroup>
+  <Accordion title="The connection verification fails">
+    Test the same URL and key directly:
 
-Test the same URL and key directly:
+    ```bash
+    curl \
+      -H "Authorization: Bearer <hivenet-router-api-key>" \
+      https://router.example.com/v1/models
+    ```
 
-```bash
-curl \
-  -H "Authorization: Bearer <hivenet-router-api-key>" \
-  https://router.example.com/v1/models
-```
+    Check:
 
-Check:
+    - URL ends in `/v1`
+    - API key is the raw client credential
+    - Open WebUI can reach the router
+    - TLS certificates are trusted
+    - the router has registered agents
+    - a reverse proxy preserves `Authorization`
+  </Accordion>
 
-- URL ends in `/v1`
-- API key is the raw client credential
-- Open WebUI can reach the router
-- TLS certificates are trusted
-- the router has registered agents
-- a reverse proxy preserves `Authorization`
+  <Accordion title="The model selector is empty">
+    Check the live catalog:
 
-### The model selector is empty
+    ```bash
+    curl \
+      -H "Authorization: Bearer <hivenet-router-api-key>" \
+      https://router.example.com/v1/models \
+      | jq .
+    ```
 
-Check the live catalog:
+    Then add exact LLM IDs to the connection’s **Model IDs** filter.
 
-```bash
-curl \
-  -H "Authorization: Bearer <hivenet-router-api-key>" \
-  https://router.example.com/v1/models \
-  | jq .
-```
+    Also check whether:
 
-Then add exact LLM IDs to the connection’s **Model IDs** filter.
+    - the API key hides the models
+    - strict per-model quotas omit them
+    - the model-list timeout is too short
+    - the saved connection is disabled
+    - persistent configuration contains an older URL or key
+  </Accordion>
 
-Also check whether:
+  <Accordion title="An embedding model appears in the chat selector">
+    Limit the connection’s Model IDs to `llm` models.
 
-- the API key hides the models
-- strict per-model quotas omit them
-- the model-list timeout is too short
-- the saved connection is disabled
-- persistent configuration contains an older URL or key
+    Configure embeddings separately through the RAG settings.
+  </Accordion>
 
-### An embedding model appears in the chat selector
+  <Accordion title="Chat requests go to `/v1/responses`">
+    The connection uses the wrong API type.
 
-Limit the connection’s Model IDs to `llm` models.
+    Edit it and select:
 
-Configure embeddings separately through the RAG settings.
+    ```text
+    Chat Completions
+    ```
 
-### Chat requests go to `/v1/responses`
+    Hivenet Router does not support `/v1/responses`.
+  </Accordion>
 
-The connection uses the wrong API type.
+  <Accordion title="Requests return `401 Unauthorized`">
+    Confirm that Open WebUI stores the raw Hivenet Router client key.
 
-Edit it and select:
+    Do not use:
 
-```text
-Chat Completions
-```
+    - the key hash from `auth.yaml`
+    - an administrator key
+    - the agent JWT secret
 
-Hivenet Router does not support `/v1/responses`.
+    Test the raw value directly with `/v1/models`.
+  </Accordion>
 
-### Requests return `401 Unauthorized`
+  <Accordion title="Hivenet Router returns `model_forbidden`">
+    The shared key’s explicit allowlist does not include the selected model.
 
-Confirm that Open WebUI stores the raw Hivenet Router client key.
+    Add the exact model ID to the key or remove the model from Open WebUI.
+  </Accordion>
 
-Do not use:
+  <Accordion title="Hivenet Router returns `429` for an apparently permitted model">
+    The key probably uses `quota.per_model`, and the selected model has no entry.
 
-- the key hash from `auth.yaml`
-- an administrator key
-- the agent JWT secret
+    Every model used for chat, tasks, embeddings, or reranking needs its own per-model quota entry.
+  </Accordion>
 
-Test the raw value directly with `/v1/models`.
+  <Accordion title="Hivenet Router returns `no_agents_available`">
+    Check:
 
-### Hivenet Router returns `model_forbidden`
+    - selected model ID
+    - `llm` capability
+    - agent health
+    - routing policy
+    - model availability
+    - static metadata matches
 
-The shared key’s explicit allowlist does not include the selected model.
+    An embedding or reranking agent cannot serve a Chat Completions request.
+  </Accordion>
 
-Add the exact model ID to the key or remove the model from Open WebUI.
+  <Accordion title="There are more requests than user messages">
+    Open WebUI background tasks are using the shared model.
 
-### Hivenet Router returns `429` for an apparently permitted model
+    Check:
 
-The key probably uses `quota.per_model`, and the selected model has no entry.
+    - title generation
+    - tag generation
+    - follow-up generation
+    - autocomplete
+    - retrieval-query generation
+    - context compaction
 
-Every model used for chat, tasks, embeddings, or reranking needs its own per-model quota entry.
+    Set `TASK_MODEL_EXTERNAL` or disable unnecessary features.
+  </Accordion>
 
-### Hivenet Router returns `no_agents_available`
+  <Accordion title="Text works but tools fail">
+    Check that:
 
-Check:
+    - the model supports native function calling
+    - the backend accepts `tools` and `tool_choice`
+    - the correct tool-call parser is enabled
+    - the chat template supports tools
+    - the response contains structured `tool_calls`
+    - the user has access to the attached Open WebUI tool
 
-- selected model ID
-- `llm` capability
-- agent health
-- routing policy
-- model availability
-- static metadata matches
+    Inspect the backend log first.
+  </Accordion>
 
-An embedding or reranking agent cannot serve a Chat Completions request.
+  <Accordion title="Streaming arrives all at once">
+    Test streaming directly against Hivenet Router.
 
-### There are more requests than user messages
+    If direct streaming works, inspect:
 
-Open WebUI background tasks are using the shared model.
+    - the proxy in front of Hivenet Router
+    - Open WebUI’s upstream connection
+    - browser-to-Open-WebUI proxy settings
+    - response buffering
+    - read and idle timeouts
+  </Accordion>
 
-Check:
+  <Accordion title="The router is on the host but cannot be reached">
+    Do not use:
 
-- title generation
-- tag generation
-- follow-up generation
-- autocomplete
-- retrieval-query generation
-- context compaction
+    ```text
+    http://localhost:8080/v1
+    ```
 
-Set `TASK_MODEL_EXTERNAL` or disable unnecessary features.
+    from inside the container.
 
-### Text works but tools fail
+    Use:
 
-Check that:
+    ```text
+    http://host.docker.internal:8080/v1
+    ```
 
-- the model supports native function calling
-- the backend accepts `tools` and `tool_choice`
-- the correct tool-call parser is enabled
-- the chat template supports tools
-- the response contains structured `tool_calls`
-- the user has access to the attached Open WebUI tool
+    and add a Linux host-gateway mapping when required.
+  </Accordion>
 
-Inspect the backend log first.
+  <Accordion title="Environment changes do not apply">
+    Open WebUI may be using the value persisted in its database.
 
-### Streaming arrives all at once
+    Update it through the administrator settings or review the persistent-configuration behavior.
+  </Accordion>
 
-Test streaming directly against Hivenet Router.
+  <Accordion title="Sign-in state is lost after recreating the container">
+    Confirm that:
 
-If direct streaming works, inspect:
+    - `/app/backend/data` uses a persistent volume
+    - the same volume is mounted after recreation
+    - `WEBUI_SECRET_KEY` has not changed
 
-- the proxy in front of Hivenet Router
-- Open WebUI’s upstream connection
-- browser-to-Open-WebUI proxy settings
-- response buffering
-- read and idle timeouts
+    Changing the secret invalidates existing sessions.
+  </Accordion>
 
-### The router is on the host but cannot be reached
+  <Accordion title="Open WebUI stops after an upgrade">
+    Inspect:
 
-Do not use:
+    ```bash
+    docker compose logs open-webui \
+      | tail -200
+    ```
 
-```text
-http://localhost:8080/v1
-```
+    Look for:
 
-from inside the container.
+    - database migration errors
+    - invalid persistent configuration
+    - volume permission problems
+    - incompatible environment variables
+    - frontend cache problems
 
-Use:
-
-```text
-http://host.docker.internal:8080/v1
-```
-
-and add a Linux host-gateway mapping when required.
-
-### Environment changes do not apply
-
-Open WebUI may be using the value persisted in its database.
-
-Update it through the administrator settings or review the persistent-configuration behavior.
-
-### Sign-in state is lost after recreating the container
-
-Confirm that:
-
-- `/app/backend/data` uses a persistent volume
-- the same volume is mounted after recreation
-- `WEBUI_SECRET_KEY` has not changed
-
-Changing the secret invalidates existing sessions.
-
-### Open WebUI stops after an upgrade
-
-Inspect:
-
-```bash
-docker compose logs open-webui \
-  | tail -200
-```
-
-Look for:
-
-- database migration errors
-- invalid persistent configuration
-- volume permission problems
-- incompatible environment variables
-- frontend cache problems
-
-Restore the pre-upgrade volume backup when rollback requires the previous database state.
+    Restore the pre-upgrade volume backup when rollback requires the previous database state.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Use from code" href="/integrations/use-from-code">
+<Columns cols={3}>
+  <Card title="Use from code" icon="code-branch" href="/integrations/use-from-code">
     Call Hivenet Router from curl, Python, JavaScript, SDKs, and services.
   </Card>
 
-  <Card title="Chat completions and messages" href="/use-the-api/chat-completions">
+  <Card title="Chat completions and messages" icon="messages" href="/use-the-api/chat-completions">
     Review Chat Completions forwarding, streaming, headers, and errors.
   </Card>
 
-  <Card title="Embeddings" href="/use-the-api/embeddings">
+  <Card title="Embeddings" icon="vector-square" href="/use-the-api/embeddings">
     Configure a Hivenet Router embedding model for Open WebUI retrieval.
   </Card>
 
-  <Card title="Reranking" href="/use-the-api/reranking">
+  <Card title="Reranking" icon="arrow-down-wide-short" href="/use-the-api/reranking">
     Connect an external reranking model to the retrieval pipeline.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Configure the shared model access, quotas, expiration, and rotation.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="clipboard-list" href="/observability/audit-logging">
     Investigate user-facing and background requests through structured records.
   </Card>
-</CardGroup>
+</Columns>

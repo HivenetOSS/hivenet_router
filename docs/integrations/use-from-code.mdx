@@ -1230,209 +1230,211 @@ unless the backend is explicitly trusted to receive them.
 
 ## Troubleshooting
 
-### The SDK returns `401 Unauthorized`
+<AccordionGroup>
+  <Accordion title="The SDK returns `401 Unauthorized`">
+    Check that:
 
-Check that:
+    - the raw client key is being used
+    - the key has not expired
+    - the key is not a SHA-256 hash
+    - the environment variable reached the process
+    - the reverse proxy preserves `Authorization`
 
-- the raw client key is being used
-- the key has not expired
-- the key is not a SHA-256 hash
-- the environment variable reached the process
-- the reverse proxy preserves `Authorization`
+    Test the same key with:
 
-Test the same key with:
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      "$HIVENET_ROUTER_URL/v1/models"
+    ```
+  </Accordion>
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  "$HIVENET_ROUTER_URL/v1/models"
-```
+  <Accordion title="The Anthropic SDK returns `401`">
+    Use:
 
-### The Anthropic SDK returns `401`
+    ```text
+    auth_token
+    ```
+
+    in Python or:
 
-Use:
+    ```text
+    authToken
+    ```
 
-```text
-auth_token
-```
+    in TypeScript.
 
-in Python or:
+    Using only `api_key` or `apiKey` sends `X-Api-Key`, which Hivenet Router does not accept for client authentication.
+  </Accordion>
 
-```text
-authToken
-```
+  <Accordion title="A request goes to `/v1/responses`">
+    Call:
 
-in TypeScript.
+    ```text
+    client.chat.completions.create
+    ```
 
-Using only `api_key` or `apiKey` sends `X-Api-Key`, which Hivenet Router does not accept for client authentication.
+    rather than:
 
-### A request goes to `/v1/responses`
+    ```text
+    client.responses.create
+    ```
 
-Call:
+    For LangChain, set:
 
-```text
-client.chat.completions.create
-```
+    ```python
+    use_responses_api=False
+    ```
+  </Accordion>
 
-rather than:
+  <Accordion title="The endpoint returns a plain `404`">
+    Check the base URL.
 
-```text
-client.responses.create
-```
+    | Client | Base URL |
+    | --- | --- |
+    | OpenAI SDK | `https://router.example.com/v1` |
+    | Anthropic SDK | `https://router.example.com` |
+    | Reranking HTTP call | `https://router.example.com/v1/rerank` |
 
-For LangChain, set:
+    Do not duplicate or omit `/v1`.
+  </Accordion>
 
-```python
-use_responses_api=False
-```
+  <Accordion title="Hivenet Router returns `model_not_found`">
+    Compare the application model with:
 
-### The endpoint returns a plain `404`
+    ```bash
+    curl \
+      -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
+      "$HIVENET_ROUTER_URL/v1/models" \
+      | jq -r '.data[].id'
+    ```
 
-Check the base URL.
+    Check:
 
-| Client | Base URL |
-| --- | --- |
-| OpenAI SDK | `https://router.example.com/v1` |
-| Anthropic SDK | `https://router.example.com` |
-| Reranking HTTP call | `https://router.example.com/v1/rerank` |
+    - capitalization
+    - slashes and punctuation
+    - agent registration
+    - model capability
+    - API-key access
+    - agent health
+  </Accordion>
 
-Do not duplicate or omit `/v1`.
+  <Accordion title="Text works but tool calls are missing">
+    Check:
 
-### Hivenet Router returns `model_not_found`
+    - model tool support
+    - backend tool parser
+    - backend chat template
+    - structured `tool_calls` in the raw response
+    - tool use while streaming
+    - model compliance with the supplied schema
 
-Compare the application model with:
+    The problem is usually in the model or backend rather than the SDK or router.
+  </Accordion>
+
+  <Accordion title="Streaming arrives only at the end">
+    Test the router with streaming curl.
 
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_API_KEY" \
-  "$HIVENET_ROUTER_URL/v1/models" \
-  | jq -r '.data[].id'
-```
-
-Check:
-
-- capitalization
-- slashes and punctuation
-- agent registration
-- model capability
-- API-key access
-- agent health
-
-### Text works but tool calls are missing
-
-Check:
-
-- model tool support
-- backend tool parser
-- backend chat template
-- structured `tool_calls` in the raw response
-- tool use while streaming
-- model compliance with the supplied schema
-
-The problem is usually in the model or backend rather than the SDK or router.
-
-### Streaming arrives only at the end
-
-Test the router with streaming curl.
-
-When curl streams but the application does not, check the SDK code.
-
-When neither streams, check:
-
-- backend SSE behavior
-- Hivenet Router agent version
-- reverse-proxy buffering
-- proxy read and idle timeouts
-- response `Content-Type`
-
-### Streaming usage is missing
-
-The backend may not support:
-
-```json
-{
-  "stream_options": {
-    "include_usage": true
-  }
-}
-```
-
-Remove the field or handle a missing final usage chunk.
-
-Hivenet Router’s own stream meter can still record usage for quotas, audit data, and metrics.
-
-### A single request receives `429`
-
-Inspect the error code.
-
-| Code | Likely cause |
-| --- | --- |
-| `rate_limit_exceeded` | RPM bucket exhausted or no per-model quota declared |
-| `token_limit_exceeded` | Daily token budget cannot admit the requested worst case |
-
-Also inspect:
-
-```text
-X-RateLimit-Remaining-Requests
-X-RateLimit-Remaining-Tokens
-```
-
-### The SDK makes more requests than expected
-
-Check its retry configuration.
-
-The official SDKs retry selected failures by default. Set retries to zero while diagnosing:
-
-```python
-max_retries=0
-```
-
-```js
-maxRetries: 0
-```
-
-### Hivenet Router returns `503`
-
-Check the specific error code:
-
-- `no_agents_available`
-- `no_capacity`
-- `agent_disconnected`
-- `backend_unavailable`
-- `queue_full`
-
-Then inspect:
-
-```text
-GET /admin/health
-GET /admin/routing-table
-```
-
-### Hivenet Router returns `504 request_timeout`
-
-The router deadline expired.
-
-Check:
-
-- backend readiness
-- model loading
-- prompt size
-- requested output
-- engine waiting requests
-- router-side queueing
-- client and proxy deadlines
-
-### The reranker response has no document text
-
-This is expected for backends that return:
-
-```json
-{
-  "document": null
-}
-```
-
-Use the result’s `index` to retrieve the original input document.
+    When curl streams but the application does not, check the SDK code.
+
+    When neither streams, check:
+
+    - backend SSE behavior
+    - Hivenet Router agent version
+    - reverse-proxy buffering
+    - proxy read and idle timeouts
+    - response `Content-Type`
+  </Accordion>
+
+  <Accordion title="Streaming usage is missing">
+    The backend may not support:
+
+    ```json
+    {
+      "stream_options": {
+        "include_usage": true
+      }
+    }
+    ```
+
+    Remove the field or handle a missing final usage chunk.
+
+    Hivenet Router’s own stream meter can still record usage for quotas, audit data, and metrics.
+  </Accordion>
+
+  <Accordion title="A single request receives `429`">
+    Inspect the error code.
+
+    | Code | Likely cause |
+    | --- | --- |
+    | `rate_limit_exceeded` | RPM bucket exhausted or no per-model quota declared |
+    | `token_limit_exceeded` | Daily token budget cannot admit the requested worst case |
+
+    Also inspect:
+
+    ```text
+    X-RateLimit-Remaining-Requests
+    X-RateLimit-Remaining-Tokens
+    ```
+  </Accordion>
+
+  <Accordion title="The SDK makes more requests than expected">
+    Check its retry configuration.
+
+    The official SDKs retry selected failures by default. Set retries to zero while diagnosing:
+
+    ```python
+    max_retries=0
+    ```
+
+    ```js
+    maxRetries: 0
+    ```
+  </Accordion>
+
+  <Accordion title="Hivenet Router returns `503`">
+    Check the specific error code:
+
+    - `no_agents_available`
+    - `no_capacity`
+    - `agent_disconnected`
+    - `backend_unavailable`
+    - `queue_full`
+
+    Then inspect:
+
+    ```text
+    GET /admin/health
+    GET /admin/routing-table
+    ```
+  </Accordion>
+
+  <Accordion title="Hivenet Router returns `504 request_timeout`">
+    The router deadline expired.
+
+    Check:
+
+    - backend readiness
+    - model loading
+    - prompt size
+    - requested output
+    - engine waiting requests
+    - router-side queueing
+    - client and proxy deadlines
+  </Accordion>
+
+  <Accordion title="The reranker response has no document text">
+    This is expected for backends that return:
+
+    ```json
+    {
+      "document": null
+    }
+    ```
+
+    Use the result’s `index` to retrieve the original input document.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
