@@ -114,30 +114,39 @@ curl -X POST http://localhost:8080/v1/rerank \
 
 ## Documentation
 
-Full documentation lives in [`docs/`](docs/). Jump in:
+The complete documentation is available at **[routerdocs.hivenet.com](https://routerdocs.hivenet.com)**. Its source lives in [`docs/`](docs/).
 
 **Get started**
-- [Quickstart](docs/Get%20Started/00-Quickstart.md) · [Architecture overview](docs/Get%20Started/01-Architecture-Overview.md) · [Why Hivenet Router](docs/Get%20Started/03-Why-Hivenet-Router.md)
 
-**Routing & policies**
-- [Routing concepts](docs/Routing%20%26%20Policies/01-Routing-Concepts.md) · [Policy YAML reference](docs/Routing%20%26%20Policies/02-Policy-YAML-Reference.md) · [Fallback chains](docs/Routing%20%26%20Policies/03-Fallback-Chains.md) · [Provider fallback](docs/Routing%20%26%20Policies/04-Provider-Fallback.md)
+[Introduction](https://routerdocs.hivenet.com/getting-started/introduction) · [Quickstart](https://routerdocs.hivenet.com/quickstart) · [Architecture overview](https://routerdocs.hivenet.com/getting-started/architecture-overview) · [Why Hivenet Router](https://routerdocs.hivenet.com/getting-started/why-hivenet-router)
 
-**Deploy**
-- [Docker quickstart](docs/Deployment/01-Docker-Quickstart.md) · [Docker Compose](docs/Deployment/02-Docker-Compose.md) · [Bare metal](docs/Deployment/03-Bare-Metal.md) · [Agent deployment (vLLM, Ollama, SGLang, llama.cpp, Infinity, custom)](docs/Deployment/04-Agent-Deployment)
+**Deploy Hivenet Router**
 
-**API reference**
-- [Chat completions](docs/API%20Reference/01-Chat-Completions.md) · [Embeddings](docs/API%20Reference/02-Embeddings.md) · [Reranking](docs/API%20Reference/03-Reranking.md) · [Models](docs/API%20Reference/04-Models-List.md) · [Admin](docs/API%20Reference/05-Admin-Endpoints.md)
+[Docker quickstart](https://routerdocs.hivenet.com/deploy/docker-quickstart) · [Docker Compose](https://routerdocs.hivenet.com/deploy/docker-compose) · [Bare metal](https://routerdocs.hivenet.com/deploy/bare-metal) · [vLLM](https://routerdocs.hivenet.com/deploy/agents/vllm) · [Ollama](https://routerdocs.hivenet.com/deploy/agents/ollama) · [SGLang](https://routerdocs.hivenet.com/deploy/agents/sglang) · [llama.cpp](https://routerdocs.hivenet.com/deploy/agents/llama-cpp) · [Infinity](https://routerdocs.hivenet.com/deploy/agents/infinity) · [Custom engines](https://routerdocs.hivenet.com/deploy/agents/custom-engine)
 
-**Security & auth**
-- [Authentication](docs/Security%20%26%20Auth/01-Authentication-Overview.md) · [API keys](docs/Security%20%26%20Auth/02-API-Keys.md) · [`auth.yaml` reference](docs/Security%20%26%20Auth/03-auth.yaml-Reference.md) · [Model restrictions](docs/Security%20%26%20Auth/04-Model-Restrictions.md) · [Key rotation](docs/Security%20%26%20Auth/05-Key-Rotation.md)
+**Use the API**
+
+[Chat completions](https://routerdocs.hivenet.com/use-the-api/chat-completions) · [Embeddings](https://routerdocs.hivenet.com/use-the-api/embeddings) · [Reranking](https://routerdocs.hivenet.com/use-the-api/reranking) · [Models](https://routerdocs.hivenet.com/use-the-api/models) · [Admin endpoints](https://routerdocs.hivenet.com/use-the-api/admin-endpoints)
+
+**Routing and policies**
+
+[Routing concepts](https://routerdocs.hivenet.com/routing/routing-concepts) · [Policy YAML reference](https://routerdocs.hivenet.com/routing/policy-yaml-reference) · [Fallback chains](https://routerdocs.hivenet.com/routing/fallback-chains) · [Provider fallback](https://routerdocs.hivenet.com/routing/provider-fallback) · [Policy gates](https://routerdocs.hivenet.com/routing/policy-gates) · [Admission control](https://routerdocs.hivenet.com/routing/admission-control)
+
+**Security and authentication**
+
+[Authentication overview](https://routerdocs.hivenet.com/security/authentication-overview) · [API keys](https://routerdocs.hivenet.com/security/api-keys) · [`auth.yaml` reference](https://routerdocs.hivenet.com/security/auth-yaml-reference) · [Model restrictions](https://routerdocs.hivenet.com/security/model-restrictions) · [Key rotation](https://routerdocs.hivenet.com/security/key-rotation)
 
 **Observability**
-- [Prometheus metrics](docs/Observability/01-Prometheus-Metrics.md) · [Grafana dashboards](docs/Observability/02-Grafana-Dashboards.md) · [Audit logging](docs/Observability/03-Audit-Logging.md)
+
+[Overview](https://routerdocs.hivenet.com/observability/observability-overview) · [Prometheus metrics](https://routerdocs.hivenet.com/observability/prometheus-metrics) · [Grafana dashboards](https://routerdocs.hivenet.com/observability/grafana-dashboards) · [Audit logging](https://routerdocs.hivenet.com/observability/audit-logging) · [Hardware metrics](https://routerdocs.hivenet.com/observability/hardware-metrics) · [Engine metrics](https://routerdocs.hivenet.com/observability/engine-metrics) · [Admission-control metrics](https://routerdocs.hivenet.com/observability/admission-control-metrics)
+
+**Integrations**
+
+[Claude Code](https://routerdocs.hivenet.com/integrations/claude-code) · [OpenCode](https://routerdocs.hivenet.com/integrations/open-code) · [Pi](https://routerdocs.hivenet.com/integrations/pi) · [Open WebUI](https://routerdocs.hivenet.com/integrations/open-web-ui) · [Use from code](https://routerdocs.hivenet.com/integrations/use-from-code)
 
 **Reference**
-- [Detailed architecture](docs/Reference/00-Detailed-Architecture.md) · [Configuration](docs/Reference/01-Configuration-Reference.md) · [Error codes](docs/Reference/02-Error-Codes.md) · [Performance](docs/Reference/03-Performance-Characteristics.md)
 
-**Integrations** — [Claude Code](docs/Integrations/01-Claude-Code.md) · [OpenCode](docs/Integrations/02-OpenCode.md) · [Open WebUI](docs/Integrations/04-Open-WebUI.md) · [Using from code](docs/Integrations/05-Using-from-Code.md)
+[Detailed architecture](https://routerdocs.hivenet.com/reference/detailed-architecture) · [Configuration reference](https://routerdocs.hivenet.com/reference/configuration-reference) · [Error codes](https://routerdocs.hivenet.com/reference/error-codes) · [Performance characteristics](https://routerdocs.hivenet.com/reference/performance-characteristics)
 
 ## Contributing
 
