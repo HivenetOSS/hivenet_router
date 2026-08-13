@@ -798,112 +798,114 @@ Fallback is a continuity mechanism. It should not quietly become the normal rout
 
 ## Troubleshooting
 
-### The chain skips a step
+<AccordionGroup>
+  <Accordion title="The chain skips a step">
+    Check whether the step had any eligible agents.
 
-Check whether the step had any eligible agents.
+    Inspect registered metadata:
 
-Inspect registered metadata:
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      -H "Authorization: Bearer <admin-api-key>" \
+      | jq '.agents[] | {
+          model: .metadata.model,
+          capability: .metadata.capability,
+          engine: .metadata.engine,
+          region: .metadata.region,
+          tags: .metadata.tags,
+          healthy: .status.healthy,
+          backend_healthy: .status.backend_healthy
+        }'
+    ```
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  -H "Authorization: Bearer <admin-api-key>" \
-  | jq '.agents[] | {
-      model: .metadata.model,
-      capability: .metadata.capability,
-      engine: .metadata.engine,
-      region: .metadata.region,
-      tags: .metadata.tags,
-      healthy: .status.healthy,
-      backend_healthy: .status.backend_healthy
-    }'
-```
+    All static match values are exact and case-sensitive.
+  </Accordion>
 
-All static match values are exact and case-sensitive.
+  <Accordion title="A failed agent is tried again">
+    An agent is excluded only for the remainder of the current step.
 
-### A failed agent is tried again
+    It can become eligible again in a later fallback step because each step has its own failed-agent set and retry budget.
 
-An agent is excluded only for the remainder of the current step.
+    Avoid overlapping steps when retrying the same agents is not useful.
 
-It can become eligible again in a later fallback step because each step has its own failed-agent set and retry budget.
+    For example, these steps overlap completely:
 
-Avoid overlapping steps when retrying the same agents is not useful.
+    ```yaml
+    routing_policy:
+      match:
+        engine: vllm
+      strategy: least-loaded
+    
+    fallback_chain:
+      - name: same-agents-again
+        match:
+          engine: vllm
+        strategy: least-loaded
+    ```
 
-For example, these steps overlap completely:
+    The fallback may retry agents already attempted in the primary step.
+  </Accordion>
 
-```yaml
-routing_policy:
-  match:
-    engine: vllm
-  strategy: least-loaded
+  <Accordion title="Requests wait instead of falling back">
+    Matching agents are probably at capacity and queueing is enabled.
 
-fallback_chain:
-  - name: same-agents-again
-    match:
-      engine: vllm
-    strategy: least-loaded
-```
+    Check:
 
-The fallback may retry agents already attempted in the primary step.
+    ```bash
+    --queue-depth
+    --request-timeout
+    ```
 
-### Requests wait instead of falling back
+    Disable queueing for immediate fallback:
 
-Matching agents are probably at capacity and queueing is enabled.
+    ```bash
+    --queue-depth 0
+    ```
+  </Accordion>
 
-Check:
+  <Accordion title="A fallback engine is never selected">
+    Confirm that it:
 
-```bash
---queue-depth
---request-timeout
-```
+    - registers the same model name
+    - serves the same capability
+    - passes the step’s static filters
+    - passes its dynamic gates
+    - is healthy
+    - has free capacity
+  </Accordion>
 
-Disable queueing for immediate fallback:
+  <Accordion title="Provider fallback is not reached">
+    Check that:
 
-```bash
---queue-depth 0
-```
+    - all local steps are exhausted
+    - the request has not already exceeded its deadline
+    - the request uses the `llm` capability
+    - `fallback_provider` is at the top level
+    - the provider engine and model are configured
+    - the corresponding API key environment variable is set
+  </Accordion>
 
-### A fallback engine is never selected
+  <Accordion title="The exhausted metric increases despite provider fallback">
+    `hivenet_router_policy_exhausted_total` also increases when the local chain is exhausted and the configured provider fallback fails.
 
-Confirm that it:
-
-- registers the same model name
-- serves the same capability
-- passes the step’s static filters
-- passes its dynamic gates
-- is healthy
-- has free capacity
-
-### Provider fallback is not reached
-
-Check that:
-
-- all local steps are exhausted
-- the request has not already exceeded its deadline
-- the request uses the `llm` capability
-- `fallback_provider` is at the top level
-- the provider engine and model are configured
-- the corresponding API key environment variable is set
-
-### The exhausted metric increases despite provider fallback
-
-`hivenet_router_policy_exhausted_total` also increases when the local chain is exhausted and the configured provider fallback fails.
-
-Check provider logs and outbound HTTP metrics before assuming the router returned a normal local-capacity error.
+    Check provider logs and outbound HTTP metrics before assuming the router returned a normal local-capacity error.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Provider fallback" href="/routing/provider-fallback">
+<Columns cols={3}>
+  <Card title="Provider fallback" icon="cloud-arrow-up" href="/routing/provider-fallback">
     Configure OpenAI or Anthropic after all local routing options fail.
   </Card>
 
-  <Card title="Policy gates" href="/routing/policy-gates">
+  <Card title="Policy gates" icon="filter" href="/routing/policy-gates">
     Apply practical health, cache, latency, and hardware thresholds.
   </Card>
 
-  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+  <Card title="Prometheus metrics" icon="chart-line" href="/observability/prometheus-metrics">
     Monitor fallback, exhaustion, queueing, failures, and routing activity.
   </Card>
-</CardGroup>
+</Columns>

@@ -835,117 +835,119 @@ After rotating a provider key:
 
 ## Troubleshooting
 
-### The router does not start
+<AccordionGroup>
+  <Accordion title="The router does not start">
+    Check the error message.
 
-Check the error message.
+    If the policy uses OpenAI, confirm:
 
-If the policy uses OpenAI, confirm:
+    ```bash
+    echo "${HIVENET_ROUTER_OPENAI_API_KEY:+configured}"
+    ```
 
-```bash
-echo "${HIVENET_ROUTER_OPENAI_API_KEY:+configured}"
-```
+    If it uses Anthropic:
 
-If it uses Anthropic:
+    ```bash
+    echo "${HIVENET_ROUTER_ANTHROPIC_API_KEY:+configured}"
+    ```
 
-```bash
-echo "${HIVENET_ROUTER_ANTHROPIC_API_KEY:+configured}"
-```
+    Also check that the policy engine is exactly:
 
-Also check that the policy engine is exactly:
+    ```text
+    openai
+    ```
 
-```text
-openai
-```
+    or:
 
-or:
+    ```text
+    anthropic
+    ```
+  </Accordion>
 
-```text
-anthropic
-```
+  <Accordion title="A policy reload is rejected">
+    A policy added through `SIGHUP` or the admin API is validated against the provider credentials loaded at router startup.
 
-### A policy reload is rejected
+    Adding the environment variable to your shell after the router is running is not enough. Restart the router so it can create the provider adapter.
+  </Accordion>
 
-A policy added through `SIGHUP` or the admin API is validated against the provider credentials loaded at router startup.
+  <Accordion title="Fallback is never attempted">
+    Check that:
 
-Adding the environment variable to your shell after the router is running is not enough. Restart the router so it can create the provider adapter.
+    - every local routing step was exhausted
+    - the request uses the `llm` capability
+    - the request did not fail with a non-retryable client error
+    - `fallback_provider` is at the policy’s top level
+    - the request deadline has not already expired
 
-### Fallback is never attempted
+    Enable debug logs:
 
-Check that:
+    ```bash
+    export GOLOG_LOG_LEVEL="policy=debug,router=debug"
+    ```
+  </Accordion>
 
-- every local routing step was exhausted
-- the request uses the `llm` capability
-- the request did not fail with a non-retryable client error
-- `fallback_provider` is at the policy’s top level
-- the request deadline has not already expired
+  <Accordion title="The provider model is rejected">
+    The external model name is independent of the model registered in Hivenet Router.
 
-Enable debug logs:
+    Confirm that:
 
-```bash
-export GOLOG_LOG_LEVEL="policy=debug,router=debug"
-```
+    - the model exists at the provider
+    - the provider account may access it
+    - the model name is spelled exactly
+    - the credential belongs to the expected provider account or project
+  </Accordion>
 
-### The provider model is rejected
+  <Accordion title="OpenAI fallback fails only for streaming requests">
+    Set:
 
-The external model name is independent of the model registered in Hivenet Router.
+    ```json
+    {
+      "stream": false
+    }
+    ```
 
-Confirm that:
+    The current provider adapter expects one JSON response and cannot decode an SSE stream.
+  </Accordion>
 
-- the model exists at the provider
-- the provider account may access it
-- the model name is spelled exactly
-- the credential belongs to the expected provider account or project
+  <Accordion title="Anthropic fallback loses system or content data">
+    System-role messages are joined into the top-level Anthropic `system` field.
 
-### OpenAI fallback fails only for streaming requests
+    Anthropic-native top-level fields and non-text content may not survive the conversion into Hivenet Router’s internal OpenAI-style request.
 
-Set:
+    Use a simple text Chat Completions request when provider fallback must behave predictably.
+  </Accordion>
 
-```json
-{
-  "stream": false
-}
-```
+  <Accordion title="Anthropic returns a tool-use response and fallback fails">
+    The current response translator requires at least one text content block.
 
-The current provider adapter expects one JSON response and cannot decode an SSE stream.
+    Tool-only responses are treated as provider errors.
 
-### Anthropic fallback loses system or content data
+    Do not depend on Anthropic tools through provider fallback in the current implementation.
+  </Accordion>
 
-System-role messages are joined into the top-level Anthropic `system` field.
+  <Accordion title="The provider call times out">
+    Check how much of the original request deadline was consumed by:
 
-Anthropic-native top-level fields and non-text content may not survive the conversion into Hivenet Router’s internal OpenAI-style request.
+    - local retries
+    - capacity waiting
+    - local fallback steps
 
-Use a simple text Chat Completions request when provider fallback must behave predictably.
-
-### Anthropic returns a tool-use response and fallback fails
-
-The current response translator requires at least one text content block.
-
-Tool-only responses are treated as provider errors.
-
-Do not depend on Anthropic tools through provider fallback in the current implementation.
-
-### The provider call times out
-
-Check how much of the original request deadline was consumed by:
-
-- local retries
-- capacity waiting
-- local fallback steps
-
-Increase the router request timeout only after considering the effect on client latency and queued work.
+    Increase the router request timeout only after considering the effect on client latency and queued work.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Policy gates" href="/routing/policy-gates">
+<Columns cols={3}>
+  <Card title="Policy gates" icon="filter" href="/routing/policy-gates">
     Apply practical health, latency, cache, and hardware thresholds.
   </Card>
 
-  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+  <Card title="Prometheus metrics" icon="chart-line" href="/observability/prometheus-metrics">
     Monitor provider usage, latency, failures, and policy exhaustion.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="file-lines" href="/observability/audit-logging">
     Record request outcomes, tenants, models, and routing behavior.
   </Card>
-</CardGroup>
+</Columns>
