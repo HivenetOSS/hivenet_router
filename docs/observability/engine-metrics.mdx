@@ -1078,155 +1078,157 @@ groups:
 
 ## Troubleshooting
 
-### No engine metrics appear
+<AccordionGroup>
+  <Accordion title="No engine metrics appear">
+    Check whether the selected engine supports metrics:
 
-Check whether the selected engine supports metrics:
-
-```text
-vllm
-sglang
-llamacpp
-```
-
-Then check the backend directly:
-
-```bash
-curl -i \
-  http://localhost:<backend-port>/metrics
-```
-
-Inspect the agent logs:
-
-<Tabs>
-  <Tab title="systemd">
-    ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      | grep -i "engine metrics"
+    ```text
+    vllm
+    sglang
+    llamacpp
     ```
-  </Tab>
-  <Tab title="Docker">
+
+    Then check the backend directly:
+
     ```bash
-    docker logs hivenet-agent \
-      2>&1 \
-      | grep -i "engine metrics"
+    curl -i \
+      http://localhost:<backend-port>/metrics
     ```
-  </Tab>
-</Tabs>
 
-### SGLang metrics are missing
+    Inspect the agent logs:
 
-Start SGLang with:
+    <Tabs>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          | grep -i "engine metrics"
+        ```
+      </Tab>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent \
+          2>&1 \
+          | grep -i "engine metrics"
+        ```
+      </Tab>
+    </Tabs>
+  </Accordion>
 
-```bash
---enable-metrics
-```
+  <Accordion title="SGLang metrics are missing">
+    Start SGLang with:
 
-Restart SGLang, then check:
+    ```bash
+    --enable-metrics
+    ```
 
-```bash
-curl http://localhost:3000/metrics \
-  | head
-```
+    Restart SGLang, then check:
 
-### llama.cpp metrics are missing
+    ```bash
+    curl http://localhost:3000/metrics \
+      | head
+    ```
+  </Accordion>
 
-Start llama.cpp with:
+  <Accordion title="llama.cpp metrics are missing">
+    Start llama.cpp with:
 
-```bash
---metrics
-```
+    ```bash
+    --metrics
+    ```
 
-Restart the server, then check:
+    Restart the server, then check:
 
-```bash
-curl http://localhost:8888/metrics \
-  | head
-```
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
+  </Accordion>
 
-### Values appear stale
+  <Accordion title="Values appear stale">
+    Check the agent logs for:
 
-Check the agent logs for:
+    ```text
+    Engine metrics scrape started failing
+    ```
 
-```text
-Engine metrics scrape started failing
-```
+    Test the backend metrics endpoint locally.
 
-Test the backend metrics endpoint locally.
+    The agent deliberately retains its latest successful snapshot during a scrape failure.
 
-The agent deliberately retains its latest successful snapshot during a scrape failure.
+    Restarting the agent clears its local cache, but the better fix is to restore the backend metrics endpoint.
+  </Accordion>
 
-Restarting the agent clears its local cache, but the better fix is to restore the backend metrics endpoint.
+  <Accordion title="TTFT or ITL is absent">
+    The backend may not expose that metric, or it may not have recorded any observations yet.
 
-### TTFT or ITL is absent
+    Check:
 
-The backend may not expose that metric, or it may not have recorded any observations yet.
+    - engine type
+    - backend metrics configuration
+    - whether requests have completed
+    - whether the expected histogram exists on the backend
 
-Check:
+    SGLang does not provide ITL through the current integration.
+  </Accordion>
 
-- engine type
-- backend metrics configuration
-- whether requests have completed
-- whether the expected histogram exists on the backend
+  <Accordion title="Raw histogram queries are empty">
+    The current Hivenet Router implementation re-exports raw engine histograms from vLLM.
 
-SGLang does not provide ITL through the current integration.
+    SGLang and llama.cpp currently supply scalar average and P90 values but not raw histogram series through the router.
 
-### Raw histogram queries are empty
+    Filter for vLLM:
 
-The current Hivenet Router implementation re-exports raw engine histograms from vLLM.
+    ```promql
+    hivenet_router_agent_engine_ttft_seconds_count{
+      engine="vllm"
+    }
+    ```
+  </Accordion>
 
-SGLang and llama.cpp currently supply scalar average and P90 values but not raw histogram series through the router.
+  <Accordion title="Preemption calculations become negative">
+    The backend cumulative value can reset when vLLM restarts.
 
-Filter for vLLM:
+    Use:
 
-```promql
-hivenet_router_agent_engine_ttft_seconds_count{
-  engine="vllm"
-}
-```
+    ```promql
+    clamp_min(
+      delta(
+        hivenet_router_agent_engine_preemptions_total[5m]
+      ),
+      0
+    )
+    ```
 
-### Preemption calculations become negative
+    rather than treating the series as a normal Prometheus counter.
+  </Accordion>
 
-The backend cumulative value can reset when vLLM restarts.
+  <Accordion title="Engine values exist but policy gates do not behave as expected">
+    Check:
 
-Use:
+    - policy field spelling
+    - units
+    - current routing-table value
+    - whether the agent passes earlier routing gates
+    - whether the metric is missing rather than zero
+    - whether cached data is stale after scrape failure
 
-```promql
-clamp_min(
-  delta(
-    hivenet_router_agent_engine_preemptions_total[5m]
-  ),
-  0
-)
-```
-
-rather than treating the series as a normal Prometheus counter.
-
-### Engine values exist but policy gates do not behave as expected
-
-Check:
-
-- policy field spelling
-- units
-- current routing-table value
-- whether the agent passes earlier routing gates
-- whether the metric is missing rather than zero
-- whether cached data is stale after scrape failure
-
-Policy utilization fields use fractions rather than percentages.
+    Policy utilization fields use fractions rather than percentages.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Latency tracking" href="/observability/latency-tracking">
+<Columns cols={3}>
+  <Card title="Latency tracking" icon="stopwatch" href="/observability/latency-tracking">
     Understand Hivenet Router’s RFC 6298 SRTT and RTTVAR measurements.
   </Card>
 
-  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+  <Card title="Hardware-aware routing" icon="microchip" href="/observability/hardware-aware-routing">
     Combine engine pressure with GPU, CPU, memory, and hardware-tier policies.
   </Card>
 
-  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+  <Card title="Grafana dashboards" icon="chart-line" href="/observability/grafana-dashboards">
     Explore the provisioned engine tables and time-series panels.
   </Card>
-</CardGroup>
+</Columns>

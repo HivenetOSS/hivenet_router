@@ -741,12 +741,26 @@ See [Grafana dashboards](/observability/grafana-dashboards) for provisioning and
 
 A practical investigation flow is:
 
-1. Obtain the request’s `X-Request-ID` or `traceparent` response header.
-2. Search the audit logs for `request_id` or `trace_id`.
-3. Inspect the status, tenant, model, agent, latency, and error code.
-4. Open the matching trace in Tempo.
-5. Review router application logs for the same request ID.
-6. Inspect Prometheus metrics for the selected agent and model.
+<Steps>
+  <Step title="Obtain the request identifier">
+    Obtain the request’s `X-Request-ID` or `traceparent` response header.
+  </Step>
+  <Step title="Search the audit logs">
+    Search the audit logs for `request_id` or `trace_id`.
+  </Step>
+  <Step title="Inspect the audit record">
+    Inspect the status, tenant, model, agent, latency, and error code.
+  </Step>
+  <Step title="Open the matching trace">
+    Open the matching trace in Tempo.
+  </Step>
+  <Step title="Review router application logs">
+    Review router application logs for the same request ID.
+  </Step>
+  <Step title="Inspect Prometheus metrics">
+    Inspect Prometheus metrics for the selected agent and model.
+  </Step>
+</Steps>
 
 For example:
 
@@ -861,156 +875,158 @@ as part of the complete data-flow assessment.
 
 ## Troubleshooting
 
-### The audit file does not exist
+<AccordionGroup>
+  <Accordion title="The audit file does not exist">
+    Check the configured path:
 
-Check the configured path:
+    ```bash
+    echo "$HIVENET_ROUTER_AUDIT_LOG_PATH"
+    ```
 
-```bash
-echo "$HIVENET_ROUTER_AUDIT_LOG_PATH"
-```
+    Check the router logs for:
 
-Check the router logs for:
+    ```text
+    audit: cannot create log dir
+    ```
 
-```text
-audit: cannot create log dir
-```
+    or:
 
-or:
+    ```text
+    audit: cannot open
+    ```
 
-```text
-audit: cannot open
-```
+    Confirm that the router process can create the directory and file.
 
-Confirm that the router process can create the directory and file.
+    For systemd:
 
-For systemd:
+    ```bash
+    sudo -u hivenet-router \
+      touch /var/log/hivenet-router/test-write
+    ```
 
-```bash
-sudo -u hivenet-router \
-  touch /var/log/hivenet-router/test-write
-```
+    Remove the test file afterward:
 
-Remove the test file afterward:
+    ```bash
+    sudo rm \
+      /var/log/hivenet-router/test-write
+    ```
+  </Accordion>
 
-```bash
-sudo rm \
-  /var/log/hivenet-router/test-write
-```
+  <Accordion title="Audit JSON appears in application stdout">
+    The file could not be opened, so Hivenet Router fell back to stdout.
 
-### Audit JSON appears in application stdout
+    Correct the path or permissions, then restart the router.
+  </Accordion>
 
-The file could not be opened, so Hivenet Router fell back to stdout.
+  <Accordion title="Promtail does not ingest records">
+    Check that the shared file is visible:
 
-Correct the path or permissions, then restart the router.
+    ```bash
+    docker compose exec promtail \
+      tail -n 5 \
+      /var/log/hivenet-router/audit.jsonl
+    ```
 
-### Promtail does not ingest records
+    Inspect Promtail logs:
 
-Check that the shared file is visible:
+    ```bash
+    docker compose logs promtail \
+      | tail -100
+    ```
 
-```bash
-docker compose exec promtail \
-  tail -n 5 \
-  /var/log/hivenet-router/audit.jsonl
-```
+    Check its positions file and Loki connection.
+  </Accordion>
 
-Inspect Promtail logs:
+  <Accordion title="Loki has no audit stream">
+    Query the labels API:
 
-```bash
-docker compose logs promtail \
-  | tail -100
-```
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      http://loki:3100/loki/api/v1/labels
+    ```
 
-Check its positions file and Loki connection.
+    Then query the stream:
 
-### Loki has no audit stream
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
+      | head
+    ```
 
-Query the labels API:
+    Check that Promtail uses:
 
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  http://loki:3100/loki/api/v1/labels
-```
+    ```text
+    job="hivenet-router"
+    log_type="audit"
+    ```
 
-Then query the stream:
+    rather than values from the older example configuration.
+  </Accordion>
 
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
-  | head
-```
+  <Accordion title="A field is empty">
+    The field may not apply to that request.
 
-Check that Promtail uses:
+    Examples:
 
-```text
-job="hivenet-router"
-log_type="audit"
-```
+    - auth failure: empty tenant and key
+    - model-list request: empty model
+    - pre-routing rejection: empty agent ID
+    - no tracing: empty trace ID
+    - static key: empty key ID
+    - embedding or reranking: zero token counts
+  </Accordion>
 
-rather than values from the older example configuration.
+  <Accordion title="The request ID was replaced">
+    Hivenet Router accepts only valid UUIDs in `X-Request-ID`.
 
-### A field is empty
+    Use a UUID such as:
 
-The field may not apply to that request.
+    ```text
+    8b9e4a6d-dfb4-4b95-bada-319e7e5b878a
+    ```
 
-Examples:
+    Other values are replaced with a generated UUID.
+  </Accordion>
 
-- auth failure: empty tenant and key
-- model-list request: empty model
-- pre-routing rejection: empty agent ID
-- no tracing: empty trace ID
-- static key: empty key ID
-- embedding or reranking: zero token counts
+  <Accordion title="The source IP is unexpected">
+    Check the proxy path and forwarding headers.
 
-### The request ID was replaced
+    The recorded value may be the proxy address or a header-derived address, depending on how the router is reached and configured.
+  </Accordion>
 
-Hivenet Router accepts only valid UUIDs in `X-Request-ID`.
+  <Accordion title="Token totals are zero">
+    Possible causes include:
 
-Use a UUID such as:
+    - the request failed before inference
+    - it was an embedding or reranking request
+    - the backend did not report usage
+    - streaming usage could not be measured
+    - the handler did not have token information for that route
 
-```text
-8b9e4a6d-dfb4-4b95-bada-319e7e5b878a
-```
+    Compare the audit record with the backend response and Prometheus tenant-token metrics.
+  </Accordion>
 
-Other values are replaced with a generated UUID.
+  <Accordion title="Records continue in a rotated file">
+    The router keeps the audit file open.
 
-### The source IP is unexpected
-
-Check the proxy path and forwarding headers.
-
-The recorded value may be the proxy address or a header-derived address, depending on how the router is reached and configured.
-
-### Token totals are zero
-
-Possible causes include:
-
-- the request failed before inference
-- it was an embedding or reranking request
-- the backend did not report usage
-- streaming usage could not be measured
-- the handler did not have token information for that route
-
-Compare the audit record with the backend response and Prometheus tenant-token metrics.
-
-### Records continue in a rotated file
-
-The router keeps the audit file open.
-
-Use `copytruncate`, or restart the router after a rename-based rotation so it opens the new path.
+    Use `copytruncate`, or restart the router after a rename-based rotation so it opens the new path.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+<Columns cols={3}>
+  <Card title="Hardware metrics" icon="microchip" href="/observability/hardware-metrics">
     Review the GPU, CPU, and memory data reported by agents.
   </Card>
 
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+  <Card title="Engine metrics" icon="gauge-high" href="/observability/engine-metrics">
     Understand cache, queue, latency, and throughput metrics by backend.
   </Card>
 
-  <Card title="Error codes" href="/reference/error-codes">
+  <Card title="Error codes" icon="triangle-exclamation" href="/reference/error-codes">
     Review the structured errors recorded in audit entries.
   </Card>
-</CardGroup>
+</Columns>
