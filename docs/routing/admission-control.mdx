@@ -26,7 +26,7 @@ Every `/v1/chat/completions` and `/v1/messages` request passes the gates in this
 | 5 | **B4** — per-key OTPM (non-deducting check), then ITPM (deducting) | serverless only | 429 `rate_limit_exceeded` |
 | 6 | Daily token budget (input reserved up front) | keys with `tokens_per_day` | 429 `token_limit_exceeded` |
 
-All 429s carry a `Retry-After` header. Every rejection increments `hivenet_router_admission_rejections_total{reason, model}` — see [Admission control metrics](/observability/admission-control-metrics).
+Not every 429 carries a `Retry-After` header: `concurrency_limit_exceeded` (B2/B3) always sets it, `rate_limit_exceeded` sets it for the serverless B4 caps but **not** for the front-door RPM limiter, and `token_limit_exceeded` (daily budget) never sets it. Clients should honor `Retry-After` when present and fall back to their own backoff otherwise. Every rejection increments `hivenet_router_admission_rejections_total{reason, model}` — see [Admission control metrics](/observability/admission-control-metrics).
 
 ## The footprint formula
 
@@ -83,15 +83,15 @@ shed_if:
 - The signal is the **mean** across healthy replicas (a single hot replica is routing's job, shedding is warranted only when the pool as a whole is under pressure).
 - A missing signal **fails open**: engines that do not report KV utilization simply skip that dimension, and B2's static budget carries the safety.
 - Only `kv_cache_utilization` and `waiting_requests` are accepted in `shed_if`; an unknown field is a load-time error (a typo must not silently disable the shed).
-- 0.90 is more permissive than the industry de-facto 0.80; it leans on the learned estimator's accuracy. Lower it if preemption metrics show the estimate is optimistic.
+- The threshold gates **admission, not decode growth**: requests admitted below it keep allocating KV blocks as they generate, so shedding lowers the *rate* of preemption rather than eliminating it. 0.90 is more permissive than the industry de-facto 0.80, leaning on the learned estimator's accuracy; if the engine's preemption counter (e.g. vLLM's `num_preemptions_total`) climbs, the estimate is running optimistic — lower the threshold toward 0.80 to restore the cushion.
 
 ## B4 — serverless per-key caps
 
-Applied only when the governing policy declares `mode: serverless` (many keys sharing replicas). On `mode: reserved` (default — one client rents the whole replica) these are inert; B1/B2/B3 still protect the box.
+Applied only when the governing policy declares `mode: serverless` (many keys sharing replicas). On `mode: reserved` (default — one client rents the whole replica) the ITPM/OTPM/occupancy-share caps are inert; B1/B2/B3 still protect the box. RPM is the exception — it is a front-door quota that runs in every mode (see below).
 
 | Cap | Field | Mechanism |
 | --- | --- | --- |
-| Requests/min | `quota.requests_per_minute` | token bucket; burst = certified window via `HIVENET_ROUTER_RPM_BURST_SECONDS`, not the library's full-minute default |
+| Requests/min | `quota.requests_per_minute` | **enforced at the front door (pre-routing), not gated by mode** — listed here to show the full per-key rate picture, but it is the same quota that guards every request. Token bucket; burst = certified window via `HIVENET_ROUTER_RPM_BURST_SECONDS`, not the library's full-minute default |
 | Input tokens/min | `quota.input_tokens_per_minute` | bucket charged with the admission estimate **before** the daily budget, so a rate rejection never spends daily tokens |
 | Output tokens/min | `quota.output_tokens_per_minute` | metered **post-hoc** from real usage (never reserved); a key that over-produces is held off on its *next* request |
 | Occupancy share | `max_occupancy_share` (key-level) | the key's in-flight `Σw` must fit `share × pool_budget` — the same replica-scaled pool B2 admits against |

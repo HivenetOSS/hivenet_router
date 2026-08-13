@@ -609,7 +609,17 @@ The handler:
 - charges admitted prompt tokens
 - preserves the original request bytes and headers
 
-The occupancy reservation taken here is held for the request’s lifetime — grown as undeclared output streams, reconciled to the backend’s exact `prompt_tokens`, and released on every exit path (or early, when the request fails over to a cloud provider). `/v1/messages/count_tokens` skips the admission gates: it is a stateless tokenizer lookup guarded by the request-rate quota alone.
+#### Reservation lifetime
+
+When the KV-occupancy gate admits a request, it books a slice of the model’s occupancy budget — a *reservation* that stays held from admission until the request fully finishes. Over that lifetime the reservation is:
+
+- **Grown as output streams.** If the client did not declare `max_tokens`, the router cannot size the output ahead of time, so it reserves an estimate and enlarges the reservation as real output tokens stream out. The booking flexes to match what is actually generated.
+- **Reconciled to the true input size.** Admission uses the *estimated* input token count. When the backend reports its exact `prompt_tokens`, the router corrects the reservation to that figure — the true-up — replacing the estimate with the real number.
+- **Released on every exit path.** Success, error, timeout, or client disconnect all return the reservation so the budget is freed for the next request. One case releases it early: when a request fails over to a cloud provider, the reservation is dropped the moment routing leaves the local backends, because provider generation consumes no local KV cache.
+
+#### `count_tokens` is exempt
+
+`POST /v1/messages/count_tokens` runs no model and consumes no KV cache — it only reports how many tokens a prompt *would* use. It therefore skips every admission gate (input/image caps, KV-pressure shed, occupancy budget, per-key token rates), since there is no generation to protect. It remains a stateless tokenizer lookup, guarded only by the request-rate quota so the endpoint cannot be flooded with counting calls.
 
 ### 5. Global request queue
 

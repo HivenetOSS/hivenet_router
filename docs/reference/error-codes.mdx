@@ -52,7 +52,7 @@ All Hivenet Router errors use a consistent JSON envelope.
 | `unauthorized`, `model_forbidden` | **Do not retry.** Fix credentials or request a different model. |
 | `model_not_found` | **Do not retry** until an agent for that model is running. Verify name via `GET /v1/models`. |
 | `token_limit_exceeded` | **Do not retry** until UTC midnight. Daily budget is exhausted. |
-| `rate_limit_exceeded` | Retry after `60 / rpm` seconds (or the `Retry-After` header). Use exponential backoff with jitter. |
+| `rate_limit_exceeded` | Retry after the `Retry-After` header when present (the serverless ITPM/OTPM/occupancy-share caps set it); otherwise — the front-door RPM limiter — retry after `60 / rpm` seconds. Use exponential backoff with jitter. |
 | `concurrency_limit_exceeded` | Retry after the `Retry-After` header with backoff + jitter — the pool is at its occupancy budget or shedding; capacity frees as in-flight requests complete. |
 | `no_capacity`, `agent_disconnected` | Retry immediately or after 1–2 s. Slot contention resolves quickly. |
 | `no_agents_available`, `backend_unavailable`, `queue_full` | Retry with exponential backoff (2 s, 4 s, 8 s…). Resolves when agents reconnect or backend finishes loading. |

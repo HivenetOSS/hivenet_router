@@ -447,7 +447,7 @@ Embedding and reranking requests currently participate in request-rate limits bu
 
 ### Serverless per-key caps (B4)
 
-On a policy with `mode: serverless`, four per-key caps apply on top of the shared circuit breaker — see [Admission control](/routing/admission-control) for the full model:
+On a policy with `mode: serverless`, the per-key occupancy share and input/output tokens-per-minute caps apply **in addition to** the always-on per-key request-rate limit (`requests_per_minute`, enforced at the front door in every mode) — see [Admission control](/routing/admission-control) for the full model:
 
 ```yaml
 api:
@@ -466,7 +466,7 @@ api:
 - **OTPM** is metered after each response from the real completion tokens — output is never reserved up front, so a long response spread over minutes is not penalised; a key that over-produces is held off on its next request instead.
 - **`max_occupancy_share`** bounds the key's token-weighted in-flight sum to `share × (admit_fraction × admit_budget_tokens × healthy replicas)` — the same pool the global occupancy gate admits against.
 - The caps are **fairness/anti-abuse, deliberately oversubscribed** — box safety is the occupancy budget and the shed gate, so do not size shares to "add up" to 1.0.
-- Rejections are 429 `rate_limit_exceeded` with `Retry-After`.
+- ITPM, OTPM, and occupancy-share rejections are 429 `rate_limit_exceeded` **with** `Retry-After`. The front-door `requests_per_minute` limiter also returns 429 `rate_limit_exceeded`, but **without** `Retry-After` (it sets `X-RateLimit-Remaining-Requests` instead) — so clients keyed on this error code should honor `Retry-After` when present and fall back to `60 / rpm` otherwise.
 
 Derive the four values per model from its benchmark artifact (`auth.DeriveKeyDefaults` implements the rules); never copy another model's constants.
 
