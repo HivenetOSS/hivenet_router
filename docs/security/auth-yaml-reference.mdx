@@ -465,11 +465,9 @@ quota:
 - **Input tokens per minute (ITPM)** uses a continuously refilling, one-minute-capacity bucket. The same learned estimate used by B1 and occupancy is deducted before the daily budget, so an ITPM rejection does not spend daily tokens. Cached prompt prefixes currently count in full.
 - **Output tokens per minute (OTPM)** is charged from exact completion usage after a local response. Output is not reserved. If recent output drains the bucket, the next request returns `429 rate_limit_exceeded`. One response can drain at most one minute of capacity.
 - **Occupancy share** limits the key's simultaneous token-weighted footprint to:
-
   ```text
   max_occupancy_share × admit_budget_tokens × healthy_replicas
   ```
-
   The per-key fairness controller intentionally does not apply `HIVENET_ROUTER_ADMIT_FRACTION`. The global B2 controller still applies that fraction and remains the safety limit for the pool.
 
 These limits do not run for `mode: reserved`, and `0` disables each limit. Their shares may be deliberately oversubscribed and do not need to add up to `1`. B4 rejections set `Retry-After: 1`; the ordinary request-per-minute limiter uses the same `rate_limit_exceeded` code without that header.
@@ -983,130 +981,132 @@ During SIGHUP reload, a validation error leaves the previous authentication prov
 
 ## Troubleshooting
 
-### The router says the key list is empty
+<AccordionGroup>
+  <Accordion title="The router says the key list is empty">
+    When using:
 
-When using:
+    ```yaml
+    api:
+      mode: api-key
+    ```
 
-```yaml
-api:
-  mode: api-key
-```
+    define at least one item under:
 
-define at least one item under:
+    ```yaml
+    api:
+      keys:
+    ```
 
-```yaml
-api:
-  keys:
-```
+    For dynamic mode, use:
 
-For dynamic mode, use:
+    ```yaml
+    api:
+      mode: dynamic
+    ```
 
-```yaml
-api:
-  mode: dynamic
-```
+    instead.
+  </Accordion>
 
-instead.
+  <Accordion title="A static key always returns 401">
+    Check that:
 
-### A static key always returns `401`
+    - the application sends the raw key rather than its hash
+    - `key_hash` was generated from the exact raw value
+    - the key has not expired
+    - the updated file loaded successfully
+    - the request reaches the intended router
+    - the authorization header is preserved by proxies
 
-Check that:
+    Generate a fresh key rather than editing hashes manually.
+  </Accordion>
 
-- the application sends the raw key rather than its hash
-- `key_hash` was generated from the exact raw value
-- the key has not expired
-- the updated file loaded successfully
-- the request reaches the intended router
-- the authorization header is preserved by proxies
+  <Accordion title="A key receives 403 model_forbidden">
+    The key uses the explicit `models` allowlist and the requested model is absent.
 
-Generate a fresh key rather than editing hashes manually.
+    Check exact spelling and capitalization.
+  </Accordion>
 
-### A key receives `403 model_forbidden`
+  <Accordion title="A per-model key receives 429">
+    Read the error message.
 
-The key uses the explicit `models` allowlist and the requested model is absent.
+    When it says:
 
-Check exact spelling and capitalization.
+    ```text
+    no quota declared for model <model> on this API key
+    ```
 
-### A per-model key receives `429`
+    add an exact entry under:
 
-Read the error message.
+    ```yaml
+    quota:
+      per_model:
+    ```
 
-When it says:
+    or use a flat quota shape instead.
+  </Accordion>
 
-```text
-no quota declared for model <model> on this API key
-```
+  <Accordion title="The router rejects an expiration date">
+    Static dates must use:
 
-add an exact entry under:
+    ```text
+    DD-MM-YYYY
+    ```
 
-```yaml
-quota:
-  per_model:
-```
+    Valid:
 
-or use a flat quota shape instead.
+    ```yaml
+    expires_at: "31-12-2026"
+    ```
 
-### The router rejects an expiration date
+    Invalid:
 
-Static dates must use:
+    ```yaml
+    expires_at: "2026-12-31"
+    ```
+  </Accordion>
 
-```text
-DD-MM-YYYY
-```
+  <Accordion title="SIGHUP does not apply the new mode">
+    Changing between static and dynamic authentication requires a router restart.
 
-Valid:
+    SIGHUP supports changes within the current mode, such as:
 
-```yaml
-expires_at: "31-12-2026"
-```
+    - adding or revoking static keys
+    - changing model restrictions
+    - changing quotas
+    - changing static expirations
+    - rebuilding administrator keys from the current environment
+  </Accordion>
 
-Invalid:
+  <Accordion title="Administration endpoints remain open">
+    Set:
 
-```yaml
-expires_at: "2026-12-31"
-```
+    ```yaml
+    admin:
+      mode: api-key
+    ```
 
-### SIGHUP does not apply the new mode
+    and provide:
 
-Changing between static and dynamic authentication requires a router restart.
+    ```bash
+    export HIVENET_ROUTER_ADMIN_API_KEYS="<admin-key>"
+    ```
 
-SIGHUP supports changes within the current mode, such as:
-
-- adding or revoking static keys
-- changing model restrictions
-- changing quotas
-- changing static expirations
-- rebuilding administrator keys from the current environment
-
-### Administration endpoints remain open
-
-Set:
-
-```yaml
-admin:
-  mode: api-key
-```
-
-and provide:
-
-```bash
-export HIVENET_ROUTER_ADMIN_API_KEYS="<admin-key>"
-```
-
-Then restart the router if you changed its process environment.
+    Then restart the router if you changed its process environment.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Model restrictions" href="/security/model-restrictions">
+<Columns cols={3}>
+  <Card title="Model restrictions" icon="shield-halved" href="/security/model-restrictions">
     Design model access and discovery boundaries for applications and tenants.
   </Card>
 
-  <Card title="Key rotation" href="/security/key-rotation">
+  <Card title="Key rotation" icon="key" href="/security/key-rotation">
     Rotate static, dynamic, administrator, agent, and provider credentials.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="clipboard-list" href="/observability/audit-logging">
     Record authenticated owners, key identifiers, models, and request outcomes.
   </Card>
-</CardGroup>
+</Columns>

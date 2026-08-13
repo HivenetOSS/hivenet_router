@@ -792,123 +792,125 @@ The failed-request metric includes other failure types. Use audit logs when you 
 
 ## Troubleshooting
 
-### A key sees every model
+<AccordionGroup>
+  <Accordion title="A key sees every model">
+    Check whether its model list is empty or omitted:
 
-Check whether its model list is empty or omitted:
+    ```yaml
+    models: []
+    ```
 
-```yaml
-models: []
-```
+    or:
 
-or:
+    ```json
+    {
+      "allowed_models": []
+    }
+    ```
 
-```json
-{
-  "allowed_models": []
-}
-```
+    An empty allowlist means unrestricted access.
 
-An empty allowlist means unrestricted access.
+    Also check whether you edited the correct key and router environment.
+  </Accordion>
 
-Also check whether you edited the correct key and router environment.
+  <Accordion title="A permitted model is missing">
+    Compare the configured name with the operator catalog:
 
-### A permitted model is missing
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/models \
+      | jq -r '.data[].id'
+    ```
 
-Compare the configured name with the operator catalog:
+    Check capitalization, slashes, punctuation, and model aliases.
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/models \
-  | jq -r '.data[].id'
-```
+    If `quota.per_model` is present, confirm that the model has an entry there.
+  </Accordion>
 
-Check capitalization, slashes, punctuation, and model aliases.
+  <Accordion title="The list endpoint hides a model, but the admin endpoint shows it">
+    The client key is restricted.
 
-If `quota.per_model` is present, confirm that the model has an entry there.
+    Review:
 
-### The list endpoint hides a model, but the admin endpoint shows it
+    - `models`
+    - `allowed_models`
+    - `quota.per_model`
 
-The client key is restricted.
+    This is expected tenant-filtering behavior.
+  </Accordion>
 
-Review:
+  <Accordion title="Inference returns 403 model_forbidden">
+    The key uses an explicit allowlist and the requested model is not permitted.
 
-- `models`
-- `allowed_models`
-- `quota.per_model`
+    Add the exact model name or use an unrestricted list when that is intentional.
+  </Accordion>
 
-This is expected tenant-filtering behavior.
+  <Accordion title="Inference returns 429 for an unlisted model">
+    The key uses `quota.per_model`.
 
-### Inference returns `403 model_forbidden`
+    Add a complete quota entry for the model:
 
-The key uses an explicit allowlist and the requested model is not permitted.
+    ```yaml
+    quota:
+      per_model:
+        model-name:
+          requests_per_minute_per_replica: 0
+          tokens_per_day: 0
+    ```
 
-Add the exact model name or use an unrestricted list when that is intentional.
+    Both fields are required even when they are unlimited.
+  </Accordion>
 
-### Inference returns `429` for an unlisted model
+  <Accordion title="A model is allowed but the request still fails">
+    Model authorization succeeded. Check the later routing stages:
 
-The key uses `quota.per_model`.
+    - registered capability
+    - agent health
+    - available capacity
+    - routing-policy filters
+    - backend compatibility
+    - request validity
 
-Add a complete quota entry for the model:
+    Use:
 
-```yaml
-quota:
-  per_model:
-    model-name:
-      requests_per_minute_per_replica: 0
-      tokens_per_day: 0
-```
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq '.agents[] | select(.metadata.model == "<model>")'
+    ```
+  </Accordion>
 
-Both fields are required even when they are unlimited.
+  <Accordion title="A changed static restriction does not take effect">
+    Send `SIGHUP` and inspect the router logs:
 
-### A model is allowed but the request still fails
+    ```bash
+    sudo kill -HUP "$(pgrep hivenet-router)"
+    ```
 
-Model authorization succeeded. Check the later routing stages:
+    A validation failure leaves the previous configuration active.
+  </Accordion>
 
-- registered capability
-- agent health
-- available capacity
-- routing-policy filters
-- backend compatibility
-- request validity
+  <Accordion title="A dynamic restriction disappears after restart">
+    Dynamic key state is memory-only.
 
-Use:
-
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | select(.metadata.model == "<model>")'
-```
-
-### A changed static restriction does not take effect
-
-Send `SIGHUP` and inspect the router logs:
-
-```bash
-sudo kill -HUP "$(pgrep hivenet-router)"
-```
-
-A validation failure leaves the previous configuration active.
-
-### A dynamic restriction disappears after restart
-
-Dynamic key state is memory-only.
-
-Repopulate the registry through the administration API after every router restart.
+    Repopulate the registry through the administration API after every router restart.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Key rotation" href="/security/key-rotation">
+<Columns cols={3}>
+  <Card title="Key rotation" icon="key" href="/security/key-rotation">
     Replace client, administrator, agent, and provider credentials safely.
   </Card>
 
-  <Card title="Models" href="/use-the-api/models">
+  <Card title="Models" icon="cubes" href="/use-the-api/models">
     Understand filtered client discovery and the unfiltered operator catalog.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="clipboard-list" href="/observability/audit-logging">
     Track owners, keys, models, denials, and request outcomes.
   </Card>
-</CardGroup>
+</Columns>
