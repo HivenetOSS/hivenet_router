@@ -840,13 +840,13 @@ The failed-request metric includes other failure types. Use audit logs when you 
     This is expected tenant-filtering behavior.
   </Accordion>
 
-  <Accordion title="Inference returns 403 model_forbidden">
+  <Accordion title="Inference returns `403 model_forbidden`">
     The key uses an explicit allowlist and the requested model is not permitted.
 
     Add the exact model name or use an unrestricted list when that is intentional.
   </Accordion>
 
-  <Accordion title="Inference returns 429 for an unlisted model">
+  <Accordion title="Inference returns `429` for an unlisted model">
     The key uses `quota.per_model`.
 
     Add a complete quota entry for the model:

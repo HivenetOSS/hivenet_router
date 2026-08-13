@@ -1007,7 +1007,7 @@ During SIGHUP reload, a validation error leaves the previous authentication prov
     instead.
   </Accordion>
 
-  <Accordion title="A static key always returns 401">
+  <Accordion title="A static key always returns `401`">
     Check that:
 
     - the application sends the raw key rather than its hash
@@ -1020,13 +1020,13 @@ During SIGHUP reload, a validation error leaves the previous authentication prov
     Generate a fresh key rather than editing hashes manually.
   </Accordion>
 
-  <Accordion title="A key receives 403 model_forbidden">
+  <Accordion title="A key receives `403 model_forbidden`">
     The key uses the explicit `models` allowlist and the requested model is absent.
 
     Check exact spelling and capitalization.
   </Accordion>
 
-  <Accordion title="A per-model key receives 429">
+  <Accordion title="A per-model key receives `429`">
     Read the error message.
 
     When it says:
