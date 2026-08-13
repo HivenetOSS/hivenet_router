@@ -428,207 +428,209 @@ Engine-specific values such as KV cache utilization, waiting requests, time to f
 
 ## Troubleshooting
 
-### No model is found
+<AccordionGroup>
+  <Accordion title="No model is found">
+    List the pulled models:
 
-List the pulled models:
+    <Tabs>
+      <Tab title="Linux">
+        ```bash
+        ollama list
+        ```
+      </Tab>
+      <Tab title="Docker">
+        ```bash
+        docker exec ollama \
+          ollama list
+        ```
+      </Tab>
+    </Tabs>
 
-<Tabs>
-  <Tab title="Linux">
+    Pull the missing model:
+
     ```bash
-    ollama list
+    ollama pull llama3.1:8b
     ```
-  </Tab>
-  <Tab title="Docker">
+
+    Check the endpoint used by the agent:
+
     ```bash
-    docker exec ollama \
-      ollama list
+    curl http://localhost:11434/api/tags \
+      | jq .
     ```
-  </Tab>
-</Tabs>
+  </Accordion>
 
-Pull the missing model:
+  <Accordion title="The wrong model is registered">
+    When `--model` is omitted, the agent registers the first model returned by `/api/tags`.
 
-```bash
-ollama pull llama3.1:8b
-```
+    Restart the agent with an explicit model:
 
-Check the endpoint used by the agent:
-
-```bash
-curl http://localhost:11434/api/tags \
-  | jq .
-```
-
-### The wrong model is registered
-
-When `--model` is omitted, the agent registers the first model returned by `/api/tags`.
-
-Restart the agent with an explicit model:
-
-```bash
---model llama3.1:8b
-```
-
-### A model appears without `:latest`
-
-This is expected.
-
-Hivenet Router converts:
-
-```text
-llama3.1:latest
-```
-
-to:
-
-```text
-llama3.1
-```
-
-Explicit tags such as `:8b` or `:7b` are preserved.
-
-### Ollama is unreachable
-
-Check the server:
-
-```bash
-curl http://localhost:11434/api/tags
-```
-
-For a Linux process, inspect its log:
-
-```bash
-tail -f ~/ollama.log
-```
-
-For Docker:
-
-```bash
-docker logs ollama
-```
-
-Confirm that the agent’s `--backend-url` matches the address where Ollama is listening.
-
-### The first response is slow
-
-Ollama may need to load the model into memory before serving the first request.
-
-Check loaded models:
-
-<Tabs>
-  <Tab title="Linux">
     ```bash
-    ollama ps
+    --model llama3.1:8b
     ```
-  </Tab>
-  <Tab title="Docker">
+  </Accordion>
+
+  <Accordion title="A model appears without `:latest`">
+    This is expected.
+
+    Hivenet Router converts:
+
+    ```text
+    llama3.1:latest
+    ```
+
+    to:
+
+    ```text
+    llama3.1
+    ```
+
+    Explicit tags such as `:8b` or `:7b` are preserved.
+  </Accordion>
+
+  <Accordion title="Ollama is unreachable">
+    Check the server:
+
     ```bash
-    docker exec ollama \
-      ollama ps
+    curl http://localhost:11434/api/tags
     ```
-  </Tab>
-</Tabs>
 
-Using:
+    For a Linux process, inspect its log:
 
-```bash
-OLLAMA_KEEP_ALIVE=-1
-```
-
-keeps the model loaded after it has been used.
-
-### The agent does not register
-
-Check the agent logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs hivenet-agent
+    tail -f ~/ollama.log
     ```
-  </Tab>
-  <Tab title="systemd">
+
+    For Docker:
+
     ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      -n 100 \
-      --no-pager
+    docker logs ollama
     ```
-  </Tab>
-</Tabs>
 
-Test connectivity from the agent to the router:
+    Confirm that the agent’s `--backend-url` matches the address where Ollama is listening.
+  </Accordion>
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+  <Accordion title="The first response is slow">
+    Ollama may need to load the model into memory before serving the first request.
 
-Check that:
+    Check loaded models:
 
-- the router and agent use the same JWT secret
-- the router’s libp2p interface is reachable
-- the router advertises a libp2p address the agent can reach
-- Ollama contains the selected model
+    <Tabs>
+      <Tab title="Linux">
+        ```bash
+        ollama ps
+        ```
+      </Tab>
+      <Tab title="Docker">
+        ```bash
+        docker exec ollama \
+          ollama ps
+        ```
+      </Tab>
+    </Tabs>
 
-### The agent gets a new peer ID after restart
+    Using:
 
-Make sure `--identity-path` points to persistent storage.
+    ```bash
+    OLLAMA_KEEP_ALIVE=-1
+    ```
 
-For Docker:
+    keeps the model loaded after it has been used.
+  </Accordion>
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+  <Accordion title="The agent does not register">
+    Check the agent logs:
 
-For bare metal:
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent
+        ```
+      </Tab>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          -n 100 \
+          --no-pager
+        ```
+      </Tab>
+    </Tabs>
 
-```bash
-ls -l /var/lib/hivenet-router/agent/identity.key
-```
+    Test connectivity from the agent to the router:
 
-### GPU metrics are missing
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-Check that NVIDIA tools work on the host:
+    Check that:
 
-```bash
-nvidia-smi
-```
+    - the router and agent use the same JWT secret
+    - the router’s libp2p interface is reachable
+    - the router advertises a libp2p address the agent can reach
+    - Ollama contains the selected model
+  </Accordion>
 
-For Docker, confirm the agent received GPU access:
+  <Accordion title="The agent gets a new peer ID after restart">
+    Make sure `--identity-path` points to persistent storage.
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].HostConfig.DeviceRequests'
-```
+    For Docker:
 
-The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
 
-### Requests time out
+    For bare metal:
 
-The agent’s backend HTTP timeout defaults to two minutes.
+    ```bash
+    ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
+  </Accordion>
 
-Increase it for long-running requests:
+  <Accordion title="GPU metrics are missing">
+    Check that NVIDIA tools work on the host:
 
-```bash
---http-timeout 10m
-```
+    ```bash
+    nvidia-smi
+    ```
 
-Also check whether the agent capacity is too high for the model and hardware.
+    For Docker, confirm the agent received GPU access:
+
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].HostConfig.DeviceRequests'
+    ```
+
+    The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+  </Accordion>
+
+  <Accordion title="Requests time out">
+    The agent’s backend HTTP timeout defaults to two minutes.
+
+    Increase it for long-running requests:
+
+    ```bash
+    --http-timeout 10m
+    ```
+
+    Also check whether the agent capacity is too high for the model and hardware.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="SGLang agent" href="/deploy/agents/sglang">
+<Columns cols={3}>
+  <Card title="SGLang agent" icon="microchip" href="/deploy/agents/sglang">
     Connect an SGLang backend and collect engine metrics.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how metadata, capacity, and policies affect agent selection.
   </Card>
 
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+  <Card title="Hardware metrics" icon="gauge-high" href="/observability/hardware-metrics">
     Understand the CPU, memory, and GPU signals reported by agents.
   </Card>
-</CardGroup>
+</Columns>

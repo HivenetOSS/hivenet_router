@@ -486,176 +486,178 @@ Support depends on the build and hardware. Remove it if the server fails to star
 
 ## Troubleshooting
 
-### llama.cpp is not ready
+<AccordionGroup>
+  <Accordion title="llama.cpp is not ready">
+    Check the health endpoint:
 
-Check the health endpoint:
-
-```bash
-curl -i http://localhost:8888/health
-```
-
-List the exposed model:
-
-```bash
-curl http://localhost:8888/v1/models \
-  | jq .
-```
-
-Inspect the logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs llama-cpp
+    curl -i http://localhost:8888/health
     ```
-  </Tab>
-  <Tab title="Bare metal">
-    Review the terminal or service logs for `llama-server`.
-  </Tab>
-</Tabs>
 
-The agent waits and retries while the backend is unavailable or still loading.
+    List the exposed model:
 
-### Metrics are missing
-
-Confirm that llama.cpp was started with:
-
-```bash
---metrics
-```
-
-Check the endpoint directly:
-
-```bash
-curl http://localhost:8888/metrics \
-  | head
-```
-
-Without `--metrics`, the endpoint returns HTTP `404` and Hivenet Router cannot collect engine-specific metrics.
-
-A metrics scrape failure does not stop the agent from forwarding requests.
-
-### The model name does not match
-
-Check the name returned by llama.cpp:
-
-```bash
-curl http://localhost:8888/v1/models \
-  | jq '.data[].id'
-```
-
-Use `-a` to set a stable alias:
-
-```bash
--a "llama-3.1-8b"
-```
-
-Clients must send the same name to Hivenet Router.
-
-### Responses are slow
-
-Possible adjustments include:
-
-- reduce `--capacity` on the Hivenet Router agent
-- reduce llama.cpp’s context size
-- use a smaller model or quantization
-- increase GPU offloading
-- reduce parallel request pressure
-
-Measure with representative prompts before changing several settings at once.
-
-### The agent does not register
-
-Check the agent logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs hivenet-agent
+    curl http://localhost:8888/v1/models \
+      | jq .
     ```
-  </Tab>
-  <Tab title="systemd">
+
+    Inspect the logs:
+
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs llama-cpp
+        ```
+      </Tab>
+      <Tab title="Bare metal">
+        Review the terminal or service logs for `llama-server`.
+      </Tab>
+    </Tabs>
+
+    The agent waits and retries while the backend is unavailable or still loading.
+  </Accordion>
+
+  <Accordion title="Metrics are missing">
+    Confirm that llama.cpp was started with:
+
     ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      -n 100 \
-      --no-pager
+    --metrics
     ```
-  </Tab>
-</Tabs>
 
-Test connectivity from the agent to the router:
+    Check the endpoint directly:
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
 
-Check that:
+    Without `--metrics`, the endpoint returns HTTP `404` and Hivenet Router cannot collect engine-specific metrics.
 
-- the router and agent use the same JWT secret
-- the router’s libp2p interface is reachable
-- the router advertises a libp2p address the agent can reach
-- llama.cpp is healthy and exposes a model
+    A metrics scrape failure does not stop the agent from forwarding requests.
+  </Accordion>
 
-### The peer ID changes after restart
+  <Accordion title="The model name does not match">
+    Check the name returned by llama.cpp:
 
-Make sure `--identity-path` points to persistent storage.
+    ```bash
+    curl http://localhost:8888/v1/models \
+      | jq '.data[].id'
+    ```
 
-For Docker:
+    Use `-a` to set a stable alias:
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+    ```bash
+    -a "llama-3.1-8b"
+    ```
 
-For bare metal:
+    Clients must send the same name to Hivenet Router.
+  </Accordion>
 
-```bash
-ls -l /var/lib/hivenet-router/agent/identity.key
-```
+  <Accordion title="Responses are slow">
+    Possible adjustments include:
 
-### Requests time out
+    - reduce `--capacity` on the Hivenet Router agent
+    - reduce llama.cpp’s context size
+    - use a smaller model or quantization
+    - increase GPU offloading
+    - reduce parallel request pressure
 
-The agent’s backend HTTP timeout defaults to two minutes.
+    Measure with representative prompts before changing several settings at once.
+  </Accordion>
 
-Increase it for long-running requests:
+  <Accordion title="The agent does not register">
+    Check the agent logs:
 
-```bash
---http-timeout 10m
-```
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent
+        ```
+      </Tab>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          -n 100 \
+          --no-pager
+        ```
+      </Tab>
+    </Tabs>
 
-Also check the declared agent capacity and llama.cpp queue state.
+    Test connectivity from the agent to the router:
 
-### GPU metrics are missing
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-Check the host:
+    Check that:
 
-```bash
-nvidia-smi
-```
+    - the router and agent use the same JWT secret
+    - the router’s libp2p interface is reachable
+    - the router advertises a libp2p address the agent can reach
+    - llama.cpp is healthy and exposes a model
+  </Accordion>
 
-For Docker, confirm the agent received GPU access:
+  <Accordion title="The peer ID changes after restart">
+    Make sure `--identity-path` points to persistent storage.
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].HostConfig.DeviceRequests'
-```
+    For Docker:
 
-The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
+
+    For bare metal:
+
+    ```bash
+    ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
+  </Accordion>
+
+  <Accordion title="Requests time out">
+    The agent’s backend HTTP timeout defaults to two minutes.
+
+    Increase it for long-running requests:
+
+    ```bash
+    --http-timeout 10m
+    ```
+
+    Also check the declared agent capacity and llama.cpp queue state.
+  </Accordion>
+
+  <Accordion title="GPU metrics are missing">
+    Check the host:
+
+    ```bash
+    nvidia-smi
+    ```
+
+    For Docker, confirm the agent received GPU access:
+
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].HostConfig.DeviceRequests'
+    ```
+
+    The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Infinity agent" href="/deploy/agents/infinity">
+<Columns cols={3}>
+  <Card title="Infinity agent" icon="microchip" href="/deploy/agents/infinity">
     Connect embedding and reranking models through Infinity.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+  <Card title="Engine metrics" icon="gauge-high" href="/observability/engine-metrics">
     Understand the metrics collected from llama.cpp and other engines.
   </Card>
-</CardGroup>
+</Columns>

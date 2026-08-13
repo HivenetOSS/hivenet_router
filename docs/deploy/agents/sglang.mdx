@@ -461,159 +461,161 @@ This allocates a larger fraction of GPU memory to SGLang’s static memory pool.
 
 ## Troubleshooting
 
-### SGLang is not ready
+<AccordionGroup>
+  <Accordion title="SGLang is not ready">
+    Check the health endpoint:
 
-Check the health endpoint:
-
-```bash
-curl -i http://localhost:3000/health
-```
-
-Check model discovery:
-
-```bash
-curl http://localhost:3000/v1/models \
-  | jq .
-```
-
-Inspect the server logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs sglang
+    curl -i http://localhost:3000/health
     ```
-  </Tab>
-  <Tab title="Bare metal">
-    Review the terminal or service logs for the SGLang process.
-  </Tab>
-</Tabs>
 
-The agent waits and retries while SGLang is unavailable or still loading.
+    Check model discovery:
 
-### Metrics are missing
-
-Confirm that SGLang was started with:
-
-```bash
---enable-metrics
-```
-
-Check the metrics endpoint directly:
-
-```bash
-curl http://localhost:3000/metrics \
-  | head
-```
-
-Without metrics enabled, the endpoint may return HTTP `404`.
-
-A metrics scrape failure does not stop the agent from forwarding requests.
-
-### The wrong model is registered
-
-Automatic discovery selects the first model returned by `/v1/models`.
-
-Pin the correct model:
-
-```bash
---model meta-llama/Llama-3.1-8B-Instruct
-```
-
-Restart the agent after changing the value.
-
-### The agent does not register
-
-Check the agent logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs hivenet-agent
+    curl http://localhost:3000/v1/models \
+      | jq .
     ```
-  </Tab>
-  <Tab title="systemd">
+
+    Inspect the server logs:
+
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs sglang
+        ```
+      </Tab>
+      <Tab title="Bare metal">
+        Review the terminal or service logs for the SGLang process.
+      </Tab>
+    </Tabs>
+
+    The agent waits and retries while SGLang is unavailable or still loading.
+  </Accordion>
+
+  <Accordion title="Metrics are missing">
+    Confirm that SGLang was started with:
+
     ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      -n 100 \
-      --no-pager
+    --enable-metrics
     ```
-  </Tab>
-</Tabs>
 
-Test connectivity from the agent to the router:
+    Check the metrics endpoint directly:
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+    ```bash
+    curl http://localhost:3000/metrics \
+      | head
+    ```
 
-Check that:
+    Without metrics enabled, the endpoint may return HTTP `404`.
 
-- the router and agent use the same JWT secret
-- the router’s libp2p interface is reachable
-- the router advertises a libp2p address the agent can reach
-- SGLang is healthy and exposes a model
+    A metrics scrape failure does not stop the agent from forwarding requests.
+  </Accordion>
 
-### The peer ID changes after restart
+  <Accordion title="The wrong model is registered">
+    Automatic discovery selects the first model returned by `/v1/models`.
 
-Make sure `--identity-path` points to persistent storage.
+    Pin the correct model:
 
-For Docker:
+    ```bash
+    --model meta-llama/Llama-3.1-8B-Instruct
+    ```
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+    Restart the agent after changing the value.
+  </Accordion>
 
-For bare metal:
+  <Accordion title="The agent does not register">
+    Check the agent logs:
 
-```bash
-ls -l /var/lib/hivenet-router/agent/identity.key
-```
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent
+        ```
+      </Tab>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          -n 100 \
+          --no-pager
+        ```
+      </Tab>
+    </Tabs>
 
-### Requests time out
+    Test connectivity from the agent to the router:
 
-The agent’s backend HTTP timeout defaults to two minutes.
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-Increase it for long-running requests:
+    Check that:
 
-```bash
---http-timeout 10m
-```
+    - the router and agent use the same JWT secret
+    - the router’s libp2p interface is reachable
+    - the router advertises a libp2p address the agent can reach
+    - SGLang is healthy and exposes a model
+  </Accordion>
 
-Also check SGLang’s queue length, cache pressure, and the capacity declared by the agent.
+  <Accordion title="The peer ID changes after restart">
+    Make sure `--identity-path` points to persistent storage.
 
-### GPU metrics are missing
+    For Docker:
 
-Check that NVIDIA tools work on the host:
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
 
-```bash
-nvidia-smi
-```
+    For bare metal:
 
-For Docker, confirm the agent received GPU access:
+    ```bash
+    ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
+  </Accordion>
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].HostConfig.DeviceRequests'
-```
+  <Accordion title="Requests time out">
+    The agent’s backend HTTP timeout defaults to two minutes.
 
-The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+    Increase it for long-running requests:
+
+    ```bash
+    --http-timeout 10m
+    ```
+
+    Also check SGLang’s queue length, cache pressure, and the capacity declared by the agent.
+  </Accordion>
+
+  <Accordion title="GPU metrics are missing">
+    Check that NVIDIA tools work on the host:
+
+    ```bash
+    nvidia-smi
+    ```
+
+    For Docker, confirm the agent received GPU access:
+
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].HostConfig.DeviceRequests'
+    ```
+
+    The agent continues to operate without NVML. It reports CPU and memory metrics but omits GPU measurements.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="llama.cpp agent" href="/deploy/agents/llama-cpp">
+<Columns cols={3}>
+  <Card title="llama.cpp agent" icon="microchip" href="/deploy/agents/llama-cpp">
     Connect a llama.cpp server and enable its Prometheus metrics.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+  <Card title="Engine metrics" icon="gauge-high" href="/observability/engine-metrics">
     Understand the metrics collected from SGLang and other engines.
   </Card>
-</CardGroup>
+</Columns>
