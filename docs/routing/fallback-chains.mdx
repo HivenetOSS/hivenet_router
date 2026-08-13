@@ -1,0 +1,909 @@
+---
+title: "Fallback chains"
+description: "Configure ordered local routing alternatives with independent filters, metric gates, retry budgets, and capacity handling."
+sidebarTitle: "Fallback chains"
+---
+
+A fallback chain gives Hivenet Router an ordered set of local routing alternatives when the primary policy cannot serve a request.
+
+Each fallback step can use its own metadata filters, metric gates, ranking strategy, and forward-attempt budget.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: eu-secondary
+    match:
+      region: EU-Germany
+      engine: vllm
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-vllm-region
+    match:
+      engine: vllm
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-local-engine
+    match: {}
+    strategy: least-loaded
+    max_tries: 2
+```
+
+Hivenet Router always evaluates the primary `routing_policy` first, then processes `fallback_chain` from top to bottom.
+
+<Note>
+  The requested model and capability remain fixed throughout the chain. A fallback step can choose another agent, region, engine, or hardware tier, but it cannot silently change the requested model or turn a chat request into an embedding or reranking request.
+</Note>
+
+## Execution order
+
+For one request, Hivenet Router follows this sequence:
+
+1. Evaluate the primary `routing_policy`.
+2. Forward to eligible agents until the step succeeds or reaches its attempt limit.
+3. Advance to the first fallback step.
+4. Repeat the same filtering, capacity, gating, and retry process.
+5. Continue through the remaining local steps.
+6. Try a configured external provider for eligible language-model requests.
+7. Return an error if no option serves the request.
+
+```text
+Request
+  │
+  ▼
+routing_policy
+  │ exhausted
+  ▼
+fallback_chain[0]
+  │ exhausted
+  ▼
+fallback_chain[1]
+  │ exhausted
+  ▼
+fallback_provider
+  │ unavailable or failed
+  ▼
+Error
+```
+
+`fallback_provider` is separate from the local chain. It is a top-level policy field rather than an item inside `fallback_chain`.
+
+## When Hivenet Router advances
+
+Hivenet Router moves from one local step to the next when the current step cannot produce a successful forward.
+
+This can happen when:
+
+- no agents are registered for the requested model
+- all registered agents are unhealthy
+- no agent serves the required capability
+- no agent passes the step’s static `match` filters
+- every matching agent violates an `exclude_if` gate
+- matching agents remain at capacity and queueing cannot dispatch the request
+- forwarding failures exhaust the step’s `max_tries`
+
+A step may be exhausted without sending anything to a backend. For example, a strict region filter may leave no matching agents.
+
+It may also be exhausted after several forwarding attempts when selected backends return retryable failures.
+
+## Errors that do not trigger fallback
+
+Hivenet Router does not retry request-level errors that are expected to produce the same result on another agent.
+
+These include:
+
+- invalid request bodies
+- invalid parameters
+- context-length errors
+- token-quota rejection
+
+For example, sending a prompt that exceeds the model’s context limit does not cause Hivenet Router to try every agent serving that model. The client receives the error from the first attempted backend.
+
+This avoids wasting capacity and incorrectly lowering the health history of otherwise working agents.
+
+<Note>
+  Fallback is designed for unavailable capacity, unhealthy backends, routing exclusions, and retryable forwarding failures. It does not repair an invalid client request.
+</Note>
+
+## Step structure
+
+Each fallback item is a complete policy step.
+
+```yaml
+fallback_chain:
+  - name: eu-secondary
+
+    match:
+      region: EU-Germany
+      engine: vllm
+
+    exclude_if:
+      success_rate:
+        lt: 0.95
+
+    strategy: least-loaded
+    max_tries: 2
+```
+
+| Field | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `name` | String | No | Identifies the step in logs and diagnostics |
+| `match` | Object | No | Filters agents by static metadata |
+| `exclude_if` | Object | No | Removes agents using live thresholds |
+| `strategy` | String | Yes | Ranks the remaining candidates |
+| `max_tries` | Integer | No | Limits failed forwards within this step |
+
+The only implemented strategy is:
+
+```yaml
+strategy: least-loaded
+```
+
+When `name` is omitted, Hivenet Router generates a name from the step’s array position:
+
+```text
+fallback_chain[0]
+fallback_chain[1]
+```
+
+Use explicit names when you want clearer operational logs.
+
+## Forward-attempt budgets
+
+`max_tries` limits the number of retryable forwarding failures within one step.
+
+```yaml
+fallback_chain:
+  - name: any-vllm-region
+    match:
+      engine: vllm
+    strategy: least-loaded
+    max_tries: 2
+```
+
+If `max_tries` is omitted, zero, or negative, the step uses the router-wide value:
+
+```bash
+--max-tries-per-step 3
+```
+
+A failed agent is excluded from further attempts in that step.
+
+For example, with three eligible agents and:
+
+```yaml
+max_tries: 2
+```
+
+Hivenet Router can:
+
+1. try agent A
+2. record a retryable failure
+3. exclude A from this step
+4. try agent B
+5. record another failure
+6. advance to the next fallback step
+
+Agent A may become eligible again in a later step because failed-agent state resets when Hivenet Router advances.
+
+### What consumes a try
+
+Retryable forwarding failures consume the budget, including:
+
+- backend unavailability returned by the agent
+- overload or rate-limit responses from the backend
+- retryable backend errors
+- malformed or unsuccessful backend responses
+- transport failures after connection recovery is exhausted
+
+Request-level failures such as `request_invalid`, `invalid_parameter`, `context_length_exceeded`, and `token_limit_exceeded` stop immediately. They do not consume additional tries or advance through other local agents.
+
+### What does not consume a try
+
+The following do not use the forward budget:
+
+- no registered agents
+- no healthy agents
+- static-filter exclusions
+- dynamic-gate exclusions
+- agents already at capacity
+- losing a race for the final capacity slot
+- the first connection-level recovery attempt for an agent
+- waiting in the capacity queue
+
+## Connection-level recovery
+
+A persistent router-agent connection can become stale after a network interruption, firewall change, container reschedule, or connection-tracking timeout.
+
+When Hivenet Router detects a connection-level forwarding failure, it can:
+
+1. discard the stale peer connection state
+2. retry the request path without charging `max_tries`
+
+The first recovery attempt for each agent and request is budget-free. If the connection is still unavailable, the failure returns to the normal retry and fallback process. The agent’s own reconnect loop re-establishes its outbound connection to the router.
+
+This behavior is limited to connection-level failures. A backend error returned through a working connection consumes a normal forward attempt.
+
+Connection resets are counted in:
+
+```text
+hivenet_router_agent_connection_resets_total
+```
+
+## Capacity and the wait queue
+
+Before moving to another fallback step, Hivenet Router can wait when eligible agents exist but all of them are at their declared capacity.
+
+The queue is:
+
+- separate for each model
+- bounded by `--queue-depth`
+- active only when the depth is greater than zero
+- governed by the request deadline
+
+The default queue depth is:
+
+```text
+30 waiting requests per model
+```
+
+Configure it:
+
+```bash
+--queue-depth 50
+```
+
+Disable queueing:
+
+```bash
+--queue-depth 0
+```
+
+While a request waits, it does not reserve a particular agent. When capacity becomes available, Hivenet Router evaluates the current policy step again.
+
+Hivenet Router advances when:
+
+- the queue is already full
+- waiting ends without usable capacity
+- the request deadline is reached
+
+<Warning>
+  The wait queue uses the request context and deadline. If the overall request deadline expires while waiting, there may be no time left to attempt later fallback steps or an external provider.
+</Warning>
+
+Disable queueing when immediate failover is preferable to waiting for local capacity:
+
+```bash
+--queue-depth 0
+```
+
+## Model and capability remain fixed
+
+Fallback steps relax infrastructure selection. They do not change the workload requested by the client.
+
+For a chat-completion request:
+
+```text
+Model: meta-llama/Llama-3.1-8B-Instruct
+Capability: llm
+```
+
+every step still requires an `llm` agent registered for:
+
+```text
+meta-llama/Llama-3.1-8B-Instruct
+```
+
+This chain can move between engines:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+  strategy: least-loaded
+
+fallback_chain:
+  - name: sglang
+    match:
+      engine: sglang
+    strategy: least-loaded
+
+  - name: llama-cpp
+    match:
+      engine: llamacpp
+    strategy: least-loaded
+```
+
+But each backend must expose the same registered model name.
+
+A fallback chain cannot replace the requested model with another local model.
+
+Use an external `fallback_provider` when you deliberately want a final provider-specific model substitution for supported chat requests.
+
+## Graduated relaxation
+
+A common pattern is to begin with strict requirements and relax them gradually.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+    tags:
+      - production
+
+  exclude_if:
+    kv_cache_utilization:
+      gt: 0.85
+    gpu_temperature_c:
+      gt: 82
+    success_rate:
+      lt: 0.95
+
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: france-relaxed
+
+    match:
+      region: EU-France
+      engine: vllm
+
+    exclude_if:
+      kv_cache_utilization:
+        gt: 0.95
+      gpu_temperature_c:
+        gt: 85
+      success_rate:
+        lt: 0.9
+
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-vllm-region
+
+    match:
+      engine: vllm
+
+    exclude_if:
+      success_rate:
+        lt: 0.9
+
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-local-engine
+
+    match: {}
+
+    strategy: least-loaded
+    max_tries: 2
+```
+
+This chain:
+
+1. prefers production vLLM agents in France
+2. keeps the same region but relaxes tags and metric thresholds
+3. accepts vLLM agents in other regions
+4. accepts any healthy local engine serving the requested model
+
+The broadest step should usually come last.
+
+## Geographic fallback
+
+Use region metadata to move traffic through preferred locations.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+  strategy: least-loaded
+
+fallback_chain:
+  - name: eu-germany
+    match:
+      region: EU-Germany
+    strategy: least-loaded
+
+  - name: us-east
+    match:
+      region: US-East
+    strategy: least-loaded
+```
+
+Region values are exact and case-sensitive.
+
+This step:
+
+```yaml
+region: EU
+```
+
+does not match agents registered as:
+
+```text
+EU-France
+```
+
+unless their actual region metadata is `EU`.
+
+## Engine fallback
+
+Move between backend implementations serving the same model.
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+  strategy: least-loaded
+
+fallback_chain:
+  - name: sglang
+    match:
+      engine: sglang
+    strategy: least-loaded
+
+  - name: ollama
+    match:
+      engine: ollama
+    strategy: least-loaded
+```
+
+The agent model names must still match the client request exactly.
+
+Engine fallback is useful when:
+
+- several serving stacks expose the same model
+- a preferred engine is overloaded or unhealthy
+- another engine provides acceptable continuity
+
+Backend behavior may differ even when the model name is the same. Test response fields, streaming, tool support, and sampling behavior across every engine used in the chain.
+
+## Hardware-tier fallback
+
+Move through preferred GPU classes.
+
+```yaml
+routing_policy:
+  match:
+    gpu_model: NVIDIA H100
+  strategy: least-loaded
+
+fallback_chain:
+  - name: a100-tier
+    match:
+      gpu_model: NVIDIA A100
+    strategy: least-loaded
+
+  - name: a10-tier
+    match:
+      gpu_model: NVIDIA A10
+    strategy: least-loaded
+```
+
+`gpu_model` matching is exact.
+
+Confirm the reported value through:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      gpu_model: .metadata.gpu_model
+    }'
+```
+
+## Mixed fallback
+
+Combine region, engine, tags, and health thresholds.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+    tags:
+      - production
+
+  exclude_if:
+    kv_cache_utilization:
+      gt: 0.85
+
+  strategy: least-loaded
+  max_tries: 3
+
+fallback_chain:
+  - name: eu-any-engine
+
+    match:
+      region: EU-France
+
+    exclude_if:
+      success_rate:
+        lt: 0.95
+
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: any-region-vllm
+
+    match:
+      engine: vllm
+
+    strategy: least-loaded
+    max_tries: 2
+
+  - name: unrestricted-local
+
+    match: {}
+
+    strategy: least-loaded
+    max_tries: 2
+```
+
+Be deliberate about the order. In this example, `eu-any-engine` is preferred over `any-region-vllm`.
+
+Reversing those two steps would prefer the engine type over geographic locality.
+
+## Add provider fallback
+
+External provider fallback comes after every local step.
+
+```yaml
+routing_policy:
+  match:
+    region: EU-France
+    engine: vllm
+  strategy: least-loaded
+
+fallback_chain:
+  - name: any-local-agent
+    match: {}
+    strategy: least-loaded
+
+fallback_provider:
+  engine: openai
+  model: gpt-4o-mini
+```
+
+Set the provider credential in the router environment:
+
+```bash
+export HIVENET_ROUTER_OPENAI_API_KEY="<openai-api-key>"
+```
+
+or:
+
+```bash
+export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
+```
+
+<Warning>
+  Provider fallback is intended for non-streaming Chat Completions requests. It is not used for embeddings or reranking, and it is not a transparent fallback for Anthropic token counting or every Messages field.
+</Warning>
+
+See [Provider fallback](/routing/provider-fallback) for supported fields, request translation, streaming limitations, and failure behavior.
+
+## Observe fallback activity
+
+Hivenet Router exposes separate counters for the primary step, local fallback steps, provider fallback, and exhausted chains.
+
+Primary-step requests:
+
+```promql
+rate(
+  hivenet_router_policy_primary_routed_total[5m]
+)
+```
+
+Requests served by any local fallback step:
+
+```promql
+rate(
+  hivenet_router_policy_fallback_routed_total[5m]
+)
+```
+
+Requests served by the external provider fallback:
+
+```promql
+rate(
+  hivenet_router_policy_provider_fallback_total[5m]
+)
+```
+
+Requests where the local chain was exhausted and no successful result followed:
+
+```promql
+rate(
+  hivenet_router_policy_exhausted_total[5m]
+)
+```
+
+Fallback as a proportion of all locally routed requests:
+
+```promql
+sum(
+  rate(
+    hivenet_router_policy_fallback_routed_total[5m]
+  )
+)
+/
+sum(
+  rate(
+    hivenet_router_routing_requests_routed_total[5m]
+  )
+)
+```
+
+These policy counters are labeled by model.
+
+<Note>
+  `hivenet_router_policy_fallback_routed_total` aggregates every local fallback step. It does not currently include the individual fallback-step name as a Prometheus label.
+
+  Use router logs and request diagnostics when you need to know which named step was used or exhausted.
+</Note>
+
+## Diagnose an exhausted chain
+
+Enable policy and router debug logging:
+
+```bash
+export GOLOG_LOG_LEVEL="policy=debug,router=debug"
+```
+
+When all local steps are exhausted, Hivenet Router emits a warning that includes:
+
+- request ID
+- model
+- capability
+- tenant
+- policy-chain order
+- number of exhausted steps
+- the reason each step drained
+
+An example shape is:
+
+```text
+policy_exhausted
+chain=[routing_policy→eu-secondary→any-region]
+reason="routing_policy: no eligible agents; eu-secondary: max_tries exhausted; any-region: no eligible agents"
+```
+
+The precise wording depends on the gates and failures observed for the request.
+
+Use `X-Request-ID` to correlate the client request with logs:
+
+```bash
+curl -X POST \
+  http://localhost:8080/v1/chat/completions \
+  -H "X-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  }'
+```
+
+## Test a fallback chain
+
+Test each step before relying on the full chain.
+
+A practical sequence is:
+
+1. Confirm the primary step routes normally.
+2. Stop or exclude its agents.
+3. Confirm the first fallback step serves the request.
+4. Repeat for each later step.
+5. Exhaust all local steps.
+6. Confirm provider fallback or the expected final error.
+7. Restore the primary agents.
+8. Check that routing returns to the preferred step.
+
+You can temporarily use restrictive policy values to force a step to drain:
+
+```yaml
+exclude_if:
+  success_rate:
+    gt: -1
+```
+
+However, using impossible or artificial thresholds can be confusing in a shared environment. Testing by stopping a controlled agent or applying a temporary tag is often clearer.
+
+For example, create a test-only primary match:
+
+```yaml
+match:
+  tags:
+    - fallback-test-primary
+```
+
+Then remove or restore that tag on the test agent.
+
+## Design guidance
+
+### Order steps by real preference
+
+The first fallback should be the next acceptable operational choice, rather than simply the easiest policy to write.
+
+Consider:
+
+- data location
+- latency
+- backend compatibility
+- hardware tier
+- operating cost
+- capacity
+- compliance requirements
+
+### Relax one concern at a time
+
+A chain is easier to understand when each step makes one deliberate compromise.
+
+For example:
+
+1. same region and engine, relaxed cache threshold
+2. same region, any engine
+3. any region, preferred engine
+4. any local agent
+
+### Keep the chain short
+
+Long chains increase:
+
+- worst-case latency
+- policy complexity
+- testing work
+- difficulty explaining why a request landed on one backend
+
+Three or four local steps are usually easier to operate than a long list of small variations.
+
+### Set retry budgets deliberately
+
+A large `max_tries` on every step can produce long delays before the request reaches a viable fallback.
+
+Use larger budgets when several independent agents are likely to recover the request.
+
+Use smaller budgets when backend failures are expensive or likely to repeat across similar agents.
+
+### Monitor fallback rate
+
+A high or rising fallback rate may indicate:
+
+- insufficient primary capacity
+- unhealthy primary agents
+- overly strict gates
+- incorrect metadata
+- mismatched model names
+- backend instability
+- network problems
+
+Fallback is a continuity mechanism. It should not quietly become the normal route unless that is intentional.
+
+## Troubleshooting
+
+### The chain skips a step
+
+Check whether the step had any eligible agents.
+
+Inspect registered metadata:
+
+```bash
+curl \
+  -H "Authorization: Bearer <admin-api-key>" \
+  http://localhost:8080/admin/routing-table \
+  -H "Authorization: Bearer <admin-api-key>" \
+  | jq '.agents[] | {
+      model: .metadata.model,
+      capability: .metadata.capability,
+      engine: .metadata.engine,
+      region: .metadata.region,
+      tags: .metadata.tags,
+      healthy: .status.healthy,
+      backend_healthy: .status.backend_healthy
+    }'
+```
+
+All static match values are exact and case-sensitive.
+
+### A failed agent is tried again
+
+An agent is excluded only for the remainder of the current step.
+
+It can become eligible again in a later fallback step because each step has its own failed-agent set and retry budget.
+
+Avoid overlapping steps when retrying the same agents is not useful.
+
+For example, these steps overlap completely:
+
+```yaml
+routing_policy:
+  match:
+    engine: vllm
+  strategy: least-loaded
+
+fallback_chain:
+  - name: same-agents-again
+    match:
+      engine: vllm
+    strategy: least-loaded
+```
+
+The fallback may retry agents already attempted in the primary step.
+
+### Requests wait instead of falling back
+
+Matching agents are probably at capacity and queueing is enabled.
+
+Check:
+
+```bash
+--queue-depth
+--request-timeout
+```
+
+Disable queueing for immediate fallback:
+
+```bash
+--queue-depth 0
+```
+
+### A fallback engine is never selected
+
+Confirm that it:
+
+- registers the same model name
+- serves the same capability
+- passes the step’s static filters
+- passes its dynamic gates
+- is healthy
+- has free capacity
+
+### Provider fallback is not reached
+
+Check that:
+
+- all local steps are exhausted
+- the request has not already exceeded its deadline
+- the request uses the `llm` capability
+- `fallback_provider` is at the top level
+- the provider engine and model are configured
+- the corresponding API key environment variable is set
+
+### The exhausted metric increases despite provider fallback
+
+`hivenet_router_policy_exhausted_total` also increases when the local chain is exhausted and the configured provider fallback fails.
+
+Check provider logs and outbound HTTP metrics before assuming the router returned a normal local-capacity error.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Provider fallback" href="/routing/provider-fallback">
+    Configure OpenAI or Anthropic after all local routing options fail.
+  </Card>
+
+  <Card title="Policy gates" href="/routing/policy-gates">
+    Apply practical health, cache, latency, and hardware thresholds.
+  </Card>
+
+  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+    Monitor fallback, exhaustion, queueing, failures, and routing activity.
+  </Card>
+</CardGroup>
