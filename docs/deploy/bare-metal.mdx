@@ -561,13 +561,29 @@ You do not need to restart the router when adding capacity.
 
 On the new host:
 
-1. Create the `hivenet-router` account and directories.
-2. Install the agent binary.
-3. Install the shared JWT secret.
-4. Create `/etc/hivenet-router/agent.env` with the router address and agent region.
-5. Install the agent systemd unit.
-6. Start the inference backend.
-7. Enable and start `hivenet-agent`.
+<Steps>
+  <Step title="Create the account and directories">
+    Create the `hivenet-router` account and directories.
+  </Step>
+  <Step title="Install the agent binary">
+    Install the agent binary.
+  </Step>
+  <Step title="Install the shared JWT secret">
+    Install the shared JWT secret.
+  </Step>
+  <Step title="Create the agent environment file">
+    Create `/etc/hivenet-router/agent.env` with the router address and agent region.
+  </Step>
+  <Step title="Install the agent systemd unit">
+    Install the agent systemd unit.
+  </Step>
+  <Step title="Start the inference backend">
+    Start the inference backend.
+  </Step>
+  <Step title="Enable and start the agent">
+    Enable and start `hivenet-agent`.
+  </Step>
+</Steps>
 
 The new agent registers automatically once it can reach the router and its backend is ready.
 
@@ -683,142 +699,144 @@ When the router itself is behind NAT or another translated network, configure th
 
 ## Troubleshooting
 
-### A service does not start
+<AccordionGroup>
+  <Accordion title="A service does not start">
+    Inspect its status and recent logs:
 
-Inspect its status and recent logs:
+    ```bash
+    sudo systemctl status hivenet-router
+    sudo journalctl -u hivenet-router -n 100 --no-pager
+    ```
 
-```bash
-sudo systemctl status hivenet-router
-sudo journalctl -u hivenet-router -n 100 --no-pager
-```
+    For an agent:
 
-For an agent:
+    ```bash
+    sudo systemctl status hivenet-agent
+    sudo journalctl -u hivenet-agent -n 100 --no-pager
+    ```
+  </Accordion>
 
-```bash
-sudo systemctl status hivenet-agent
-sudo journalctl -u hivenet-agent -n 100 --no-pager
-```
+  <Accordion title="The router cannot read the JWT secret">
+    Check the file ownership and mode:
 
-### The router cannot read the JWT secret
+    ```bash
+    sudo ls -l /etc/hivenet-router/jwt.secret
+    ```
 
-Check the file ownership and mode:
+    Expected ownership and permissions:
 
-```bash
-sudo ls -l /etc/hivenet-router/jwt.secret
-```
+    ```text
+    -rw-r----- root hivenet-router
+    ```
 
-Expected ownership and permissions:
+    Test access as the service account:
 
-```text
--rw-r----- root hivenet-router
-```
+    ```bash
+    sudo -u hivenet-router cat /etc/hivenet-router/jwt.secret >/dev/null
+    ```
+  </Accordion>
 
-Test access as the service account:
+  <Accordion title="An agent does not register">
+    From the agent host, check the router:
 
-```bash
-sudo -u hivenet-router cat /etc/hivenet-router/jwt.secret >/dev/null
-```
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-### An agent does not register
+    Common causes include:
 
-From the agent host, check the router:
+    - the router is not listening on `0.0.0.0`
+    - `ROUTER_IP` is incorrect
+    - the router advertises a libp2p address the agent cannot reach
+    - the router needs a correct `--p2p-announce-addr` behind NAT or port translation
+    - the router or agent firewall blocks outbound agent connectivity
+    - the JWT secret differs between hosts
+    - the backend has not become healthy
+    - the agent environment file contains an invalid value
+  </Accordion>
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+  <Accordion title="The agent gets a new peer ID after restart">
+    Confirm that the persistent identity file exists:
 
-Common causes include:
+    ```bash
+    sudo ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
 
-- the router is not listening on `0.0.0.0`
-- `ROUTER_IP` is incorrect
-- the router advertises a libp2p address the agent cannot reach
-- the router needs a correct `--p2p-announce-addr` behind NAT or port translation
-- the router or agent firewall blocks outbound agent connectivity
-- the JWT secret differs between hosts
-- the backend has not become healthy
-- the agent environment file contains an invalid value
+    The service account must be able to read and write this file.
+  </Accordion>
 
-### The agent gets a new peer ID after restart
+  <Accordion title="GPU metrics are missing">
+    Check NVIDIA access:
 
-Confirm that the persistent identity file exists:
+    ```bash
+    nvidia-smi
+    ```
 
-```bash
-sudo ls -l /var/lib/hivenet-router/agent/identity.key
-```
+    Test access as the service account:
 
-The service account must be able to read and write this file.
+    ```bash
+    sudo -u hivenet-router nvidia-smi
+    ```
 
-### GPU metrics are missing
+    Check the account’s groups:
 
-Check NVIDIA access:
+    ```bash
+    id hivenet-router
+    ```
 
-```bash
-nvidia-smi
-```
+    If necessary:
 
-Test access as the service account:
+    ```bash
+    sudo usermod -aG video hivenet-router
+    sudo systemctl restart hivenet-agent
+    ```
 
-```bash
-sudo -u hivenet-router nvidia-smi
-```
+    If NVML remains unavailable, the agent continues to report CPU and memory metrics but omits GPU metrics.
+  </Accordion>
 
-Check the account’s groups:
+  <Accordion title="Ports are already in use">
+    ```bash
+    sudo ss -tlnp \
+      | grep -E '8080|50051|9000|2112'
+    ```
+  </Accordion>
 
-```bash
-id hivenet-router
-```
+  <Accordion title="Check live routing data">
+    ```bash
+    curl http://192.168.1.100:8080/admin/routing-table \
+      | jq '.agents[] | {
+          peer_id,
+          model: .metadata.model,
+          engine: .metadata.engine,
+          region: .metadata.region,
+          healthy: .status.healthy,
+          active_requests: .status.active_requests,
+          srtt_ms: .universal.srtt_ms
+        }'
+    ```
 
-If necessary:
+    Check the routing counter:
 
-```bash
-sudo usermod -aG video hivenet-router
-sudo systemctl restart hivenet-agent
-```
-
-If NVML remains unavailable, the agent continues to report CPU and memory metrics but omits GPU metrics.
-
-### Ports are already in use
-
-```bash
-sudo ss -tlnp \
-  | grep -E '8080|50051|9000|2112'
-```
-
-### Check live routing data
-
-```bash
-curl http://192.168.1.100:8080/admin/routing-table \
-  | jq '.agents[] | {
-      peer_id,
-      model: .metadata.model,
-      engine: .metadata.engine,
-      region: .metadata.region,
-      healthy: .status.healthy,
-      active_requests: .status.active_requests,
-      srtt_ms: .universal.srtt_ms
-    }'
-```
-
-Check the routing counter:
-
-```bash
-curl http://192.168.1.100:2112/metrics \
-  | grep hivenet_router_routing_requests_routed_total
-```
+    ```bash
+    curl http://192.168.1.100:2112/metrics \
+      | grep hivenet_router_routing_requests_routed_total
+    ```
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="vLLM agent" href="/deploy/agents/vllm">
+<Columns cols={3}>
+  <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
     Configure vLLM discovery, capacity, metrics, and multi-model deployments.
   </Card>
 
-  <Card title="Configuration reference" href="/reference/configuration-reference">
+  <Card title="Configuration reference" icon="book" href="/reference/configuration-reference">
     Review every router and agent flag and environment variable.
   </Card>
 
-  <Card title="Authentication overview" href="/security/authentication-overview">
+  <Card title="Authentication overview" icon="shield-halved" href="/security/authentication-overview">
     Protect the client and administration APIs before production use.
   </Card>
-</CardGroup>
+</Columns>
