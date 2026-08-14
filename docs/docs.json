@@ -7,6 +7,9 @@
     "light": "#FFB366",
     "dark": "#D46E35"
   },
+  "styling": {
+    "eyebrows": "breadcrumbs"
+  },
   "favicon": {
     "light": "/images/favicon.png",
     "dark": "/images/favicon.png"
@@ -16,6 +19,7 @@
       "index",
       {
         "group": "Getting started",
+        "icon": "rocket",
         "pages": [
           "getting-started/introduction",
           "getting-started/why-hivenet-router",
@@ -26,12 +30,14 @@
       },
       {
         "group": "Deploy Hivenet Router",
+        "icon": "server",
         "pages": [
           "deploy/docker-quickstart",
           "deploy/docker-compose",
           "deploy/bare-metal",
           {
             "group": "Agents",
+            "icon": "microchip",
             "pages": [
               "deploy/agents/vllm",
               "deploy/agents/ollama",
@@ -45,6 +51,7 @@
       },
       {
         "group": "Use the API",
+        "icon": "code",
         "pages": [
           "use-the-api/chat-completions",
           "use-the-api/embeddings",
@@ -55,6 +62,7 @@
       },
       {
         "group": "Routing and policies",
+        "icon": "route",
         "pages": [
           "routing/routing-concepts",
           "routing/policy-yaml-reference",
@@ -66,6 +74,7 @@
       },
       {
         "group": "Security and auth",
+        "icon": "lock",
         "pages": [
           "security/authentication-overview",
           "security/api-keys",
@@ -76,6 +85,7 @@
       },
       {
         "group": "Observability",
+        "icon": "chart-line",
         "pages": [
           "observability/observability-overview",
           "observability/prometheus-metrics",
@@ -90,6 +100,7 @@
       },
       {
         "group": "Integrations",
+        "icon": "plug",
         "pages": [
           "integrations/integrations-overview",
           "integrations/claude-code",
@@ -101,6 +112,7 @@
       },
       {
         "group": "Reference",
+        "icon": "book",
         "pages": [
           "reference/detailed-architecture",
           "reference/configuration-reference",
@@ -110,6 +122,7 @@
       },
       {
         "group": "Project",
+        "icon": "users",
         "pages": [
           "project/project-overview",
           "project/contributing",

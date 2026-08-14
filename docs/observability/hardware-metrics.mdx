@@ -844,177 +844,179 @@ Increase declared capacity gradually rather than deriving it from one hardware m
 
 ## Troubleshooting
 
-### GPU metrics are missing
+<AccordionGroup>
+  <Accordion title="GPU metrics are missing">
+    Check the host:
 
-Check the host:
-
-```bash
-nvidia-smi
-```
-
-Check device permissions:
-
-```bash
-ls -la /dev/nvidia*
-```
-
-Check the agent logs:
-
-<Tabs>
-  <Tab title="systemd">
     ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      | grep -i "nvml\|hardware"
+    nvidia-smi
     ```
-  </Tab>
-  <Tab title="Docker">
+
+    Check device permissions:
+
     ```bash
-    docker logs hivenet-agent \
-      2>&1 \
-      | grep -i "nvml\|hardware"
+    ls -la /dev/nvidia*
     ```
-  </Tab>
-</Tabs>
 
-For Docker, confirm that the agent received GPU access:
+    Check the agent logs:
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].HostConfig.DeviceRequests'
-```
+    <Tabs>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          | grep -i "nvml\|hardware"
+        ```
+      </Tab>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent \
+          2>&1 \
+          | grep -i "nvml\|hardware"
+        ```
+      </Tab>
+    </Tabs>
 
-Test NVML inside a GPU-enabled container:
+    For Docker, confirm that the agent received GPU access:
 
-```bash
-docker run --rm \
-  --gpus all \
-  nvidia/cuda:12.6.0-base-ubuntu24.04 \
-  nvidia-smi
-```
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].HostConfig.DeviceRequests'
+    ```
 
-The agent continues with CPU and memory metrics when NVML is unavailable.
+    Test NVML inside a GPU-enabled container:
 
-### The agent reports GPUs it should not monitor
+    ```bash
+    docker run --rm \
+      --gpus all \
+      nvidia/cuda:12.6.0-base-ubuntu24.04 \
+      nvidia-smi
+    ```
 
-Use:
+    The agent continues with CPU and memory metrics when NVML is unavailable.
+  </Accordion>
 
-```bash
---gpu-devices-file <path>
-```
+  <Accordion title="The agent reports GPUs it should not monitor">
+    Use:
 
-with the assigned NVIDIA GPU UUIDs.
+    ```bash
+    --gpu-devices-file <path>
+    ```
 
-Confirm the UUIDs:
+    with the assigned NVIDIA GPU UUIDs.
 
-```bash
-nvidia-smi \
-  --query-gpu=index,uuid \
-  --format=csv
-```
+    Confirm the UUIDs:
 
-Restart the agent after changing a successfully loaded GPU-device file.
+    ```bash
+    nvidia-smi \
+      --query-gpu=index,uuid \
+      --format=csv
+    ```
 
-### The GPU-device file has no effect
+    Restart the agent after changing a successfully loaded GPU-device file.
+  </Accordion>
 
-Check that:
+  <Accordion title="The GPU-device file has no effect">
+    Check that:
 
-- the file exists inside the agent’s filesystem
-- its contents use NVIDIA GPU UUIDs rather than numeric indices
-- the agent can read it
-- the agent was restarted after a previous successful load
-- the UUIDs match the values returned by NVML
+    - the file exists inside the agent’s filesystem
+    - its contents use NVIDIA GPU UUIDs rather than numeric indices
+    - the agent can read it
+    - the agent was restarted after a previous successful load
+    - the UUIDs match the values returned by NVML
 
-For a container, confirm the file is mounted:
+    For a container, confirm the file is mounted:
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
+  </Accordion>
 
-### Values show zero for one GPU
+  <Accordion title="Values show zero for one GPU">
+    Individual NVML subqueries can fail independently.
 
-Individual NVML subqueries can fail independently.
+    Hivenet Router keeps the GPU record and sets the failed reading to zero while preserving the other values it could collect.
 
-Hivenet Router keeps the GPU record and sets the failed reading to zero while preserving the other values it could collect.
+    Check the agent log for:
 
-Check the agent log for:
+    ```text
+    hardware: GPU
+    ```
 
-```text
-hardware: GPU
-```
+    and compare with:
 
-and compare with:
+    ```bash
+    nvidia-smi
+    ```
+  </Accordion>
 
-```bash
-nvidia-smi
-```
+  <Accordion title="CPU use looks wrong immediately after startup">
+    The collector seeds a CPU baseline during initialization and then reports non-blocking interval measurements.
 
-### CPU use looks wrong immediately after startup
+    Allow at least one sampling interval and compare several readings rather than relying on one value immediately after startup.
+  </Accordion>
 
-The collector seeds a CPU baseline during initialization and then reports non-blocking interval measurements.
+  <Accordion title="Hardware data is present in the routing table but not Prometheus">
+    Check the router’s metrics endpoint:
 
-Allow at least one sampling interval and compare several readings rather than relying on one value immediately after startup.
+    ```bash
+    curl -s \
+      http://localhost:2112/metrics \
+      | grep hivenet_router_agent_gpu
+    ```
 
-### Hardware data is present in the routing table but not Prometheus
+    Then check Prometheus’s router target.
 
-Check the router’s metrics endpoint:
+    The agent sends hardware data to the router; Prometheus does not scrape the agent.
+  </Accordion>
 
-```bash
-curl -s \
-  http://localhost:2112/metrics \
-  | grep hivenet_router_agent_gpu
-```
+  <Accordion title="Old GPU series remain after reassignment">
+    The router removes series when a reported GPU index disappears from a later snapshot or when the agent is unregistered.
 
-Then check Prometheus’s router target.
+    If an old series remains, check whether:
 
-The agent sends hardware data to the router; Prometheus does not scrape the agent.
+    - the original agent peer ID is still registered
+    - the agent identity changed
+    - Prometheus is displaying historical data within the selected time range
+    - the agent has not yet sent a new filtered snapshot
 
-### Old GPU series remain after reassignment
+    Use an instant query to inspect current series rather than a long-range graph.
+  </Accordion>
 
-The router removes series when a reported GPU index disappears from a later snapshot or when the agent is unregistered.
+  <Accordion title="A hardware gate does not exclude the agent">
+    Check the unit and current value.
 
-If an old series remains, check whether:
+    Prometheus percentages use `0` to `100`, while policy percentages use `0.0` to `1.0`.
 
-- the original agent peer ID is still registered
-- the agent identity changed
-- Prometheus is displaying historical data within the selected time range
-- the agent has not yet sent a new filtered snapshot
+    Inspect the routing table:
 
-Use an instant query to inspect current series rather than a long-range graph.
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq '.agents[] | {
+          model: .metadata.model,
+          hardware
+        }'
+    ```
 
-### A hardware gate does not exclude the agent
-
-Check the unit and current value.
-
-Prometheus percentages use `0` to `100`, while policy percentages use `0.0` to `1.0`.
-
-Inspect the routing table:
-
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {
-      model: .metadata.model,
-      hardware
-    }'
-```
-
-The metric may also be unavailable. Missing metrics pass the policy gate.
+    The metric may also be unavailable. Missing metrics pass the policy gate.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+<Columns cols={3}>
+  <Card title="Engine metrics" icon="gauge-high" href="/observability/engine-metrics">
     Review cache, queue, latency, finish-reason, and throughput metrics from inference engines.
   </Card>
 
-  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+  <Card title="Hardware-aware routing" icon="microchip" href="/observability/hardware-aware-routing">
     Build policies around GPU tier, thermal state, VRAM pressure, CPU, and system memory.
   </Card>
 
-  <Card title="Prometheus metrics" href="/observability/prometheus-metrics">
+  <Card title="Prometheus metrics" icon="chart-line" href="/observability/prometheus-metrics">
     Query and alert on the complete Hivenet Router metric set.
   </Card>
-</CardGroup>
+</Columns>

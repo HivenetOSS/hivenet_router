@@ -54,6 +54,34 @@ You need:
 
 The compiled Hivenet Router binaries do not require Go on the target machines.
 
+## Deployment path
+
+<Steps>
+  <Step title="Prepare the hosts">
+    Create the installation directory on the router and all three agent machines.
+  </Step>
+
+  <Step title="Build and secure the deployment">
+    Compile the router and agent binaries, distribute them, and create the shared JWT secret.
+  </Step>
+
+  <Step title="Start the inference backends">
+    Start two vLLM servers for the shared model and one Ollama server for the third agent.
+  </Step>
+
+  <Step title="Start the router and agents">
+    Launch the router, then connect each backend through its own agent process.
+  </Step>
+
+  <Step title="Verify registration">
+    Confirm that the router reports three healthy agents with the expected models, engines, and regions.
+  </Step>
+
+  <Step title="Send and observe requests">
+    Route a chat request, generate concurrent traffic, and inspect the Prometheus routing counter.
+  </Step>
+</Steps>
+
 ## Prepare the target machines
 
 On each router and agent machine, create the Hivenet Router directory:
@@ -416,74 +444,78 @@ curl -s http://192.168.1.100:2112/metrics \
 
 ## Troubleshooting
 
-### The router gRPC endpoint is unreachable
+<AccordionGroup>
+  <Accordion title="The router gRPC endpoint is unreachable" icon="network-wired">
+    On `router-server`, check that the port is listening:
 
-On `router-server`, check that the port is listening:
+    ```bash
+    ss -tlnp | grep 50051
+    ```
 
-```bash
-ss -tlnp | grep 50051
-```
+    On an agent machine, test connectivity to the router:
 
-On an agent machine, test connectivity to the router:
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
+  </Accordion>
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+  <Accordion title="An agent does not register" icon="link-slash">
+    Check for these common causes:
 
-### An agent does not register
+    - `--router-grpc` points to the wrong or unreachable address
+    - the router is still listening for libp2p only on `127.0.0.1`
+    - the router advertises a libp2p address the agent cannot reach
+    - the router needs a correct `--p2p-announce-addr`
+    - the inference backend is not ready
+    - the router and agent use different JWT secrets
+  </Accordion>
 
-Check for these common causes:
+  <Accordion title="A backend is not ready" icon="server">
+    Check vLLM:
 
-- `--router-grpc` points to the wrong or unreachable address
-- the router is still listening for libp2p only on `127.0.0.1`
-- the router advertises a libp2p address the agent cannot reach
-- the router needs a correct `--p2p-announce-addr`
-- the inference backend is not ready
-- the router and agent use different JWT secrets
+    ```bash
+    curl http://localhost:8888/health
+    ```
 
-### A backend is not ready
+    Check Ollama:
 
-Check vLLM:
+    ```bash
+    curl http://localhost:11434/api/tags
+    ollama ps
+    ```
+  </Accordion>
 
-```bash
-curl http://localhost:8888/health
-```
+  <Accordion title="The JWT secret does not match" icon="key">
+    Confirm that every machine has the same secret:
 
-Check Ollama:
+    ```bash
+    sha256sum /opt/hivenet-router/jwt.secret
+    ```
 
-```bash
-curl http://localhost:11434/api/tags
-ollama ps
-```
+    The hash should be identical on the router and every agent host.
+  </Accordion>
 
-### The JWT secret does not match
+  <Accordion title="A firewall blocks the connection" icon="shield-halved">
+    The exact commands depend on your firewall. With UFW, a basic router configuration could look like:
 
-Confirm that every machine has the same secret:
+    ```bash
+    sudo ufw allow 50051/tcp
+    sudo ufw allow 9000/tcp
+    sudo ufw allow 8080/tcp
+    sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
+    ```
 
-```bash
-sha256sum /opt/hivenet-router/jwt.secret
-```
+    Agent hosts do not need an inbound Hivenet Router firewall rule. Allow their outbound connections to the router’s ports `50051` and `9000`.
 
-The hash should be identical on the router and every agent host.
-
-### A firewall blocks the connection
-
-The exact commands depend on your firewall. With UFW, a basic router configuration could look like:
-
-```bash
-sudo ufw allow 50051/tcp
-sudo ufw allow 9000/tcp
-sudo ufw allow 8080/tcp
-sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
-```
-
-Agent hosts do not need an inbound Hivenet Router firewall rule. Allow their outbound connections to the router’s ports `50051` and `9000`.
-
-<Warning>
-  These are examples, not a complete network-security policy. Restrict every port to the clients, agents, or monitoring systems that require access.
-</Warning>
+    <Warning>
+      These are examples, not a complete network-security policy. Restrict every port to the clients, agents, or monitoring systems that require access.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
 
 ## Next step
 
-Read the [architecture overview](/getting-started/architecture-overview) to understand the router-agent control flow, data plane, storage, authentication, and routing pipeline.
+<Card title="Architecture overview" icon="network-wired" href="/getting-started/architecture-overview" horizontal>
+  Understand the router-agent control flow, data plane, storage, authentication, and routing pipeline.
+</Card>

@@ -39,111 +39,108 @@ For an active compromise, revoke or disable the exposed credential first when co
 
 Static client keys are stored as SHA-256 hashes in `auth.yaml`. The safest rotation keeps both entries active for a short overlap period.
 
-### 1. Generate the replacement
+<Steps>
+  <Step title="Generate the replacement">
+    ```bash
+    ./bin/hivenet-router \
+      keygen \
+      --tenant acme-corp
+    ```
 
-```bash
-./bin/hivenet-router \
-  keygen \
-  --tenant acme-corp
-```
+    Store the raw key securely. Copy the generated hash and YAML entry into `auth.yaml`.
 
-Store the raw key securely. Copy the generated hash and YAML entry into `auth.yaml`.
+    Use the exact lowercase hash printed by the generator or `sha256sum`.
+  </Step>
+  <Step title="Keep both keys temporarily">
+    ```yaml
+    api:
+      mode: api-key
+    
+      keys:
+        - key_hash: "<old-key-sha256>"
+          key_preview: "sk-...old"
+    
+          metadata:
+            name: "Acme production, old"
+            owner: "acme-corp"
+    
+          models:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+    
+          quota:
+            requests_per_minute: 100
+            tokens_per_day: 500000
+    
+        - key_hash: "<new-key-sha256>"
+          key_preview: "sk-...new"
+    
+          metadata:
+            name: "Acme production, new"
+            owner: "acme-corp"
+    
+          models:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+    
+          quota:
+            requests_per_minute: 100
+            tokens_per_day: 500000
+    
+    admin:
+      mode: api-key
+    ```
 
-Use the exact lowercase hash printed by the generator or `sha256sum`.
+    Using the same owner preserves one shared quota bucket during the overlap. Use different owners only when the two credentials should have independent quota accounting.
 
-### 2. Keep both keys temporarily
+    Keep the model restrictions and quotas aligned unless the rotation is also an intentional access change.
+  </Step>
+  <Step title="Reload the file">
+    ```bash
+    sudo kill -HUP "$(pgrep hivenet-router)"
+    ```
 
-```yaml
-api:
-  mode: api-key
+    For Docker Compose:
 
-  keys:
-    - key_hash: "<old-key-sha256>"
-      key_preview: "sk-...old"
+    ```bash
+    docker compose kill \
+      --signal SIGHUP \
+      router
+    ```
 
-      metadata:
-        name: "Acme production, old"
-        owner: "acme-corp"
+    Hivenet Router validates the replacement provider before swapping it in. A failed reload leaves the previous provider active.
 
-      models:
-        - "meta-llama/Llama-3.1-8B-Instruct"
+    <Warning>
+      A successful static-auth reload rebuilds the in-memory quota limiter.
 
-      quota:
-        requests_per_minute: 100
-        tokens_per_day: 500000
+      Request-per-minute buckets reset. With the `memory` quota backend, current daily token usage is also lost. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
+    </Warning>
+  </Step>
+  <Step title="Test the new key">
+    ```bash
+    curl \
+      -H "Authorization: Bearer <new-client-key>" \
+      http://localhost:8080/v1/models
+    ```
 
-    - key_hash: "<new-key-sha256>"
-      key_preview: "sk-...new"
+    Also test an inference request and confirm:
 
-      metadata:
-        name: "Acme production, new"
-        owner: "acme-corp"
+    - the intended models are visible
+    - the intended model can be invoked
+    - quotas are correct
+    - audit records use the expected owner; static keys do not populate a stable `key_id`
+  </Step>
+  <Step title="Move applications to the new key">
+    Update every application, job, SDK, proxy, and secret reference that uses the old value.
 
-      models:
-        - "meta-llama/Llama-3.1-8B-Instruct"
+    Keep the overlap only as long as necessary. Two active credentials increase the number of values that can be exposed.
+  </Step>
+  <Step title="Remove the old entry">
+    Delete the old key from `auth.yaml`, send `SIGHUP` again, and verify that it now returns:
 
-      quota:
-        requests_per_minute: 100
-        tokens_per_day: 500000
-
-admin:
-  mode: api-key
-```
-
-Using the same owner preserves one shared quota bucket during the overlap. Use different owners only when the two credentials should have independent quota accounting.
-
-Keep the model restrictions and quotas aligned unless the rotation is also an intentional access change.
-
-### 3. Reload the file
-
-```bash
-sudo kill -HUP "$(pgrep hivenet-router)"
-```
-
-For Docker Compose:
-
-```bash
-docker compose kill \
-  --signal SIGHUP \
-  router
-```
-
-Hivenet Router validates the replacement provider before swapping it in. A failed reload leaves the previous provider active.
-
-<Warning>
-  A successful static-auth reload rebuilds the in-memory quota limiter.
-
-  Request-per-minute buckets reset. With the `memory` quota backend, current daily token usage is also lost. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
-</Warning>
-
-### 4. Test the new key
-
-```bash
-curl \
-  -H "Authorization: Bearer <new-client-key>" \
-  http://localhost:8080/v1/models
-```
-
-Also test an inference request and confirm:
-
-- the intended models are visible
-- the intended model can be invoked
-- quotas are correct
-- audit records use the expected owner; static keys do not populate a stable `key_id`
-
-### 5. Move applications to the new key
-
-Update every application, job, SDK, proxy, and secret reference that uses the old value.
-
-Keep the overlap only as long as necessary. Two active credentials increase the number of values that can be exposed.
-
-### 6. Remove the old entry
-
-Delete the old key from `auth.yaml`, send `SIGHUP` again, and verify that it now returns:
-
-```text
-401 unauthorized
-```
+    ```text
+    401 unauthorized
+    ```
+  </Step>
+</Steps>
 
 ## Rotate a dynamic client key
 
@@ -407,62 +404,64 @@ or:
 
 ## Troubleshooting
 
-### The new static key returns `401`
+<AccordionGroup>
+  <Accordion title="The new static key returns `401`">
+    Check that:
 
-Check that:
+    - the application sends the raw key, not its SHA-256 hash
+    - the hash in `auth.yaml` was generated from the exact raw value
+    - the successful `SIGHUP` reload appears in router logs
+    - the key has not already expired
+    - the request reaches the intended router
+  </Accordion>
 
-- the application sends the raw key, not its SHA-256 hash
-- the hash in `auth.yaml` was generated from the exact raw value
-- the successful `SIGHUP` reload appears in router logs
-- the key has not already expired
-- the request reaches the intended router
+  <Accordion title="The old static key still works">
+    Confirm that its entry was removed from the file that the running router actually loads, then send `SIGHUP` again.
 
-### The old static key still works
+    A failed reload leaves the previous provider active.
+  </Accordion>
 
-Confirm that its entry was removed from the file that the running router actually loads, then send `SIGHUP` again.
+  <Accordion title="A dynamic mutation returns `409 stale version`">
+    Read the current version:
 
-A failed reload leaves the previous provider active.
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-key>" \
+      http://localhost:8080/admin/api-keys/version \
+      | jq .
+    ```
 
-### A dynamic mutation returns `409 stale version`
+    Retry with a value that sorts after the current version.
+  </Accordion>
 
-Read the current version:
+  <Accordion title="The new administrator key returns `401`">
+    The running process probably still has the old environment.
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-key>" \
-  http://localhost:8080/admin/api-keys/version \
-  | jq .
-```
+    Restart or recreate the router after updating `HIVENET_ROUTER_ADMIN_API_KEYS`.
+  </Accordion>
 
-Retry with a value that sorts after the current version.
+  <Accordion title="Agents do not reconnect after secret rotation">
+    Check that:
 
-### The new administrator key returns `401`
+    - the router and every agent loaded the same new secret
+    - the secret contains at least 32 bytes
+    - agents can reach the router’s gRPC and libp2p ports
+    - all affected processes were restarted
+    - no host still references an older secret file or secret version
 
-The running process probably still has the old environment.
+    Compare secret files by hash without printing their contents.
+  </Accordion>
 
-Restart or recreate the router after updating `HIVENET_ROUTER_ADMIN_API_KEYS`.
+  <Accordion title="Provider fallback fails after rotation">
+    Confirm that:
 
-### Agents do not reconnect after secret rotation
-
-Check that:
-
-- the router and every agent loaded the same new secret
-- the secret contains at least 32 bytes
-- agents can reach the router’s gRPC and libp2p ports
-- all affected processes were restarted
-- no host still references an older secret file or secret version
-
-Compare secret files by hash without printing their contents.
-
-### Provider fallback fails after rotation
-
-Confirm that:
-
-- the router was restarted
-- the active policy still declares the provider
-- the new credential can access the configured provider model
-- provider billing or project limits permit the request
-- the test request uses the supported non-streaming fallback path
+    - the router was restarted
+    - the active policy still declares the provider
+    - the new credential can access the configured provider model
+    - provider billing or project limits permit the request
+    - the test request uses the supported non-streaming fallback path
+  </Accordion>
+</AccordionGroup>
 
 ## Rotation checklist
 
@@ -481,16 +480,16 @@ Confirm that:
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="API keys" href="/security/api-keys">
+<Columns cols={3}>
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Review static and dynamic client-key configuration and persistence.
   </Card>
 
-  <Card title="Authentication overview" href="/security/authentication-overview">
+  <Card title="Authentication overview" icon="lock" href="/security/authentication-overview">
     Understand the separate trust boundaries behind each credential.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="file-lines" href="/observability/audit-logging">
     Correlate credential use, denials, tenants, models, and request outcomes.
   </Card>
-</CardGroup>
+</Columns>

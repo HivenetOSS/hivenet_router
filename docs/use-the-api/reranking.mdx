@@ -461,133 +461,135 @@ See [Error codes](/reference/error-codes) for the complete reference.
 
 ## Troubleshooting
 
-### The model is not found
+<AccordionGroup>
+  <Accordion title="The model is not found">
+    List available reranking models:
 
-List available reranking models:
+    ```bash
+    curl http://localhost:8080/v1/models \
+      | jq '.data[]
+          | select(.capability == "reranker")'
+    ```
 
-```bash
-curl http://localhost:8080/v1/models \
-  | jq '.data[]
-      | select(.capability == "reranker")'
-```
+    Check that:
 
-Check that:
+    - the agent uses `--capability reranker`
+    - the requested model matches the registered model exactly
+    - the agent is healthy
+    - the API key may access the model
+  </Accordion>
 
-- the agent uses `--capability reranker`
-- the requested model matches the registered model exactly
-- the agent is healthy
-- the API key may access the model
+  <Accordion title="The request reaches the wrong capability">
+    Inspect the agent registration:
 
-### The request reaches the wrong capability
+    ```bash
+    curl http://localhost:8080/admin/routing-table \
+      | jq '.agents[]
+          | select(.metadata.model == "bge-reranker-large")
+          | {
+              model: .metadata.model,
+              capability: .metadata.capability,
+              engine: .metadata.engine
+            }'
+    ```
 
-Inspect the agent registration:
+    The capability must be:
 
-```bash
-curl http://localhost:8080/admin/routing-table \
-  | jq '.agents[]
-      | select(.metadata.model == "bge-reranker-large")
-      | {
-          model: .metadata.model,
-          capability: .metadata.capability,
-          engine: .metadata.engine
-        }'
-```
+    ```text
+    reranker
+    ```
+  </Accordion>
 
-The capability must be:
+  <Accordion title="The backend rejects the request">
+    Test it directly:
 
-```text
-reranker
-```
+    ```bash
+    curl -X POST \
+      http://localhost:7997/v1/rerank \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "bge-reranker-large",
+        "query": "Test query",
+        "documents": [
+          "First document",
+          "Second document"
+        ],
+        "top_n": 2
+      }'
+    ```
 
-### The backend rejects the request
+    A backend may reject:
 
-Test it directly:
+    - an empty query
+    - an empty document list
+    - unsupported document formats
+    - too many documents
+    - documents above the model’s token limit
+    - an invalid `top_n`
+    - unsupported optional fields
+  </Accordion>
 
-```bash
-curl -X POST \
-  http://localhost:7997/v1/rerank \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "bge-reranker-large",
-    "query": "Test query",
-    "documents": [
-      "First document",
-      "Second document"
-    ],
-    "top_n": 2
-  }'
-```
+  <Accordion title="The response contains `document: null`">
+    This is expected for backends that do not return document text by default.
 
-A backend may reject:
+    Use each result’s `index` to retrieve the original document from the input array.
+  </Accordion>
 
-- an empty query
-- an empty document list
-- unsupported document formats
-- too many documents
-- documents above the model’s token limit
-- an invalid `top_n`
-- unsupported optional fields
+  <Accordion title="Results do not contain every document">
+    Check `top_n`.
 
-### The response contains `document: null`
+    For example:
 
-This is expected for backends that do not return document text by default.
+    ```json
+    {
+      "top_n": 2
+    }
+    ```
 
-Use each result’s `index` to retrieve the original document from the input array.
+    returns at most two results, even when the request contains more documents.
 
-### Results do not contain every document
+    When `top_n` is omitted, the documented Infinity behavior is to return all ranked documents.
+  </Accordion>
 
-Check `top_n`.
+  <Accordion title="Requests time out">
+    Reduce the number or size of candidate documents, or increase the agent’s backend timeout:
 
-For example:
+    ```bash
+    --http-timeout 10m
+    ```
 
-```json
-{
-  "top_n": 2
-}
-```
+    Also check:
 
-returns at most two results, even when the request contains more documents.
+    - backend model loading state
+    - declared agent capacity
+    - accelerator memory
+    - competing embedding or reranking traffic
+    - backend batch configuration
+  </Accordion>
 
-When `top_n` is omitted, the documented Infinity behavior is to return all ranked documents.
+  <Accordion title="The request is rate-limited">
+    Check:
 
-### Requests time out
+    ```text
+    X-RateLimit-Remaining-Requests
+    ```
 
-Reduce the number or size of candidate documents, or increase the agent’s backend timeout:
-
-```bash
---http-timeout 10m
-```
-
-Also check:
-
-- backend model loading state
-- declared agent capacity
-- accelerator memory
-- competing embedding or reranking traffic
-- backend batch configuration
-
-### The request is rate-limited
-
-Check:
-
-```text
-X-RateLimit-Remaining-Requests
-```
-
-Review the API key’s request-rate quota and any per-model quota configuration.
+    Review the API key’s request-rate quota and any per-model quota configuration.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Models" href="/use-the-api/models">
+<Columns cols={3}>
+  <Card title="Models" icon="list" href="/use-the-api/models">
     Discover available models, capabilities, engines, and healthy capacity.
   </Card>
 
-  <Card title="Infinity agent" href="/deploy/agents/infinity">
+  <Card title="Infinity agent" icon="microchip" href="/deploy/agents/infinity">
     Configure embedding and reranking models through Infinity.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how reranking agents are filtered, ranked, and used in fallback chains.
   </Card>
-</CardGroup>
+</Columns>

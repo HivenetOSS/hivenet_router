@@ -737,121 +737,123 @@ Use audit or tenant-duration metrics when you need client-visible request durati
 
 ## Troubleshooting
 
-### SRTT remains unknown
+<AccordionGroup>
+  <Accordion title="SRTT remains unknown">
+    The agent has not produced a valid recorded request sample.
 
-The agent has not produced a valid recorded request sample.
+    Check that:
 
-Check that:
+    - the agent is registered
+    - it has served a request
+    - the request reached the agent
+    - the router recorded a success or a failure with a positive sample
 
-- the agent is registered
-- it has served a request
-- the request reached the agent
-- the router recorded a success or a failure with a positive sample
+    Inspect:
 
-Inspect:
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq '.agents[] | {
+          model: .metadata.model,
+          latency_state: .universal.latency_state,
+          successful: .universal.successful_requests_total,
+          failed: .universal.failed_requests_total
+        }'
+    ```
+  </Accordion>
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {
-      model: .metadata.model,
-      latency_state: .universal.latency_state,
-      successful: .universal.successful_requests_total,
-      failed: .universal.failed_requests_total
-    }'
-```
+  <Accordion title="SRTT is much higher than TTFT">
+    The requests may be non-streaming.
 
-### SRTT is much higher than TTFT
+    For native non-streaming Chat Completions, SRTT includes the complete inference before the agent returns headers. Engine TTFT measures only the start of model output.
 
-The requests may be non-streaming.
+    Also check:
 
-For native non-streaming Chat Completions, SRTT includes the complete inference before the agent returns headers. Engine TTFT measures only the start of model output.
+    - router-agent network time
+    - backend queueing
+    - response parsing
+    - mixed request types
+    - different observation windows
+  </Accordion>
 
-Also check:
+  <Accordion title="SRTT changes after switching to streaming">
+    This is expected.
 
-- router-agent network time
-- backend queueing
-- response parsing
-- mixed request types
-- different observation windows
+    Streaming usually records latency near response start, while non-streaming native chat records latency after the complete backend response is ready.
 
-### SRTT changes after switching to streaming
+    Establish separate baselines when both modes are used heavily.
+  </Accordion>
 
-This is expected.
+  <Accordion title="SRTT remains high after a cold start">
+    The estimator moves downward quickly, but it still needs successful faster samples.
 
-Streaming usually records latency near response start, while non-streaming native chat records latency after the complete backend response is ready.
+    Send representative requests and check whether:
 
-Establish separate baselines when both modes are used heavily.
+    - the backend is fully loaded
+    - queue pressure has cleared
+    - new samples are actually lower
+    - the agent is still serving unusually large requests
+  </Accordion>
 
-### SRTT remains high after a cold start
+  <Accordion title="SRTT resets after an agent restart">
+    The agent may have started with a new peer ID.
 
-The estimator moves downward quickly, but it still needs successful faster samples.
+    Check that `--identity-path` points to persistent storage and compare the current peer ID with the previous deployment.
 
-Send representative requests and check whether:
+    Also confirm that:
 
-- the backend is fully loaded
-- queue pressure has cleared
-- new samples are actually lower
-- the agent is still serving unusually large requests
+    - the router uses a persistent BadgerDB directory
+    - universal history was not reset
+    - the previous record has not expired
+    - the router shut down or flushed recently enough to preserve the latest value
+  </Accordion>
 
-### SRTT resets after an agent restart
+  <Accordion title="Policy does not exclude a slow agent">
+    Check that the field is:
 
-The agent may have started with a new peer ID.
+    ```yaml
+    srtt:
+    ```
 
-Check that `--identity-path` points to persistent storage and compare the current peer ID with the previous deployment.
+    rather than:
 
-Also confirm that:
+    ```yaml
+    srtt_ms:
+    ```
 
-- the router uses a persistent BadgerDB directory
-- universal history was not reset
-- the previous record has not expired
-- the router shut down or flushed recently enough to preserve the latest value
+    Inspect the live routing-table value.
 
-### Policy does not exclude a slow agent
+    A new agent with no SRTT passes the gate.
 
-Check that the field is:
+    Also confirm that the agent survived the earlier model, health, capability, match, failure, and capacity gates.
+  </Accordion>
 
-```yaml
-srtt:
-```
+  <Accordion title="Prometheus shows zero before traffic">
+    The SRTT gauge may be seeded at zero when the agent first registers without latency history.
 
-rather than:
+    Use the routing table’s:
 
-```yaml
-srtt_ms:
-```
+    ```text
+    latency_state
+    ```
 
-Inspect the live routing-table value.
-
-A new agent with no SRTT passes the gate.
-
-Also confirm that the agent survived the earlier model, health, capability, match, failure, and capacity gates.
-
-### Prometheus shows zero before traffic
-
-The SRTT gauge may be seeded at zero when the agent first registers without latency history.
-
-Use the routing table’s:
-
-```text
-latency_state
-```
-
-when you need to distinguish an initialized low value from an unknown estimator.
+    when you need to distinguish an initialized low value from an unknown estimator.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Hardware-aware routing" href="/observability/hardware-aware-routing">
+<Columns cols={3}>
+  <Card title="Hardware-aware routing" icon="microchip" href="/observability/hardware-aware-routing">
     Combine latency with GPU, CPU, memory, cache, and queue pressure.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     See where the SRTT gate fits inside the complete routing pipeline.
   </Card>
 
-  <Card title="Performance characteristics" href="/reference/performance-characteristics">
+  <Card title="Performance characteristics" icon="gauge-high" href="/reference/performance-characteristics">
     Review performance measurements, scope, and testing considerations.
   </Card>
-</CardGroup>
+</Columns>

@@ -663,119 +663,121 @@ docker compose --env-file .env up -d
 
 ## Troubleshooting
 
-### An agent does not appear
+<AccordionGroup>
+  <Accordion title="An agent does not appear">
+    Check the agent logs:
 
-Check the agent logs:
+    ```bash
+    docker compose \
+      -f docker-compose.agent.yml \
+      logs agent
+    ```
 
-```bash
-docker compose \
-  -f docker-compose.agent.yml \
-  logs agent
-```
+    Test the agent’s connection to the router:
 
-Test the agent’s connection to the router:
+    ```bash
+    nc -zv <router-ip> 8902
+    nc -zv <router-ip> 8903
+    ```
 
-```bash
-nc -zv <router-ip> 8902
-nc -zv <router-ip> 8903
-```
+    Check the router logs:
 
-Check the router logs:
+    ```bash
+    docker compose logs router \
+      | grep -i "registered\|agent\|error"
+    ```
 
-```bash
-docker compose logs router \
-  | grep -i "registered\|agent\|error"
-```
+    Common causes include:
 
-Common causes include:
+    - a different JWT secret on the router and agent
+    - an incorrect or unreachable `ROUTER_GRPC` address
+    - the router advertising a libp2p address the agent cannot reach
+    - a missing or incorrect router `--p2p-announce-addr` behind NAT or port translation
+    - an unhealthy inference backend
+  </Accordion>
 
-- a different JWT secret on the router and agent
-- an incorrect or unreachable `ROUTER_GRPC` address
-- the router advertising a libp2p address the agent cannot reach
-- a missing or incorrect router `--p2p-announce-addr` behind NAT or port translation
-- an unhealthy inference backend
+  <Accordion title="Prometheus cannot scrape the router">
+    Inspect Prometheus targets:
 
-### Prometheus cannot scrape the router
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- http://localhost:9090/api/v1/targets \
+      | jq '.data.activeTargets[] | {
+          job: .labels.job,
+          health: .health,
+          lastError: .lastError
+        }'
+    ```
 
-Inspect Prometheus targets:
+    Check the router endpoint from the Prometheus container:
 
-```bash
-docker compose exec prometheus \
-  wget -qO- http://localhost:9090/api/v1/targets \
-  | jq '.data.activeTargets[] | {
-      job: .labels.job,
-      health: .health,
-      lastError: .lastError
-    }'
-```
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- http://router:2112/metrics \
+      | head
+    ```
+  </Accordion>
 
-Check the router endpoint from the Prometheus container:
+  <Accordion title="Grafana has no metrics">
+    Confirm that Prometheus contains Hivenet Router data:
 
-```bash
-docker compose exec prometheus \
-  wget -qO- http://router:2112/metrics \
-  | head
-```
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- \
+      'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
+      | jq .
+    ```
 
-### Grafana has no metrics
+    Check the service logs:
 
-Confirm that Prometheus contains Hivenet Router data:
+    ```bash
+    docker compose logs prometheus | tail -50
+    docker compose logs grafana | tail -50
+    ```
+  </Accordion>
 
-```bash
-docker compose exec prometheus \
-  wget -qO- \
-  'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
-  | jq .
-```
+  <Accordion title="Grafana has no audit logs">
+    Check Loki and Promtail:
 
-Check the service logs:
+    ```bash
+    docker compose logs loki | tail -50
+    docker compose logs promtail | tail -50
+    ```
 
-```bash
-docker compose logs prometheus | tail -50
-docker compose logs grafana | tail -50
-```
+    Confirm that the router writes audit records to the shared volume:
 
-### Grafana has no audit logs
+    ```bash
+    docker compose exec router \
+      ls -la /var/log/hivenet-router
+    ```
+  </Accordion>
 
-Check Loki and Promtail:
+  <Accordion title="Agent metrics are missing">
+    Agents do not expose a separate Prometheus endpoint for this deployment. They push metrics to the router.
 
-```bash
-docker compose logs loki | tail -50
-docker compose logs promtail | tail -50
-```
+    Inspect the routing table:
 
-Confirm that the router writes audit records to the shared volume:
+    ```bash
+    curl http://localhost:8888/admin/routing-table \
+      | jq '.agents[]'
+    ```
 
-```bash
-docker compose exec router \
-  ls -la /var/log/hivenet-router
-```
-
-### Agent metrics are missing
-
-Agents do not expose a separate Prometheus endpoint for this deployment. They push metrics to the router.
-
-Inspect the routing table:
-
-```bash
-curl http://localhost:8888/admin/routing-table \
-  | jq '.agents[]'
-```
-
-If the agent is missing or unhealthy, check its backend, network connection, logs, and JWT secret.
+    If the agent is missing or unhealthy, check its backend, network connection, logs, and JWT secret.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Bare metal" href="/deploy/bare-metal">
+<Columns cols={3}>
+  <Card title="Bare metal" icon="server" href="/deploy/bare-metal">
     Run the router and agents directly without Docker.
   </Card>
 
-  <Card title="vLLM agent" href="/deploy/agents/vllm">
+  <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
     Configure a vLLM backend, model discovery, metrics, and capacity.
   </Card>
 
-  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+  <Card title="Grafana dashboards" icon="chart-line" href="/observability/grafana-dashboards">
     Understand the provisioned dashboards and data sources.
   </Card>
-</CardGroup>
+</Columns>

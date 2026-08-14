@@ -465,179 +465,181 @@ curl http://192.168.1.100:2112/metrics \
 
 ## Troubleshooting
 
-### The agent reports that `--model` is required
+<AccordionGroup>
+  <Accordion title="The agent reports that `--model` is required">
+    The custom engine cannot discover models.
 
-The custom engine cannot discover models.
+    Start the agent with:
 
-Start the agent with:
-
-```bash
---model <model-name>
-```
-
-### The agent reports that `--health-url` is required
-
-Provide the complete health endpoint:
-
-```bash
---health-url http://localhost:8000/health
-```
-
-This is separate from `--backend-url`.
-
-### The backend never becomes ready
-
-Test the exact URL passed to `--health-url`:
-
-```bash
-curl -i http://localhost:8000/health
-```
-
-The endpoint must return HTTP `200`. Redirects, authentication challenges, and other status codes are treated as unhealthy.
-
-### Direct requests work, but routed requests fail
-
-Test the exact OpenAI-compatible path:
-
-```bash
-curl -X POST \
-  http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello"
-      }
-    ]
-  }'
-```
-
-Common causes include:
-
-- the backend uses another path
-- the backend expects a proprietary request schema
-- the model name differs
-- the backend requires credentials that are not present in the client request
-- the backend does not support the requested field or streaming mode
-
-### The model is visible but requests do not route
-
-Check the model value in all three places:
-
-```text
-Agent --model
-Client request body
-Backend model identifier
-```
-
-The agent’s registered model must match the client request.
-
-Inspect the routing table:
-
-```bash
-curl http://192.168.1.100:8080/admin/routing-table \
-  | jq '.agents[]
-      | select(.metadata.engine == "custom")
-      | {
-          model: .metadata.model,
-          capability: .metadata.capability,
-          healthy: .status.healthy,
-          active_requests: .status.active_requests,
-          capacity: .metadata.capacity
-        }'
-```
-
-### The agent does not register
-
-Check the logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs hivenet-agent
+    --model <model-name>
     ```
-  </Tab>
-  <Tab title="systemd">
+  </Accordion>
+
+  <Accordion title="The agent reports that `--health-url` is required">
+    Provide the complete health endpoint:
+
     ```bash
-    sudo journalctl \
-      -u hivenet-agent \
-      -n 100 \
-      --no-pager
+    --health-url http://localhost:8000/health
     ```
-  </Tab>
-</Tabs>
 
-Test connectivity from the agent to the router:
+    This is separate from `--backend-url`.
+  </Accordion>
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+  <Accordion title="The backend never becomes ready">
+    Test the exact URL passed to `--health-url`:
 
-Check that:
+    ```bash
+    curl -i http://localhost:8000/health
+    ```
 
-- the router and agent use the same JWT secret
-- the backend health endpoint returns HTTP `200`
-- the router’s libp2p interface is reachable
-- the router advertises a libp2p address the agent can reach
+    The endpoint must return HTTP `200`. Redirects, authentication challenges, and other status codes are treated as unhealthy.
+  </Accordion>
 
-### Streaming is buffered or incomplete
+  <Accordion title="Direct requests work, but routed requests fail">
+    Test the exact OpenAI-compatible path:
 
-Test the backend directly with `curl -N`.
+    ```bash
+    curl -X POST \
+      http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello"
+          }
+        ]
+      }'
+    ```
 
-Confirm that it returns a streaming content type and flushes chunks as they are generated.
+    Common causes include:
 
-Hivenet Router can relay an SSE stream, but it cannot correct buffering introduced by the backend or an intermediate proxy.
+    - the backend uses another path
+    - the backend expects a proprietary request schema
+    - the model name differs
+    - the backend requires credentials that are not present in the client request
+    - the backend does not support the requested field or streaming mode
+  </Accordion>
 
-### Requests time out
+  <Accordion title="The model is visible but requests do not route">
+    Check the model value in all three places:
 
-The backend HTTP timeout defaults to two minutes.
+    ```text
+    Agent --model
+    Client request body
+    Backend model identifier
+    ```
 
-Increase it for longer requests:
+    The agent’s registered model must match the client request.
 
-```bash
---http-timeout 10m
-```
+    Inspect the routing table:
 
-For streaming responses, the rolling stream-write timeout is configured separately:
+    ```bash
+    curl http://192.168.1.100:8080/admin/routing-table \
+      | jq '.agents[]
+          | select(.metadata.engine == "custom")
+          | {
+              model: .metadata.model,
+              capability: .metadata.capability,
+              healthy: .status.healthy,
+              active_requests: .status.active_requests,
+              capacity: .metadata.capacity
+            }'
+    ```
+  </Accordion>
 
-```bash
---stream-write-timeout 2m
-```
+  <Accordion title="The agent does not register">
+    Check the logs:
 
-Also check the backend’s own timeout, queue, and concurrency settings.
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent
+        ```
+      </Tab>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl \
+          -u hivenet-agent \
+          -n 100 \
+          --no-pager
+        ```
+      </Tab>
+    </Tabs>
 
-### The peer ID changes after restart
+    Test connectivity from the agent to the router:
 
-Make sure `--identity-path` points to persistent storage.
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-For Docker:
+    Check that:
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+    - the router and agent use the same JWT secret
+    - the backend health endpoint returns HTTP `200`
+    - the router’s libp2p interface is reachable
+    - the router advertises a libp2p address the agent can reach
+  </Accordion>
 
-For bare metal:
+  <Accordion title="Streaming is buffered or incomplete">
+    Test the backend directly with `curl -N`.
 
-```bash
-ls -l /var/lib/hivenet-router/agent/identity.key
-```
+    Confirm that it returns a streaming content type and flushes chunks as they are generated.
+
+    Hivenet Router can relay an SSE stream, but it cannot correct buffering introduced by the backend or an intermediate proxy.
+  </Accordion>
+
+  <Accordion title="Requests time out">
+    The backend HTTP timeout defaults to two minutes.
+
+    Increase it for longer requests:
+
+    ```bash
+    --http-timeout 10m
+    ```
+
+    For streaming responses, the rolling stream-write timeout is configured separately:
+
+    ```bash
+    --stream-write-timeout 2m
+    ```
+
+    Also check the backend’s own timeout, queue, and concurrency settings.
+  </Accordion>
+
+  <Accordion title="The peer ID changes after restart">
+    Make sure `--identity-path` points to persistent storage.
+
+    For Docker:
+
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
+
+    For bare metal:
+
+    ```bash
+    ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Chat completions" href="/use-the-api/chat-completions">
+<Columns cols={3}>
+  <Card title="Chat completions" icon="comments" href="/use-the-api/chat-completions">
     Review the supported request, response, and streaming behavior.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how custom agents participate in routing and fallback.
   </Card>
 
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+  <Card title="Hardware metrics" icon="gauge-high" href="/observability/hardware-metrics">
     Understand the system and GPU signals collected from agent hosts.
   </Card>
-</CardGroup>
+</Columns>

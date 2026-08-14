@@ -435,139 +435,141 @@ See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy 
 
 ## Troubleshooting
 
-### The agent cannot discover a model
+<AccordionGroup>
+  <Accordion title="The agent cannot discover a model">
+    Check vLLM health:
 
-Check vLLM health:
-
-```bash
-curl -i http://localhost:8888/health
-```
-
-Check model discovery:
-
-```bash
-curl http://localhost:8888/v1/models \
-  | jq '.data[].id'
-```
-
-The agent waits and retries if vLLM is healthy but no model is available yet.
-
-### The wrong model is registered
-
-Automatic discovery selects the first model returned by `/v1/models`.
-
-Pin the correct one:
-
-```bash
---model meta-llama/Llama-3.1-8B-Instruct
-```
-
-Restart the agent after changing the setting.
-
-### The agent does not register
-
-Check the agent logs:
-
-<Tabs>
-  <Tab title="Docker">
     ```bash
-    docker logs hivenet-agent
+    curl -i http://localhost:8888/health
     ```
-  </Tab>
-  <Tab title="systemd">
+
+    Check model discovery:
+
     ```bash
-    sudo journalctl -u hivenet-agent -n 100 --no-pager
+    curl http://localhost:8888/v1/models \
+      | jq '.data[].id'
     ```
-  </Tab>
-</Tabs>
 
-Confirm connectivity:
+    The agent waits and retries if vLLM is healthy but no model is available yet.
+  </Accordion>
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+  <Accordion title="The wrong model is registered">
+    Automatic discovery selects the first model returned by `/v1/models`.
 
-Check that the router and agent use the same JWT secret.
+    Pin the correct one:
 
-### KV cache utilization remains high
+    ```bash
+    --model meta-llama/Llama-3.1-8B-Instruct
+    ```
 
-Reduce the amount of work Hivenet Router assigns to the agent:
+    Restart the agent after changing the setting.
+  </Accordion>
 
-```bash
---capacity 128
-```
+  <Accordion title="The agent does not register">
+    Check the agent logs:
 
-Or reduce vLLM’s scheduler limit:
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker logs hivenet-agent
+        ```
+      </Tab>
+      <Tab title="systemd">
+        ```bash
+        sudo journalctl -u hivenet-agent -n 100 --no-pager
+        ```
+      </Tab>
+    </Tabs>
 
-```bash
---max-num-seqs 128
-```
+    Confirm connectivity:
 
-You can also use a routing gate to stop selecting the agent above a chosen threshold.
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-### Preemptions keep increasing
+    Check that the router and agent use the same JWT secret.
+  </Accordion>
 
-Rising preemptions indicate that vLLM is evicting in-flight KV-cache data under memory pressure.
+  <Accordion title="KV cache utilization remains high">
+    Reduce the amount of work Hivenet Router assigns to the agent:
 
-Reduce:
+    ```bash
+    --capacity 128
+    ```
 
-- `--capacity` on the Hivenet Router agent
-- `--max-num-seqs` on vLLM
-- model context or batch pressure, where appropriate for your workload
+    Or reduce vLLM’s scheduler limit:
 
-### Backend requests time out
+    ```bash
+    --max-num-seqs 128
+    ```
 
-The agent’s backend HTTP timeout defaults to two minutes.
+    You can also use a routing gate to stop selecting the agent above a chosen threshold.
+  </Accordion>
 
-Increase it for longer requests:
+  <Accordion title="Preemptions keep increasing">
+    Rising preemptions indicate that vLLM is evicting in-flight KV-cache data under memory pressure.
 
-```bash
---http-timeout 10m
-```
+    Reduce:
 
-### The peer ID changes after restart
+    - `--capacity` on the Hivenet Router agent
+    - `--max-num-seqs` on vLLM
+    - model context or batch pressure, where appropriate for your workload
+  </Accordion>
 
-Make sure `--identity-path` points to persistent storage.
+  <Accordion title="Backend requests time out">
+    The agent’s backend HTTP timeout defaults to two minutes.
 
-For Docker, confirm the volume is mounted:
+    Increase it for longer requests:
 
-```bash
-docker inspect hivenet-agent \
-  | jq '.[0].Mounts'
-```
+    ```bash
+    --http-timeout 10m
+    ```
+  </Accordion>
 
-For bare metal:
+  <Accordion title="The peer ID changes after restart">
+    Make sure `--identity-path` points to persistent storage.
 
-```bash
-ls -l /var/lib/hivenet-router/agent/identity.key
-```
+    For Docker, confirm the volume is mounted:
 
-### Metrics are missing
+    ```bash
+    docker inspect hivenet-agent \
+      | jq '.[0].Mounts'
+    ```
 
-Check vLLM’s metrics endpoint:
+    For bare metal:
 
-```bash
-curl http://localhost:8888/metrics \
-  | head
-```
+    ```bash
+    ls -l /var/lib/hivenet-router/agent/identity.key
+    ```
+  </Accordion>
 
-Check the agent logs for scrape errors.
+  <Accordion title="Metrics are missing">
+    Check vLLM’s metrics endpoint:
 
-Metrics are scraped in the background. A scrape failure does not stop the agent from forwarding requests.
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
+
+    Check the agent logs for scrape errors.
+
+    Metrics are scraped in the background. A scrape failure does not stop the agent from forwarding requests.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Ollama agent" href="/deploy/agents/ollama">
+<Columns cols={3}>
+  <Card title="Ollama agent" icon="server" href="/deploy/agents/ollama">
     Connect an Ollama backend for local or edge inference.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Learn how Hivenet Router filters and ranks matching agents.
   </Card>
 
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+  <Card title="Engine metrics" icon="chart-line" href="/observability/engine-metrics">
     Understand the metrics collected from vLLM and other engines.
   </Card>
-</CardGroup>
+</Columns>

@@ -1600,143 +1600,145 @@ groups:
 
 ## Troubleshooting
 
-### Prometheus cannot reach the router
+<AccordionGroup>
+  <Accordion title="Prometheus cannot reach the router">
+    Check the endpoint directly:
 
-Check the endpoint directly:
+    ```bash
+    curl -i \
+      http://<router-host>:2112/metrics
+    ```
 
-```bash
-curl -i \
-  http://<router-host>:2112/metrics
-```
+    Check the router logs:
 
-Check the router logs:
+    ```bash
+    journalctl \
+      -u hivenet-router \
+      | grep -i prometheus
+    ```
 
-```bash
-journalctl \
-  -u hivenet-router \
-  | grep -i prometheus
-```
+    For Docker Compose:
 
-For Docker Compose:
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- \
+      http://router:2112/metrics \
+      | head
+    ```
 
-```bash
-docker compose exec prometheus \
-  wget -qO- \
-  http://router:2112/metrics \
-  | head
-```
+    Check firewall and container-network rules.
+  </Accordion>
 
-Check firewall and container-network rules.
+  <Accordion title="A metric is missing">
+    A series often appears only after the relevant event or data has occurred.
 
-### A metric is missing
+    For example:
 
-A series often appears only after the relevant event or data has occurred.
+    - tenant metrics appear after requests
+    - engine metrics appear after a successful engine scrape
+    - TTFT and ITL appear after completions
+    - GPU metrics require NVML and visible NVIDIA devices
+    - policy counters appear after routing activity
+    - per-model quota gauges appear when those quota paths are used or seeded
 
-For example:
+    Search by prefix:
 
-- tenant metrics appear after requests
-- engine metrics appear after a successful engine scrape
-- TTFT and ITL appear after completions
-- GPU metrics require NVML and visible NVIDIA devices
-- policy counters appear after routing activity
-- per-model quota gauges appear when those quota paths are used or seeded
+    ```bash
+    curl -s \
+      http://localhost:2112/metrics \
+      | grep 'hivenet_router_agent_engine'
+    ```
+  </Accordion>
 
-Search by prefix:
+  <Accordion title="An engine metric is missing">
+    Check the backend endpoint locally on the agent host:
 
-```bash
-curl -s \
-  http://localhost:2112/metrics \
-  | grep 'hivenet_router_agent_engine'
-```
+    ```bash
+    curl \
+      http://localhost:8888/metrics \
+      | head
+    ```
 
-### An engine metric is missing
+    Confirm the engine-specific requirement:
 
-Check the backend endpoint locally on the agent host:
+    - SGLang needs `--enable-metrics`
+    - llama.cpp needs `--metrics`
+    - Ollama, Infinity, and custom engines do not currently supply engine metrics
 
-```bash
-curl \
-  http://localhost:8888/metrics \
-  | head
-```
+    Inspect the agent logs for scrape errors.
 
-Confirm the engine-specific requirement:
+    A failed metrics scrape does not stop request forwarding.
+  </Accordion>
 
-- SGLang needs `--enable-metrics`
-- llama.cpp needs `--metrics`
-- Ollama, Infinity, and custom engines do not currently supply engine metrics
+  <Accordion title="Prometheus shows duplicate or stale agents">
+    The `peer_id` label identifies the agent.
 
-Inspect the agent logs for scrape errors.
+    If an agent starts with a new identity after every restart, Prometheus sees a new series.
 
-A failed metrics scrape does not stop request forwarding.
+    Configure a persistent:
 
-### Prometheus shows duplicate or stale agents
+    ```text
+    --identity-path
+    ```
 
-The `peer_id` label identifies the agent.
+    and preserve the file or mounted volume across restarts.
+  </Accordion>
 
-If an agent starts with a new identity after every restart, Prometheus sees a new series.
+  <Accordion title="Tenant labels show `anonymous` or `default`">
+    In no-auth mode:
 
-Configure a persistent:
+    ```text
+    tenant_id="default"
+    key_id="anonymous"
+    ```
 
-```text
---identity-path
-```
+    Static API keys currently use:
 
-and preserve the file or mounted volume across restarts.
+    ```text
+    key_id="anonymous"
+    ```
 
-### Tenant labels show `anonymous` or `default`
+    because stable key IDs belong to dynamic registry entries.
 
-In no-auth mode:
+    `deployment_id="unset"` is expected before an agent is selected or when the agent does not advertise a deployment ID.
+  </Accordion>
 
-```text
-tenant_id="default"
-key_id="anonymous"
-```
+  <Accordion title="Histogram queries return no data">
+    Check that the corresponding `_bucket` series exists:
 
-Static API keys currently use:
+    ```bash
+    curl -s \
+      http://localhost:2112/metrics \
+      | grep \
+        'hivenet_router_agent_engine_ttft_seconds_bucket'
+    ```
 
-```text
-key_id="anonymous"
-```
+    Use `rate()` over a window that contains completed observations.
 
-because stable key IDs belong to dynamic registry entries.
+    A new or idle engine may not have enough data yet.
+  </Accordion>
 
-`deployment_id="unset"` is expected before an agent is selected or when the agent does not advertise a deployment ID.
+  <Accordion title="Counter graphs drop after a restart">
+    Prometheus counters are process-local series.
 
-### Histogram queries return no data
+    Some per-agent lifetime counters are reseeded from BadgerDB when agents register again, but other router, policy, HTTP, tenant, and queue metrics begin again with the new router process.
 
-Check that the corresponding `_bucket` series exists:
-
-```bash
-curl -s \
-  http://localhost:2112/metrics \
-  | grep \
-    'hivenet_router_agent_engine_ttft_seconds_bucket'
-```
-
-Use `rate()` over a window that contains completed observations.
-
-A new or idle engine may not have enough data yet.
-
-### Counter graphs drop after a restart
-
-Prometheus counters are process-local series.
-
-Some per-agent lifetime counters are reseeded from BadgerDB when agents register again, but other router, policy, HTTP, tenant, and queue metrics begin again with the new router process.
-
-Use `rate()` or `increase()` rather than graphing raw counter values when restart behavior matters.
+    Use `rate()` or `increase()` rather than graphing raw counter values when restart behavior matters.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Grafana dashboards" href="/observability/grafana-dashboards">
+<Columns cols={3}>
+  <Card title="Grafana dashboards" icon="gauge-high" href="/observability/grafana-dashboards">
     Explore the provisioned dashboards, data sources, variables, and panels.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="file-lines" href="/observability/audit-logging">
     Query structured request records through Loki or local JSONL files.
   </Card>
 
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+  <Card title="Hardware metrics" icon="microchip" href="/observability/hardware-metrics">
     Review how agents collect GPU, CPU, and memory data.
   </Card>
-</CardGroup>
+</Columns>

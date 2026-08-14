@@ -9,28 +9,49 @@ Hivenet Router exposes OpenAI-compatible Chat Completions and Anthropic-compatib
 
 The router reads the top-level `model` field, selects a healthy language-model agent, and forwards the original request to the same path on that agent’s backend.
 
-| API dialect | Endpoint |
-| --- | --- |
-| OpenAI Chat Completions | `POST /v1/chat/completions` |
-| Anthropic Messages | `POST /v1/messages` |
-| Anthropic token counting | `POST /v1/messages/count_tokens` |
+<Columns cols={3}>
+  <Card title="OpenAI Chat Completions" icon="comments" href="#openai-chat-completions">
+    `POST /v1/chat/completions`
+  </Card>
 
-<Note>
+  <Card title="Anthropic Messages" icon="message" href="#anthropic-messages">
+    `POST /v1/messages`
+  </Card>
+
+  <Card title="Anthropic token counting" icon="calculator" href="#count-anthropic-input-tokens">
+    `POST /v1/messages/count_tokens`
+  </Card>
+</Columns>
+
+<Info>
   The selected backend must support the endpoint used by the client. Hivenet Router does not translate between the OpenAI and Anthropic request formats.
-</Note>
+</Info>
 
 ## How passthrough works
 
-For each request, Hivenet Router:
+For each request, Hivenet Router follows the same pipeline:
 
-1. authenticates the client when API authentication is enabled
-2. applies request and token quotas when configured
-3. reads and validates the top-level `model` field
-4. checks that the API key may use that model
-5. applies the model's request caps, pressure shed, occupancy budget, and serverless per-key admission limits
-6. selects a healthy `llm` agent through the routing policy
-7. forwards the original body to the same path on the selected backend
-8. returns the backend response to the client
+<Steps>
+  <Step title="Authenticate and apply quotas">
+    Authenticate the client when API authentication is enabled, then apply configured request and token quotas.
+  </Step>
+
+  <Step title="Resolve and authorize the model">
+    Read and validate the top-level `model` field, then confirm that the API key may use it.
+  </Step>
+
+  <Step title="Apply admission control">
+    Check the model’s request caps, pressure shed, occupancy budget, and serverless per-key limits.
+  </Step>
+
+  <Step title="Select and forward">
+    Select a healthy `llm` agent through the routing policy and forward the original body to the same backend path.
+  </Step>
+
+  <Step title="Return the response">
+    Return the backend response to the client.
+  </Step>
+</Steps>
 
 Apart from the fields needed for routing and quota estimation, Hivenet Router does not impose its own generation schema or defaults. Parameters such as sampling controls, tools, structured output, multimodal input, and backend-specific extensions work only when the selected backend supports them.
 
@@ -102,7 +123,9 @@ POST /v1/chat/completions
 
 ### Basic request
 
-```bash
+<CodeGroup>
+
+```bash Without authentication
 curl -X POST \
   http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -121,9 +144,7 @@ curl -X POST \
   }'
 ```
 
-When authentication is enabled:
-
-```bash
+```bash With API key
 curl -X POST \
   http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer <api-key>" \
@@ -138,6 +159,8 @@ curl -X POST \
     ]
   }'
 ```
+
+</CodeGroup>
 
 ### Fields used by Hivenet Router
 
@@ -155,9 +178,9 @@ Hivenet Router forwards the complete request, but it reads a small number of fie
 
 All other fields are passed to the backend without Hivenet Router assigning its own default values.
 
-<Note>
+<Info>
   The selected backend decides which request fields, message roles, modalities, tools, and sampling values it accepts.
-</Note>
+</Info>
 
 ### Multimodal message content
 
@@ -268,9 +291,9 @@ data: [DONE]
 
 The exact event structure comes from the backend.
 
-<Note>
+<Info>
   Hivenet Router can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
-</Note>
+</Info>
 
 ## Anthropic Messages
 
@@ -436,7 +459,9 @@ A token-budget rejection can still report a nonzero `X-RateLimit-Remaining-Token
 
 Router errors use this envelope:
 
-```json
+<CodeGroup>
+
+```json Router error
 {
   "error": {
     "code": "error_code",
@@ -446,9 +471,7 @@ Router errors use this envelope:
 }
 ```
 
-Backend-derived errors use:
-
-```json
+```json Backend error
 {
   "error": {
     "code": "error_code",
@@ -457,6 +480,8 @@ Backend-derived errors use:
   }
 }
 ```
+
+</CodeGroup>
 
 Common responses include:
 
@@ -481,16 +506,16 @@ See [Error codes](/reference/error-codes) for the complete reference.
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Embeddings" href="/use-the-api/embeddings">
+<Columns cols={3}>
+  <Card title="Embeddings" icon="layer-group" href="/use-the-api/embeddings">
     Generate vectors through capability-specific embedding agents.
   </Card>
 
-  <Card title="Models" href="/use-the-api/models">
+  <Card title="Models" icon="list" href="/use-the-api/models">
     Discover which models and capabilities are currently available.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Configure client authentication, model access, and quotas.
   </Card>
-</CardGroup>
+</Columns>

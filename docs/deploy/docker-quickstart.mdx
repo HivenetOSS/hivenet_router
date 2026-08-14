@@ -430,6 +430,10 @@ This guide uses Docker host networking and is intended for Linux hosts.
   </Step>
 </Steps>
 
+<Check>
+  The deployment is ready when the router reports two healthy vLLM agents and the routing counter increases after you send requests.
+</Check>
+
 ## Port reference
 
 | Service | Host | Port | Restrict access to |
@@ -444,91 +448,93 @@ Because the agent container uses host networking, it reaches vLLM at `localhost:
 
 ## Troubleshooting
 
-### An agent does not register
+<AccordionGroup>
+  <Accordion title="An agent does not register" icon="link-slash">
+    Check the agent logs:
 
-Check the agent logs:
+    ```bash
+    docker logs hivenet-agent
+    ```
 
-```bash
-docker logs hivenet-agent
-```
+    Test the agent’s connection to the router:
 
-Test the agent’s connection to the router:
+    ```bash
+    nc -zv 192.168.1.100 50051
+    nc -zv 192.168.1.100 9000
+    ```
 
-```bash
-nc -zv 192.168.1.100 50051
-nc -zv 192.168.1.100 9000
-```
+    Common causes include:
 
-Common causes include:
+    - `--router-grpc` points to the wrong address
+    - the router advertises a libp2p address the agent cannot reach
+    - the router is not listening on `0.0.0.0`
+    - the backend is not healthy
+    - the router and agent use different JWT secrets
+  </Accordion>
 
-- `--router-grpc` points to the wrong address
-- the router advertises a libp2p address the agent cannot reach
-- the router is not listening on `0.0.0.0`
-- the backend is not healthy
-- the router and agent use different JWT secrets
+  <Accordion title="vLLM is not ready" icon="server">
+    Inspect the logs:
 
-### vLLM is not ready
+    ```bash
+    docker logs vllm
+    ```
 
-Inspect the logs:
+    Check the health endpoint:
 
-```bash
-docker logs vllm
-```
+    ```bash
+    curl http://localhost:8888/health
+    ```
 
-Check the health endpoint:
+    Wait for vLLM to finish loading the model before starting the agent.
+  </Accordion>
 
-```bash
-curl http://localhost:8888/health
-```
+  <Accordion title="The JWT secret does not match" icon="key">
+    On the router and each agent host:
 
-Wait for vLLM to finish loading the model before starting the agent.
+    ```bash
+    sha256sum /path/to/jwt.secret
+    ```
 
-### The JWT secret does not match
+    The hash must be identical on every host.
+  </Accordion>
 
-On the router and each agent host:
+  <Accordion title="GPU metrics are missing" icon="microchip">
+    Check that Docker can access the GPU:
 
-```bash
-sha256sum /path/to/jwt.secret
-```
+    ```bash
+    docker run --rm \
+      --gpus all \
+      nvidia/cuda:12.6.0-base-ubuntu24.04 \
+      nvidia-smi
+    ```
 
-The hash must be identical on every host.
+    Confirm that the agent container received a GPU device request:
 
-### GPU metrics are missing
+    ```bash
+    docker inspect hivenet-agent \
+      | grep -A5 DeviceRequests
+    ```
+  </Accordion>
 
-Check that Docker can access the GPU:
+  <Accordion title="A firewall blocks traffic" icon="shield-halved">
+    On the router, allow only the traffic your deployment requires.
 
-```bash
-docker run --rm \
-  --gpus all \
-  nvidia/cuda:12.6.0-base-ubuntu24.04 \
-  nvidia-smi
-```
+    With UFW:
 
-Confirm that the agent container received a GPU device request:
+    ```bash
+    sudo ufw allow 8080/tcp
+    sudo ufw allow from 192.168.1.101 to any port 50051 proto tcp
+    sudo ufw allow from 192.168.1.102 to any port 50051 proto tcp
+    sudo ufw allow from 192.168.1.101 to any port 9000 proto tcp
+    sudo ufw allow from 192.168.1.102 to any port 9000 proto tcp
+    sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
+    ```
 
-```bash
-docker inspect hivenet-agent \
-  | grep -A5 DeviceRequests
-```
-
-### A firewall blocks traffic
-
-On the router, allow only the traffic your deployment requires.
-
-With UFW:
-
-```bash
-sudo ufw allow 8080/tcp
-sudo ufw allow from 192.168.1.101 to any port 50051 proto tcp
-sudo ufw allow from 192.168.1.102 to any port 50051 proto tcp
-sudo ufw allow from 192.168.1.101 to any port 9000 proto tcp
-sudo ufw allow from 192.168.1.102 to any port 9000 proto tcp
-sudo ufw allow from <monitoring-ip> to any port 2112 proto tcp
-```
-
-<Warning>
-  These commands are examples, not a complete network-security policy. Apply equivalent restrictions in your cloud firewall or security group.
-</Warning>
+    <Warning>
+      These commands are examples, not a complete network-security policy. Apply equivalent restrictions in your cloud firewall or security group.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
 
 ## Clean up
 
@@ -550,16 +556,16 @@ The BadgerDB data in the mounted `badger` directory and agent identity files in 
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Docker Compose" href="/deploy/docker-compose">
+<Columns cols={3}>
+  <Card title="Docker Compose" icon="boxes-stacked" href="/deploy/docker-compose">
     Add Prometheus, Grafana, Loki, and Tempo using the repository’s Compose stack.
   </Card>
 
-  <Card title="vLLM agent" href="/deploy/agents/vllm">
+  <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
     Configure model discovery, metrics, capacity, and multi-model deployments.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     Control how Hivenet Router filters, ranks, and falls back across agents.
   </Card>
-</CardGroup>
+</Columns>

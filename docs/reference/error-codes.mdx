@@ -1239,41 +1239,63 @@ Official SDKs and frameworks may add their own automatic retries. Account for th
 
 A production client should:
 
-1. Parse structured errors when the body matches the Hivenet Router envelope.
-2. Preserve the HTTP status and `X-Request-ID`.
-3. Handle ordinary HTTP errors when no structured envelope exists.
-4. Distinguish temporary capacity failures from request defects.
-5. Apply bounded retries with exponential backoff and jitter.
-6. Avoid retrying unsafe or ambiguous operations automatically.
-7. Log the code, status, source, request ID, and model.
-8. Avoid logging credentials or complete sensitive prompts.
-9. Alert on sustained error rates rather than individual transient failures.
-10. Use audit records and traces for detailed investigation.
+<Steps>
+  <Step title="Parse structured errors">
+    Parse structured errors when the body matches the Hivenet Router envelope.
+  </Step>
+  <Step title="Preserve the HTTP status and `X-Request-ID`">
+    Preserve the HTTP status and `X-Request-ID`.
+  </Step>
+  <Step title="Handle ordinary HTTP errors when no structured envelope exists">
+    Handle ordinary HTTP errors when no structured envelope exists.
+  </Step>
+  <Step title="Distinguish temporary capacity failures from request defects">
+    Distinguish temporary capacity failures from request defects.
+  </Step>
+  <Step title="Apply bounded retries with exponential backoff and jitter">
+    Apply bounded retries with exponential backoff and jitter.
+  </Step>
+  <Step title="Avoid retrying unsafe or ambiguous operations automatically">
+    Avoid retrying unsafe or ambiguous operations automatically.
+  </Step>
+  <Step title="Log the code, status, source, request ID, and model">
+    Log the code, status, source, request ID, and model.
+  </Step>
+  <Step title="Avoid logging credentials or complete sensitive prompts">
+    Avoid logging credentials or complete sensitive prompts.
+  </Step>
+  <Step title="Alert on sustained error rates rather than individual transient failures">
+    Alert on sustained error rates rather than individual transient failures.
+  </Step>
+  <Step title="Use audit records and traces for detailed investigation">
+    Use audit records and traces for detailed investigation.
+  </Step>
+</Steps>
 
 ## Next steps
 
-<CardGroup cols={2}>
-  <Card title="Performance characteristics" href="/reference/performance-characteristics">
+<Columns cols={2}>
+  <Card title="Performance characteristics" icon="gauge-high" href="/reference/performance-characteristics">
     Understand queueing, concurrency, latency, throughput, and benchmarking behavior.
   </Card>
 
-  <Card title="Use from code" href="/integrations/use-from-code">
+  <Card title="Use from code" icon="code" href="/integrations/use-from-code">
     Handle Hivenet Router errors from Python, JavaScript, SDKs, and direct HTTP clients.
   </Card>
 
-  <Card title="Routing concepts" href="/routing/routing-concepts">
+  <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
     See how retries, fallback steps, capacity, and policy exhaustion affect the final response.
   </Card>
 
-  <Card title="API keys" href="/security/api-keys">
+  <Card title="API keys" icon="key" href="/security/api-keys">
     Configure the request and token quotas behind `429` responses.
   </Card>
 
-  <Card title="Admin endpoints" href="/use-the-api/admin-endpoints">
+  <Card title="Admin endpoints" icon="screwdriver-wrench" href="/use-the-api/admin-endpoints">
     Diagnose fleet health, capacity, routing state, and dynamic key errors.
   </Card>
 
-  <Card title="Audit logging" href="/observability/audit-logging">
+  <Card title="Audit logging" icon="file-lines" href="/observability/audit-logging">
     Correlate error codes with tenants, models, agents, request IDs, and traces.
   </Card>
-</CardGroup>
+</Columns>

@@ -710,240 +710,242 @@ See [Prometheus metrics](/observability/prometheus-metrics#alerting-examples) fo
 
 ## Troubleshooting
 
-### Grafana does not start
+<AccordionGroup>
+  <Accordion title="Grafana does not start">
+    Check the container:
+
+    ```bash
+    docker compose ps grafana
+    ```
+
+    Inspect its logs:
+
+    ```bash
+    docker compose logs grafana \
+      | tail -100
+    ```
+
+    Common causes include:
+
+    - invalid provisioning YAML
+    - unreadable mounted files
+    - an unwritable Grafana data volume
+    - an occupied host port `3000`
+  </Accordion>
+
+  <Accordion title="Dashboards are missing">
+    Check the mounted directory:
+
+    ```bash
+    docker compose exec grafana \
+      find /etc/grafana/provisioning \
+      -maxdepth 3 \
+      -type f
+    ```
+
+    Confirm that it contains the dashboard JSON files and `dashboard.yml`.
+
+    Check provisioning logs:
+
+    ```bash
+    docker compose logs grafana \
+      | grep -i "provision\|dashboard"
+    ```
+  </Accordion>
+
+  <Accordion title="A data source reports an error">
+    Test connectivity from the Grafana container.
+
+    Prometheus:
+
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      http://prometheus:9090/-/ready
+    ```
+
+    Loki:
+
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      http://loki:3100/ready
+    ```
+
+    Tempo:
+
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      http://tempo:3200/ready
+    ```
+
+    Inspect the corresponding service logs when a check fails.
+  </Accordion>
 
-Check the container:
+  <Accordion title="The router dashboard has no data">
+    Check the Prometheus target:
 
-```bash
-docker compose ps grafana
-```
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- \
+      http://localhost:9090/api/v1/targets \
+      | jq '.data.activeTargets[] | {
+          health,
+          lastError
+        }'
+    ```
+
+    Query one registration metric:
+
+    ```bash
+    docker compose exec prometheus \
+      wget -qO- \
+      'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
+      | jq .
+    ```
+
+    If the query is empty:
 
-Inspect its logs:
+    - confirm that agents are registered
+    - confirm that Prometheus scrapes `router:2112`
+    - inspect router and Prometheus logs
+    - check whether the selected dashboard filters exclude all agents
+  </Accordion>
 
-```bash
-docker compose logs grafana \
-  | tail -100
-```
+  <Accordion title="Hardware panels are empty">
+    Check whether the agent reports hardware data:
 
-Common causes include:
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq '.agents[] | {
+          peer_id,
+          hardware
+        }'
+    ```
 
-- invalid provisioning YAML
-- unreadable mounted files
-- an unwritable Grafana data volume
-- an occupied host port `3000`
+    For GPU panels, check:
 
-### Dashboards are missing
+    - NVIDIA drivers
+    - NVML availability
+    - container GPU access
+    - the agent process permissions
 
-Check the mounted directory:
+    CPU-only agents do not produce GPU series.
+  </Accordion>
 
-```bash
-docker compose exec grafana \
-  find /etc/grafana/provisioning \
-  -maxdepth 3 \
-  -type f
-```
+  <Accordion title="Engine panels are empty">
+    Check backend support and configuration:
 
-Confirm that it contains the dashboard JSON files and `dashboard.yml`.
+    - SGLang needs `--enable-metrics`
+    - llama.cpp needs `--metrics`
+    - Ollama, Infinity, and custom engines do not currently supply engine metrics
 
-Check provisioning logs:
+    Test the engine endpoint on the agent host:
 
-```bash
-docker compose logs grafana \
-  | grep -i "provision\|dashboard"
-```
+    ```bash
+    curl http://localhost:8888/metrics \
+      | head
+    ```
 
-### A data source reports an error
+    Inspect the agent logs for scrape errors.
+  </Accordion>
 
-Test connectivity from the Grafana container.
+  <Accordion title="The tenant dashboard has no tenants">
+    Tenant metrics appear only after authenticated or no-auth traffic creates them.
 
-Prometheus:
+    Check:
 
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  http://prometheus:9090/-/ready
-```
+    ```bash
+    curl -s \
+      http://localhost:2112/metrics \
+      | grep hivenet_router_tenant
+    ```
 
-Loki:
+    A tenant using only per-model quota gauges may not appear in the current selector. Query the per-model metrics directly in Explore when necessary.
+  </Accordion>
 
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  http://loki:3100/ready
-```
+  <Accordion title="The audit dashboard is empty">
+    Confirm that audit records exist:
 
-Tempo:
+    ```bash
+    docker compose exec router \
+      ls -la /var/log/hivenet-router
+    ```
 
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  http://tempo:3200/ready
-```
+    Check Promtail:
 
-Inspect the corresponding service logs when a check fails.
+    ```bash
+    docker compose logs promtail \
+      | tail -100
+    ```
 
-### The router dashboard has no data
+    Check Loki:
 
-Check the Prometheus target:
+    ```bash
+    docker compose logs loki \
+      | tail -100
+    ```
 
-```bash
-docker compose exec prometheus \
-  wget -qO- \
-  http://localhost:9090/api/v1/targets \
-  | jq '.data.activeTargets[] | {
-      health,
-      lastError
-    }'
-```
+    Query Loki through its API:
 
-Query one registration metric:
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
+      | head
+    ```
+  </Accordion>
 
-```bash
-docker compose exec prometheus \
-  wget -qO- \
-  'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
-  | jq .
-```
+  <Accordion title="Trace search is empty">
+    Check that the router received:
 
-If the query is empty:
+    ```text
+    OTEL_EXPORTER_OTLP_ENDPOINT=tempo:4317
+    ```
 
-- confirm that agents are registered
-- confirm that Prometheus scrapes `router:2112`
-- inspect router and Prometheus logs
-- check whether the selected dashboard filters exclude all agents
+    Inspect the router logs for tracing initialization or export errors.
 
-### Hardware panels are empty
+    Confirm that Tempo is ready:
 
-Check whether the agent reports hardware data:
+    ```bash
+    docker compose exec grafana \
+      wget -qO- \
+      http://tempo:3200/ready
+    ```
+  </Accordion>
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {
-      peer_id,
-      hardware
-    }'
-```
+  <Accordion title="Dashboard edits disappear">
+    The dashboards are provisioned from files.
 
-For GPU panels, check:
+    Make durable changes in:
 
-- NVIDIA drivers
-- NVML availability
-- container GPU access
-- the agent process permissions
+    ```text
+    deploy/grafana/provisioning/dashboards/
+    ```
 
-CPU-only agents do not produce GPU series.
+    then allow Grafana’s provisioning interval to reload them, or restart Grafana:
 
-### Engine panels are empty
-
-Check backend support and configuration:
-
-- SGLang needs `--enable-metrics`
-- llama.cpp needs `--metrics`
-- Ollama, Infinity, and custom engines do not currently supply engine metrics
-
-Test the engine endpoint on the agent host:
-
-```bash
-curl http://localhost:8888/metrics \
-  | head
-```
-
-Inspect the agent logs for scrape errors.
-
-### The tenant dashboard has no tenants
-
-Tenant metrics appear only after authenticated or no-auth traffic creates them.
-
-Check:
-
-```bash
-curl -s \
-  http://localhost:2112/metrics \
-  | grep hivenet_router_tenant
-```
-
-A tenant using only per-model quota gauges may not appear in the current selector. Query the per-model metrics directly in Explore when necessary.
-
-### The audit dashboard is empty
-
-Confirm that audit records exist:
-
-```bash
-docker compose exec router \
-  ls -la /var/log/hivenet-router
-```
-
-Check Promtail:
-
-```bash
-docker compose logs promtail \
-  | tail -100
-```
-
-Check Loki:
-
-```bash
-docker compose logs loki \
-  | tail -100
-```
-
-Query Loki through its API:
-
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  'http://loki:3100/loki/api/v1/query?query=%7Bjob%3D%22hivenet-router%22%2Clog_type%3D%22audit%22%7D' \
-  | head
-```
-
-### Trace search is empty
-
-Check that the router received:
-
-```text
-OTEL_EXPORTER_OTLP_ENDPOINT=tempo:4317
-```
-
-Inspect the router logs for tracing initialization or export errors.
-
-Confirm that Tempo is ready:
-
-```bash
-docker compose exec grafana \
-  wget -qO- \
-  http://tempo:3200/ready
-```
-
-### Dashboard edits disappear
-
-The dashboards are provisioned from files.
-
-Make durable changes in:
-
-```text
-deploy/grafana/provisioning/dashboards/
-```
-
-then allow Grafana’s provisioning interval to reload them, or restart Grafana:
-
-```bash
-docker compose restart grafana
-```
+    ```bash
+    docker compose restart grafana
+    ```
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Audit logging" href="/observability/audit-logging">
+<Columns cols={3}>
+  <Card title="Audit logging" icon="file-lines" href="/observability/audit-logging">
     Configure structured request records and query them through Loki.
   </Card>
 
-  <Card title="Hardware metrics" href="/observability/hardware-metrics">
+  <Card title="Hardware metrics" icon="microchip" href="/observability/hardware-metrics">
     Understand the GPU, CPU, and memory values shown in Grafana.
   </Card>
 
-  <Card title="Engine metrics" href="/observability/engine-metrics">
+  <Card title="Engine metrics" icon="gears" href="/observability/engine-metrics">
     Review cache, queue, TTFT, ITL, and throughput metrics by backend.
   </Card>
-</CardGroup>
+</Columns>

@@ -832,140 +832,142 @@ The router refuses to start with unauthenticated administrator endpoints unless 
 
 ## Troubleshooting
 
-### Every request returns `401 unauthorized`
+<AccordionGroup>
+  <Accordion title="Every request returns `401 unauthorized`">
+    Check that:
 
-Check that:
+    - the router is using `api-key` or `dynamic` mode
+    - the application sends the raw key rather than the hash
+    - the `Authorization` header reaches the router
+    - a static hash matches the exact raw key
+    - the static key has not expired
+    - the dynamic key is enabled
+    - the dynamic registry has been repopulated after restart
 
-- the router is using `api-key` or `dynamic` mode
-- the application sends the raw key rather than the hash
-- the `Authorization` header reaches the router
-- a static hash matches the exact raw key
-- the static key has not expired
-- the dynamic key is enabled
-- the dynamic registry has been repopulated after restart
+    Hivenet Router does not reveal which authentication condition failed.
+  </Accordion>
 
-Hivenet Router does not reveal which authentication condition failed.
+  <Accordion title="A static key does not load">
+    Check the router logs.
 
-### A static key does not load
+    Common causes include:
 
-Check the router logs.
+    - empty `key_hash`
+    - empty `metadata.name`
+    - empty `metadata.owner`
+    - duplicate hashes
+    - invalid `expires_at`
+    - invalid quota configuration
+    - empty `api.keys` while mode is `api-key`
 
-Common causes include:
+    The previous provider remains active when a SIGHUP reload fails.
+  </Accordion>
 
-- empty `key_hash`
-- empty `metadata.name`
-- empty `metadata.owner`
-- duplicate hashes
-- invalid `expires_at`
-- invalid quota configuration
-- empty `api.keys` while mode is `api-key`
+  <Accordion title="A key can see the wrong models">
+    Check whether the key uses:
 
-The previous provider remains active when a SIGHUP reload fails.
+    ```yaml
+    models:
+    ```
 
-### A key can see the wrong models
+    or:
 
-Check whether the key uses:
+    ```yaml
+    quota:
+      per_model:
+    ```
 
-```yaml
-models:
-```
+    When `quota.per_model` exists, its keys define the effective allowlist and take precedence over `models`.
+  </Accordion>
 
-or:
+  <Accordion title="Several keys consume one quota unexpectedly">
+    Check their owner values.
 
-```yaml
-quota:
-  per_model:
-```
+    Keys with the same:
 
-When `quota.per_model` exists, its keys define the effective allowlist and take precedence over `models`.
+    ```yaml
+    metadata:
+      owner: acme-corp
+    ```
 
-### Several keys consume one quota unexpectedly
+    share quota buckets.
 
-Check their owner values.
+    Assign different owners when the limits should remain independent.
+  </Accordion>
 
-Keys with the same:
+  <Accordion title="The effective per-model RPM is unexpected">
+    The rate is:
 
-```yaml
-metadata:
-  owner: acme-corp
-```
+    ```text
+    requests_per_minute_per_replica
+    × healthy agents serving the model
+    ```
 
-share quota buckets.
+    Check the current healthy replica count:
 
-Assign different owners when the limits should remain independent.
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-key>" \
+      http://localhost:8080/admin/models/<model> \
+      | jq '.agents.healthy'
+    ```
+  </Accordion>
 
-### The effective per-model RPM is unexpected
+  <Accordion title="Daily usage resets after restart">
+    The quota backend is probably using:
 
-The rate is:
+    ```text
+    memory
+    ```
 
-```text
-requests_per_minute_per_replica
-× healthy agents serving the model
-```
+    Enable:
 
-Check the current healthy replica count:
+    ```bash
+    HIVENET_ROUTER_QUOTA_BACKEND=badger
+    ```
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-key>" \
-  http://localhost:8080/admin/models/<model> \
-  | jq '.agents.healthy'
-```
+    to persist daily token use.
 
-### Daily usage resets after restart
+    Request-per-minute state remains in memory by design.
+  </Accordion>
 
-The quota backend is probably using:
+  <Accordion title="A dynamic update returns `409 stale version`">
+    Read the current registry version:
 
-```text
-memory
-```
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-key>" \
+      http://localhost:8080/admin/api-keys/version \
+      | jq .
+    ```
 
-Enable:
+    Retry with a version that sorts equal to or after the current one.
+  </Accordion>
 
-```bash
-HIVENET_ROUTER_QUOTA_BACKEND=badger
-```
+  <Accordion title="A dynamic update rejects the hash">
+    Check that it is exactly 64 hexadecimal characters:
 
-to persist daily token use.
+    ```bash
+    printf '%s' "$RAW_API_KEY" \
+      | sha256sum
+    ```
 
-Request-per-minute state remains in memory by design.
-
-### A dynamic update returns `409 stale version`
-
-Read the current registry version:
-
-```bash
-curl \
-  -H "Authorization: Bearer <admin-key>" \
-  http://localhost:8080/admin/api-keys/version \
-  | jq .
-```
-
-Retry with a version that sorts equal to or after the current one.
-
-### A dynamic update rejects the hash
-
-Check that it is exactly 64 hexadecimal characters:
-
-```bash
-printf '%s' "$RAW_API_KEY" \
-  | sha256sum
-```
-
-Do not send the raw key in `key_hash`.
+    Do not send the raw key in `key_hash`.
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="auth.yaml reference" href="/security/auth-yaml-reference">
+<Columns cols={3}>
+  <Card title="auth.yaml reference" icon="file-code" href="/security/auth-yaml-reference">
     Review the full static authentication and quota schema.
   </Card>
 
-  <Card title="Model restrictions" href="/security/model-restrictions">
+  <Card title="Model restrictions" icon="shield-halved" href="/security/model-restrictions">
     Design model access for applications, tenants, and workload types.
   </Card>
 
-  <Card title="Key rotation" href="/security/key-rotation">
+  <Card title="Key rotation" icon="rotate" href="/security/key-rotation">
     Rotate static, dynamic, administration, agent, and provider credentials safely.
   </Card>
-</CardGroup>
+</Columns>

@@ -712,86 +712,88 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
 
 ## Troubleshooting
 
-### The policy does not load
+<AccordionGroup>
+  <Accordion title="The policy does not load">
+    Check the router logs for validation errors.
 
-Check the router logs for validation errors.
+    Common causes include:
 
-Common causes include:
+    - missing `strategy`
+    - an unknown strategy
+    - a misspelled `exclude_if` field
+    - no comparison operator
+    - several operators on one gate
+    - an incomplete provider fallback
+    - invalid YAML indentation
 
-- missing `strategy`
-- an unknown strategy
-- a misspelled `exclude_if` field
-- no comparison operator
-- several operators on one gate
-- an incomplete provider fallback
-- invalid YAML indentation
+    Only `least-loaded` is currently accepted as a strategy.
+  </Accordion>
 
-Only `least-loaded` is currently accepted as a strategy.
+  <Accordion title="An agent does not match">
+    All match values are exact and case-sensitive.
 
-### An agent does not match
+    Compare the policy with live metadata:
 
-All match values are exact and case-sensitive.
+    ```bash
+    curl \
+      -H "Authorization: Bearer <admin-api-key>" \
+      http://localhost:8080/admin/routing-table \
+      | jq '.agents[] | {
+          model: .metadata.model,
+          engine: .metadata.engine,
+          region: .metadata.region,
+          organization: .metadata.organization,
+          machine: .metadata.machine,
+          tags: .metadata.tags,
+          gpu_model: .metadata.gpu_model
+        }'
+    ```
 
-Compare the policy with live metadata:
+    Check that every tag in the policy appears on the agent.
+  </Accordion>
 
-```bash
-curl \
-  -H "Authorization: Bearer <admin-api-key>" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {
-      model: .metadata.model,
-      engine: .metadata.engine,
-      region: .metadata.region,
-      organization: .metadata.organization,
-      machine: .metadata.machine,
-      tags: .metadata.tags,
-      gpu_model: .metadata.gpu_model
-    }'
-```
+  <Accordion title="A metric gate does not exclude an agent">
+    The metric may be unavailable.
 
-Check that every tag in the policy appears on the agent.
+    Inspect the agent through the routing table and confirm that the relevant engine or hardware field is present.
 
-### A metric gate does not exclude an agent
+    Missing metrics skip the gate.
+  </Accordion>
 
-The metric may be unavailable.
+  <Accordion title="Requests wait instead of falling back">
+    Matching agents may exist but be at capacity.
 
-Inspect the agent through the routing table and confirm that the relevant engine or hardware field is present.
+    Hivenet Router waits in the per-model queue before advancing to fallback. Reduce or disable the queue when immediate fallback is more appropriate:
 
-Missing metrics skip the gate.
+    ```bash
+    --queue-depth 0
+    ```
+  </Accordion>
 
-### Requests wait instead of falling back
+  <Accordion title="An external provider is never called">
+    Check that:
 
-Matching agents may exist but be at capacity.
-
-Hivenet Router waits in the per-model queue before advancing to fallback. Reduce or disable the queue when immediate fallback is more appropriate:
-
-```bash
---queue-depth 0
-```
-
-### An external provider is never called
-
-Check that:
-
-- every local policy step was exhausted
-- the request is a language-model chat request
-- `fallback_provider` is at the policy’s top level
-- the engine is `openai` or `anthropic`
-- the corresponding environment variable is configured
-- the provider model is not empty
+    - every local policy step was exhausted
+    - the request is a language-model chat request
+    - `fallback_provider` is at the policy’s top level
+    - the engine is `openai` or `anthropic`
+    - the corresponding environment variable is configured
+    - the provider model is not empty
+  </Accordion>
+</AccordionGroup>
 
 ## Next steps
 
-<CardGroup cols={3}>
-  <Card title="Policy YAML reference" href="/routing/policy-yaml-reference">
+<Columns cols={3}>
+  <Card title="Policy YAML reference" icon="file-code" href="/routing/policy-yaml-reference">
     Review the complete policy schema, fields, operators, and validation rules.
   </Card>
 
-  <Card title="Fallback chains" href="/routing/fallback-chains">
+  <Card title="Fallback chains" icon="link" href="/routing/fallback-chains">
     Configure ordered local alternatives and retry budgets.
   </Card>
 
-  <Card title="Provider fallback" href="/routing/provider-fallback">
+  <Card title="Provider fallback" icon="cloud-arrow-up" href="/routing/provider-fallback">
     Add OpenAI or Anthropic as a final fallback for chat requests.
   </Card>
-</CardGroup>
+</Columns>
