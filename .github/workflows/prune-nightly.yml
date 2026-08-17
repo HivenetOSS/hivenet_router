@@ -1,0 +1,52 @@
+name: Prune old nightly images
+
+# GHCR has no automatic retention, so every merge to main leaves behind another
+# immutable ghcr.io/hivenetoss/{hivenet-router,hivenet-agent}:nightly-<shortsha>
+# version. This job trims that accumulation, keeping the 10 most recent nightly
+# builds per image.
+#
+# It ONLY ever considers images whose tag matches `nightly-*` (see image-tags),
+# so release tags (v*), :latest, and the moving :nightly tag are never deletion
+# candidates. keep-n-most-recent then retains the 10 newest of those, which
+# always includes the current :nightly (it carries a nightly-<sha> tag too).
+#
+# Runs automatically after a GitHub Release is published, and on demand via
+# workflow_dispatch — the manual run defaults to dry-run so you can confirm what
+# it would delete before enabling real deletion.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only log what would be deleted; delete nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ghcr-prune-nightly
+  cancel-in-progress: false
+
+permissions:
+  packages: write  # required for the GITHUB_TOKEN to delete GHCR package versions
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune nightly-<sha> images, keep the 10 most recent
+        uses: snok/container-retention-policy@v3.1.0
+        with:
+          account: ${{ github.repository_owner }}
+          # The built-in GITHUB_TOKEN can delete versions of packages that
+          # "inherit access from repository" with Admin role. If org settings
+          # block that, create a PAT with the `delete:packages` scope and store
+          # it as the GHCR_CLEANUP_TOKEN secret — it is preferred when present.
+          token: ${{ secrets.GHCR_CLEANUP_TOKEN || secrets.GITHUB_TOKEN }}
+          image-names: "hivenet-router hivenet-agent"
+          image-tags: "nightly-*"   # scope: never touch v*, :latest, or :nightly
+          tag-selection: tagged
+          cut-off: 1s               # age gate disabled; keep-n is the real control
+          keep-n-most-recent: 10
+          # release → real deletion; manual dispatch → honor the dry_run input.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
