@@ -20,16 +20,17 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write      # required to push images to GHCR
   id-token: write      # required to sign the build-provenance attestation
   attestations: write  # required to record the attestation on GitHub
 
-# Images publish to the OVH registry because that is where the consuming
-# clusters already authenticate (their pull secrets hold an OVH robot account).
-# Host and project are not secret — they appear verbatim in the consumers'
-# deployment manifests — so only the push credentials are.
+# Images publish to the GitHub Container Registry. GHCR authenticates with the
+# workflow's built-in GITHUB_TOKEN, so there are no registry credentials to
+# manage. The owner path must be lowercase (the org is "HivenetOSS"), hence the
+# hardcoded namespace here and in the attestation subject-name below.
 env:
-  REGISTRY: rbbbucym.gra7.container-registry.ovh.net
-  PROJECT: hivegpt
+  REGISTRY: ghcr.io
+  NAMESPACE: ghcr.io/hivenetoss
 
 jobs:
   build-push:
@@ -40,7 +41,7 @@ jobs:
       matrix:
         include:
           # `repo` is the published image name; the short matrix label differs.
-          # Standardized to hivenet-router / hivenet-agent for the launch.
+          # Publishes ghcr.io/hivenetoss/hivenet-router and .../hivenet-agent.
           - image: router
             repo: hivenet-router
             dockerfile: Dockerfile
@@ -52,21 +53,23 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Log in to the OVH registry
+      - name: Log in to GHCR
         uses: docker/login-action@v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.OVH_REGISTRY_USERNAME }}
-          password: ${{ secrets.OVH_REGISTRY_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Produces a moving :nightly tag plus an immutable :nightly-<shortsha> tag.
       # The moving tag is gated on the default branch so a workflow_dispatch run
-      # against an unmerged ref publishes only its immutable sha tag.
+      # against an unmerged ref publishes only its immutable sha tag. Every push
+      # also yields a content-addressed sha256 digest (used below to scan and
+      # attest exactly the image that was built).
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}
+          images: ${{ env.NAMESPACE }}/${{ matrix.repo }}
           tags: |
             type=raw,value=nightly,enable={{is_default_branch}}
             type=sha,prefix=nightly-,format=short
@@ -94,7 +97,7 @@ jobs:
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.NAMESPACE }}/${{ matrix.repo }}@${{ steps.build.outputs.digest }}
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
@@ -105,6 +108,6 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.repo }}
+          subject-name: ${{ env.NAMESPACE }}/${{ matrix.repo }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: false
