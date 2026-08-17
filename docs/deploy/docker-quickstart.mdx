@@ -67,10 +67,10 @@ This guide uses Docker host networking and is intended for Linux hosts.
     docker compose version
     ```
 
-    Build the router image:
+    Pull the router image from the GitHub Container Registry:
 
     ```bash
-    docker build -t hivenet-router/router:latest .
+    docker pull ghcr.io/hivenetoss/hivenet-router:latest
     ```
 
     Create the persistent database directory:
@@ -108,13 +108,10 @@ This guide uses Docker host networking and is intended for Linux hosts.
 
     If the script adds your user to the Docker group, sign out and back in before running Docker without `sudo`.
 
-    Build the agent image:
+    Pull the agent image from the GitHub Container Registry:
 
     ```bash
-    docker build \
-      -f Dockerfile.agent \
-      -t hivenet-router/agent:latest \
-      .
+    docker pull ghcr.io/hivenetoss/hivenet-agent:latest
     ```
 
     Create a directory for the shared secret and persistent agent identity:
@@ -160,7 +157,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
       -e HIVENET_ROUTER_ALLOW_INSECURE_ADMIN=true \
       -v "$PWD/jwt.secret:/jwt.secret:ro" \
       -v "$PWD/badger:/badger" \
-      hivenet-router/router:latest \
+      ghcr.io/hivenetoss/hivenet-router:latest \
       --jwt-secret-file /jwt.secret \
       --http-port :8080 \
       --grpc-port :50051 \
@@ -255,7 +252,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --gpus all \
       -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
       -v /opt/hivenet-router:/data \
-      hivenet-router/agent:latest \
+      ghcr.io/hivenetoss/hivenet-agent:latest \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
       --engine vllm \
@@ -314,7 +311,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --gpus all \
       -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
       -v /opt/hivenet-router:/data \
-      hivenet-router/agent:latest \
+      ghcr.io/hivenetoss/hivenet-agent:latest \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
       --engine vllm \
