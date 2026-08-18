@@ -22,7 +22,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_routing_agent_info, model)",
+        "definition": "label_values(hivenet_routing_agent_info, model)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -31,7 +31,7 @@
         "name": "model",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_routing_agent_info, model)",
+          "query": "label_values(hivenet_routing_agent_info, model)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -49,7 +49,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_routing_agent_info, engine)",
+        "definition": "label_values(hivenet_routing_agent_info, engine)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -58,7 +58,7 @@
         "name": "engine",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_routing_agent_info, engine)",
+          "query": "label_values(hivenet_routing_agent_info, engine)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -76,7 +76,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_routing_agent_info, peer_id)",
+        "definition": "label_values(hivenet_routing_agent_info, peer_id)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -85,7 +85,7 @@
         "name": "peer_id",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_routing_agent_info, peer_id)",
+          "query": "label_values(hivenet_routing_agent_info, peer_id)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -103,7 +103,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_routing_agent_info, organization)",
+        "definition": "label_values(hivenet_routing_agent_info, organization)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -112,7 +112,7 @@
         "name": "organization",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_routing_agent_info, organization)",
+          "query": "label_values(hivenet_routing_agent_info, organization)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -130,7 +130,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_routing_agent_info, machine)",
+        "definition": "label_values(hivenet_routing_agent_info, machine)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -139,7 +139,7 @@
         "name": "machine",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_routing_agent_info, machine)",
+          "query": "label_values(hivenet_routing_agent_info, machine)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -200,7 +200,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count(hivenet_router_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
+          "expr": "count(hivenet_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "agents",
           "refId": "A"
         }
@@ -256,7 +256,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hivenet_router_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
+          "expr": "sum(hivenet_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "healthy",
           "refId": "A"
         }
@@ -291,7 +291,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(hivenet_router_policy_primary_routed_total{model=~\"$model\"}) or vector(0)",
+          "expr": "sum(hivenet_policy_primary_routed_total{model=~\"$model\"}) or vector(0)",
           "legendFormat": "primary",
           "refId": "A"
         }
@@ -327,7 +327,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(hivenet_router_policy_fallback_routed_total{model=~\"$model\"}) or vector(0)",
+          "expr": "sum(hivenet_policy_fallback_routed_total{model=~\"$model\"}) or vector(0)",
           "legendFormat": "fallback",
           "refId": "A"
         }
@@ -363,7 +363,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(hivenet_router_policy_exhausted_total{model=~\"$model\"}) or vector(0)",
+          "expr": "sum(hivenet_policy_exhausted_total{model=~\"$model\"}) or vector(0)",
           "legendFormat": "exhausted",
           "refId": "A"
         }
@@ -396,7 +396,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(hivenet_router_policy_provider_fallback_total{model=~\"$model\"}) or vector(0)",
+          "expr": "sum(hivenet_policy_provider_fallback_total{model=~\"$model\"}) or vector(0)",
           "legendFormat": "provider fallback",
           "refId": "A"
         }
@@ -558,7 +558,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_routing_agent_info{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -569,7 +569,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_routing_agent_healthy{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -580,7 +580,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_routing_agent_last_seen_timestamp{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_routing_agent_last_seen_timestamp{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -591,7 +591,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -602,7 +602,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_model_backend_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_model_backend_failure_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -613,7 +613,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_disconnections_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_disconnections_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -926,7 +926,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -937,7 +937,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_capacity_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_capacity_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -948,7 +948,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_srtt_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_srtt_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -959,7 +959,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_rttvar_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_rttvar_ms{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -970,7 +970,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_requests_success_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_requests_success_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "instant": true,
           "legendFormat": "",
           "refId": "F",
@@ -981,7 +981,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_requests_failed_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_requests_failed_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "instant": true,
           "legendFormat": "",
           "refId": "G",
@@ -992,7 +992,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_input_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_input_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "instant": true,
           "legendFormat": "",
           "refId": "H",
@@ -1003,7 +1003,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_output_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_output_tokens_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "instant": true,
           "legendFormat": "",
           "refId": "I",
@@ -1014,7 +1014,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_rejected_requests_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_router_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_rejected_requests_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"} or on(peer_id,model,engine) 0 * hivenet_agent_success_rate{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "instant": true,
           "legendFormat": "",
           "refId": "J",
@@ -1317,7 +1317,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1328,7 +1328,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_memory_used_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_memory_used_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1339,7 +1339,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1350,7 +1350,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_memory_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_memory_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1649,7 +1649,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1660,7 +1660,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1671,7 +1671,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_vram_free_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_vram_free_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1682,7 +1682,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_vram_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_vram_total_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1693,7 +1693,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1704,7 +1704,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1886,7 +1886,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_utilization_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
           "refId": "A"
         }
@@ -1944,7 +1944,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_vram_used_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
           "refId": "A"
         }
@@ -2019,7 +2019,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_temperature_celsius{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
           "refId": "A"
         }
@@ -2078,7 +2078,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_gpu_power_watts{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}} [GPU{{gpu_index}}]",
           "refId": "A"
         }
@@ -2154,7 +2154,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_cpu_usage_percent{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}}",
           "refId": "A"
         }
@@ -2212,7 +2212,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_memory_available_bytes{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}}",
           "refId": "A"
         }
@@ -2566,7 +2566,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2577,7 +2577,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2588,7 +2588,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2599,7 +2599,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2610,7 +2610,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2621,7 +2621,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2632,7 +2632,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2643,7 +2643,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2654,7 +2654,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2665,7 +2665,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -2852,7 +2852,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_kv_cache_utilization{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "{{peer_id}}",
           "refId": "A"
         }
@@ -2910,7 +2910,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_running_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Running \u2014 {{peer_id}}",
           "refId": "A"
         },
@@ -2919,7 +2919,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_waiting_requests{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Waiting \u2014 {{peer_id}}",
           "refId": "B"
         }
@@ -2977,7 +2977,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(hivenet_router_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}[5m])",
+          "expr": "rate(hivenet_agent_engine_preemptions_total{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}[5m])",
           "legendFormat": "{{peer_id}}",
           "refId": "A"
         }
@@ -3053,7 +3053,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_avg_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Avg TTFT \u2014 {{peer_id}}",
           "refId": "A"
         },
@@ -3062,7 +3062,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_p90_ttft_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "P90 TTFT \u2014 {{peer_id}}",
           "refId": "B"
         }
@@ -3121,7 +3121,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_avg_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Avg ITL \u2014 {{peer_id}}",
           "refId": "A"
         },
@@ -3130,7 +3130,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_p90_itl_seconds{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "P90 ITL \u2014 {{peer_id}}",
           "refId": "B"
         }
@@ -3189,7 +3189,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_predicted_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Pred t/s \u2014 {{peer_id}}",
           "refId": "A"
         },
@@ -3198,7 +3198,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
+          "expr": "hivenet_agent_engine_prompt_tps{model=~\"$model\",engine=~\"$engine\",peer_id=~\"$peer_id\",organization=~\"$organization\",machine=~\"$machine\"}",
           "legendFormat": "Prompt t/s \u2014 {{peer_id}}",
           "refId": "B"
         }

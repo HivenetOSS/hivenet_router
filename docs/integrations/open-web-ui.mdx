@@ -961,7 +961,7 @@ Request rate by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_routing_requests_routed_total{
+    hivenet_routing_requests_routed_total{
       tenant_id="open-webui"
     }[5m]
   )
@@ -973,7 +973,7 @@ Failed requests:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_tenant_requests_failed_total{
+    hivenet_tenant_requests_failed_total{
       tenant_id="open-webui"
     }[5m]
   )

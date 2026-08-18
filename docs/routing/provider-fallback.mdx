@@ -685,7 +685,7 @@ Successful provider fallbacks:
 
 ```promql
 rate(
-  hivenet_router_policy_provider_fallback_total[5m]
+  hivenet_policy_provider_fallback_total[5m]
 )
 ```
 
@@ -696,7 +696,7 @@ Successful fallbacks by original model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_provider_fallback_total[5m]
+    hivenet_policy_provider_fallback_total[5m]
   )
 )
 ```
@@ -733,13 +733,13 @@ status_code="0"
 Provider failures also increase:
 
 ```text
-hivenet_router_policy_exhausted_total
+hivenet_policy_exhausted_total
 ```
 
 and the corresponding failed-request metrics.
 
 <Note>
-  `hivenet_router_policy_provider_fallback_total` counts successful provider responses, not every attempted provider call.
+  `hivenet_policy_provider_fallback_total` counts successful provider responses, not every attempted provider call.
 
   Use the outbound HTTP histogram and router logs to observe failed attempts.
 </Note>

@@ -374,21 +374,21 @@ View all engine metrics through the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep hivenet_router_agent_engine
+  | grep hivenet_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
-hivenet_router_agent_engine_avg_ttft_seconds
-hivenet_router_agent_engine_p90_ttft_seconds
-hivenet_router_agent_engine_avg_itl_seconds
-hivenet_router_agent_engine_p90_itl_seconds
-hivenet_router_agent_engine_predicted_tps
-hivenet_router_agent_engine_prompt_tps
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
+hivenet_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_avg_itl_seconds
+hivenet_agent_engine_p90_itl_seconds
+hivenet_agent_engine_predicted_tps
+hivenet_agent_engine_prompt_tps
 ```
 
 View current values through the routing table:

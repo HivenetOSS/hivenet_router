@@ -271,14 +271,14 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	// Wire the today-usage gauge so hivenet_router_tenant_tokens_used_today is updated
+	// Wire the today-usage gauge so hivenet_tenant_tokens_used_today is updated
 	// on every successful token deduction, regardless of backend strategy.
 	type tokenUsageReporter interface{ SetOnTokensUsed(func(string, int)) }
 	if r, ok := rateLimiter.(tokenUsageReporter); ok {
 		r.SetOnTokensUsed(routerMetrics.TenantSetTokensUsedToday)
 	}
 	// Wire the flush-error counter so diskDB write failures increment
-	// hivenet_router_quota_backend_errors_total instead of being silently dropped.
+	// hivenet_quota_backend_errors_total instead of being silently dropped.
 	type flushErrorReporter interface{ SetOnFlushError(func()) }
 	if r, ok := rateLimiter.(flushErrorReporter); ok {
 		r.SetOnFlushError(routerMetrics.QuotaBackendError)

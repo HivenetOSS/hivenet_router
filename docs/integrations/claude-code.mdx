@@ -766,7 +766,7 @@ Request rate:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```

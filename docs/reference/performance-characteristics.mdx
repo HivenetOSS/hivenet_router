@@ -74,7 +74,7 @@ Different observability signals cover different parts of this path.
 | Client-observed latency | Client request start to completed response | Yes |
 | Audit `latency_ms` | Router middleware entry to handler completion | Yes |
 | `http_server_request_duration_seconds` | Complete router HTTP handling | Yes |
-| `hivenet_router_tenant_request_duration_seconds` | Successful tenant request through the router | Yes |
+| `hivenet_tenant_request_duration_seconds` | Successful tenant request through the router | Yes |
 | `queue_wait` trace span | Time in the per-model capacity queue | No |
 | `dispatch` trace span | Policy selection and router-to-agent forwarding until the processor receives a response | Depends on response mode |
 | `forward_to_agent` trace span | Router request to agent response headers or completed non-streaming body | Depends on response mode |
@@ -874,7 +874,7 @@ That interval can include:
 It is not the same as the explicit `queue_wait` trace span or:
 
 ```text
-hivenet_router_queue_wait_seconds
+hivenet_queue_wait_seconds
 ```
 
 Those represent the per-model capacity queue specifically.
@@ -1104,16 +1104,16 @@ A practical tuning order is:
 Monitor:
 
 ```text
-hivenet_router_agent_capacity_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_p90_ttft_seconds
-hivenet_router_agent_engine_p90_itl_seconds
-hivenet_router_queue_depth
-hivenet_router_queue_wait_seconds
-hivenet_router_policy_fallback_routed_total
-hivenet_router_policy_exhausted_total
+hivenet_agent_capacity_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_p90_itl_seconds
+hivenet_queue_depth
+hivenet_queue_wait_seconds
+hivenet_policy_fallback_routed_total
+hivenet_policy_exhausted_total
 ```
 
 For streaming workloads, give engine-level concurrency and queue metrics more weight than Hivenet Router’s agent active-request count.
@@ -1181,7 +1181,7 @@ histogram_quantile(
   0.95,
   sum by (le, model) (
     rate(
-      hivenet_router_queue_wait_seconds_bucket[5m]
+      hivenet_queue_wait_seconds_bucket[5m]
     )
   )
 )
@@ -1191,7 +1191,7 @@ histogram_quantile(
 
 ```promql
 sum by (model) (
-  hivenet_router_agent_engine_waiting_requests
+  hivenet_agent_engine_waiting_requests
 )
 ```
 
@@ -1200,7 +1200,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_routing_requests_failed_total[5m]
+    hivenet_routing_requests_failed_total[5m]
   )
 )
 ```
@@ -1210,7 +1210,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_fallback_routed_total[5m]
+    hivenet_policy_fallback_routed_total[5m]
   )
 )
 ```

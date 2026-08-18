@@ -541,26 +541,26 @@ http://localhost:9090
 Active agents:
 
 ```promql
-count(hivenet_router_routing_agent_info)
+count(hivenet_routing_agent_info)
 ```
 
 Request routing rate:
 
 ```promql
-rate(hivenet_router_routing_requests_routed_total[5m])
+rate(hivenet_routing_requests_routed_total[5m])
 ```
 
 Failed routing rate:
 
 ```promql
-rate(hivenet_router_routing_requests_failed_total[5m])
+rate(hivenet_routing_requests_failed_total[5m])
 ```
 
 Smoothed round-trip time by model:
 
 ```promql
 avg by (model) (
-  hivenet_router_agent_srtt_ms
+  hivenet_agent_srtt_ms
 )
 ```
 
@@ -605,7 +605,7 @@ Back up the router database:
 
 ```bash
 docker run --rm \
-  -v hivenet_router_badger_data:/data:ro \
+  -v hivenet_badger_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/badger-$(date +%Y%m%d).tar.gz -C /data .
@@ -615,7 +615,7 @@ Back up Prometheus:
 
 ```bash
 docker run --rm \
-  -v hivenet_router_prometheus_data:/data:ro \
+  -v hivenet_prometheus_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/prometheus-$(date +%Y%m%d).tar.gz -C /data .
@@ -625,7 +625,7 @@ Back up Grafana:
 
 ```bash
 docker run --rm \
-  -v hivenet_router_grafana_data:/data:ro \
+  -v hivenet_grafana_data:/data:ro \
   -v "$PWD/backup:/backup" \
   alpine \
   tar czf /backup/grafana-$(date +%Y%m%d).tar.gz -C /data .
@@ -649,7 +649,7 @@ Clear the existing contents and restore the archive:
 
 ```bash
 docker run --rm \
-  -v hivenet_router_badger_data:/data \
+  -v hivenet_badger_data:/data \
   -v "$PWD/backup:/backup:ro" \
   alpine \
   sh -c 'rm -rf /data/* && tar xzf /backup/badger-<date>.tar.gz -C /data'
@@ -724,7 +724,7 @@ docker compose --env-file .env up -d
     ```bash
     docker compose exec prometheus \
       wget -qO- \
-      'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
+      'http://localhost:9090/api/v1/query?query=hivenet_routing_agent_info' \
       | jq .
     ```
 

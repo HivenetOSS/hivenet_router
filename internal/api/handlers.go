@@ -64,7 +64,7 @@ type AgentStatusView struct {
 }
 
 // AgentUniversalView holds engine-agnostic lifetime counters and latency
-// (matching hivenet_router_agent_* Prometheus metrics).
+// (matching hivenet_agent_* Prometheus metrics).
 type AgentUniversalView struct {
 	SuccessfulRequestsTotal int64    `json:"successful_requests_total"`
 	FailedRequestsTotal     int64    `json:"failed_requests_total"`
@@ -81,7 +81,7 @@ type AgentUniversalView struct {
 }
 
 // AgentEngineView holds real-time engine backend metrics
-// (matching hivenet_router_agent_engine_* Prometheus metrics).
+// (matching hivenet_agent_engine_* Prometheus metrics).
 // Nil when no engine snapshot has been received yet (e.g. Ollama/custom engines).
 type AgentEngineView struct {
 	KVCacheUtilization *float64 `json:"kv_cache_utilization,omitempty"`

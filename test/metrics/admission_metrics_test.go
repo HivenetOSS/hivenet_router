@@ -75,7 +75,7 @@ func TestAdmissionRejectionsCounter(t *testing.T) {
 		{"b4_rpm", "qwen", 1},
 	}
 	for _, tc := range cases {
-		got, ok := metricValue(t, m, "hivenet_router_admission_rejections_total",
+		got, ok := metricValue(t, m, "hivenet_admission_rejections_total",
 			map[string]string{"reason": tc.reason, "model": tc.model})
 		if !ok {
 			t.Errorf("no series for reason=%s model=%s", tc.reason, tc.model)
@@ -86,7 +86,7 @@ func TestAdmissionRejectionsCounter(t *testing.T) {
 		}
 	}
 	// A reason that never fired has no series (rather than a zero we'd have to seed).
-	if _, ok := metricValue(t, m, "hivenet_router_admission_rejections_total",
+	if _, ok := metricValue(t, m, "hivenet_admission_rejections_total",
 		map[string]string{"reason": "b1", "model": "gemma"}); ok {
 		t.Error("expected no b1 series before any b1 rejection")
 	}
@@ -102,10 +102,10 @@ func TestAdmissionOccupancyGauges(t *testing.T) {
 		name string
 		want float64
 	}{
-		{"hivenet_router_admission_occupancy_tokens", 250_000},
-		{"hivenet_router_admission_inflight_requests", 1},
-		{"hivenet_router_admission_budget_tokens", 409_000},
-		{"hivenet_router_admission_max_inflight", 64},
+		{"hivenet_admission_occupancy_tokens", 250_000},
+		{"hivenet_admission_inflight_requests", 1},
+		{"hivenet_admission_budget_tokens", 409_000},
+		{"hivenet_admission_max_inflight", 64},
 	} {
 		got, ok := metricValue(t, m, tc.name, map[string]string{"model": "gemma"})
 		if !ok || got != tc.want {
@@ -116,7 +116,7 @@ func TestAdmissionOccupancyGauges(t *testing.T) {
 	// A later update overwrites the gauges (occupancy drains as requests finish),
 	// and a disabled budget drops to 0 rather than staying stale.
 	m.SetAdmissionOccupancy("gemma", 0, 0, 0, 0)
-	if got, _ := metricValue(t, m, "hivenet_router_admission_budget_tokens", map[string]string{"model": "gemma"}); got != 0 {
+	if got, _ := metricValue(t, m, "hivenet_admission_budget_tokens", map[string]string{"model": "gemma"}); got != 0 {
 		t.Errorf("budget gauge must drop to 0 when disabled, got %v", got)
 	}
 }

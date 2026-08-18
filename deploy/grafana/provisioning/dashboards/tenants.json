@@ -49,7 +49,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(hivenet_router_tenant_quota_rpm_limit, tenant_id)",
+        "definition": "label_values(hivenet_tenant_quota_rpm_limit, tenant_id)",
         "hide": 0,
         "includeAll": false,
         "label": "Tenant",
@@ -57,7 +57,7 @@
         "name": "tenant_id",
         "options": [],
         "query": {
-          "query": "label_values(hivenet_router_tenant_quota_rpm_limit, tenant_id)",
+          "query": "label_values(hivenet_tenant_quota_rpm_limit, tenant_id)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -75,7 +75,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values({__name__=~\"hivenet_router_tenant_requests_success_total|hivenet_router_tenant_requests_failed_total\",tenant_id=~\"$tenant_id\", model!=\"\"}, model)",
+        "definition": "label_values({__name__=~\"hivenet_tenant_requests_success_total|hivenet_tenant_requests_failed_total\",tenant_id=~\"$tenant_id\", model!=\"\"}, model)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".*",
@@ -84,7 +84,7 @@
         "name": "model",
         "options": [],
         "query": {
-          "query": "label_values({__name__=~\"hivenet_router_tenant_requests_success_total|hivenet_router_tenant_requests_failed_total\",tenant_id=~\"$tenant_id\", model!=\"\"}, model)",
+          "query": "label_values({__name__=~\"hivenet_tenant_requests_success_total|hivenet_tenant_requests_failed_total\",tenant_id=~\"$tenant_id\", model!=\"\"}, model)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -164,7 +164,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(hivenet_router_tenant_quota_rpm_limit{tenant_id=~\"$tenant_id\"})",
+          "expr": "max(hivenet_tenant_quota_rpm_limit{tenant_id=~\"$tenant_id\"})",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -228,7 +228,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"})",
+          "expr": "max(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"})",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -282,7 +282,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) + (sum(hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0))",
+          "expr": "(sum(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) + (sum(hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0))",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -346,7 +346,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) / clamp_min((sum(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) + (sum(hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)), 1)",
+          "expr": "(sum(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) / clamp_min((sum(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)) + (sum(hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}) or vector(0)), 1)",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -408,7 +408,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(hivenet_router_tenant_rate_limited_total{tenant_id=~\"$tenant_id\"}) or vector(0))",
+          "expr": "(sum(hivenet_tenant_rate_limited_total{tenant_id=~\"$tenant_id\"}) or vector(0))",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -470,7 +470,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(hivenet_router_tenant_token_limited_total{tenant_id=~\"$tenant_id\"}) or vector(0))",
+          "expr": "(sum(hivenet_tenant_token_limited_total{tenant_id=~\"$tenant_id\"}) or vector(0))",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -524,7 +524,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hivenet_router_tenant_last_request_timestamp{tenant_id=~\"$tenant_id\"} * 1000",
+          "expr": "hivenet_tenant_last_request_timestamp{tenant_id=~\"$tenant_id\"} * 1000",
           "legendFormat": "Last request",
           "refId": "A"
         }
@@ -668,7 +668,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "((sum(rate(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) or vector(0)) + (sum(rate(hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) or vector(0))) * 60",
+          "expr": "((sum(rate(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) or vector(0)) + (sum(rate(hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) or vector(0))) * 60",
           "legendFormat": "Actual req/min",
           "refId": "A"
         },
@@ -677,7 +677,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(hivenet_router_tenant_quota_rpm_limit{tenant_id=~\"$tenant_id\"}) > 0",
+          "expr": "max(hivenet_tenant_quota_rpm_limit{tenant_id=~\"$tenant_id\"}) > 0",
           "legendFormat": "RPM Limit",
           "refId": "B"
         }
@@ -769,7 +769,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(hivenet_router_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"}) / sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"})) and on() (sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0)",
+          "expr": "(sum(hivenet_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"}) / sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"})) and on() (sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0)",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -823,7 +823,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hivenet_router_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"})",
+          "expr": "sum(hivenet_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"})",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -902,7 +902,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hivenet_router_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"})",
+          "expr": "sum(hivenet_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"})",
           "instant": true,
           "legendFormat": "Prompt",
           "refId": "A"
@@ -912,7 +912,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hivenet_router_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"})",
+          "expr": "sum(hivenet_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"})",
           "instant": true,
           "legendFormat": "Completion",
           "refId": "B"
@@ -965,7 +965,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(hivenet_router_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) + sum(rate(hivenet_router_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))) / clamp_min(sum(rate(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])), 0.0001)",
+          "expr": "(sum(rate(hivenet_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])) + sum(rate(hivenet_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))) / clamp_min(sum(rate(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])), 0.0001)",
           "legendFormat": "tokens/req",
           "refId": "A"
         }
@@ -1027,7 +1027,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "((sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) - sum(hivenet_router_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"})) / clamp_min(sum(rate(hivenet_router_tenant_input_tokens_total{tenant_id=~\"$tenant_id\"}[10m])) + sum(rate(hivenet_router_tenant_output_tokens_total{tenant_id=~\"$tenant_id\"}[10m])), 0.001) / 3600) and on() (sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0)",
+          "expr": "((sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) - sum(hivenet_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"})) / clamp_min(sum(rate(hivenet_tenant_input_tokens_total{tenant_id=~\"$tenant_id\"}[10m])) + sum(rate(hivenet_tenant_output_tokens_total{tenant_id=~\"$tenant_id\"}[10m])), 0.001) / 3600) and on() (sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0)",
           "legendFormat": "Hours remaining",
           "refId": "A"
         }
@@ -1099,7 +1099,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "clamp_min(sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) - sum(hivenet_router_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"}), 0) and on() sum(hivenet_router_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0",
+          "expr": "clamp_min(sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) - sum(hivenet_tenant_tokens_used_today{tenant_id=~\"$tenant_id\"}), 0) and on() sum(hivenet_tenant_quota_tpd_limit{tenant_id=~\"$tenant_id\"}) > 0",
           "instant": true,
           "legendFormat": "",
           "refId": "A"
@@ -1156,7 +1156,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(hivenet_router_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))",
+          "expr": "sum(rate(hivenet_tenant_input_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "Prompt tokens/s",
           "refId": "A"
         },
@@ -1165,7 +1165,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(hivenet_router_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))",
+          "expr": "sum(rate(hivenet_tenant_output_tokens_total{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "Completion tokens/s",
           "refId": "B"
         }
@@ -1225,7 +1225,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(hivenet_router_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(hivenet_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
           "legendFormat": "P50",
           "refId": "A"
         },
@@ -1234,7 +1234,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(hivenet_router_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(hivenet_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
           "legendFormat": "P95",
           "refId": "B"
         },
@@ -1243,7 +1243,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(hivenet_router_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(hivenet_tenant_request_duration_seconds_bucket{tenant_id=~\"$tenant_id\", model=~\"$model\"}[$__rate_interval])))",
           "legendFormat": "P99",
           "refId": "C"
         }
@@ -1304,7 +1304,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(\n  (sum by (model) (hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}) or 0 * sum by (model) (hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}))\n  + on(model) group_left()\n  (sum by (model) (hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}) or 0 * sum by (model) (hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}))\n) / on() group_left() (\n  (sum(hivenet_router_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}) or vector(0)) + (sum(hivenet_router_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}) or vector(0))\n) * 100",
+          "expr": "(\n  (sum by (model) (hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}) or 0 * sum by (model) (hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}))\n  + on(model) group_left()\n  (sum by (model) (hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}) or 0 * sum by (model) (hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}))\n) / on() group_left() (\n  (sum(hivenet_tenant_requests_success_total{tenant_id=~\"$tenant_id\"}) or vector(0)) + (sum(hivenet_tenant_requests_failed_total{tenant_id=~\"$tenant_id\"}) or vector(0))\n) * 100",
           "legendFormat": "{{model}}",
           "refId": "A"
         }
