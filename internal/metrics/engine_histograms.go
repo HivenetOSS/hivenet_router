@@ -56,22 +56,22 @@ type engineHistSnapshot struct {
 func newEngineHistogramCollector() *engineHistogramCollector {
 	return &engineHistogramCollector{
 		ttftDesc: prometheus.NewDesc(
-			"hivenet_router_agent_engine_ttft_seconds",
+			"hivenet_agent_engine_ttft_seconds",
 			"Time-to-first-token latency histogram (seconds). Re-exported from the engine's TTFT histogram with the router's label set. Use histogram_quantile() for correct fleet-wide percentiles.",
 			engineHistogramLabels, nil,
 		),
 		itlDesc: prometheus.NewDesc(
-			"hivenet_router_agent_engine_itl_seconds",
+			"hivenet_agent_engine_itl_seconds",
 			"Inter-token latency histogram (seconds). Re-exported from the engine's ITL histogram with the router's label set.",
 			engineHistogramLabels, nil,
 		),
 		promptDesc: prometheus.NewDesc(
-			"hivenet_router_agent_engine_request_prompt_tokens",
+			"hivenet_agent_engine_request_prompt_tokens",
 			"Per-request prompt length histogram (tokens). Drives the prompt-length workload-shape heatmap on the Inference Engine dashboard.",
 			engineHistogramLabels, nil,
 		),
 		genDesc: prometheus.NewDesc(
-			"hivenet_router_agent_engine_request_generation_tokens",
+			"hivenet_agent_engine_request_generation_tokens",
 			"Per-request generation length histogram (tokens). Drives the generation-length workload-shape heatmap on the Inference Engine dashboard.",
 			engineHistogramLabels, nil,
 		),
@@ -203,7 +203,7 @@ func newEngineFinishReasonTracker() *engineFinishReasonTracker {
 // the internal state with the current cumulative counts.
 //
 // First observation for a peer records a baseline and emits no deltas. This
-// prevents a day-zero spike on hivenet_router_agent_engine_request_success_total —
+// prevents a day-zero spike on hivenet_agent_engine_request_success_total —
 // otherwise the vLLM pod's cumulative-since-its-own-startup count would be
 // Add()ed as a single delta on the first scrape, inflating rate() for a full
 // window. After the baseline is recorded, subsequent scrapes compute real
