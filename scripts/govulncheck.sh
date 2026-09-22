@@ -16,7 +16,15 @@ GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
 #   go-libp2p's WebRTC transport (go-libp2p → webrtc → pion/stun → pion/dtls/v2);
 #   Hivenet Router uses the TCP/QUIC libp2p transports, not WebRTC/DTLS, so the
 #   vulnerable handshake path is not exercised. Re-check when pion ships a fix.
-ALLOWLIST="GO-2026-4479"
+#
+# GO-2026-6099 — quic-go/webtransport-go capsule buffering memory exhaustion,
+#   fixed in v0.11.1. We are pinned to v0.10.0 because the fixed line requires
+#   quic-go >= v0.60, which is incompatible with go-libp2p v0.47.0 (its
+#   webtransport transport needs quic-go v0.59 / webtransport-go v0.10.0). Pulled
+#   in transitively via go-libp2p's WebTransport transport, which Hivenet Router
+#   does not use (TCP/QUIC transports only), so the vulnerable capsule path is not
+#   exercised. Re-check when go-libp2p bumps to quic-go >= v0.61.
+ALLOWLIST="GO-2026-4479 GO-2026-6099"
 
 echo "Running govulncheck@${GOVULNCHECK_VERSION} ..."
 json="$(go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" -format json ./...)"
