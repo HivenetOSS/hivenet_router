@@ -425,21 +425,31 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 // occurred. For post-send failures (non-200, decode error, network error after dial) the
 // real RTT is returned so the caller can pass it to RecordFailure and keep SRTT accurate.
 //
-// Slot ownership: DecrementLoad is called exactly once by this function on ALL paths —
-// via a sync.Once defer on error paths, and explicitly before RecordSuccess on the
-// success path. The caller must NEVER call DecrementLoad.
+// Slot ownership: DecrementLoad is called exactly once per forward on ALL paths —
+// via a sync.Once: by the deferred release on error paths, explicitly before
+// RecordSuccess on the non-streaming success path, and by drainStream when a
+// streamed response fully drains (the slot must cover the whole generation so
+// least-loaded sees the agent's real concurrent load). The caller must NEVER
+// call DecrementLoad.
 //
 // NamespacedClient fetches the agent's /.well-known/libp2p document, resolves the path
 // prefix for inferenceProtocolID, and prepends it to every outbound request URL — so
 // the agent's handler receives the path stripped of the protocol prefix.
 func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *domain.Agent, pending *domain.PendingRequest) (*domain.ChatResponse, float64, error) {
-	// Release the slot exactly once. For early error paths that return before
-	// explicit decrement, the defer handles it. For the success path, decrement
-	// is called explicitly before recording metrics so GetLoad() reflects
-	// the post-completion state — capacityUtil reports 0 when the agent goes idle.
+	// Release the slot exactly once. Early error paths that return before the
+	// response completes rely on the deferred release. Non-streaming success
+	// returns only after the body is fully read, so the deferred release lands
+	// on completion. Streaming success sets releaseOnReturn = false and hands
+	// the release to the drainStream goroutine (see below), so the slot stays
+	// held for the whole generation instead of just the TTFT window.
 	var once sync.Once
+	releaseOnReturn := true
 	decrement := func() { once.Do(agent.DecrementLoad) }
-	defer decrement()
+	defer func() {
+		if releaseOnReturn {
+			decrement()
+		}
+	}()
 
 	region := agent.Metadata.Region
 	engine := agent.Metadata.Engine
@@ -650,45 +660,15 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		if pending.Reservation != nil {
 			meter.SetContentObserver(NewGrowthObserver(pending.Reservation))
 		}
-		go func() {
-			defer cancel()
-			defer pw.Close()
-			defer resp.Body.Close()
-			// Forward bytes to the client byte-exact while a copy feeds the token
-			// meter (TeeReader never alters the forwarded stream).
-			io.Copy(pw, io.TeeReader(resp.Body, meter)) //nolint:errcheck
-
-			// Stream finished — the token counts are now known. Accounting is
-			// post-hoc: the response is already delivered, so this deducts the
-			// actual completion tokens from the daily budget (best-effort, fail-open;
-			// it cannot reject a response that has already been streamed) and records
-			// real token metrics in place of the previous zero placeholders.
-			prompt, completion := meter.Tokens(pending.Request)
-			// Publish the totals to the handler so the audit log carries them.
-			// Stored BEFORE pw.Close() fires (deferred), so the handler's io.Copy
-			// is still blocked when we set these — guaranteeing visibility on the
-			// handler side as soon as it unblocks.
-			pending.StreamedPromptTokens.Store(int64(prompt))
-			pending.StreamedCompletionTokens.Store(int64(completion))
-			pending.StreamedPromptExact.Store(meter.HaveUsage())
-			if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
-				allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
-				if err != nil {
-					log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
-				} else if !allowed {
-					// The stream is already delivered and cannot be rejected mid-flight,
-					// but record the limit event so quota/abuse metrics stay accurate.
-					p.metrics.TenantTokenLimited(pending.TenantID, pending.KeyID, pending.DeploymentID, "output")
-				}
-			}
-			p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
-			p.counters.RecordSuccess(agent, prompt, completion, rttMs)
-		}()
-		// RTT is time-to-first-byte (headers already received above). The
-		// token-bearing metrics are recorded in the goroutine once the stream
-		// completes; here we only mark the request as routed and release the slot.
+		// RTT is time-to-first-byte (headers already received above). Token-bearing
+		// metrics are recorded by drainStream once the stream completes; here we
+		// only mark the request as routed. The in-flight slot stays held until the
+		// stream drains (drainStream releases it) — not until it starts — so
+		// least-loaded sees the agent's real concurrent load during generation
+		// instead of treating every streaming request as instantly idle.
+		releaseOnReturn = false
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
-		decrement()
+		go p.drainStream(agent, pending, pw, resp, cancel, meter, region, engine, model, rttMs, decrement)
 		chatResp.Body = pr
 		chatResp.ProcessedBy = agent.ID.String()
 		log.Debugf("Streaming response started for %s from agent %s", pending.ID, agentID)
@@ -750,6 +730,63 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	chatResp.ProcessedBy = agent.ID.String()
 	log.Debugf("Received response for %s from agent %s", pending.ID, agentID)
 	return &chatResp, rttMs, nil
+}
+
+// drainStream proxies an agent's streaming response body into the client pipe
+// byte-exact, performs post-hoc token accounting once the stream ends, and
+// releases the in-flight slot exactly when the generation is done. releaseSlot is
+// the forwardToAgent slot-release closure (sync.Once-backed, so a redundant call
+// is a no-op); it is invoked after io.Copy returns — normal stream end or client
+// disconnect — so least-loaded observes the agent's real concurrent load for the
+// whole generation, not just the TTFT window.
+//
+// The goroutine owns resp.Body and cancel: both stay open until the stream has
+// fully drained, which is what makes the late slot release safe.
+func (p *RequestProcessor) drainStream(
+	agent *domain.Agent,
+	pending *domain.PendingRequest,
+	pw *io.PipeWriter,
+	resp *http.Response,
+	cancel context.CancelFunc,
+	meter *SSETokenMeter,
+	region, engine, model string,
+	rttMs float64,
+	releaseSlot func(),
+) {
+	defer cancel()
+	defer pw.Close()
+	defer resp.Body.Close()
+	// Forward bytes to the client byte-exact while a copy feeds the token
+	// meter (TeeReader never alters the forwarded stream).
+	io.Copy(pw, io.TeeReader(resp.Body, meter)) //nolint:errcheck
+
+	// Stream finished — the token counts are now known. Accounting is
+	// post-hoc: the response is already delivered, so this deducts the
+	// actual completion tokens from the daily budget (best-effort, fail-open;
+	// it cannot reject a response that has already been streamed) and records
+	// real token metrics in place of the previous zero placeholders.
+	prompt, completion := meter.Tokens(pending.Request)
+	// Publish the totals to the handler so the audit log carries them.
+	// Stored BEFORE pw.Close() fires (deferred), so the handler's io.Copy
+	// is still blocked when we set these — guaranteeing visibility on the
+	// handler side as soon as it unblocks.
+	pending.StreamedPromptTokens.Store(int64(prompt))
+	pending.StreamedCompletionTokens.Store(int64(completion))
+	pending.StreamedPromptExact.Store(meter.HaveUsage())
+	if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
+		allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
+		if err != nil {
+			log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
+		} else if !allowed {
+			// The stream is already delivered and cannot be rejected mid-flight,
+			// but record the limit event so quota/abuse metrics stay accurate.
+			p.metrics.TenantTokenLimited(pending.TenantID, pending.KeyID, pending.DeploymentID, "output")
+		}
+	}
+	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
+	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
+	// Release the in-flight slot now that the generation is done.
+	releaseSlot()
 }
 
 // tryProviderFallback forwards pending to the named closed-source provider using the
