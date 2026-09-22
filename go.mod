@@ -3,7 +3,7 @@
 module hivenet_router
 
 // Minimum Go version required to build the project.
-go 1.26.0
+go 1.25.13
 
 // ── Direct dependencies ─────────────────────────────────────────────────────
 require (
@@ -131,7 +131,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/time v0.16.0
+	golang.org/x/time v0.15.0
 	golang.org/x/tools v0.48.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
