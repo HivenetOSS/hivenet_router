@@ -153,7 +153,7 @@ func TestDrainStream_ReleasesSlotOnClientDisconnect(t *testing.T) {
 	go p.drainStream(agent, pending, pw, newStreamingResponse(infiniteReader{}), func() {}, NewSSETokenMeter(),
 		"EU-France", "vllm", "test-model", 5.0, releaseSlot)
 
-	time.Sleep(20 * time.Millisecond) // let the first write land
+	time.Sleep(20 * time.Millisecond)  // let the first write land
 	if err := pr.Close(); err != nil { // client disconnect → next write fails
 		t.Fatalf("closing pipe: %v", err)
 	}
