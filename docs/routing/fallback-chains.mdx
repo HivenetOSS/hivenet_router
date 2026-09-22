@@ -234,7 +234,7 @@ This behavior is limited to connection-level failures. A backend error returned 
 Connection resets are counted in:
 
 ```text
-hivenet_router_agent_connection_resets_total
+hivenet_agent_connection_resets_total
 ```
 
 ## Capacity and the wait queue
@@ -603,7 +603,7 @@ Primary-step requests:
 
 ```promql
 rate(
-  hivenet_router_policy_primary_routed_total[5m]
+  hivenet_policy_primary_routed_total[5m]
 )
 ```
 
@@ -611,7 +611,7 @@ Requests served by any local fallback step:
 
 ```promql
 rate(
-  hivenet_router_policy_fallback_routed_total[5m]
+  hivenet_policy_fallback_routed_total[5m]
 )
 ```
 
@@ -619,7 +619,7 @@ Requests served by the external provider fallback:
 
 ```promql
 rate(
-  hivenet_router_policy_provider_fallback_total[5m]
+  hivenet_policy_provider_fallback_total[5m]
 )
 ```
 
@@ -627,7 +627,7 @@ Requests where the local chain was exhausted and no successful result followed:
 
 ```promql
 rate(
-  hivenet_router_policy_exhausted_total[5m]
+  hivenet_policy_exhausted_total[5m]
 )
 ```
 
@@ -636,13 +636,13 @@ Fallback as a proportion of all locally routed requests:
 ```promql
 sum(
   rate(
-    hivenet_router_policy_fallback_routed_total[5m]
+    hivenet_policy_fallback_routed_total[5m]
   )
 )
 /
 sum(
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -650,7 +650,7 @@ sum(
 These policy counters are labeled by model.
 
 <Note>
-  `hivenet_router_policy_fallback_routed_total` aggregates every local fallback step. It does not currently include the individual fallback-step name as a Prometheus label.
+  `hivenet_policy_fallback_routed_total` aggregates every local fallback step. It does not currently include the individual fallback-step name as a Prometheus label.
 
   Use router logs and request diagnostics when you need to know which named step was used or exhausted.
 </Note>
@@ -888,7 +888,7 @@ Fallback is a continuity mechanism. It should not quietly become the normal rout
   </Accordion>
 
   <Accordion title="The exhausted metric increases despite provider fallback">
-    `hivenet_router_policy_exhausted_total` also increases when the local chain is exhausted and the configured provider fallback fails.
+    `hivenet_policy_exhausted_total` also increases when the local chain is exhausted and the configured provider fallback fails.
 
     Check provider logs and outbound HTTP metrics before assuming the router returned a normal local-capacity error.
   </Accordion>

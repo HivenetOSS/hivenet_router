@@ -159,7 +159,7 @@ For example, primary requests during the last hour:
 ```promql
 sum(
   increase(
-    hivenet_router_policy_primary_routed_total[1h]
+    hivenet_policy_primary_routed_total[1h]
   )
 )
 ```
@@ -207,7 +207,7 @@ These values come from Hivenet Router’s universal per-agent history and can ap
 ### Success rate
 
 ```text
-hivenet_router_agent_success_rate
+hivenet_agent_success_rate
 ```
 
 A value below your normal baseline may indicate backend errors, request incompatibility, or connection instability.
@@ -215,7 +215,7 @@ A value below your normal baseline may indicate backend errors, request incompat
 ### Capacity utilization
 
 ```text
-hivenet_router_agent_capacity_utilization
+hivenet_agent_capacity_utilization
 ```
 
 This is:
@@ -231,8 +231,8 @@ For streaming requests, the current implementation releases the agent slot when 
 ### SRTT and RTTVAR
 
 ```text
-hivenet_router_agent_srtt_ms
-hivenet_router_agent_rttvar_ms
+hivenet_agent_srtt_ms
+hivenet_agent_rttvar_ms
 ```
 
 SRTT represents smoothed request time observed by Hivenet Router.
@@ -339,7 +339,7 @@ Use this in Explore when you need recent positive growth:
 ```promql
 clamp_min(
   delta(
-    hivenet_router_agent_engine_preemptions_total[5m]
+    hivenet_agent_engine_preemptions_total[5m]
   ),
   0
 )
@@ -360,7 +360,7 @@ histogram_quantile(
   0.95,
   sum by (le, model) (
     rate(
-      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+      hivenet_agent_engine_ttft_seconds_bucket[5m]
     )
   )
 )
@@ -413,8 +413,8 @@ The time-series panels use Grafana’s selected rate interval and respond more d
 Daily token panels use:
 
 ```text
-hivenet_router_tenant_tokens_used_today
-hivenet_router_tenant_quota_tpd_limit
+hivenet_tenant_tokens_used_today
+hivenet_tenant_quota_tpd_limit
 ```
 
 The budget resets at midnight UTC.
@@ -435,14 +435,14 @@ A quota limit of `0` means unlimited. Panels that depend on a finite budget may 
 The current tenant selector is populated from:
 
 ```text
-hivenet_router_tenant_quota_rpm_limit
+hivenet_tenant_quota_rpm_limit
 ```
 
 and several limit panels use the flat quota gauges:
 
 ```text
-hivenet_router_tenant_quota_rpm_limit
-hivenet_router_tenant_quota_tpd_limit
+hivenet_tenant_quota_rpm_limit
+hivenet_tenant_quota_tpd_limit
 ```
 
 Tenants using only `quota.per_model` may therefore be missing from the selector or may not have their limits represented fully in this dashboard.
@@ -450,8 +450,8 @@ Tenants using only `quota.per_model` may therefore be missing from the selector 
 Per-model quota metrics are still available in Prometheus:
 
 ```text
-hivenet_router_tenant_per_model_quota_rpm_limit
-hivenet_router_tenant_per_model_quota_tpd_limit
+hivenet_tenant_per_model_quota_rpm_limit
+hivenet_tenant_per_model_quota_tpd_limit
 ```
 
 Use Grafana Explore or create additional panels when per-model quota visibility is required.
@@ -622,7 +622,7 @@ The current dashboards define these variables.
 
 | Variable | Source |
 | --- | --- |
-| `$model` | Models from `hivenet_router_routing_agent_info` |
+| `$model` | Models from `hivenet_routing_agent_info` |
 | `$engine` | Engine values from agent registrations |
 | `$peer_id` | Agent peer IDs |
 | `$organization` | Agent organization metadata |
@@ -655,7 +655,7 @@ For example, request rate by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -665,7 +665,7 @@ Policy exhaustion by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_exhausted_total[5m]
+    hivenet_policy_exhausted_total[5m]
   )
 )
 ```
@@ -677,7 +677,7 @@ histogram_quantile(
   0.95,
   sum by (le, tenant_id, model) (
     rate(
-      hivenet_router_tenant_request_duration_seconds_bucket[5m]
+      hivenet_tenant_request_duration_seconds_bucket[5m]
     )
   )
 )
@@ -801,7 +801,7 @@ See [Prometheus metrics](/observability/prometheus-metrics#alerting-examples) fo
     ```bash
     docker compose exec prometheus \
       wget -qO- \
-      'http://localhost:9090/api/v1/query?query=hivenet_router_routing_agent_info' \
+      'http://localhost:9090/api/v1/query?query=hivenet_routing_agent_info' \
       | jq .
     ```
 
@@ -861,7 +861,7 @@ See [Prometheus metrics](/observability/prometheus-metrics#alerting-examples) fo
     ```bash
     curl -s \
       http://localhost:2112/metrics \
-      | grep hivenet_router_tenant
+      | grep hivenet_tenant
     ```
 
     A tenant using only per-model quota gauges may not appear in the current selector. Query the per-model metrics directly in Explore when necessary.

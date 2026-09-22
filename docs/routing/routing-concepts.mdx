@@ -468,7 +468,7 @@ Application-level errors do not trigger connection recovery because the agent re
 Connection resets increment:
 
 ```text
-hivenet_router_agent_connection_resets_total
+hivenet_agent_connection_resets_total
 ```
 
 A sustained increase may indicate repeated network interruption or agent reconnects.
@@ -685,21 +685,21 @@ Inspect policy-related metrics:
 
 ```bash
 curl http://localhost:2112/metrics \
-  | grep hivenet_router_policy
+  | grep hivenet_policy
 ```
 
 Inspect routed requests:
 
 ```bash
 curl http://localhost:2112/metrics \
-  | grep hivenet_router_routing_requests_routed_total
+  | grep hivenet_routing_requests_routed_total
 ```
 
 Inspect stale-connection resets:
 
 ```bash
 curl http://localhost:2112/metrics \
-  | grep hivenet_router_agent_connection_resets_total
+  | grep hivenet_agent_connection_resets_total
 ```
 
 When a complete policy chain is exhausted, the router logs which gate drained each step’s candidate pool.

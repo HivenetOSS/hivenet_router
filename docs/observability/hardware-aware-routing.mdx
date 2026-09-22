@@ -318,7 +318,7 @@ Policy utilization values use fractions:
 Prometheus exposes the corresponding hardware value on a `0` to `100` scale:
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent > 95
+hivenet_agent_gpu_utilization_percent > 95
 ```
 
 <Note>
@@ -662,14 +662,14 @@ This routes according to the metadata you supplied. Hivenet Router does not inde
 GPU power is available through Prometheus:
 
 ```text
-hivenet_router_agent_gpu_power_watts
+hivenet_agent_gpu_power_watts
 ```
 
 Total current GPU power by machine:
 
 ```promql
 sum by (machine) (
-  hivenet_router_agent_gpu_power_watts
+  hivenet_agent_gpu_power_watts
 )
 ```
 
@@ -677,7 +677,7 @@ Power by region:
 
 ```promql
 sum by (region) (
-  hivenet_router_agent_gpu_power_watts
+  hivenet_agent_gpu_power_watts
 )
 ```
 
@@ -696,13 +696,13 @@ A ratio such as requests per watt can be useful as a rough dashboard signal:
 ```promql
 sum(
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 /
 clamp_min(
   sum(
-    hivenet_router_agent_gpu_power_watts
+    hivenet_agent_gpu_power_watts
   ),
   1
 )
@@ -801,42 +801,42 @@ A long list of gates can drain the candidate pool more often than expected. Add 
 ### Current GPU state
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent
+hivenet_agent_gpu_utilization_percent
 ```
 
 ```promql
 100
 *
-hivenet_router_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_used_bytes
 /
 clamp_min(
-  hivenet_router_agent_gpu_vram_total_bytes,
+  hivenet_agent_gpu_vram_total_bytes,
   1
 )
 ```
 
 ```promql
-hivenet_router_agent_gpu_temperature_celsius
+hivenet_agent_gpu_temperature_celsius
 ```
 
 ### Current host state
 
 ```promql
-hivenet_router_agent_cpu_usage_percent
+hivenet_agent_cpu_usage_percent
 ```
 
 ```promql
-hivenet_router_agent_memory_used_percent
+hivenet_agent_memory_used_percent
 ```
 
 ### Engine pressure
 
 ```promql
-hivenet_router_agent_engine_kv_cache_utilization
+hivenet_agent_engine_kv_cache_utilization
 ```
 
 ```promql
-hivenet_router_agent_engine_waiting_requests
+hivenet_agent_engine_waiting_requests
 ```
 
 ### Routing outcomes
@@ -844,7 +844,7 @@ hivenet_router_agent_engine_waiting_requests
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_primary_routed_total[5m]
+    hivenet_policy_primary_routed_total[5m]
   )
 )
 ```
@@ -852,7 +852,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_fallback_routed_total[5m]
+    hivenet_policy_fallback_routed_total[5m]
   )
 )
 ```
@@ -860,7 +860,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_exhausted_total[5m]
+    hivenet_policy_exhausted_total[5m]
   )
 )
 ```

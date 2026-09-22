@@ -112,7 +112,7 @@ Check that Hivenet Router metrics exist:
 ```bash
 curl -s \
   http://localhost:2112/metrics \
-  | grep '^hivenet_router_'
+  | grep '^hivenet_'
 ```
 
 ## How metrics reach the router
@@ -188,7 +188,7 @@ machine
 as labels.
 
 ```promql
-hivenet_router_routing_agent_info
+hivenet_routing_agent_info
 ```
 
 The value is `1` while an agent is registered.
@@ -197,7 +197,7 @@ Count registered agents:
 
 ```promql
 count(
-  hivenet_router_routing_agent_info
+  hivenet_routing_agent_info
 )
 ```
 
@@ -205,14 +205,14 @@ Count agents by model:
 
 ```promql
 count by (model) (
-  hivenet_router_routing_agent_info
+  hivenet_routing_agent_info
 )
 ```
 
 ### Agent health
 
 ```promql
-hivenet_router_routing_agent_healthy
+hivenet_routing_agent_healthy
 ```
 
 Values are:
@@ -226,20 +226,20 @@ Count healthy agents by model:
 
 ```promql
 sum by (model) (
-  hivenet_router_routing_agent_healthy
+  hivenet_routing_agent_healthy
 )
 ```
 
 Find unhealthy agents:
 
 ```promql
-hivenet_router_routing_agent_healthy == 0
+hivenet_routing_agent_healthy == 0
 ```
 
 ### Last heartbeat
 
 ```promql
-hivenet_router_routing_agent_last_seen_timestamp
+hivenet_routing_agent_last_seen_timestamp
 ```
 
 The value is a Unix timestamp in **milliseconds**.
@@ -250,7 +250,7 @@ Show seconds since the most recent heartbeat:
 time()
 -
 (
-  hivenet_router_routing_agent_last_seen_timestamp
+  hivenet_routing_agent_last_seen_timestamp
   / 1000
 )
 ```
@@ -258,7 +258,7 @@ time()
 ### Routed requests
 
 ```promql
-hivenet_router_routing_requests_routed_total
+hivenet_routing_requests_routed_total
 ```
 
 Labels:
@@ -275,7 +275,7 @@ Request rate by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -285,7 +285,7 @@ Request rate by region and engine:
 ```promql
 sum by (region, engine) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -293,7 +293,7 @@ sum by (region, engine) (
 ### Failed routing
 
 ```promql
-hivenet_router_routing_requests_failed_total
+hivenet_routing_requests_failed_total
 ```
 
 This counts inference requests that the router could not forward successfully.
@@ -303,20 +303,20 @@ Failure rate:
 ```promql
 sum(
   rate(
-    hivenet_router_routing_requests_failed_total[5m]
+    hivenet_routing_requests_failed_total[5m]
   )
 )
 /
 clamp_min(
   sum(
     rate(
-      hivenet_router_routing_requests_routed_total[5m]
+      hivenet_routing_requests_routed_total[5m]
     )
   )
   +
   sum(
     rate(
-      hivenet_router_routing_requests_failed_total[5m]
+      hivenet_routing_requests_failed_total[5m]
     )
   ),
   0.000001
@@ -340,8 +340,8 @@ as labels.
 ### Successful and failed requests
 
 ```promql
-hivenet_router_agent_requests_success_total
-hivenet_router_agent_requests_failed_total
+hivenet_agent_requests_success_total
+hivenet_agent_requests_failed_total
 ```
 
 Request rate by agent:
@@ -349,7 +349,7 @@ Request rate by agent:
 ```promql
 sum by (peer_id, model) (
   rate(
-    hivenet_router_agent_requests_success_total[5m]
+    hivenet_agent_requests_success_total[5m]
   )
 )
 ```
@@ -357,7 +357,7 @@ sum by (peer_id, model) (
 ### Success rate
 
 ```promql
-hivenet_router_agent_success_rate
+hivenet_agent_success_rate
 ```
 
 The value ranges from `0.0` to `1.0`.
@@ -365,7 +365,7 @@ The value ranges from `0.0` to `1.0`.
 Find agents below 95%:
 
 ```promql
-hivenet_router_agent_success_rate < 0.95
+hivenet_agent_success_rate < 0.95
 ```
 
 A new agent may not expose a meaningful success rate until it has completed requests.
@@ -373,7 +373,7 @@ A new agent may not expose a meaningful success rate until it has completed requ
 ### Capacity utilization
 
 ```promql
-hivenet_router_agent_capacity_utilization
+hivenet_agent_capacity_utilization
 ```
 
 The value is:
@@ -385,7 +385,7 @@ active requests / declared capacity
 For non-streaming requests, the slot normally remains occupied until the response completes. For streaming requests, the current implementation releases the agent capacity slot when response headers arrive and streaming begins, while backend generation can continue.
 
 <Warning>
-  Do not use `hivenet_router_agent_capacity_utilization` as the authoritative count of ongoing streaming generations.
+  Do not use `hivenet_agent_capacity_utilization` as the authoritative count of ongoing streaming generations.
 
   For streaming-heavy workloads, compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL.
 </Warning>
@@ -393,14 +393,14 @@ For non-streaming requests, the slot normally remains occupied until the respons
 Show agents above 80%:
 
 ```promql
-hivenet_router_agent_capacity_utilization > 0.8
+hivenet_agent_capacity_utilization > 0.8
 ```
 
 ### Tokens
 
 ```promql
-hivenet_router_agent_input_tokens_total
-hivenet_router_agent_output_tokens_total
+hivenet_agent_input_tokens_total
+hivenet_agent_output_tokens_total
 ```
 
 Token rate by model:
@@ -408,11 +408,11 @@ Token rate by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_agent_input_tokens_total[5m]
+    hivenet_agent_input_tokens_total[5m]
   )
   +
   rate(
-    hivenet_router_agent_output_tokens_total[5m]
+    hivenet_agent_output_tokens_total[5m]
   )
 )
 ```
@@ -420,7 +420,7 @@ sum by (model) (
 ### Capacity rejections
 
 ```promql
-hivenet_router_agent_rejected_requests_total
+hivenet_agent_rejected_requests_total
 ```
 
 This increases when Hivenet Router tries to acquire a capacity slot and the agent is already full.
@@ -428,7 +428,7 @@ This increases when Hivenet Router tries to acquire a capacity slot and the agen
 ```promql
 sum by (peer_id, model) (
   rate(
-    hivenet_router_agent_rejected_requests_total[5m]
+    hivenet_agent_rejected_requests_total[5m]
   )
 )
 ```
@@ -436,23 +436,23 @@ sum by (peer_id, model) (
 ### Disconnections and health failures
 
 ```promql
-hivenet_router_agent_disconnections_total
-hivenet_router_agent_failure_total
-hivenet_router_model_backend_failure_total
+hivenet_agent_disconnections_total
+hivenet_agent_failure_total
+hivenet_model_backend_failure_total
 ```
 
 | Metric | Meaning |
 | --- | --- |
-| `hivenet_router_agent_disconnections_total` | Agent disconnection history |
-| `hivenet_router_agent_failure_total` | Agent marked unhealthy after missed heartbeats |
-| `hivenet_router_model_backend_failure_total` | Agent reported its inference backend as unhealthy |
+| `hivenet_agent_disconnections_total` | Agent disconnection history |
+| `hivenet_agent_failure_total` | Agent marked unhealthy after missed heartbeats |
+| `hivenet_model_backend_failure_total` | Agent reported its inference backend as unhealthy |
 
 Compare agent-process and backend failures:
 
 ```promql
 sum by (peer_id, model) (
   rate(
-    hivenet_router_agent_failure_total[1h]
+    hivenet_agent_failure_total[1h]
   )
 )
 ```
@@ -460,7 +460,7 @@ sum by (peer_id, model) (
 ```promql
 sum by (peer_id, model) (
   rate(
-    hivenet_router_model_backend_failure_total[1h]
+    hivenet_model_backend_failure_total[1h]
   )
 )
 ```
@@ -468,8 +468,8 @@ sum by (peer_id, model) (
 ### Smoothed latency
 
 ```promql
-hivenet_router_agent_srtt_ms
-hivenet_router_agent_rttvar_ms
+hivenet_agent_srtt_ms
+hivenet_agent_rttvar_ms
 ```
 
 These follow the RFC 6298 smoothed round-trip-time calculation.
@@ -477,17 +477,17 @@ These follow the RFC 6298 smoothed round-trip-time calculation.
 Show SRTT by agent:
 
 ```promql
-hivenet_router_agent_srtt_ms
+hivenet_agent_srtt_ms
 ```
 
 Find high or unstable latency:
 
 ```promql
-hivenet_router_agent_srtt_ms > 5000
+hivenet_agent_srtt_ms > 5000
 ```
 
 ```promql
-hivenet_router_agent_rttvar_ms > 2000
+hivenet_agent_rttvar_ms > 2000
 ```
 
 <Note>
@@ -556,27 +556,27 @@ A metric is absent until the agent reports it.
 ### Cache and queue state
 
 ```promql
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
 ```
 
 Agents under cache pressure:
 
 ```promql
-hivenet_router_agent_engine_kv_cache_utilization > 0.9
+hivenet_agent_engine_kv_cache_utilization > 0.9
 ```
 
 Agents with backend queues:
 
 ```promql
-hivenet_router_agent_engine_waiting_requests > 0
+hivenet_agent_engine_waiting_requests > 0
 ```
 
 ### Preemptions
 
 ```promql
-hivenet_router_agent_engine_preemptions_total
+hivenet_agent_engine_preemptions_total
 ```
 
 Despite the `_total` suffix, this series is exported as a gauge representing the backend’s latest cumulative value.
@@ -585,7 +585,7 @@ Use a change function to detect growth:
 
 ```promql
 delta(
-  hivenet_router_agent_engine_preemptions_total[5m]
+  hivenet_agent_engine_preemptions_total[5m]
 ) > 0
 ```
 
@@ -594,10 +594,10 @@ Do not assume ordinary counter-reset behavior across every backend restart.
 ### Per-agent TTFT and ITL gauges
 
 ```promql
-hivenet_router_agent_engine_avg_ttft_seconds
-hivenet_router_agent_engine_p90_ttft_seconds
-hivenet_router_agent_engine_avg_itl_seconds
-hivenet_router_agent_engine_p90_itl_seconds
+hivenet_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_avg_itl_seconds
+hivenet_agent_engine_p90_itl_seconds
 ```
 
 These are convenient for viewing one agent.
@@ -607,7 +607,7 @@ For fleet-wide percentiles, use the histogram metrics instead of averaging per-a
 ### Finish reasons
 
 ```promql
-hivenet_router_agent_engine_request_success_total
+hivenet_agent_engine_request_success_total
 ```
 
 Additional label:
@@ -629,7 +629,7 @@ Completion rate by finish reason:
 ```promql
 sum by (finished_reason) (
   rate(
-    hivenet_router_agent_engine_request_success_total[5m]
+    hivenet_agent_engine_request_success_total[5m]
   )
 )
 ```
@@ -637,8 +637,8 @@ sum by (finished_reason) (
 ### llama.cpp throughput
 
 ```promql
-hivenet_router_agent_engine_predicted_tps
-hivenet_router_agent_engine_prompt_tps
+hivenet_agent_engine_predicted_tps
+hivenet_agent_engine_prompt_tps
 ```
 
 These expose the latest reported generation and prompt-ingestion throughput from llama.cpp.
@@ -650,10 +650,10 @@ The current router re-exports raw engine histogram buckets for vLLM agents. SGLa
 The vLLM-backed histogram families are:
 
 ```text
-hivenet_router_agent_engine_ttft_seconds
-hivenet_router_agent_engine_itl_seconds
-hivenet_router_agent_engine_request_prompt_tokens
-hivenet_router_agent_engine_request_generation_tokens
+hivenet_agent_engine_ttft_seconds
+hivenet_agent_engine_itl_seconds
+hivenet_agent_engine_request_prompt_tokens
+hivenet_agent_engine_request_generation_tokens
 ```
 
 Prometheus exposes each histogram as:
@@ -671,7 +671,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+      hivenet_agent_engine_ttft_seconds_bucket[5m]
     )
   )
 )
@@ -684,7 +684,7 @@ histogram_quantile(
   0.90,
   sum by (le, model) (
     rate(
-      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+      hivenet_agent_engine_ttft_seconds_bucket[5m]
     )
   )
 )
@@ -697,7 +697,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_itl_seconds_bucket[5m]
+      hivenet_agent_engine_itl_seconds_bucket[5m]
     )
   )
 )
@@ -710,7 +710,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+      hivenet_agent_engine_request_prompt_tokens_bucket[5m]
     )
   )
 )
@@ -723,7 +723,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_request_generation_tokens_bucket[5m]
+      hivenet_agent_engine_request_generation_tokens_bucket[5m]
     )
   )
 )
@@ -753,12 +753,12 @@ machine
 as labels.
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent
-hivenet_router_agent_gpu_vram_used_bytes
-hivenet_router_agent_gpu_vram_free_bytes
-hivenet_router_agent_gpu_vram_total_bytes
-hivenet_router_agent_gpu_temperature_celsius
-hivenet_router_agent_gpu_power_watts
+hivenet_agent_gpu_utilization_percent
+hivenet_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_free_bytes
+hivenet_agent_gpu_vram_total_bytes
+hivenet_agent_gpu_temperature_celsius
+hivenet_agent_gpu_power_watts
 ```
 
 Unlike policy gates, the Prometheus utilization value uses a `0` to `100` scale.
@@ -766,14 +766,14 @@ Unlike policy gates, the Prometheus utilization value uses a `0` to `100` scale.
 ### GPU utilization
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent
+hivenet_agent_gpu_utilization_percent
 ```
 
 Average utilization by model:
 
 ```promql
 avg by (model) (
-  hivenet_router_agent_gpu_utilization_percent
+  hivenet_agent_gpu_utilization_percent
 )
 ```
 
@@ -782,10 +782,10 @@ avg by (model) (
 ```promql
 100
 *
-hivenet_router_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_used_bytes
 /
 clamp_min(
-  hivenet_router_agent_gpu_vram_total_bytes,
+  hivenet_agent_gpu_vram_total_bytes,
   1
 )
 ```
@@ -794,7 +794,7 @@ clamp_min(
 
 ```promql
 max by (peer_id, model) (
-  hivenet_router_agent_gpu_temperature_celsius
+  hivenet_agent_gpu_temperature_celsius
 )
 ```
 
@@ -802,7 +802,7 @@ max by (peer_id, model) (
 
 ```promql
 sum by (peer_id, model) (
-  hivenet_router_agent_gpu_power_watts
+  hivenet_agent_gpu_power_watts
 )
 ```
 
@@ -822,28 +822,28 @@ machine
 ```
 
 ```promql
-hivenet_router_agent_cpu_usage_percent
-hivenet_router_agent_memory_used_percent
-hivenet_router_agent_memory_available_bytes
-hivenet_router_agent_memory_total_bytes
+hivenet_agent_cpu_usage_percent
+hivenet_agent_memory_used_percent
+hivenet_agent_memory_available_bytes
+hivenet_agent_memory_total_bytes
 ```
 
 CPU usage:
 
 ```promql
-hivenet_router_agent_cpu_usage_percent
+hivenet_agent_cpu_usage_percent
 ```
 
 Memory use:
 
 ```promql
-hivenet_router_agent_memory_used_percent
+hivenet_agent_memory_used_percent
 ```
 
 Available GiB:
 
 ```promql
-hivenet_router_agent_memory_available_bytes
+hivenet_agent_memory_available_bytes
 /
 1024
 /
@@ -857,10 +857,10 @@ hivenet_router_agent_memory_available_bytes
 ### Primary and fallback routing
 
 ```promql
-hivenet_router_policy_primary_routed_total
-hivenet_router_policy_fallback_routed_total
-hivenet_router_policy_provider_fallback_total
-hivenet_router_policy_exhausted_total
+hivenet_policy_primary_routed_total
+hivenet_policy_fallback_routed_total
+hivenet_policy_provider_fallback_total
+hivenet_policy_exhausted_total
 ```
 
 All use the `model` label.
@@ -870,7 +870,7 @@ Local fallback rate by model:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_fallback_routed_total[5m]
+    hivenet_policy_fallback_routed_total[5m]
   )
 )
 ```
@@ -880,7 +880,7 @@ Provider fallback rate:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_provider_fallback_total[5m]
+    hivenet_policy_provider_fallback_total[5m]
   )
 )
 ```
@@ -890,7 +890,7 @@ Policy exhaustion:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_exhausted_total[5m]
+    hivenet_policy_exhausted_total[5m]
   )
 )
 ```
@@ -900,7 +900,7 @@ This counter describes an exhausted policy path, not one guaranteed final HTTP s
 ### Stale connection resets
 
 ```promql
-hivenet_router_agent_connection_resets_total
+hivenet_agent_connection_resets_total
 ```
 
 Labels:
@@ -915,7 +915,7 @@ A sustained rate can indicate repeated router-agent connection loss:
 ```promql
 sum by (model, reason) (
   rate(
-    hivenet_router_agent_connection_resets_total[5m]
+    hivenet_agent_connection_resets_total[5m]
   )
 )
 ```
@@ -923,7 +923,7 @@ sum by (model, reason) (
 ### Policy reloads
 
 ```promql
-hivenet_router_policy_reload_total
+hivenet_policy_reload_total
 ```
 
 Labels:
@@ -948,7 +948,7 @@ Failed reloads:
 ```promql
 sum by (trigger) (
   increase(
-    hivenet_router_policy_reload_total{
+    hivenet_policy_reload_total{
       result="error"
     }[1h]
   )
@@ -962,7 +962,7 @@ These metrics describe the per-model queue used when eligible agents exist but a
 ### Current queue depth
 
 ```promql
-hivenet_router_queue_depth
+hivenet_queue_depth
 ```
 
 Label:
@@ -972,13 +972,13 @@ model
 ```
 
 ```promql
-hivenet_router_queue_depth > 0
+hivenet_queue_depth > 0
 ```
 
 ### Queue wait duration
 
 ```promql
-hivenet_router_queue_wait_seconds
+hivenet_queue_wait_seconds
 ```
 
 P95 queue wait by model:
@@ -988,7 +988,7 @@ histogram_quantile(
   0.95,
   sum by (le, model) (
     rate(
-      hivenet_router_queue_wait_seconds_bucket[5m]
+      hivenet_queue_wait_seconds_bucket[5m]
     )
   )
 )
@@ -1016,8 +1016,8 @@ unset
 ### Successful and failed requests
 
 ```promql
-hivenet_router_tenant_requests_success_total
-hivenet_router_tenant_requests_failed_total
+hivenet_tenant_requests_success_total
+hivenet_tenant_requests_failed_total
 ```
 
 Labels:
@@ -1034,7 +1034,7 @@ Request count by tenant and deployment:
 ```promql
 sum by (tenant_id, deployment_id) (
   increase(
-    hivenet_router_tenant_requests_success_total[7d]
+    hivenet_tenant_requests_success_total[7d]
   )
 )
 ```
@@ -1042,8 +1042,8 @@ sum by (tenant_id, deployment_id) (
 ### Token use
 
 ```promql
-hivenet_router_tenant_input_tokens_total
-hivenet_router_tenant_output_tokens_total
+hivenet_tenant_input_tokens_total
+hivenet_tenant_output_tokens_total
 ```
 
 Token rate by tenant and model:
@@ -1051,11 +1051,11 @@ Token rate by tenant and model:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_tenant_input_tokens_total[5m]
+    hivenet_tenant_input_tokens_total[5m]
   )
   +
   rate(
-    hivenet_router_tenant_output_tokens_total[5m]
+    hivenet_tenant_output_tokens_total[5m]
   )
 )
 ```
@@ -1063,7 +1063,7 @@ sum by (tenant_id, model) (
 ### Request-rate rejection
 
 ```promql
-hivenet_router_tenant_rate_limited_total
+hivenet_tenant_rate_limited_total
 ```
 
 Labels:
@@ -1076,7 +1076,7 @@ key_id
 ```promql
 sum by (tenant_id, key_id) (
   rate(
-    hivenet_router_tenant_rate_limited_total[5m]
+    hivenet_tenant_rate_limited_total[5m]
   )
 )
 ```
@@ -1084,7 +1084,7 @@ sum by (tenant_id, key_id) (
 ### Token-budget rejection
 
 ```promql
-hivenet_router_tenant_token_limited_total
+hivenet_tenant_token_limited_total
 ```
 
 Labels:
@@ -1106,7 +1106,7 @@ output
 ```promql
 sum by (tenant_id, phase) (
   rate(
-    hivenet_router_tenant_token_limited_total[5m]
+    hivenet_tenant_token_limited_total[5m]
   )
 )
 ```
@@ -1114,8 +1114,8 @@ sum by (tenant_id, phase) (
 ### Flat quota limits
 
 ```promql
-hivenet_router_tenant_quota_rpm_limit
-hivenet_router_tenant_quota_tpd_limit
+hivenet_tenant_quota_rpm_limit
+hivenet_tenant_quota_tpd_limit
 ```
 
 Label:
@@ -1131,8 +1131,8 @@ These gauges describe keys using the flat quota shape.
 ### Per-model quota limits
 
 ```promql
-hivenet_router_tenant_per_model_quota_rpm_limit
-hivenet_router_tenant_per_model_quota_tpd_limit
+hivenet_tenant_per_model_quota_rpm_limit
+hivenet_tenant_per_model_quota_tpd_limit
 ```
 
 Labels:
@@ -1154,7 +1154,7 @@ It can change as agent health and fleet size change.
 ### Tokens used today
 
 ```promql
-hivenet_router_tenant_tokens_used_today
+hivenet_tenant_tokens_used_today
 ```
 
 Label:
@@ -1168,10 +1168,10 @@ The value resets at midnight UTC.
 Token-budget utilization for flat quotas:
 
 ```promql
-hivenet_router_tenant_tokens_used_today
+hivenet_tenant_tokens_used_today
 /
 clamp_min(
-  hivenet_router_tenant_quota_tpd_limit,
+  hivenet_tenant_quota_tpd_limit,
   1
 )
 ```
@@ -1179,7 +1179,7 @@ clamp_min(
 ### Last request timestamp
 
 ```promql
-hivenet_router_tenant_last_request_timestamp
+hivenet_tenant_last_request_timestamp
 ```
 
 Labels:
@@ -1194,7 +1194,7 @@ Most recent request per API key:
 
 ```promql
 max by (tenant_id, key_id) (
-  hivenet_router_tenant_last_request_timestamp
+  hivenet_tenant_last_request_timestamp
 )
 ```
 
@@ -1204,14 +1204,14 @@ Seconds since last request:
 time()
 -
 max by (tenant_id, key_id) (
-  hivenet_router_tenant_last_request_timestamp
+  hivenet_tenant_last_request_timestamp
 )
 ```
 
 ### Tenant request duration
 
 ```promql
-hivenet_router_tenant_request_duration_seconds
+hivenet_tenant_request_duration_seconds
 ```
 
 Labels:
@@ -1230,7 +1230,7 @@ histogram_quantile(
   0.95,
   sum by (le, tenant_id, model) (
     rate(
-      hivenet_router_tenant_request_duration_seconds_bucket[5m]
+      hivenet_tenant_request_duration_seconds_bucket[5m]
     )
   )
 )
@@ -1239,14 +1239,14 @@ histogram_quantile(
 ### Quota persistence errors
 
 ```promql
-hivenet_router_quota_backend_errors_total
+hivenet_quota_backend_errors_total
 ```
 
 This increases when the Badger-backed daily token limiter cannot flush quota state to disk.
 
 ```promql
 increase(
-  hivenet_router_quota_backend_errors_total[15m]
+  hivenet_quota_backend_errors_total[15m]
 ) > 0
 ```
 
@@ -1262,11 +1262,11 @@ The LLM admission gates publish one rejection counter and four live pool gauges:
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `hivenet_router_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
-| `hivenet_router_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
-| `hivenet_router_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling |
-| `hivenet_router_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
-| `hivenet_router_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
+| `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
+| `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
+| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling |
+| `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
+| `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
 
 The `reason` label identifies the gate:
 
@@ -1287,7 +1287,7 @@ The budget and backstop gauges can change as healthy replicas join or leave. Exi
 ## Per-request duration by agent
 
 ```promql
-hivenet_router_request_duration_seconds
+hivenet_request_duration_seconds
 ```
 
 Labels:
@@ -1306,7 +1306,7 @@ histogram_quantile(
   0.95,
   sum by (le, peer_id, model) (
     rate(
-      hivenet_router_request_duration_seconds_bucket[5m]
+      hivenet_request_duration_seconds_bucket[5m]
     )
   )
 )
@@ -1429,7 +1429,7 @@ groups:
       - alert: HivenetRouterAgentUnhealthy
 
         expr: |
-          hivenet_router_routing_agent_healthy == 0
+          hivenet_routing_agent_healthy == 0
 
         for: 1m
 
@@ -1450,20 +1450,20 @@ groups:
           (
             sum(
               rate(
-                hivenet_router_routing_requests_failed_total[5m]
+                hivenet_routing_requests_failed_total[5m]
               )
             )
             /
             clamp_min(
               sum(
                 rate(
-                  hivenet_router_routing_requests_routed_total[5m]
+                  hivenet_routing_requests_routed_total[5m]
                 )
               )
               +
               sum(
                 rate(
-                  hivenet_router_routing_requests_failed_total[5m]
+                  hivenet_routing_requests_failed_total[5m]
                 )
               ),
               0.000001
@@ -1486,7 +1486,7 @@ groups:
       - alert: HivenetRouterKVCachePressure
 
         expr: |
-          hivenet_router_agent_engine_kv_cache_utilization > 0.90
+          hivenet_agent_engine_kv_cache_utilization > 0.90
 
         for: 2m
 
@@ -1504,7 +1504,7 @@ groups:
       - alert: HivenetRouterGPUHighTemperature
 
         expr: |
-          hivenet_router_agent_gpu_temperature_celsius > 85
+          hivenet_agent_gpu_temperature_celsius > 85
 
         for: 5m
 
@@ -1524,7 +1524,7 @@ groups:
         expr: |
           sum by (model) (
             rate(
-              hivenet_router_policy_exhausted_total[5m]
+              hivenet_policy_exhausted_total[5m]
             )
           ) > 0
 
@@ -1545,7 +1545,7 @@ groups:
 
         expr: |
           increase(
-            hivenet_router_quota_backend_errors_total[15m]
+            hivenet_quota_backend_errors_total[15m]
           ) > 0
 
         labels:
@@ -1572,7 +1572,7 @@ groups:
         expr: |
           sum by (model) (
             rate(
-              hivenet_router_routing_requests_routed_total[5m]
+              hivenet_routing_requests_routed_total[5m]
             )
           )
 
@@ -1581,7 +1581,7 @@ groups:
         expr: |
           sum by (model) (
             rate(
-              hivenet_router_routing_requests_failed_total[5m]
+              hivenet_routing_requests_failed_total[5m]
             )
           )
 
@@ -1592,7 +1592,7 @@ groups:
             0.95,
             sum by (le, model) (
               rate(
-                hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+                hivenet_agent_engine_ttft_seconds_bucket[5m]
               )
             )
           )
@@ -1646,7 +1646,7 @@ groups:
     ```bash
     curl -s \
       http://localhost:2112/metrics \
-      | grep 'hivenet_router_agent_engine'
+      | grep 'hivenet_agent_engine'
     ```
   </Accordion>
 
@@ -1710,7 +1710,7 @@ groups:
     curl -s \
       http://localhost:2112/metrics \
       | grep \
-        'hivenet_router_agent_engine_ttft_seconds_bucket'
+        'hivenet_agent_engine_ttft_seconds_bucket'
     ```
 
     Use `rate()` over a window that contains completed observations.

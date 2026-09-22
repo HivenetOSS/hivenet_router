@@ -282,28 +282,28 @@ type BackendMetrics struct {
 
 	// TTFTHistogram is the raw time-to-first-token histogram snapshot from the
 	// engine. Re-exported by the router via a custom Prometheus collector as
-	// hivenet_router_agent_engine_ttft_seconds_{bucket,sum,count}. Enables correct
+	// hivenet_agent_engine_ttft_seconds_{bucket,sum,count}. Enables correct
 	// fleet-wide percentile aggregation (histogram_quantile on the sum of rates)
 	// and heatmap visualisation — neither of which is possible with scalar gauges.
 	TTFTHistogram *HistogramSnapshot `json:"ttft_histogram,omitempty"`
 
 	// ITLHistogram is the raw inter-token latency histogram snapshot.
-	// Re-exported as hivenet_router_agent_engine_itl_seconds_{bucket,sum,count}.
+	// Re-exported as hivenet_agent_engine_itl_seconds_{bucket,sum,count}.
 	ITLHistogram *HistogramSnapshot `json:"itl_histogram,omitempty"`
 
 	// PromptTokensHistogram is the per-request prompt-length histogram (in tokens).
-	// Re-exported as hivenet_router_agent_engine_request_prompt_tokens_{bucket,sum,count}.
+	// Re-exported as hivenet_agent_engine_request_prompt_tokens_{bucket,sum,count}.
 	// Drives the workload-shape heatmap on the Inference Engine dashboard.
 	PromptTokensHistogram *HistogramSnapshot `json:"prompt_tokens_histogram,omitempty"`
 
 	// GenerationTokensHistogram is the per-request generation-length histogram (in tokens).
-	// Re-exported as hivenet_router_agent_engine_request_generation_tokens_{bucket,sum,count}.
+	// Re-exported as hivenet_agent_engine_request_generation_tokens_{bucket,sum,count}.
 	GenerationTokensHistogram *HistogramSnapshot `json:"generation_tokens_histogram,omitempty"`
 
 	// FinishReasonCounts maps vLLM finished_reason label values (stop, length,
 	// abort, etc.) to cumulative request counts observed on the engine since it
 	// last restarted. The router computes deltas across snapshots and increments
-	// hivenet_router_agent_engine_request_success_total{finished_reason=...}. Pod
+	// hivenet_agent_engine_request_success_total{finished_reason=...}. Pod
 	// restarts are detected as a decrease (new < prev) and the new value is
 	// treated as the post-restart delta.
 	FinishReasonCounts map[string]uint64 `json:"finish_reason_counts,omitempty"`

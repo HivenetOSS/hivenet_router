@@ -760,7 +760,7 @@ Inspect successful routed traffic by tenant and model:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_routing_requests_routed_total[1h]
+    hivenet_routing_requests_routed_total[1h]
   )
 )
 ```
@@ -770,7 +770,7 @@ Inspect all failed or rejected tenant requests:
 ```promql
 sum by (tenant_id, key_id, model) (
   rate(
-    hivenet_router_tenant_requests_failed_total[5m]
+    hivenet_tenant_requests_failed_total[5m]
   )
 )
 ```

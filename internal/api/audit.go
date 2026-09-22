@@ -195,7 +195,7 @@ func int64Default(v interface{}, def int64) int64 {
 // statusToErrorCode maps HTTP status codes to human-readable error codes.
 // Both RPM and token-budget rejections return HTTP 429; the audit log uses
 // a single "rate_limit_exceeded" code to keep cardinality low. The distinction
-// is visible in Prometheus counters (hivenet_router_tenant_rate_limited_total vs hivenet_router_tenant_token_limited_total).
+// is visible in Prometheus counters (hivenet_tenant_rate_limited_total vs hivenet_tenant_token_limited_total).
 func statusToErrorCode(status int) string {
 	switch status {
 	case http.StatusBadRequest:

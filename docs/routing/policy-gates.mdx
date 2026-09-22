@@ -876,7 +876,7 @@ Inspect the policy-exhaustion counter:
 
 ```bash
 curl http://localhost:2112/metrics \
-  | grep hivenet_router_policy_exhausted_total
+  | grep hivenet_policy_exhausted_total
 ```
 
 PromQL:
@@ -884,7 +884,7 @@ PromQL:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_exhausted_total[5m]
+    hivenet_policy_exhausted_total[5m]
   )
 )
 ```

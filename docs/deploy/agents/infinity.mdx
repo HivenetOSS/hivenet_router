@@ -560,7 +560,7 @@ Embedding request rate:
 
 ```promql
 rate(
-  hivenet_router_routing_requests_routed_total{
+  hivenet_routing_requests_routed_total{
     engine="infinity",
     model="bge-m3"
   }[5m]
@@ -571,7 +571,7 @@ Reranking request rate:
 
 ```promql
 rate(
-  hivenet_router_routing_requests_routed_total{
+  hivenet_routing_requests_routed_total{
     engine="infinity",
     model="bge-reranker-large"
   }[5m]
@@ -581,7 +581,7 @@ rate(
 Smoothed round-trip time:
 
 ```promql
-hivenet_router_agent_srtt_ms{
+hivenet_agent_srtt_ms{
   engine="infinity"
 }
 ```

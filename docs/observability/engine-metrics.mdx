@@ -240,7 +240,7 @@ as their common labels.
 For example:
 
 ```promql
-hivenet_router_agent_engine_waiting_requests{
+hivenet_agent_engine_waiting_requests{
   model="meta-llama/Llama-3.1-8B-Instruct",
   engine="vllm"
 }
@@ -301,7 +301,7 @@ The routing table currently exposes scalar engine values. Raw histograms, finish
 ## KV-cache utilization
 
 ```text
-hivenet_router_agent_engine_kv_cache_utilization
+hivenet_agent_engine_kv_cache_utilization
 ```
 
 KV-cache utilization is the fraction of the engine’s preallocated KV or token cache currently in use.
@@ -323,20 +323,20 @@ Backend sources are:
 View current cache use:
 
 ```promql
-hivenet_router_agent_engine_kv_cache_utilization
+hivenet_agent_engine_kv_cache_utilization
 ```
 
 Find agents above 85%:
 
 ```promql
-hivenet_router_agent_engine_kv_cache_utilization > 0.85
+hivenet_agent_engine_kv_cache_utilization > 0.85
 ```
 
 Average by model and engine:
 
 ```promql
 avg by (model, engine) (
-  hivenet_router_agent_engine_kv_cache_utilization
+  hivenet_agent_engine_kv_cache_utilization
 )
 ```
 
@@ -355,7 +355,7 @@ Avoid treating one threshold as universal across every deployment.
 ## Running requests
 
 ```text
-hivenet_router_agent_engine_running_requests
+hivenet_agent_engine_running_requests
 ```
 
 This is the number of requests currently being processed by the inference engine.
@@ -371,14 +371,14 @@ Backend sources are:
 View running requests:
 
 ```promql
-hivenet_router_agent_engine_running_requests
+hivenet_agent_engine_running_requests
 ```
 
 Total by model:
 
 ```promql
 sum by (model) (
-  hivenet_router_agent_engine_running_requests
+  hivenet_agent_engine_running_requests
 )
 ```
 
@@ -402,7 +402,7 @@ For example:
 ## Waiting requests
 
 ```text
-hivenet_router_agent_engine_waiting_requests
+hivenet_agent_engine_waiting_requests
 ```
 
 Waiting requests are queued inside the inference-engine scheduler.
@@ -418,20 +418,20 @@ Backend sources are:
 View backend queues:
 
 ```promql
-hivenet_router_agent_engine_waiting_requests
+hivenet_agent_engine_waiting_requests
 ```
 
 Find agents with queued requests:
 
 ```promql
-hivenet_router_agent_engine_waiting_requests > 0
+hivenet_agent_engine_waiting_requests > 0
 ```
 
 Total waiting work by model:
 
 ```promql
 sum by (model) (
-  hivenet_router_agent_engine_waiting_requests
+  hivenet_agent_engine_waiting_requests
 )
 ```
 
@@ -449,7 +449,7 @@ It is separate from Hivenet Router’s per-model capacity wait queue. One queue 
 ## Preemptions
 
 ```text
-hivenet_router_agent_engine_preemptions_total
+hivenet_agent_engine_preemptions_total
 ```
 
 vLLM reports a cumulative count of requests preempted because of scheduler and KV-cache pressure.
@@ -465,14 +465,14 @@ vllm:num_preemptions_total
 View the current cumulative value:
 
 ```promql
-hivenet_router_agent_engine_preemptions_total
+hivenet_agent_engine_preemptions_total
 ```
 
 Detect growth over a period:
 
 ```promql
 delta(
-  hivenet_router_agent_engine_preemptions_total[5m]
+  hivenet_agent_engine_preemptions_total[5m]
 ) > 0
 ```
 
@@ -482,7 +482,7 @@ Show increases by agent:
 sum by (peer_id, model) (
   clamp_min(
     delta(
-      hivenet_router_agent_engine_preemptions_total[5m]
+      hivenet_agent_engine_preemptions_total[5m]
     ),
     0
   )
@@ -504,8 +504,8 @@ Time to first token, or TTFT, is the time between a request entering the inferen
 Hivenet Router exposes two per-agent gauges:
 
 ```text
-hivenet_router_agent_engine_avg_ttft_seconds
-hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
 ```
 
 Both are measured in seconds.
@@ -513,7 +513,7 @@ Both are measured in seconds.
 ### Average TTFT
 
 ```promql
-hivenet_router_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_avg_ttft_seconds
 ```
 
 This is calculated from the backend histogram’s cumulative sum and count.
@@ -521,7 +521,7 @@ This is calculated from the backend histogram’s cumulative sum and count.
 ### P90 TTFT
 
 ```promql
-hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
 ```
 
 The agent estimates this value from the backend histogram buckets.
@@ -533,15 +533,15 @@ Hivenet Router keeps it as a scalar because routing policies need to read a curr
 For vLLM agents, Hivenet Router also exports:
 
 ```text
-hivenet_router_agent_engine_ttft_seconds
+hivenet_agent_engine_ttft_seconds
 ```
 
 Prometheus exposes:
 
 ```text
-hivenet_router_agent_engine_ttft_seconds_bucket
-hivenet_router_agent_engine_ttft_seconds_sum
-hivenet_router_agent_engine_ttft_seconds_count
+hivenet_agent_engine_ttft_seconds_bucket
+hivenet_agent_engine_ttft_seconds_sum
+hivenet_agent_engine_ttft_seconds_count
 ```
 
 Fleet-wide P90 for vLLM:
@@ -551,7 +551,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+      hivenet_agent_engine_ttft_seconds_bucket[5m]
     )
   )
 )
@@ -564,7 +564,7 @@ histogram_quantile(
   0.90,
   sum by (le, model) (
     rate(
-      hivenet_router_agent_engine_ttft_seconds_bucket[5m]
+      hivenet_agent_engine_ttft_seconds_bucket[5m]
     )
   )
 )
@@ -595,8 +595,8 @@ Inter-token latency, or ITL, is the time between generated output tokens during 
 Hivenet Router exposes:
 
 ```text
-hivenet_router_agent_engine_avg_itl_seconds
-hivenet_router_agent_engine_p90_itl_seconds
+hivenet_agent_engine_avg_itl_seconds
+hivenet_agent_engine_p90_itl_seconds
 ```
 
 for:
@@ -609,19 +609,19 @@ SGLang does not currently supply ITL through this integration.
 Average ITL:
 
 ```promql
-hivenet_router_agent_engine_avg_itl_seconds
+hivenet_agent_engine_avg_itl_seconds
 ```
 
 P90 ITL:
 
 ```promql
-hivenet_router_agent_engine_p90_itl_seconds
+hivenet_agent_engine_p90_itl_seconds
 ```
 
 For vLLM, Hivenet Router also exports the raw histogram:
 
 ```text
-hivenet_router_agent_engine_itl_seconds
+hivenet_agent_engine_itl_seconds
 ```
 
 Fleet-wide vLLM P90:
@@ -631,7 +631,7 @@ histogram_quantile(
   0.90,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_itl_seconds_bucket[5m]
+      hivenet_agent_engine_itl_seconds_bucket[5m]
     )
   )
 )
@@ -653,15 +653,15 @@ Possible causes include:
 vLLM supplies a histogram of prompt sizes:
 
 ```text
-hivenet_router_agent_engine_request_prompt_tokens
+hivenet_agent_engine_request_prompt_tokens
 ```
 
 Prometheus exposes:
 
 ```text
-hivenet_router_agent_engine_request_prompt_tokens_bucket
-hivenet_router_agent_engine_request_prompt_tokens_sum
-hivenet_router_agent_engine_request_prompt_tokens_count
+hivenet_agent_engine_request_prompt_tokens_bucket
+hivenet_agent_engine_request_prompt_tokens_sum
+hivenet_agent_engine_request_prompt_tokens_count
 ```
 
 P50 prompt length:
@@ -671,7 +671,7 @@ histogram_quantile(
   0.50,
   sum by (le) (
     rate(
-      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+      hivenet_agent_engine_request_prompt_tokens_bucket[5m]
     )
   )
 )
@@ -684,7 +684,7 @@ histogram_quantile(
   0.90,
   sum by (le, model) (
     rate(
-      hivenet_router_agent_engine_request_prompt_tokens_bucket[5m]
+      hivenet_agent_engine_request_prompt_tokens_bucket[5m]
     )
   )
 )
@@ -703,7 +703,7 @@ Long prompts can increase:
 vLLM also supplies a distribution of generated output lengths:
 
 ```text
-hivenet_router_agent_engine_request_generation_tokens
+hivenet_agent_engine_request_generation_tokens
 ```
 
 P90 generation length:
@@ -713,7 +713,7 @@ histogram_quantile(
   0.90,
   sum by (le, model) (
     rate(
-      hivenet_router_agent_engine_request_generation_tokens_bucket[5m]
+      hivenet_agent_engine_request_generation_tokens_bucket[5m]
     )
   )
 )
@@ -735,7 +735,7 @@ vLLM reports cumulative completion counts grouped by finish reason.
 Hivenet Router converts changes between backend snapshots into the counter:
 
 ```text
-hivenet_router_agent_engine_request_success_total
+hivenet_agent_engine_request_success_total
 ```
 
 Additional label:
@@ -757,7 +757,7 @@ Completion rate by reason:
 ```promql
 sum by (finished_reason) (
   rate(
-    hivenet_router_agent_engine_request_success_total[5m]
+    hivenet_agent_engine_request_success_total[5m]
   )
 )
 ```
@@ -767,7 +767,7 @@ Length-limited completions:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_agent_engine_request_success_total{
+    hivenet_agent_engine_request_success_total{
       finished_reason="length"
     }[5m]
   )
@@ -779,7 +779,7 @@ Aborted completions:
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_agent_engine_request_success_total{
+    hivenet_agent_engine_request_success_total{
       finished_reason="abort"
     }[5m]
   )
@@ -797,40 +797,40 @@ If the backend count decreases after a restart, Hivenet Router treats the new va
 llama.cpp exposes two current throughput gauges:
 
 ```text
-hivenet_router_agent_engine_predicted_tps
-hivenet_router_agent_engine_prompt_tps
+hivenet_agent_engine_predicted_tps
+hivenet_agent_engine_prompt_tps
 ```
 
 ### Generation throughput
 
 ```text
-hivenet_router_agent_engine_predicted_tps
+hivenet_agent_engine_predicted_tps
 ```
 
 This is the backend’s recent generated-token rate.
 
 ```promql
-hivenet_router_agent_engine_predicted_tps
+hivenet_agent_engine_predicted_tps
 ```
 
 Average by model:
 
 ```promql
 avg by (model) (
-  hivenet_router_agent_engine_predicted_tps
+  hivenet_agent_engine_predicted_tps
 )
 ```
 
 ### Prompt throughput
 
 ```text
-hivenet_router_agent_engine_prompt_tps
+hivenet_agent_engine_prompt_tps
 ```
 
 This is the backend’s recent prompt-ingestion rate.
 
 ```promql
-hivenet_router_agent_engine_prompt_tps
+hivenet_agent_engine_prompt_tps
 ```
 
 These values are currently available through Prometheus but not through the administration routing-table response.
@@ -1005,7 +1005,7 @@ groups:
       - alert: HivenetRouterKVCachePressure
 
         expr: |
-          hivenet_router_agent_engine_kv_cache_utilization > 0.90
+          hivenet_agent_engine_kv_cache_utilization > 0.90
 
         for: 2m
 
@@ -1023,7 +1023,7 @@ groups:
       - alert: HivenetRouterEngineQueue
 
         expr: |
-          hivenet_router_agent_engine_waiting_requests > 10
+          hivenet_agent_engine_waiting_requests > 10
 
         for: 2m
 
@@ -1041,7 +1041,7 @@ groups:
       - alert: HivenetRouterTTFTDegradation
 
         expr: |
-          hivenet_router_agent_engine_p90_ttft_seconds > 0.5
+          hivenet_agent_engine_p90_ttft_seconds > 0.5
 
         for: 5m
 
@@ -1061,7 +1061,7 @@ groups:
         expr: |
           clamp_min(
             delta(
-              hivenet_router_agent_engine_preemptions_total[5m]
+              hivenet_agent_engine_preemptions_total[5m]
             ),
             0
           ) > 0
@@ -1180,7 +1180,7 @@ groups:
     Filter for vLLM:
 
     ```promql
-    hivenet_router_agent_engine_ttft_seconds_count{
+    hivenet_agent_engine_ttft_seconds_count{
       engine="vllm"
     }
     ```
@@ -1194,7 +1194,7 @@ groups:
     ```promql
     clamp_min(
       delta(
-        hivenet_router_agent_engine_preemptions_total[5m]
+        hivenet_agent_engine_preemptions_total[5m]
       ),
       0
     )

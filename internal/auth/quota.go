@@ -146,7 +146,7 @@ func (l *InMemoryLimiter) rpmBurst(rpm int) int {
 
 // SetOnTokensUsed registers a callback that fires after every successful token
 // deduction. The callback receives the tenant ID and the cumulative tokens used
-// today. Intended for updating the hivenet_router_tenant_tokens_used_today gauge.
+// today. Intended for updating the hivenet_tenant_tokens_used_today gauge.
 // Must be called before the limiter handles any requests.
 func (l *InMemoryLimiter) SetOnTokensUsed(fn func(tenantID string, used int)) {
 	l.onTokensUsed = fn
@@ -365,7 +365,7 @@ func NewBadgerLimiter(store DailyQuotaStore) *BadgerLimiter {
 }
 
 // SetOnFlushError registers a callback that fires on every diskDB write failure
-// inside Flush. Intended for incrementing the hivenet_router_quota_backend_errors_total
+// inside Flush. Intended for incrementing the hivenet_quota_backend_errors_total
 // Prometheus counter. Must be called before the limiter handles any requests.
 func (l *BadgerLimiter) SetOnFlushError(fn func()) {
 	l.onFlushError = fn
