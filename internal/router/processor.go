@@ -784,9 +784,13 @@ func (p *RequestProcessor) drainStream(
 		}
 	}
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
-	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
-	// Release the in-flight slot now that the generation is done.
+	// Release the in-flight slot before recording the success, mirroring the
+	// non-streaming path (decrement before RecordSuccess) so the
+	// CapacityUtilization published by RecordSuccess reflects post-completion
+	// load. RecordSuccess does not depend on the slot being held, and routing
+	// reads GetLoad() directly, so this is metric-accuracy only.
 	releaseSlot()
+	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
 }
 
 // tryProviderFallback forwards pending to the named closed-source provider using the
