@@ -70,6 +70,7 @@ func main() {
 	maxConcurrentForwards := flag.Int("max-concurrent", cfg.MaxConcurrentForwards, "Max concurrent in-flight request forwards to agents")
 	policyFile := flag.String("policy-file", cfg.PolicyFile, "Path to routing policy YAML file (optional; omit to use built-in default)")
 	policyModelDir := flag.String("policy-model-dir", cfg.PolicyModelDir, "Path to directory of per-model policy YAML files (optional; env: HIVENET_ROUTER_POLICY_MODEL_DIR)")
+	semanticDecisionLog := flag.String("semantic-decision-log", cfg.SemanticDecisionLog, "Path of a JSONL file recording every semantic alias decision (optional; env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG)")
 	maxTriesPerStep := flag.Int("max-tries-per-step", cfg.MaxTriesPerStep, "Default maximum forward attempts per policy step (used when a step does not set max_tries)")
 	defaultQueueDepth := flag.Int("queue-depth", cfg.QueueDepth, "Max concurrent waiters per model in the capacity wait queue; 0 disables the queue")
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
@@ -100,6 +101,7 @@ func main() {
 	cfg.MaxConcurrentForwards = *maxConcurrentForwards
 	cfg.PolicyFile = *policyFile
 	cfg.PolicyModelDir = *policyModelDir
+	cfg.SemanticDecisionLog = *semanticDecisionLog
 	if *maxTriesPerStep < 1 {
 		log.Fatalf("--max-tries-per-step must be >= 1, got %d", *maxTriesPerStep)
 	}
@@ -176,6 +178,9 @@ func main() {
 		log.Info("  Queue depth/model:   disabled")
 	} else {
 		log.Infof("  Queue depth/model:   %d", cfg.QueueDepth)
+	}
+	if cfg.SemanticDecisionLog != "" {
+		log.Infof("  Semantic decisions:  %s", cfg.SemanticDecisionLog)
 	}
 	log.Info("Auth:")
 	if cfg.AuthConfigFile != "" {

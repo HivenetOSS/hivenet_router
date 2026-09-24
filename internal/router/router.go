@@ -24,6 +24,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
+	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
 	"hivenet_router/internal/transport/grpc"
@@ -94,6 +95,9 @@ var log = logging.Logger("router")
 
 // Router is the main Hivenet Router
 type Router struct {
+	// decisionLog records semantic alias decisions when configured (nil = off).
+	decisionLog *semantic.DecisionLog
+
 	cfg *config.Config
 
 	// P2P networking
@@ -538,7 +542,12 @@ func (r *Router) Close() error {
 		r.p2pHost.Close()
 	}
 
-	// 5. Close storage (safe — no goroutine can write to it now).
+	// 5. Flush the semantic decision log (nil-safe).
+	if err := r.decisionLog.Close(); err != nil {
+		log.Warnf("closing semantic decision log: %v", err)
+	}
+
+	// 6. Close storage (safe — no goroutine can write to it now).
 	return r.storage.Close()
 }
 
@@ -597,6 +606,15 @@ func (r *Router) startHTTPServer() {
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
 	)
+	if r.cfg.SemanticDecisionLog != "" {
+		dl, err := semantic.OpenDecisionLog(r.cfg.SemanticDecisionLog, 0)
+		if err != nil {
+			log.Errorf("semantic decision log disabled: %v", err)
+		} else {
+			handlers.SetDecisionLog(dl)
+			r.decisionLog = dl
+		}
+	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)

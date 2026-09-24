@@ -406,12 +406,22 @@ func QuotaMiddleware(limiter auth.RateLimiter, m *metrics.RouterMetrics, healthy
 // protection lives at the http.MaxBytesReader / Gin layer where it belongs.
 // On parse failure (non-JSON, malformed body) return "" — the regular
 // request-invalid path picks up the error downstream.
+//
+// The result is cached in the gin context (ctxKeyPeekedModel): AliasMiddleware
+// peeks first, and when it resolves an alias it overwrites the cache with the
+// resolved model, so later peeks see the concrete model without re-decoding.
 func peekModel(c *gin.Context) string {
+	if v, ok := c.Get(ctxKeyPeekedModel); ok {
+		if m, ok := v.(string); ok {
+			return m
+		}
+	}
 	var req struct {
 		Model string `json:"model"`
 	}
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		return ""
 	}
+	c.Set(ctxKeyPeekedModel, req.Model)
 	return req.Model
 }

@@ -62,6 +62,11 @@ type RequestView struct {
 	ReasoningAsked bool   // reasoning_effort / reasoning / thinking requested
 	Stream         bool
 	RequestBytes   int
+	// PromptBytes approximates the prompt text the backend tokenizes: message
+	// text, tool-result text, system prompt and tool schemas. It is at least the
+	// router's own domain.PromptTextBytes measure (which skips tool results), so
+	// token estimates built from it err on the large side for the context filter.
+	PromptBytes int
 }
 
 type rawRequest struct {
@@ -107,6 +112,7 @@ func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
 		t, _, _ := contentText(raw.System)
 		system.WriteString(t)
 	}
+	v.PromptBytes = len(raw.Tools)
 	if len(raw.Tools) > 0 {
 		var tools []json.RawMessage
 		if json.Unmarshal(raw.Tools, &tools) == nil {
@@ -132,12 +138,16 @@ func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
 			if looksLikeFailure(t) {
 				m.ToolErrors = 1
 			}
+			v.PromptBytes += len(t)
 		default:
-			m.Text, m.Images, m.ToolResults, m.ToolErrors, m.ToolCalls = parseContent(rm.Content, m.ToolCalls)
+			var resultBytes int
+			m.Text, m.Images, m.ToolResults, m.ToolErrors, m.ToolCalls, resultBytes = parseContent(rm.Content, m.ToolCalls)
+			v.PromptBytes += len(m.Text) + resultBytes
 		}
 		v.Messages = append(v.Messages, m)
 	}
 	v.System = system.String()
+	v.PromptBytes += len(v.System)
 	for i := range v.Messages {
 		if v.Messages[i].IsUserTurn() {
 			v.FirstUserText = v.Messages[i].Text
@@ -149,7 +159,7 @@ func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
 
 // parseContent handles a message content that is either a string or an array
 // of typed parts (OpenAI multimodal parts or Anthropic content blocks).
-func parseContent(c json.RawMessage, toolCalls int) (text string, images, results, errs, calls int) {
+func parseContent(c json.RawMessage, toolCalls int) (text string, images, results, errs, calls, resultBytes int) {
 	calls = toolCalls
 	if len(c) == 0 || string(c) == "null" {
 		return
@@ -178,6 +188,7 @@ func parseContent(c json.RawMessage, toolCalls int) (text string, images, result
 		case "tool_result":
 			results++
 			rt, _, _ := contentText(p.Content)
+			resultBytes += len(rt)
 			if p.IsError || looksLikeFailure(rt) {
 				errs++
 			}

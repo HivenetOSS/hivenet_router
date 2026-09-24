@@ -71,9 +71,13 @@ type Config struct {
 	ProtocolID string
 
 	// Routing policy
-	PolicyFile      string // path to routing policy YAML; empty = built-in default (least-loaded)
-	PolicyModelDir  string // path to directory of per-model policy YAML files; empty = disabled
-	MaxTriesPerStep int    // global default for steps that don't set max_tries
+	PolicyFile     string // path to routing policy YAML; empty = built-in default (least-loaded)
+	PolicyModelDir string // path to directory of per-model policy YAML files; empty = disabled
+	// SemanticDecisionLog is the path of the JSONL log that records every semantic
+	// alias decision (R&D spike). Empty = disabled.
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
+	SemanticDecisionLog string
+	MaxTriesPerStep     int // global default for steps that don't set max_tries
 
 	// Per-model wait queue: max requests that park waiting for a slot before being rejected.
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
@@ -206,6 +210,9 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_POLICY_MODEL_DIR"); v != "" {
 		cfg.PolicyModelDir = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG"); v != "" {
+		cfg.SemanticDecisionLog = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_TRIES_PER_STEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
