@@ -77,7 +77,18 @@ type Config struct {
 	// alias decision. Empty = disabled.
 	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
 	SemanticDecisionLog string
-	MaxTriesPerStep     int // global default for steps that don't set max_tries
+	// SemanticDecisionLogBuffer is how many decision records may queue before
+	// new ones are dropped (counted in hivenet_semantic_decision_log_dropped_total).
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER  Flag: --semantic-decision-log-buffer
+	SemanticDecisionLogBuffer int
+	// SemanticPinMax caps the task pins held in memory; SemanticPinMaxPerKey caps
+	// one API key's share so a single caller cannot evict everyone else's pins.
+	// At either cap the least recently used pin is evicted.
+	// Env: HIVENET_ROUTER_SEMANTIC_PIN_MAX / HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY
+	// Flag: --semantic-pin-max / --semantic-pin-max-per-key
+	SemanticPinMax       int
+	SemanticPinMaxPerKey int
+	MaxTriesPerStep      int // global default for steps that don't set max_tries
 
 	// Per-model wait queue: max requests that park waiting for a slot before being rejected.
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
@@ -149,24 +160,27 @@ func DefaultConfig() *Config {
 		P2PListenAddr:    "127.0.0.1",
 		P2PMaxConnsPerIP: 32, // > libp2p's default of 8; see field doc for the >= 2x fleet-size rule
 
-		RequestTimeout:         60 * time.Second,
-		HealthCheckInterval:    5 * time.Second,
-		UnhealthyAfter:         15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
-		RemoveAfter:            30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
-		HeartbeatInterval:      5 * time.Second,
-		QueueSize:              100,
-		MaxConcurrentForwards:  50,
-		DiskDBPath:             "./badger_disk",
-		FlushPeriod:            5 * time.Second,
-		DiskDBTTLDays:          30,
-		UniversalFlushInterval: 30 * time.Second,
-		SessionTTL:             1 * time.Hour,
-		ProtocolID:             "/hivenet_router/1.0.0",
-		MaxTriesPerStep:        3,
-		QueueDepth:             30,
-		MaxRequestBytes:        10 << 20, // 10 MB
-		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
-		AdmitParkTimeout:       250 * time.Millisecond,
+		RequestTimeout:            60 * time.Second,
+		HealthCheckInterval:       5 * time.Second,
+		UnhealthyAfter:            15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
+		RemoveAfter:               30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
+		HeartbeatInterval:         5 * time.Second,
+		QueueSize:                 100,
+		MaxConcurrentForwards:     50,
+		DiskDBPath:                "./badger_disk",
+		FlushPeriod:               5 * time.Second,
+		DiskDBTTLDays:             30,
+		UniversalFlushInterval:    30 * time.Second,
+		SessionTTL:                1 * time.Hour,
+		ProtocolID:                "/hivenet_router/1.0.0",
+		MaxTriesPerStep:           3,
+		SemanticDecisionLogBuffer: 4096,
+		SemanticPinMax:            100_000,
+		SemanticPinMaxPerKey:      10_000,
+		QueueDepth:                30,
+		MaxRequestBytes:           10 << 20, // 10 MB
+		AdmitFraction:             0.90,     // learned estimator + true-up now cover the token-estimate error
+		AdmitParkTimeout:          250 * time.Millisecond,
 	}
 }
 
@@ -213,6 +227,17 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG"); v != "" {
 		cfg.SemanticDecisionLog = v
+	}
+	for env, dst := range map[string]*int{
+		"HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER": &cfg.SemanticDecisionLogBuffer,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":             &cfg.SemanticPinMax,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY":     &cfg.SemanticPinMaxPerKey,
+	} {
+		if v := os.Getenv(env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				*dst = n
+			}
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_TRIES_PER_STEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

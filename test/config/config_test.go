@@ -195,3 +195,19 @@ func TestDefaultAgentConfig_JWTFromEnv(t *testing.T) {
 		t.Errorf("unexpected agent defaults: %+v", a)
 	}
 }
+
+// TestLoadFromEnv_SemanticKnobs: the semantic pin store and decision log knobs
+// default sensibly, take positive env overrides, and ignore invalid values.
+func TestLoadFromEnv_SemanticKnobs(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if cfg.SemanticPinMax != 100_000 || cfg.SemanticPinMaxPerKey != 10_000 || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("defaults = %d/%d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey, cfg.SemanticDecisionLogBuffer)
+	}
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX", "500")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY", "50")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER", "-1") // invalid → default kept
+	cfg = config.LoadFromEnv()
+	if cfg.SemanticPinMax != 500 || cfg.SemanticPinMaxPerKey != 50 || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("overrides = %d/%d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey, cfg.SemanticDecisionLogBuffer)
+	}
+}

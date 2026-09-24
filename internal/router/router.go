@@ -319,6 +319,18 @@ func New(cfg *config.Config) (*Router, error) {
 	if r.keyRegistry != nil {
 		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
 	}
+	// Open the semantic decision log here, before Start launches any goroutine,
+	// so the field is written once and only read afterwards (no data race with
+	// Close on the signal goroutine). A failure disables the log, not the router.
+	if cfg.SemanticDecisionLog != "" {
+		dl, err := semantic.OpenDecisionLog(cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+		if err != nil {
+			log.Errorf("semantic decision log disabled: %v", err)
+		} else {
+			r.decisionLog = dl
+			routerMetrics.RegisterSemanticDecisionLog(dl.Dropped, dl.WriteErrors)
+		}
+	}
 	return r, nil
 }
 
@@ -542,7 +554,8 @@ func (r *Router) Close() error {
 		r.p2pHost.Close()
 	}
 
-	// 5. Flush the semantic decision log (nil-safe).
+	// 5. Flush the semantic decision log (nil-safe). The HTTP server is still
+	//    serving here; DecisionLog.Write is safe after Close and drops the record.
 	if err := r.decisionLog.Close(); err != nil {
 		log.Warnf("closing semantic decision log: %v", err)
 	}
@@ -606,14 +619,10 @@ func (r *Router) startHTTPServer() {
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
 	)
-	if r.cfg.SemanticDecisionLog != "" {
-		dl, err := semantic.OpenDecisionLog(r.cfg.SemanticDecisionLog, 0)
-		if err != nil {
-			log.Errorf("semantic decision log disabled: %v", err)
-		} else {
-			handlers.SetDecisionLog(dl)
-			r.decisionLog = dl
-		}
+	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
+	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
+	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
+		handlers.SetDecisionLog(r.decisionLog)
 	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
