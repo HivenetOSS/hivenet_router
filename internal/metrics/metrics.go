@@ -222,7 +222,7 @@ type RouterMetrics struct {
 	policyReloadTotal *prometheus.CounterVec
 
 	// semanticDecisions counts semantic alias decisions.
-	// Labels: alias, route, source (pinned|scored|default|fallback|count, empty
+	// Labels: alias, route, source (pinned|affinity|scored|default|fallback|count, empty
 	// on failure), outcome (ok|invalid|forbidden|too_long|unsupported|unavailable).
 	// All label values come from operator config or fixed sets, so cardinality
 	// is bounded by the alias YAML.

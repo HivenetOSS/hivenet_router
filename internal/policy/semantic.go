@@ -5,6 +5,7 @@ package policy
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -67,8 +68,8 @@ type AliasSpec struct {
 	DefaultRoute string `yaml:"default_route" json:"default_route"`
 	// AbstainBelow: the best route score must be >= this, and > 0, to be chosen;
 	// otherwise the decision abstains to DefaultRoute. [0,1]. Each route scores
-	// Σ weight·match / Σ weight over its own signals, so weights compare only
-	// within a route; ties between routes go to the one declared first.
+	// Σ weight·match over its own signals, whose weights sum to 1; a route below
+	// its own min_score cannot win. Ties go to the route declared first.
 	AbstainBelow float64 `yaml:"abstain_below" json:"abstain_below"`
 	// ContextBuffer is the fraction of a candidate's context window the estimated
 	// prompt may fill. Default 0.95.
@@ -83,14 +84,27 @@ type AliasSpec struct {
 	// hit (pins otherwise slide by the route's pin_ttl on every call). It bounds
 	// how long a fingerprint shared by unrelated conversations can hold them on
 	// one model, and how long a task can outlive config changes. Default 4h.
-	PinMaxAge string  `yaml:"pin_max_age" json:"pin_max_age,omitempty"`
-	Routes    []Route `yaml:"routes"        json:"routes"`
+	PinMaxAge string `yaml:"pin_max_age" json:"pin_max_age,omitempty"`
+	// AffinityTTL keeps a conversation on the model that answered its previous
+	// turn (keyed like task pins) for routes without pin_task, so the backend's
+	// prefix cache is reused and a follow-up is not bounced between models.
+	// Each use extends it, up to PinMaxAge. Empty or "0" disables affinity.
+	AffinityTTL string `yaml:"affinity_ttl" json:"affinity_ttl,omitempty"`
+	// AffinityMargin is how much higher, in score, the newly chosen route must
+	// be than the sticky route before the conversation switches. (0,1],
+	// default 0.2. A request that would stay on the sticky route always stays.
+	AffinityMargin float64 `yaml:"affinity_margin" json:"affinity_margin,omitempty"`
+	Routes         []Route `yaml:"routes"        json:"routes"`
 
-	pinMaxAge time.Duration // parsed from PinMaxAge by validateAlias
+	pinMaxAge   time.Duration // parsed from PinMaxAge by validateAlias
+	affinityTTL time.Duration // parsed from AffinityTTL by validateAlias
 }
 
 // PinMaxAgeDuration returns the parsed pin max age (default 4h).
 func (a *AliasSpec) PinMaxAgeDuration() time.Duration { return a.pinMaxAge }
+
+// AffinityDuration returns the parsed conversation affinity TTL (0 = off).
+func (a *AliasSpec) AffinityDuration() time.Duration { return a.affinityTTL }
 
 // Route is one semantic category an alias can resolve to.
 type Route struct {
@@ -102,9 +116,13 @@ type Route struct {
 	PinTTL  string `yaml:"pin_ttl"  json:"pin_ttl,omitempty"`
 	// Prefer orders eligible candidates: "order" (default, as listed),
 	// "smallest" or "largest" (by profile size; unknown sizes keep list order, last).
-	Prefer     string       `yaml:"prefer"     json:"prefer,omitempty"`
-	Signals    []SignalRule `yaml:"signals"    json:"signals,omitempty"`
-	Candidates []Candidate  `yaml:"candidates" json:"candidates"`
+	Prefer  string       `yaml:"prefer"     json:"prefer,omitempty"`
+	Signals []SignalRule `yaml:"signals"    json:"signals,omitempty"`
+	// MinScore is the lowest score at which this route may win, on top of the
+	// alias's abstain_below. [0,1], default 0. Use it on a route whose single
+	// signal is weak evidence, since that signal alone scores 1.0.
+	MinScore   float64     `yaml:"min_score"  json:"min_score,omitempty"`
+	Candidates []Candidate `yaml:"candidates" json:"candidates"`
 
 	pinTTL time.Duration // parsed from PinTTL by validateAlias
 }
@@ -113,7 +131,9 @@ type Route struct {
 func (r *Route) PinDuration() time.Duration { return r.pinTTL }
 
 // SignalRule contributes Weight × match to a route's score, where match is in
-// [0,1]. Exactly one of Feature or Keywords is set.
+// [0,1]. Exactly one of Feature or Keywords is set. The weights of a route's
+// signals must sum to 1, so a route's score (Σ weight·match) is in [0,1] and
+// reads the same way in every route.
 //
 //   - Feature with GTE and/or LTE: match is 1 when the value is within bounds.
 //   - Feature with no bounds: match is 1 when the value is > 0 (boolean features
@@ -167,8 +187,11 @@ func KnownSignalFeatures() []string {
 }
 
 const (
-	defaultPinTTL    = 30 * time.Minute
-	defaultPinMaxAge = 4 * time.Hour
+	defaultPinTTL         = 30 * time.Minute
+	defaultPinMaxAge      = 4 * time.Hour
+	defaultAffinityMargin = 0.2
+	// weightSumTolerance absorbs float rounding in YAML weights (0.35+0.35+0.3).
+	weightSumTolerance = 1e-6
 )
 
 // InheritsRouting reports whether this per-model document omits routing
@@ -266,6 +289,20 @@ func validateAlias(a *AliasSpec, aliasNames []string) error {
 			return fmt.Errorf("policy: alias.strip_markers[%d] is empty", i)
 		}
 	}
+	a.affinityTTL = 0
+	if a.AffinityTTL != "" && a.AffinityTTL != "0" {
+		d, err := time.ParseDuration(a.AffinityTTL)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("policy: alias.affinity_ttl: invalid duration %q", a.AffinityTTL)
+		}
+		a.affinityTTL = d
+	}
+	if a.AffinityMargin == 0 {
+		a.AffinityMargin = defaultAffinityMargin
+	}
+	if a.AffinityMargin < 0 || a.AffinityMargin > 1 {
+		return fmt.Errorf("policy: alias.affinity_margin must be in (0,1], got %g", a.AffinityMargin)
+	}
 	a.pinMaxAge = defaultPinMaxAge
 	if a.PinMaxAge != "" {
 		d, err := time.ParseDuration(a.PinMaxAge)
@@ -313,6 +350,16 @@ func validateAlias(a *AliasSpec, aliasNames []string) error {
 			r.pinTTL = d
 		} else if r.PinTask {
 			r.pinTTL = defaultPinTTL
+		}
+		if r.MinScore < 0 || r.MinScore > 1 {
+			return fmt.Errorf("policy: route %q: min_score must be in [0,1], got %g", r.Name, r.MinScore)
+		}
+		var weights float64
+		for _, sig := range r.Signals {
+			weights += sig.Weight
+		}
+		if len(r.Signals) > 0 && math.Abs(weights-1) > weightSumTolerance {
+			return fmt.Errorf("policy: route %q: signal weights must sum to 1, got %g", r.Name, weights)
 		}
 		for k, s := range r.Signals {
 			if err := validateSignal(r.Name, k, s); err != nil {

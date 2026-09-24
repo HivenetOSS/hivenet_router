@@ -89,7 +89,9 @@ The weights and candidate order above are an example, not a recommendation.
 | `context_buffer` | `0.95` | Fraction of a candidate's `context_window` the prompt plus output may fill, in `(0,1]`. |
 | `recent_turns` | `3` | Number of trailing human turns scanned for markers and keywords. |
 | `strip_markers` | `["<system-reminder>", "</system-reminder>"]` | Open/close tag pairs whose enclosed text is removed from messages before they are classified and matched. Must be an even-length list of non-empty strings. |
-| `pin_max_age` | `4h` | Absolute lifetime of a task pin, however often it is used. |
+| `pin_max_age` | `4h` | Absolute lifetime of a task pin or affinity entry, however often it is used. |
+| `affinity_ttl` | Off | Keep a conversation on the model that answered its previous turn, for routes without `pin_task`. See [Conversation affinity](#conversation-affinity). Empty or `0` disables it. |
+| `affinity_margin` | `0.2` | How much higher, in score, a newly chosen route must be than the conversation's current route before it switches, in `(0,1]`. |
 | `routes` | Required | At least one route. |
 
 ### Route keys
@@ -98,7 +100,8 @@ The weights and candidate order above are an example, not a recommendation.
 | --- | --- | --- |
 | `name` | Required | Unique within the alias. |
 | `description` | Empty | Free text for operators. Not used by the Phase 1 decision. |
-| `signals` | Empty | Weighted rules that score the route. A route without signals scores `0` and is reached only as the default or a fallback. |
+| `signals` | Empty | Weighted rules that score the route. Their weights must sum to `1`. A route without signals scores `0` and is reached only as the default or a fallback. |
+| `min_score` | `0` | Lowest score at which this route may win, in `[0,1]`, on top of the alias's `abstain_below`. |
 | `candidates` | Required | Ordered concrete models. An alias name is never a valid candidate. |
 | `prefer` | `order` | `order` keeps the listed order; `smallest` or `largest` sorts by `active_params_b` (else `params_b`). Models without a size keep their listed order, after the sized ones. |
 | `pin_task` | `false` | Keep a multi-call task on the model this route chose. See [Task pinning](#task-pinning). |
@@ -106,7 +109,7 @@ The weights and candidate order above are an example, not a recommendation.
 
 ### Signals
 
-Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` or more.
+Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` or more. The weights of a route's signals must sum to `1` (the loader rejects the document otherwise), so a route's score is the sum of the weights of its matching signals and always lies between `0` and `1`.
 
 - `feature` with `gte` and/or `lte` matches when the value is within the bounds.
 - `feature` without bounds matches when the value is greater than `0`.
@@ -138,7 +141,10 @@ Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` o
     If any route of the alias sets `pin_task`, the router looks up the task's pin. A pin is used only if its route still exists and still pins, its model is still one of that route's candidates, and the model passes the eligibility checks below. Otherwise the pin is dropped.
   </Step>
   <Step title="Score routes">
-    Each route scores `Σ weight × match / Σ weight` over its own signals, so a score is always between `0` and `1`. The highest-scoring route wins if its score is above `0` and at least `abstain_below`; ties go to the route declared first. Otherwise the decision abstains to `default_route`.
+    Each route scores `Σ weight × match` over its own signals. Among routes that reach their own `min_score`, the highest-scoring route wins if its score is above `0` and at least `abstain_below`; ties go to the route declared first. Otherwise the decision abstains to `default_route`.
+  </Step>
+  <Step title="Conversation affinity">
+    If `affinity_ttl` is set and the conversation was resolved recently, the router keeps its previous model, unless the route chosen in the previous step scores at least `affinity_margin` more than the conversation's current route, or that model is no longer eligible.
   </Step>
   <Step title="Pick a candidate">
     The router takes the first eligible candidate of the chosen route. If there is none, it tries the default route, then the remaining routes in descending score order.
@@ -146,7 +152,7 @@ Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` o
 </Steps>
 
 <Note>
-Because each route's score is normalised by that route's own total weight, weights are comparable only within a route. A route with a single matching signal scores `1.0`, whatever that signal's weight.
+A route with a single signal scores `1.0` whenever that signal matches. If one weak signal should not be enough, add a second signal or set `min_score`.
 </Note>
 
 A candidate is eligible when all of these hold, checked in this order:
@@ -174,7 +180,20 @@ Without `X-Hivenet-Task-ID` or an end-user field, conversations that share an AP
 
 Pins live in router memory and are lost on restart. The store holds at most `--semantic-pin-max` pins in total and `--semantic-pin-max-per-key` per API key; beyond either limit the least recently used pin is evicted.
 
-`POST /v1/messages/count_tokens` on an alias always uses the default route and never reads or writes a pin.
+`POST /v1/messages/count_tokens` on an alias always uses the default route and never reads or writes a pin or affinity entry.
+
+## Conversation affinity
+
+Routes without `pin_task` are decided again on every request, so without affinity a conversation can move between models when one turn happens to contain code and the next does not. Each move discards the prompt prefix the previous backend had cached. With `affinity_ttl` set, the router records which route and model answered a conversation, keyed exactly like task pins, and keeps using them while the conversation continues within `affinity_ttl`, up to `pin_max_age`.
+
+```yaml
+alias:
+  default_route: general
+  affinity_ttl: 5m
+  affinity_margin: 0.2
+```
+
+The conversation switches when the newly chosen route scores at least `affinity_margin` more than its current route. It also moves on when its model is no longer eligible (for example, no healthy agent), or when a reload removes that model from the route. Affinity entries share the pin store and its limits. A route with `pin_task` uses its task pin instead.
 
 ## Responses
 
@@ -184,7 +203,7 @@ A resolved request carries these response headers:
 | --- | --- |
 | `X-Hivenet-Routed-Model` | The concrete model that served the request |
 | `X-Hivenet-Route` | The route that chose it |
-| `X-Hivenet-Route-Source` | `pinned`, `scored`, `default`, `fallback`, or `count` |
+| `X-Hivenet-Route-Source` | `pinned`, `affinity`, `scored`, `default`, `fallback`, or `count` |
 
 The response body's `model` field is the resolved model, not the alias.
 

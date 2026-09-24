@@ -20,6 +20,7 @@ const (
 	SourceDefault  = "default"  // no route scored above abstain_below → default_route
 	SourceFallback = "fallback" // first route had no eligible candidate → default_route or next best route
 	SourceCount    = "count"    // /v1/messages/count_tokens → default_route, no pin
+	SourceAffinity = "affinity" // conversation stayed on its previous model (affinity_ttl)
 )
 
 // ErrNoEligibleModel means no route of the alias has a candidate the request
@@ -119,8 +120,11 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 	}
 
 	pinnable := !env.CountOnly && anyPinned(spec)
-	if pinnable {
+	affinity := !env.CountOnly && spec.AffinityDuration() > 0
+	if pinnable || affinity {
 		d.TaskKey = TaskKey(alias, env.TaskHeader, env.KeyID, v)
+	}
+	if pinnable {
 		if model, route, ok := r.pins.Get(d.TaskKey); ok {
 			reason := pinStale(spec, route, model)
 			if reason == "" {
@@ -148,6 +152,13 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 		}
 	}
 
+	if affinity {
+		if model, route, ok := r.stickyChoice(spec, d.TaskKey, first, d.RouteScores, eligible); ok {
+			d.Model, d.Route, d.Source = model, route, SourceAffinity
+			return d, nil
+		}
+	}
+
 	for i, idx := range routeOrder(spec, first, d.RouteScores) {
 		route := &spec.Routes[idx]
 		model := pickCandidate(route, profiles, eligible, d.FilteredOut)
@@ -158,13 +169,46 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 		if i > 0 {
 			d.Source = SourceFallback
 		}
-		if pinnable && route.PinTask {
+		switch {
+		case pinnable && route.PinTask:
 			r.pins.Put(d.TaskKey, env.KeyID, model, route.Name, route.PinDuration(), spec.PinMaxAgeDuration())
+		case affinity:
+			r.pins.Put(affinityKey(d.TaskKey), env.KeyID, model, route.Name, spec.AffinityDuration(), spec.PinMaxAgeDuration())
 		}
 		return d, nil
 	}
 	d.Route = spec.Routes[first].Name
 	return d, ErrNoEligibleModel
+}
+
+// affinityKey derives the conversation-affinity key from a task key, so
+// affinity entries share the pin store (and its caps) without colliding with
+// task pins.
+func affinityKey(taskKey string) string { return "a" + taskKey }
+
+// stickyChoice returns the model the conversation used last (affinity_ttl),
+// unless the newly chosen route (index first) beats the sticky route's score by
+// at least affinity_margin, the sticky entry no longer matches the config, or
+// its model is no longer eligible. Stale entries are dropped.
+func (r *Resolver) stickyChoice(spec *policy.AliasSpec, taskKey string, first int, scores map[string]float64, eligible func(string) (bool, string)) (model, route string, ok bool) {
+	key := affinityKey(taskKey)
+	model, route, found := r.pins.Get(key)
+	if !found {
+		return "", "", false
+	}
+	if routeHasCandidate(spec, route, model) != "" {
+		r.pins.Delete(key)
+		return "", "", false
+	}
+	chosen := spec.Routes[first].Name
+	if chosen != route && scores[chosen] >= scores[route]+spec.AffinityMargin {
+		return "", "", false // a clearly better route: switch (and re-stick below)
+	}
+	if okE, _ := eligible(model); !okE {
+		r.pins.Delete(key)
+		return "", "", false
+	}
+	return model, route, true
 }
 
 // routeOrder lists route indexes in the order Resolve tries them: first, then
@@ -189,20 +233,28 @@ func routeOrder(spec *policy.AliasSpec, first int, scores map[string]float64) []
 	return append(order, rest...)
 }
 
-// pinStale reports why a pin no longer matches the alias config ("" = still
-// valid): its route was removed or no longer pins, or its model is no longer a
-// candidate of that route. Pins survive hot reloads, so this keeps a pinned task
-// inside the current candidate set.
+// pinStale reports why a task pin no longer matches the alias config ("" =
+// still valid): its route was removed or no longer pins, or its model is no
+// longer a candidate of that route. Pins survive hot reloads, so this keeps a
+// pinned task inside the current candidate set.
 func pinStale(spec *policy.AliasSpec, routeName, model string) string {
+	if reason := routeHasCandidate(spec, routeName, model); reason != "" {
+		return reason
+	}
+	if !spec.Routes[routeIndex(spec, routeName)].PinTask {
+		return "route_not_pinned"
+	}
+	return ""
+}
+
+// routeHasCandidate reports why model is not a current candidate of the named
+// route ("" = it is).
+func routeHasCandidate(spec *policy.AliasSpec, routeName, model string) string {
 	i := routeIndex(spec, routeName)
 	if i < 0 {
 		return "route_removed"
 	}
-	rt := &spec.Routes[i]
-	if !rt.PinTask {
-		return "route_not_pinned"
-	}
-	for _, c := range rt.Candidates {
+	for _, c := range spec.Routes[i].Candidates {
 		if c.Model == model {
 			return ""
 		}
@@ -401,7 +453,9 @@ func pickCandidate(route *policy.Route, profiles map[string]*policy.ModelProfile
 }
 
 // scoreRoutes computes Σ weight·match / Σ weight per route, and the signals
-// that matched (for the decision log). Routes without signals score 0.
+// that matched (for the decision log). The loader requires each route's
+// weights to sum to 1, so the division only guards specs built in code.
+// Routes without signals score 0.
 func scoreRoutes(spec *policy.AliasSpec, f *Features) (map[string]float64, map[string][]string) {
 	scores := make(map[string]float64, len(spec.Routes))
 	matches := make(map[string][]string)
@@ -447,12 +501,13 @@ func matchSignal(s policy.SignalRule, f *Features, window string) (bool, string)
 	return true, s.Feature
 }
 
-// argmax returns the index of the highest-scoring route; ties go to the route
-// declared first. -1 when there are no routes.
+// argmax returns the index of the highest-scoring route among those at or
+// above their own min_score; ties go to the route declared first. -1 when no
+// route qualifies.
 func argmax(spec *policy.AliasSpec, scores map[string]float64) (int, float64) {
 	best, bestScore := -1, -1.0
 	for i := range spec.Routes {
-		if s := scores[spec.Routes[i].Name]; s > bestScore {
+		if s := scores[spec.Routes[i].Name]; s >= spec.Routes[i].MinScore && s > bestScore {
 			best, bestScore = i, s
 		}
 	}
