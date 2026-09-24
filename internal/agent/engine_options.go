@@ -19,6 +19,23 @@ type EngineOptions struct {
 	StreamWriteTimeout time.Duration
 }
 
+// BackendHeader returns a copy of the client headers to send to the backend.
+// When apiKey is non-empty the client's credentials are replaced by it
+// (Authorization: Bearer <apiKey>, x-api-key removed), so a caller's router key
+// never reaches an authenticated backend and the backend sees the agent's key.
+// When apiKey is empty the headers are forwarded unchanged.
+func BackendHeader(src http.Header, apiKey string) http.Header {
+	h := src.Clone()
+	if h == nil {
+		h = http.Header{}
+	}
+	if apiKey != "" {
+		h.Del("X-Api-Key")
+		h.Set("Authorization", "Bearer "+apiKey)
+	}
+	return h
+}
+
 func WithHttpHeader(header http.Header) EngineOption {
 	return func(opts *EngineOptions) {
 		opts.HttpHeader = header

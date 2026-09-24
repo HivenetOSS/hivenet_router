@@ -763,7 +763,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// so we must not write anything to w after it returns on success.
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
 			chatReq.RawBytes, a.engine.Name(),
-			WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()),
+			WithHttpHeader(BackendHeader(r.Header, a.cfg.BackendAPIKey)), WithPeerID(a.peerID.String()),
 			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout))
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
@@ -785,7 +785,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, responseHeader, err := a.engine.ForwardChat(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model, chatReq,
-		WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()))
+		WithHttpHeader(BackendHeader(r.Header, a.cfg.BackendAPIKey)), WithPeerID(a.peerID.String()))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -889,7 +889,7 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 		return
 	}
 	// Clone all incoming headers (preserves W3C trace context injected by the router).
-	req.Header = r.Header.Clone()
+	req.Header = BackendHeader(r.Header, a.cfg.BackendAPIKey)
 	req.Header.Del("Content-Length") // Go's http client sets this from the body.
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
