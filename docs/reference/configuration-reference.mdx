@@ -320,6 +320,10 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | --- | --- | --- | --- |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty | Global routing-policy YAML file |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty | Directory containing global and per-model policies |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty | JSONL file that records every [semantic alias](/routing/semantic-routing) decision; empty disables it |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` | Decision records queued before new ones are dropped |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` | Maximum semantic task pins held in memory; least recently used pins are evicted beyond it |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues |
@@ -736,6 +740,10 @@ The complete current router flag set is:
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |
@@ -756,6 +764,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every backend request, replacing the client's credentials (any `x-api-key` header is removed). The flag reads the key from a file; the environment variable holds the raw value. Empty forwards the client's headers unchanged |
 
 ### Supported engines
 
@@ -1079,6 +1088,7 @@ The complete current agent flag set is:
 | `--engine-sample-interval` | — | `500ms` |
 | `--routing-signal-interval` | — | `500ms` |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty |
 | `--gpu-devices-file` | — | Empty |
 | `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty |
 | `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty |

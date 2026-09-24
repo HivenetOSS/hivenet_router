@@ -955,6 +955,56 @@ sum by (trigger) (
 )
 ```
 
+## Semantic alias metrics
+
+These metrics describe [semantic model alias](/routing/semantic-routing) decisions. They are recorded only for requests that name an alias.
+
+### Alias decisions
+
+```promql
+hivenet_semantic_decisions_total
+```
+
+Labels:
+
+```text
+alias
+route
+source
+outcome
+```
+
+`route` and `source` are empty when no model was chosen. `source` is one of `pinned`, `scored`, `default`, `fallback`, or `count`. `outcome` is one of `ok`, `invalid`, `forbidden`, `too_long`, `unsupported`, or `unavailable`. Label values come from your alias configuration and fixed sets, so cardinality is bounded by the alias YAML.
+
+Share of alias requests that could not be resolved:
+
+```promql
+sum by (alias) (rate(hivenet_semantic_decisions_total{outcome!="ok"}[5m]))
+/
+sum by (alias) (rate(hivenet_semantic_decisions_total[5m]))
+```
+
+### Decision time
+
+```promql
+hivenet_semantic_decision_seconds
+```
+
+A histogram of the time an alias adds to a request (parsing, resolution and body rewrite), labelled by `alias`.
+
+```promql
+histogram_quantile(0.99, sum by (le, alias) (rate(hivenet_semantic_decision_seconds_bucket[5m])))
+```
+
+### Decision log health
+
+```promql
+hivenet_semantic_decision_log_dropped_total
+hivenet_semantic_decision_log_write_errors_total
+```
+
+Registered only when `--semantic-decision-log` is set. Dropped records were not queued because the buffer was full or the log was closing. Write errors are encode or flush failures, such as a full disk.
+
 ## Queue metrics
 
 These metrics describe the per-model queue used when eligible agents exist but all declared capacity slots are occupied. They do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
