@@ -320,6 +320,10 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | --- | --- | --- | --- |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty | Global routing-policy YAML file |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty | Directory containing global and per-model policies |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty | JSONL file that records every [semantic alias](/routing/semantic-routing) decision; empty disables it |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` | Decision records queued before new ones are dropped |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` | Maximum semantic task pins held in memory; least recently used pins are evicted beyond it |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues |
@@ -736,6 +740,10 @@ The complete current router flag set is:
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |

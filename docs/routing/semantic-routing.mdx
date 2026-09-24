@@ -1,0 +1,239 @@
+---
+title: "Semantic model aliases"
+description: "Let clients send a virtual model name such as auto and have Hivenet Router pick the concrete model from the request's structure, with task pinning, capability filtering, and a decision log."
+sidebarTitle: "Semantic model aliases"
+---
+
+A semantic model alias is a virtual model name, such as `auto`, that you declare in a per-model policy document. When a request names an alias, Hivenet Router picks one concrete model from the request's content, rewrites the request's `model` field, and then applies quota, admission control, and replica routing to that model exactly as if the client had named it.
+
+Requests that name a concrete model never enter this path. They cost one map lookup and are forwarded byte-identical.
+
+<Info>
+The decision uses **structural signals only**: tool activity, conversation size, images, output constraints, and lexical markers for code, stack traces, and maths, plus keyword lists you write. It does not call a model or an embedding service. Topics without such markers (for example, "why is the sky blue?") fall through to the alias's default route.
+</Info>
+
+Aliases apply to `POST /v1/chat/completions`, `POST /v1/messages`, and `POST /v1/messages/count_tokens`. On any other path an alias name is treated as an ordinary, unknown model name.
+
+## Prerequisites
+
+- A policy directory set with `--policy-model-dir` or `HIVENET_ROUTER_POLICY_MODEL_DIR`. See [Policy YAML reference](/routing/policy-yaml-reference).
+- The concrete model IDs exactly as your agents register them. Check them with `GET /v1/models`.
+
+## Declare model profiles
+
+A `profile:` block describes the models its document claims. The resolver uses it to skip models that cannot serve a request. Every field is optional: an unknown value never excludes a model.
+
+```yaml
+# policies/qwen3.6-35b-a3b.yaml: profile only, inherits the global routing policy
+models: ["HivenetQuant/Qwen3.6-35B-A3B"]
+profile:
+  context_window: 131072
+  params_b: 35
+  active_params_b: 3
+  capabilities:
+    tool_calling: true
+    structured_output: true
+    vision: true
+    reasoning: true
+```
+
+| Key | Meaning |
+| --- | --- |
+| `context_window` | Served maximum context in tokens (prompt plus output). `0` or absent means unknown. |
+| `params_b` | Total parameters, in billions. |
+| `active_params_b` | Parameters active per token, in billions (equal to `params_b` for dense models). Must not exceed `params_b`. |
+| `capabilities.tool_calling` | `false` excludes the model from requests that declare tools or carry tool traffic in their history. |
+| `capabilities.structured_output` | `false` excludes the model when `response_format` is `json_schema` or `json_object`. |
+| `capabilities.vision` | `false` excludes the model from requests that contain images. |
+| `capabilities.reasoning` | `false` excludes the model when `reasoning_effort`, `reasoning`, or `thinking` requests reasoning. |
+
+A document that contains only `models:` and `profile:` may omit `routing_policy`; its models keep the global routing policy. A model can be claimed by only one policy document, so if a model already has its own routing document, put the `profile:` block in that document.
+
+## Declare an alias
+
+An `alias:` block turns the names in its document's `models:` list into aliases. An alias document must not contain `routing_policy` or `profile:`; the resolved model's own policy applies after resolution.
+
+```yaml
+# policies/auto.yaml
+models: ["auto"]
+alias:
+  default_route: general
+  abstain_below: 0.3
+  routes:
+    - name: agentic_long_task
+      pin_task: true
+      signals:
+        - { feature: has_tools, weight: 0.5 }
+        - { feature: tool_result_turns, gte: 2, weight: 0.4 }
+        - { keywords: [research, autonomously], weight: 0.1 }
+      candidates: [ { model: HivenetQuant/Qwen3.8-27B }, { model: HivenetQuant/Qwen3.6-35B-A3B } ]
+    - name: software_engineering
+      signals:
+        - { feature: code_presence, weight: 0.35 }
+        - { feature: stack_trace, weight: 0.35 }
+        - { keywords: [bug, compile, refactor], weight: 0.3 }
+      candidates: [ { model: HivenetQuant/Qwen3.8-27B } ]
+    - name: general
+      prefer: smallest
+      candidates: [ { model: HivenetQuant/Qwen3.8-27B }, { model: HivenetQuant/Qwen3.6-35B-A3B } ]
+```
+
+The weights and candidate order above are an example, not a recommendation.
+
+### Alias keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `default_route` | Required | Route used when no route scores high enough. Must name a declared route. |
+| `abstain_below` | `0` | Minimum best-route score, in `[0,1]`, for that route to be chosen. |
+| `context_buffer` | `0.95` | Fraction of a candidate's `context_window` the prompt plus output may fill, in `(0,1]`. |
+| `recent_turns` | `3` | Number of trailing human turns scanned for markers and keywords. |
+| `strip_markers` | `["<system-reminder>", "</system-reminder>"]` | Open/close tag pairs whose enclosed text is removed from messages before they are classified and matched. Must be an even-length list of non-empty strings. |
+| `pin_max_age` | `4h` | Absolute lifetime of a task pin or affinity entry, however often it is used. |
+| `affinity_ttl` | Off | Keep a conversation on the model that answered its previous turn, for routes without `pin_task`. See [Conversation affinity](#conversation-affinity). Empty or `0` disables it. |
+| `affinity_margin` | `0.2` | How much higher, in score, a newly chosen route must be than the conversation's current route before it switches, in `(0,1]`. |
+| `routes` | Required | At least one route. |
+
+### Route keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | Required | Unique within the alias. |
+| `description` | Empty | Free text for operators. Not used by the Phase 1 decision. |
+| `signals` | Empty | Weighted rules that score the route. Their weights must sum to `1`. A route without signals scores `0` and is reached only as the default or a fallback. |
+| `min_score` | `0` | Lowest score at which this route may win, in `[0,1]`, on top of the alias's `abstain_below`. |
+| `candidates` | Required | Ordered concrete models. An alias name is never a valid candidate. |
+| `prefer` | `order` | `order` keeps the listed order; `smallest` or `largest` sorts by `active_params_b` (else `params_b`). Models without a size keep their listed order, after the sized ones. |
+| `pin_task` | `false` | Keep a multi-call task on the model this route chose. See [Task pinning](#task-pinning). |
+| `pin_ttl` | `30m` when `pin_task` is set | Idle time after which a pin expires. Each use extends it. |
+
+### Signals
+
+Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` or more. The weights of a route's signals must sum to `1` (the loader rejects the document otherwise), so a route's score is the sum of the weights of its matching signals and always lies between `0` and `1`.
+
+- `feature` with `gte` and/or `lte` matches when the value is within the bounds.
+- `feature` without bounds matches when the value is greater than `0`.
+- `keywords` matches when any keyword appears, case-insensitively and at word boundaries, in the last `recent_turns` human turns.
+
+| Feature | Value |
+| --- | --- |
+| `has_tools` | `1` when the request declares tools |
+| `tool_count` | Number of declared tools |
+| `tool_result_turns` | Messages carrying tool results |
+| `tool_error_count` | Tool results flagged `is_error` or that read like a failure |
+| `assistant_tool_call_turns` | Assistant messages that call tools |
+| `turn_count` | Human turns (tool-result messages that only add harness reminders are not counted) |
+| `message_count` | Non-system messages |
+| `system_prompt_bytes` | Bytes of the system prompt |
+| `request_bytes` | Bytes of the request body |
+| `estimated_input_tokens` | Largest prompt-token estimate across the alias's candidates; `0` when no estimator is available |
+| `image_count` | Images in the messages |
+| `needs_structured_output` | `1` when `response_format` asks for JSON |
+| `needs_reasoning` | `1` when reasoning is requested |
+| `code_presence` | `1` for a fenced code block or at least two code-like lines |
+| `stack_trace` | `1` for a recognised stack trace or compiler/package-manager error |
+| `math_presence` | `1` for LaTeX, maths symbols, or derivative notation |
+
+## How a model is chosen
+
+<Steps>
+  <Step title="Pin lookup">
+    If any route of the alias sets `pin_task`, the router looks up the task's pin. A pin is used only if its route still exists and still pins, its model is still one of that route's candidates, and the model passes the eligibility checks below. Otherwise the pin is dropped.
+  </Step>
+  <Step title="Score routes">
+    Each route scores `Σ weight × match` over its own signals. Among routes that reach their own `min_score`, the highest-scoring route wins if its score is above `0` and at least `abstain_below`; ties go to the route declared first. Otherwise the decision abstains to `default_route`.
+  </Step>
+  <Step title="Conversation affinity">
+    If `affinity_ttl` is set and the conversation was resolved recently, the router keeps its previous model, unless the route chosen in the previous step scores at least `affinity_margin` more than the conversation's current route, or that model is no longer eligible.
+  </Step>
+  <Step title="Pick a candidate">
+    The router takes the first eligible candidate of the chosen route. If there is none, it tries the default route, then the remaining routes in descending score order.
+  </Step>
+</Steps>
+
+<Note>
+A route with a single signal scores `1.0` whenever that signal matches. If one weak signal should not be enough, add a second signal or set `min_score`.
+</Note>
+
+A candidate is eligible when all of these hold, checked in this order:
+
+1. It is not itself an alias.
+2. The caller's API key may use it: its allowlist, or its per-model quota entries when the key uses per-model quotas. Quota is then charged to the resolved model, so resolution never ends in a quota rejection for an unlisted model.
+3. Its profile does not rule out a capability the request needs.
+4. The estimated prompt tokens plus the request's `max_tokens` (or `max_completion_tokens`) fit within `context_window × context_buffer`.
+5. At least one healthy agent serves it.
+
+## Task pinning
+
+Routes with `pin_task: true` keep a multi-call task, such as an agent session, on one model. The task key is:
+
+- the `X-Hivenet-Task-ID` request header, when present; or
+- a fingerprint of the API key, the end user (OpenAI `user` or Anthropic `metadata.user_id`), the system prompt, and the first human message.
+
+Keys are scoped to the alias and the API key, and stored as hashes. A pin lasts while the task keeps calling within `pin_ttl`, up to `pin_max_age`.
+
+<Warning>
+Without `X-Hivenet-Task-ID` or an end-user field, conversations that share an API key, a system prompt, and a first message share one pin. Send `X-Hivenet-Task-ID` when many users share one key.
+</Warning>
+
+`X-Hivenet-Task-ID` values longer than 128 bytes are rejected with `400`.
+
+Pins live in router memory and are lost on restart. The store holds at most `--semantic-pin-max` pins in total and `--semantic-pin-max-per-key` per API key; beyond either limit the least recently used pin is evicted.
+
+`POST /v1/messages/count_tokens` on an alias always uses the default route and never reads or writes a pin or affinity entry.
+
+## Conversation affinity
+
+Routes without `pin_task` are decided again on every request, so without affinity a conversation can move between models when one turn happens to contain code and the next does not. Each move discards the prompt prefix the previous backend had cached. With `affinity_ttl` set, the router records which route and model answered a conversation, keyed exactly like task pins, and keeps using them while the conversation continues within `affinity_ttl`, up to `pin_max_age`.
+
+```yaml
+alias:
+  default_route: general
+  affinity_ttl: 5m
+  affinity_margin: 0.2
+```
+
+The conversation switches when the newly chosen route scores at least `affinity_margin` more than its current route. It also moves on when its model is no longer eligible (for example, no healthy agent), or when a reload removes that model from the route. Affinity entries share the pin store and its limits. A route with `pin_task` uses its task pin instead.
+
+## Responses
+
+A resolved request carries these response headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Hivenet-Routed-Model` | The concrete model that served the request |
+| `X-Hivenet-Route` | The route that chose it |
+| `X-Hivenet-Route-Source` | `pinned`, `affinity`, `scored`, `default`, `fallback`, or `count` |
+
+The response body's `model` field is the resolved model, not the alias.
+
+When no candidate is eligible, the router answers before quota or routing runs:
+
+| Status | Error code | When |
+| --- | --- | --- |
+| `403` | `model_forbidden` | The API key may use none of the alias's candidates |
+| `400` | `input_too_long` | Every allowed candidate's context window is too small for the prompt plus output |
+| `400` | `request_invalid` | Every allowed candidate lacks a capability the request needs (or is too small), or the body or `X-Hivenet-Task-ID` is invalid |
+| `503` | `backend_unavailable` | Otherwise, for example when the allowed candidates have no healthy agent |
+
+The error message names only models the API key may use.
+
+## Listing aliases
+
+`GET /v1/models` lists an alias for an API key when at least one of its candidates is allowed for that key and has a healthy agent. `GET /v1/models/{alias}` is not supported and returns `404`.
+
+## Observability
+
+- **Audit log:** alias requests add `alias` and `semantic_route` fields; `model` holds the resolved model. See [Audit logging](/observability/audit-logging).
+- **Metrics:** `hivenet_semantic_decisions_total`, `hivenet_semantic_decision_seconds`, `hivenet_semantic_decision_log_dropped_total`, and `hivenet_semantic_decision_log_write_errors_total`. See [Prometheus metrics](/observability/prometheus-metrics#semantic-alias-metrics).
+- **Decision log:** set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision: requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds. Prompt text is not written. The file is not rotated by the router. When more than `--semantic-decision-log-buffer` records are queued, new records are dropped and counted.
+
+## Reload
+
+Alias and profile blocks reload with the rest of the policy directory on `SIGHUP` and through `PUT /admin/policy/models/{name}`. The global policy (`--policy-file`, `_default.yaml`, `PUT /admin/policy`) rejects both blocks. Existing pins are revalidated against the new configuration on their next use.
+
+## Related pages
+
+- [Policy YAML reference](/routing/policy-yaml-reference)
+- [Model restrictions](/security/model-restrictions)
+- [Configuration reference](/reference/configuration-reference)
