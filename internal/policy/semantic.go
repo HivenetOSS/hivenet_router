@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Semantic routing configuration (R&D spike, rnd/semantic-routing/).
+// Semantic (model-level) routing configuration.
 //
 // Two optional blocks extend a per-model policy document:
 //

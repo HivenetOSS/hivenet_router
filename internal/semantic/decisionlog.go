@@ -15,7 +15,7 @@ import (
 
 // DecisionRecord is one line of the decision log (JSONL). It is both the audit
 // trail for "why did this request go there" and the dataset for later
-// evaluation and learning (PRD F7).
+// evaluation and learning.
 type DecisionRecord struct {
 	TS            time.Time           `json:"ts"`
 	RequestID     string              `json:"request_id,omitempty"`

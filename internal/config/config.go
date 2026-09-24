@@ -74,7 +74,7 @@ type Config struct {
 	PolicyFile     string // path to routing policy YAML; empty = built-in default (least-loaded)
 	PolicyModelDir string // path to directory of per-model policy YAML files; empty = disabled
 	// SemanticDecisionLog is the path of the JSONL log that records every semantic
-	// alias decision (R&D spike). Empty = disabled.
+	// alias decision. Empty = disabled.
 	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
 	SemanticDecisionLog string
 	MaxTriesPerStep     int // global default for steps that don't set max_tries

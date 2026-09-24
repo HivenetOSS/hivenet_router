@@ -125,7 +125,7 @@ func modelOf(t *testing.T, body []byte) string {
 }
 
 // TestAliasMiddleware_ConcreteModelUntouched: a concrete model passes through
-// with byte-identical body and no routing headers (PRD N1).
+// with byte-identical body and no routing headers.
 func TestAliasMiddleware_ConcreteModelUntouched(t *testing.T) {
 	var out seen
 	r := aliasRouter(newAliasHandlers(t, nil), noAuth, &out)

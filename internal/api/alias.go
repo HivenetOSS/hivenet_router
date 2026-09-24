@@ -19,7 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Semantic alias routing (R&D spike, rnd/semantic-routing/).
+// Semantic alias routing: model-level routing for virtual model names (e.g. "auto").
 //
 // AliasMiddleware runs in the inference group after BodyLimitMiddleware and
 // before QuotaMiddleware. For a request whose model is a configured alias it

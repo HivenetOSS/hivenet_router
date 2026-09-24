@@ -462,9 +462,10 @@ func claudeCodeLikeBody(tb testing.TB) []byte {
 	return b
 }
 
-// BenchmarkResolve_ClaudeCodeLike measures the full alias decision (parse +
-// features + scoring + filter) on a ~200 KB agentic request (PRD N2 target:
-// structural path <= 1 ms).
+// BenchmarkResolve_ClaudeCodeLike measures the resolver alone (parse +
+// features + scoring + filter) on a ~200 KB agentic request; the structural
+// path targets <= 1 ms. BenchmarkAliasMiddleware_Agentic in test/api measures
+// the whole middleware including the body rewrite.
 func BenchmarkResolve_ClaudeCodeLike(b *testing.B) {
 	body := claudeCodeLikeBody(b)
 	spec := mustAlias(b, aliasYAML)

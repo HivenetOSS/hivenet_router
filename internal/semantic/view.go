@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
 // Package semantic resolves a virtual model alias (e.g. "auto") to one concrete
-// model from the content of the request (R&D spike, rnd/semantic-routing/).
+// model from the content of the request.
 //
 // It runs only for requests whose model is an alias; concrete-model requests
 // never reach it. Everything here is in-process and stdlib-only (no cgo, no
