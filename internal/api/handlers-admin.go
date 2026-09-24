@@ -123,7 +123,7 @@ func (h *Handlers) PutModelPolicy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body (max 1 MB)"})
 		return
 	}
-	p, err := policy.LoadBytes(body)
+	p, err := policy.LoadModelDocBytes(body)
 	if err != nil {
 		if h.policyReloadObserver != nil {
 			h.policyReloadObserver("api", "error")
