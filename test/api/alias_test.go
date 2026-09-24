@@ -6,6 +6,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -281,5 +282,89 @@ func TestListModels_IncludesAlias(t *testing.T) {
 	}
 	if ids := list(allowOnly("other")); contains(ids, "auto") {
 		t.Errorf("key without candidates must not see auto: %v", ids)
+	}
+}
+
+// TestAliasMiddleware_ModelKeyPlacement: the rewrite finds "model" wherever it
+// sits, honours escaped key spellings, and with duplicate keys rewrites the
+// last one — the one encoding/json (and therefore quota and routing) uses.
+func TestAliasMiddleware_ModelKeyPlacement(t *testing.T) {
+	tests := []struct{ name, body string }{
+		{"model after messages", `{"messages":[{"role":"user","content":"hi \"model\": {x}"}],"stream":false,"model":"auto"}`},
+		{"escaped key", `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`},
+		{"duplicate keys, alias last", `{"model":"coder","messages":[{"role":"user","content":"hi"}],"model":"auto"}`},
+		{"whitespace everywhere", "{ \"model\" :\n \"auto\" ,\t\"messages\" : [ {\"role\":\"user\",\"content\":\"hi\"} ] }"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out seen
+			r := aliasRouter(newAliasHandlers(t, nil), noAuth, &out)
+			w := post(r, "/v1/chat/completions", tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", w.Code, w.Body.String())
+			}
+			routed := w.Header().Get(api.HeaderRoutedModel)
+			if got := modelOf(t, out.body); got != routed || routed == "" {
+				t.Errorf("decoded model %q, routed %q; body %s", got, routed, out.body)
+			}
+			if len(out.body)-len(tc.body) != len(routed)-len("auto") && !strings.Contains(tc.body, `e`) {
+				t.Errorf("more than the model value changed: %s", out.body)
+			}
+		})
+	}
+}
+
+// BenchmarkAliasMiddleware_Agentic measures everything an alias adds inside
+// the router (peek, parse, resolve, body rewrite) on a ~190 KB agentic
+// Anthropic body whose "model" key is serialised after "messages".
+func BenchmarkAliasMiddleware_Agentic(b *testing.B) {
+	tools := make([]map[string]any, 30)
+	for i := range tools {
+		tools[i] = map[string]any{"name": fmt.Sprintf("Tool%d", i), "input_schema": map[string]any{"type": "object", "description": strings.Repeat("schema text ", 60)}}
+	}
+	msgs := []map[string]any{{"role": "user", "content": "Refactor the storage layer and add tests"}}
+	for len(msgs) < 120 {
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "t", "name": "Bash", "input": map[string]any{"cmd": "go test ./..."}}}},
+			map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "t", "content": strings.Repeat("ok  \tpkg/x\t0.1s\n", 110)}}})
+	}
+	body, _ := json.Marshal(map[string]any{"model": "auto", "system": strings.Repeat("You are an agent. ", 1500), "tools": tools, "messages": msgs})
+	exec := policy.NewExecutor(nil, nil, policy.Default(), 3, 0)
+	doc, err := policy.LoadModelDocBytes([]byte(aliasDocYAML))
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := exec.SetNamedPolicy("auto", doc); err != nil {
+		b.Fatal(err)
+	}
+	h := api.NewHandlers(nil, nil, nil, time.Second, exec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/messages", h.AliasMiddleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	for b.Loop() {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)))
+		if w.Code != http.StatusOK {
+			b.Fatalf("status %d", w.Code)
+		}
+	}
+}
+
+// BenchmarkConcreteModelPeek is the baseline a concrete-model request pays in
+// the same position (the body read + model peek QuotaMiddleware already did
+// before semantic routing existed), for comparison with the alias path.
+func BenchmarkConcreteModelPeek(b *testing.B) {
+	msgs := []map[string]any{{"role": "user", "content": strings.Repeat("hello ", 30000)}}
+	body, _ := json.Marshal(map[string]any{"model": "coder", "messages": msgs})
+	h := newAliasHandlers(&testing.T{}, nil)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/chat/completions", h.AliasMiddleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)))
 	}
 }

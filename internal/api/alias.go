@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -120,8 +119,8 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 	}
 
 	d, resolveErr := h.resolver.Resolve(alias, spec, sv.Profiles, view, env)
-	h.logDecision(c, path, d, resolveErr, time.Since(start))
 	if resolveErr != nil {
+		h.logDecision(c, path, d, resolveErr, time.Since(start))
 		status, code := http.StatusServiceUnavailable, domain.ErrCodeBackendUnavailable
 		if allReasons(d.FilteredOut, "not_allowed") {
 			status, code = http.StatusForbidden, domain.ErrCodeModelForbidden
@@ -133,6 +132,8 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 	}
 
 	patched, err := replaceTopLevelModel(body, d.Model)
+	// decision_us covers everything the alias adds: parse, resolve and rewrite.
+	h.logDecision(c, path, d, err, time.Since(start))
 	if err != nil {
 		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, "Invalid request: "+err.Error(), domain.SourceRouter)
 		return false
@@ -223,35 +224,127 @@ func describeFiltered(filtered map[string]string) string {
 
 // replaceTopLevelModel returns body with the value of the top-level "model"
 // key replaced by model. Every other byte is preserved, so the forwarded
-// request differs from the client's only in the model name.
+// request differs from the client's only in the model name. When the key is
+// duplicated the LAST occurrence is replaced, matching encoding/json (which
+// peekModel and the handler use), so quota and routing see the same model.
+//
+// It is a byte scanner rather than a json.Decoder walk: the body was already
+// validated by semantic.ParseView, and agentic bodies are hundreds of KB with
+// "model" often serialised after "messages".
 func replaceTopLevelModel(body []byte, model string) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+	i := skipWS(body, 0)
+	if i >= len(body) || body[i] != '{' {
 		return nil, errors.New("request body must be a JSON object")
 	}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return nil, err
+	i++
+	valStart, valEnd := -1, -1
+	for {
+		i = skipWS(body, i)
+		if i < len(body) && body[i] == '}' {
+			break
 		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, err
+		if i >= len(body) || body[i] != '"' {
+			return nil, errors.New("malformed JSON object")
 		}
-		if key, _ := keyTok.(string); key == "model" {
-			end := int(dec.InputOffset())
-			start := end - len(raw)
-			quoted, _ := json.Marshal(model)
-			out := make([]byte, 0, len(body)-len(raw)+len(quoted))
-			out = append(out, body[:start]...)
-			out = append(out, quoted...)
-			return append(out, body[end:]...), nil
+		keyStart := i
+		i = skipString(body, i)
+		key := body[keyStart:i]
+		i = skipWS(body, i)
+		if i >= len(body) || body[i] != ':' {
+			return nil, errors.New("malformed JSON object")
+		}
+		i = skipWS(body, i+1)
+		vs := i
+		i = skipValue(body, i)
+		if i < 0 {
+			return nil, errors.New("malformed JSON value")
+		}
+		if isModelKey(key) {
+			valStart, valEnd = vs, i
+		}
+		i = skipWS(body, i)
+		if i < len(body) && body[i] == ',' {
+			i++
+			continue
+		}
+		if i < len(body) && body[i] == '}' {
+			break
+		}
+		return nil, errors.New("malformed JSON object")
+	}
+	if valStart < 0 {
+		return nil, errors.New("request body has no top-level model field")
+	}
+	quoted, _ := json.Marshal(model)
+	out := make([]byte, 0, len(body)-(valEnd-valStart)+len(quoted))
+	out = append(out, body[:valStart]...)
+	out = append(out, quoted...)
+	return append(out, body[valEnd:]...), nil
+}
+
+// isModelKey reports whether a quoted JSON key decodes to "model" (escaped
+// spellings such as "mod\u0065l" included, as encoding/json would decode them).
+func isModelKey(quoted []byte) bool {
+	if string(quoted) == `"model"` {
+		return true
+	}
+	if !bytes.ContainsRune(quoted, '\\') {
+		return false
+	}
+	var k string
+	return json.Unmarshal(quoted, &k) == nil && k == "model"
+}
+
+func skipWS(b []byte, i int) int {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// skipString returns the index just past the string starting at b[i] == '"'.
+func skipString(b []byte, i int) int {
+	for i++; i < len(b); i++ {
+		switch b[i] {
+		case '\\':
+			i++
+		case '"':
+			return i + 1
 		}
 	}
-	if _, err := dec.Token(); err != nil && err != io.EOF {
-		return nil, err
+	return len(b)
+}
+
+// skipValue returns the index just past the JSON value starting at b[i], or -1.
+func skipValue(b []byte, i int) int {
+	if i >= len(b) {
+		return -1
 	}
-	return nil, errors.New("request body has no top-level model field")
+	switch b[i] {
+	case '"':
+		return skipString(b, i)
+	case '{', '[':
+		depth := 0
+		for ; i < len(b); i++ {
+			switch b[i] {
+			case '"':
+				i = skipString(b, i) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return i + 1
+				}
+			}
+		}
+		return -1
+	default: // number, true, false, null
+		for i < len(b) && b[i] != ',' && b[i] != '}' && b[i] != ']' && b[i] != ' ' && b[i] != '\t' && b[i] != '\n' && b[i] != '\r' {
+			i++
+		}
+		return i
+	}
 }
 
 // aliasModelObjects returns /v1/models entries for aliases the caller may use:
