@@ -54,33 +54,87 @@ type AgentLister interface {
 }
 
 // policyState is an immutable snapshot of the global policy, the named policy
-// documents, and the model-keyed routing index derived from them.
-// All three are stored together under a single atomic.Pointer so that
+// documents, and the indexes derived from them.
+// All of it is stored together under a single atomic.Pointer so that
 // NewSession always observes a consistent view — no torn read between a global
 // update and a named-policy update during a concurrent SIGHUP or API call.
+// Always build it with newPolicyState so the derived indexes can never go stale.
 //
 //	named         — keyed by policy document name (filename stem or API URL segment).
 //	                Each document declares which models it applies to via its Models field.
 //	modelPolicies — derived from named; keyed by model name for O(1) routing lookup.
-//	                Rebuilt by buildModelPolicies on every write to named.
+//	                Documents that inherit routing (profile/alias only) are skipped,
+//	                so their models fall back to the global policy.
+//	profiles      — derived; model name → semantic ModelProfile.
+//	aliases       — derived; alias name → semantic AliasSpec.
 type policyState struct {
 	global        *Policy
 	named         map[string]*Policy // keyed by document name
 	modelPolicies map[string]*Policy // keyed by model name (derived)
+	profiles      map[string]*ModelProfile
+	aliases       map[string]*AliasSpec
+}
+
+// newPolicyState derives every index from global and named. named is stored as
+// given; callers pass a map they will not mutate afterwards.
+func newPolicyState(global *Policy, named map[string]*Policy) *policyState {
+	st := &policyState{
+		global:        global,
+		named:         named,
+		modelPolicies: buildModelPolicies(named),
+		profiles:      make(map[string]*ModelProfile),
+		aliases:       make(map[string]*AliasSpec),
+	}
+	for _, p := range named {
+		for _, model := range p.Models {
+			if p.Profile != nil {
+				st.profiles[model] = p.Profile
+			}
+			if p.Alias != nil {
+				st.aliases[model] = p.Alias
+			}
+		}
+	}
+	return st
 }
 
 // buildModelPolicies expands each named policy's Models field into a flat
 // model→policy routing map. Conflicts are prevented upstream (LoadDirSnapshot
 // and SetNamedPolicy both reject conflicting documents before they reach here),
 // so the last write simply wins — this is a mechanical expansion, not arbitration.
+// Documents that inherit routing contribute no entry.
 func buildModelPolicies(named map[string]*Policy) map[string]*Policy {
 	result := make(map[string]*Policy, len(named))
 	for _, p := range named {
+		if p.InheritsRouting() {
+			continue
+		}
 		for _, model := range p.Models {
 			result[model] = p
 		}
 	}
 	return result
+}
+
+// SemanticView is a consistent, read-only snapshot of the semantic routing
+// configuration: model profiles and aliases from the named policy documents.
+// Callers must not mutate the maps or the values they point to.
+type SemanticView struct {
+	Profiles map[string]*ModelProfile
+	Aliases  map[string]*AliasSpec
+}
+
+// Semantic returns the current semantic routing configuration in one atomic load.
+func (e *Executor) Semantic() SemanticView {
+	s := e.state.Load()
+	return SemanticView{Profiles: s.profiles, Aliases: s.aliases}
+}
+
+// IsAlias reports whether model names a configured semantic alias. It is the
+// only cost a concrete-model request pays for semantic routing.
+func (e *Executor) IsAlias(model string) bool {
+	_, ok := e.state.Load().aliases[model]
+	return ok
 }
 
 // Executor applies the active routing policy to every incoming request.
@@ -115,11 +169,7 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 		defaultQueueDepth: defaultQueueDepth,
 		queues:            make(map[string]*WaitQueue),
 	}
-	e.state.Store(&policyState{
-		global:        initial,
-		named:         make(map[string]*Policy),
-		modelPolicies: make(map[string]*Policy),
-	})
+	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
 }
 
@@ -185,7 +235,7 @@ func (e *Executor) SetPolicy(p *Policy) {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 	cur := e.state.Load()
-	e.state.Store(&policyState{global: p, named: cur.named, modelPolicies: cur.modelPolicies})
+	e.state.Store(newPolicyState(p, cur.named))
 }
 
 // GetPolicy returns the currently active global policy.
@@ -233,7 +283,7 @@ func (e *Executor) SetNamedPolicy(name string, p *Policy) error {
 		newNamed[k] = v
 	}
 	newNamed[name] = p
-	e.state.Store(&policyState{global: cur.global, named: newNamed, modelPolicies: buildModelPolicies(newNamed)})
+	e.state.Store(newPolicyState(cur.global, newNamed))
 	return nil
 }
 
@@ -250,7 +300,7 @@ func (e *Executor) DeleteNamedPolicy(name string) {
 			newNamed[k] = v
 		}
 	}
-	e.state.Store(&policyState{global: cur.global, named: newNamed, modelPolicies: buildModelPolicies(newNamed)})
+	e.state.Store(newPolicyState(cur.global, newNamed))
 }
 
 // GetNamedPolicies returns a defensive copy of the current named policy map.
@@ -282,7 +332,7 @@ func (e *Executor) SetNamedPoliciesFromSnapshot(named map[string]*Policy) {
 	for k, v := range named {
 		newNamed[k] = v
 	}
-	e.state.Store(&policyState{global: cur.global, named: newNamed, modelPolicies: buildModelPolicies(newNamed)})
+	e.state.Store(newPolicyState(cur.global, newNamed))
 }
 
 // NewSession creates a per-request routing session. The policy is snapshotted
