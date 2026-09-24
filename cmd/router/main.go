@@ -70,6 +70,8 @@ func main() {
 	maxConcurrentForwards := flag.Int("max-concurrent", cfg.MaxConcurrentForwards, "Max concurrent in-flight request forwards to agents")
 	policyFile := flag.String("policy-file", cfg.PolicyFile, "Path to routing policy YAML file (optional; omit to use built-in default)")
 	policyModelDir := flag.String("policy-model-dir", cfg.PolicyModelDir, "Path to directory of per-model policy YAML files (optional; env: HIVENET_ROUTER_POLICY_MODEL_DIR)")
+	semanticPinMax := flag.Int("semantic-pin-max", cfg.SemanticPinMax, "Max semantic task pins held in memory; LRU-evicted beyond (env: HIVENET_ROUTER_SEMANTIC_PIN_MAX)")
+	semanticPinMaxPerKey := flag.Int("semantic-pin-max-per-key", cfg.SemanticPinMaxPerKey, "Max semantic task pins per API key; LRU-evicted beyond (env: HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY)")
 	maxTriesPerStep := flag.Int("max-tries-per-step", cfg.MaxTriesPerStep, "Default maximum forward attempts per policy step (used when a step does not set max_tries)")
 	defaultQueueDepth := flag.Int("queue-depth", cfg.QueueDepth, "Max concurrent waiters per model in the capacity wait queue; 0 disables the queue")
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
@@ -100,6 +102,11 @@ func main() {
 	cfg.MaxConcurrentForwards = *maxConcurrentForwards
 	cfg.PolicyFile = *policyFile
 	cfg.PolicyModelDir = *policyModelDir
+	if *semanticPinMax < 1 || *semanticPinMaxPerKey < 1 {
+		log.Fatalf("--semantic-pin-max and --semantic-pin-max-per-key must be >= 1")
+	}
+	cfg.SemanticPinMax = *semanticPinMax
+	cfg.SemanticPinMaxPerKey = *semanticPinMaxPerKey
 	if *maxTriesPerStep < 1 {
 		log.Fatalf("--max-tries-per-step must be >= 1, got %d", *maxTriesPerStep)
 	}
