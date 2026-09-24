@@ -65,7 +65,10 @@ type AliasSpec struct {
 	// DefaultRoute is used when no route scores at or above AbstainBelow, and as
 	// the fallback when the winning route has no eligible candidate.
 	DefaultRoute string `yaml:"default_route" json:"default_route"`
-	// AbstainBelow: the best route score must be >= this to be chosen. [0,1].
+	// AbstainBelow: the best route score must be >= this, and > 0, to be chosen;
+	// otherwise the decision abstains to DefaultRoute. [0,1]. Each route scores
+	// Σ weight·match / Σ weight over its own signals, so weights compare only
+	// within a route; ties between routes go to the one declared first.
 	AbstainBelow float64 `yaml:"abstain_below" json:"abstain_below"`
 	// ContextBuffer is the fraction of a candidate's context window the estimated
 	// prompt may fill. Default 0.95.
@@ -76,8 +79,18 @@ type AliasSpec struct {
 	// before keyword matching (e.g. harness-injected <system-reminder> blocks).
 	// Must have an even number of entries. Default: <system-reminder> pair.
 	StripMarkers []string `yaml:"strip_markers" json:"strip_markers,omitempty"`
-	Routes       []Route  `yaml:"routes"        json:"routes"`
+	// PinMaxAge caps how long a task pin may live in total, however often it is
+	// hit (pins otherwise slide by the route's pin_ttl on every call). It bounds
+	// how long a fingerprint shared by unrelated conversations can hold them on
+	// one model, and how long a task can outlive config changes. Default 4h.
+	PinMaxAge string  `yaml:"pin_max_age" json:"pin_max_age,omitempty"`
+	Routes    []Route `yaml:"routes"        json:"routes"`
+
+	pinMaxAge time.Duration // parsed from PinMaxAge by validateAlias
 }
+
+// PinMaxAgeDuration returns the parsed pin max age (default 4h).
+func (a *AliasSpec) PinMaxAgeDuration() time.Duration { return a.pinMaxAge }
 
 // Route is one semantic category an alias can resolve to.
 type Route struct {
@@ -153,7 +166,10 @@ func KnownSignalFeatures() []string {
 	return out
 }
 
-const defaultPinTTL = 30 * time.Minute
+const (
+	defaultPinTTL    = 30 * time.Minute
+	defaultPinMaxAge = 4 * time.Hour
+)
 
 // InheritsRouting reports whether this per-model document omits routing
 // entirely and only contributes a profile and/or alias. Its models then use
@@ -244,6 +260,19 @@ func validateAlias(a *AliasSpec, aliasNames []string) error {
 	}
 	if len(a.StripMarkers)%2 != 0 {
 		return fmt.Errorf("policy: alias.strip_markers must list open/close pairs (even count), got %d", len(a.StripMarkers))
+	}
+	for i, m := range a.StripMarkers {
+		if m == "" {
+			return fmt.Errorf("policy: alias.strip_markers[%d] is empty", i)
+		}
+	}
+	a.pinMaxAge = defaultPinMaxAge
+	if a.PinMaxAge != "" {
+		d, err := time.ParseDuration(a.PinMaxAge)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("policy: alias.pin_max_age: invalid duration %q", a.PinMaxAge)
+		}
+		a.pinMaxAge = d
 	}
 	isAlias := make(map[string]struct{}, len(aliasNames))
 	for _, n := range aliasNames {

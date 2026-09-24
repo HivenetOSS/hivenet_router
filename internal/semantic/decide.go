@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"hivenet_router/internal/policy"
@@ -17,12 +18,13 @@ const (
 	SourcePinned   = "pinned"   // task key hit a live pin whose model is still eligible
 	SourceScored   = "scored"   // best route scored >= abstain_below
 	SourceDefault  = "default"  // no route scored above abstain_below → default_route
-	SourceFallback = "fallback" // winning route had no eligible candidate → default_route
+	SourceFallback = "fallback" // first route had no eligible candidate → default_route or next best route
 	SourceCount    = "count"    // /v1/messages/count_tokens → default_route, no pin
 )
 
-// ErrNoEligibleModel means neither the chosen route nor the default route has a
-// candidate the request can run on; Decision.FilteredOut says why.
+// ErrNoEligibleModel means no route of the alias has a candidate the request
+// can run on; Decision.FilteredOut says why and Classify turns that into a
+// Failure.
 var ErrNoEligibleModel = errors.New("semantic: no eligible model for this request")
 
 // Env is the per-request caller context the resolver needs from the router.
@@ -75,7 +77,7 @@ func NewResolver(pins *PinStore, signals ...Signal) *Resolver {
 		signals = []Signal{Structural{}}
 	}
 	if pins == nil {
-		pins = NewPinStore(0)
+		pins = NewPinStore(0, 0)
 	}
 	return &Resolver{signals: signals, pins: pins}
 }
@@ -83,14 +85,19 @@ func NewResolver(pins *PinStore, signals ...Signal) *Resolver {
 // Pins exposes the pin store (tests / diagnostics).
 func (r *Resolver) Pins() *PinStore { return r.pins }
 
-// Resolve picks the model for a request to alias.
-func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[string]*policy.ModelProfile, v *RequestView, env Env) (Decision, error) {
+// Resolve picks the model for a request to alias. Order: a live pin for the
+// task (if the alias pins, the pin is still valid for the current config and
+// its model is still eligible), else the best-scoring route (or the default
+// route when nothing reaches abstain_below), then the default route, then every
+// other route by descending score, taking the first eligible candidate. When no
+// route has one it returns ErrNoEligibleModel; Classify(d.FilteredOut) says why.
+func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[string]*policy.ModelProfile, v *RequestView, env Env) (d Decision, err error) {
 	start := time.Now()
-	d := Decision{Alias: alias, FilteredOut: map[string]string{}}
+	d = Decision{Alias: alias, FilteredOut: map[string]string{}}
 	defer func() { d.Latency = time.Since(start) }()
 
 	f := &Features{}
-	opts := ExtractOptions{RecentTurns: spec.RecentTurns, StripMarkers: spec.StripMarkers}
+	opts := ExtractOptions{RecentTurns: spec.RecentTurns}
 	for _, s := range r.signals {
 		s.Extract(v, opts, f)
 	}
@@ -99,57 +106,184 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 	est := estimateFor(env, spec)
 	f.Set("estimated_input_tokens", float64(est.max()))
 	req := requirementsOf(f)
+	req.outputTokens = v.MaxOutputTokens
+	// Eligibility does not depend on the route, so check each model once.
+	memo := make(map[string]string, 4) // model → reason ("" = eligible)
 	eligible := func(model string) (bool, string) {
-		return checkEligible(model, profiles, spec, req, est, env)
+		reason, done := memo[model]
+		if !done {
+			_, reason = checkEligible(model, profiles, spec, req, est, env)
+			memo[model] = reason
+		}
+		return reason == "", reason
 	}
 
 	pinnable := !env.CountOnly && anyPinned(spec)
 	if pinnable {
-		d.TaskKey = TaskKey(env.TaskHeader, env.KeyID, v)
+		d.TaskKey = TaskKey(alias, env.TaskHeader, env.KeyID, v)
 		if model, route, ok := r.pins.Get(d.TaskKey); ok {
-			okE, reason := eligible(model)
-			if okE {
-				d.Model, d.Route, d.Source = model, route, SourcePinned
-				return d, nil
+			reason := pinStale(spec, route, model)
+			if reason == "" {
+				var okE bool
+				if okE, reason = eligible(model); okE {
+					d.Model, d.Route, d.Source = model, route, SourcePinned
+					return d, nil
+				}
 			}
-			// The pinned model can no longer serve this task: re-route and re-pin.
+			// The pin no longer fits the config or the model can no longer serve
+			// this task: drop it, re-route and (if the new route pins) re-pin.
 			d.FilteredOut[model] = "pinned_but_" + reason
 			r.pins.Delete(d.TaskKey)
 		}
 	}
 
-	routeIdx := indexOf(spec, spec.DefaultRoute)
+	first := indexOf(spec, spec.DefaultRoute)
 	d.Source = SourceDefault
 	if env.CountOnly {
 		d.Source = SourceCount
 	} else {
 		d.RouteScores, d.RouteMatches = scoreRoutes(spec, f)
 		if best, bestScore := argmax(spec, d.RouteScores); best >= 0 && bestScore > 0 && bestScore >= spec.AbstainBelow {
-			routeIdx, d.Source = best, SourceScored
+			first, d.Source = best, SourceScored
 		}
 	}
 
-	route := &spec.Routes[routeIdx]
-	model := pickCandidate(route, profiles, eligible, d.FilteredOut)
-	if model == "" && route.Name != spec.DefaultRoute {
-		route = &spec.Routes[indexOf(spec, spec.DefaultRoute)]
-		model = pickCandidate(route, profiles, eligible, d.FilteredOut)
-		d.Source = SourceFallback
+	for i, idx := range routeOrder(spec, first, d.RouteScores) {
+		route := &spec.Routes[idx]
+		model := pickCandidate(route, profiles, eligible, d.FilteredOut)
+		if model == "" {
+			continue
+		}
+		d.Model, d.Route = model, route.Name
+		if i > 0 {
+			d.Source = SourceFallback
+		}
+		if pinnable && route.PinTask {
+			r.pins.Put(d.TaskKey, env.KeyID, model, route.Name, route.PinDuration(), spec.PinMaxAgeDuration())
+		}
+		return d, nil
 	}
-	d.Route = route.Name
-	if model == "" {
-		return d, ErrNoEligibleModel
-	}
-	d.Model = model
-	if pinnable && route.PinTask {
-		r.pins.Put(d.TaskKey, model, route.Name, route.PinDuration())
-	}
-	return d, nil
+	d.Route = spec.Routes[first].Name
+	return d, ErrNoEligibleModel
 }
 
-// requirements are the capabilities a request needs from its model.
+// routeOrder lists route indexes in the order Resolve tries them: first, then
+// the default route, then the remaining routes by descending score (ties keep
+// declaration order). Trying every route means an alias resolves whenever any
+// of its candidates is usable, which is also when /v1/models lists it.
+func routeOrder(spec *policy.AliasSpec, first int, scores map[string]float64) []int {
+	order := make([]int, 0, len(spec.Routes))
+	order = append(order, first)
+	if def := indexOf(spec, spec.DefaultRoute); def != first {
+		order = append(order, def)
+	}
+	rest := make([]int, 0, len(spec.Routes))
+	for i := range spec.Routes {
+		if i != order[0] && (len(order) < 2 || i != order[1]) {
+			rest = append(rest, i)
+		}
+	}
+	sort.SliceStable(rest, func(a, b int) bool {
+		return scores[spec.Routes[rest[a]].Name] > scores[spec.Routes[rest[b]].Name]
+	})
+	return append(order, rest...)
+}
+
+// pinStale reports why a pin no longer matches the alias config ("" = still
+// valid): its route was removed or no longer pins, or its model is no longer a
+// candidate of that route. Pins survive hot reloads, so this keeps a pinned task
+// inside the current candidate set.
+func pinStale(spec *policy.AliasSpec, routeName, model string) string {
+	i := routeIndex(spec, routeName)
+	if i < 0 {
+		return "route_removed"
+	}
+	rt := &spec.Routes[i]
+	if !rt.PinTask {
+		return "route_not_pinned"
+	}
+	for _, c := range rt.Candidates {
+		if c.Model == model {
+			return ""
+		}
+	}
+	return "not_a_candidate"
+}
+
+// Eligibility reasons recorded in Decision.FilteredOut.
+const (
+	ReasonIsAlias        = "is_alias"
+	ReasonNotAllowed     = "not_allowed"
+	ReasonNoHealthyAgent = "no_healthy_agent"
+	// ReasonContextWindow prefixes "context_window(est=..,out=..>limit=..)".
+	ReasonContextWindow = "context_window"
+	reasonPinnedPrefix  = "pinned_but_"
+)
+
+// capabilityReasons are the reasons a request needs a feature a model lacks.
+var capabilityReasons = map[string]bool{
+	"no_tool_calling": true, "no_vision": true, "no_structured_output": true, "no_reasoning": true,
+}
+
+// Failure classifies why no candidate was eligible, so the API can answer with
+// a status the client can act on.
+type Failure int
+
+const (
+	// FailureUnavailable: at least one allowed candidate is down (or the config
+	// has no usable candidate). Retrying later can help → 503.
+	FailureUnavailable Failure = iota
+	// FailureForbidden: the key may use none of the candidates → 403.
+	FailureForbidden
+	// FailureTooLong: every allowed candidate's context window is too small for
+	// prompt + output → 400 input_too_long, like the concrete-model cap.
+	FailureTooLong
+	// FailureUnsupported: every allowed candidate lacks a capability the request
+	// needs (or is too small) → 400; retrying cannot help.
+	FailureUnsupported
+)
+
+// Classify maps the reasons of a failed decision to a Failure. Reasons recorded
+// for a dropped pin are ignored: they describe the old pin, not the candidates.
+func Classify(filtered map[string]string) Failure {
+	var allowed, tooLong, unsupported int
+	for _, reason := range filtered {
+		switch {
+		case strings.HasPrefix(reason, reasonPinnedPrefix):
+			continue
+		case reason == ReasonNotAllowed:
+			continue
+		case strings.HasPrefix(reason, ReasonContextWindow):
+			tooLong++
+		case capabilityReasons[reason]:
+			unsupported++
+		}
+		allowed++
+	}
+	switch {
+	case allowed == 0 && len(filtered) > 0 && !onlyPinReasons(filtered):
+		return FailureForbidden
+	case allowed > 0 && tooLong == allowed:
+		return FailureTooLong
+	case allowed > 0 && tooLong+unsupported == allowed:
+		return FailureUnsupported
+	}
+	return FailureUnavailable
+}
+
+func onlyPinReasons(filtered map[string]string) bool {
+	for _, reason := range filtered {
+		if !strings.HasPrefix(reason, reasonPinnedPrefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// requirements are what a request needs from its model.
 type requirements struct {
 	tools, vision, structured, reasoning bool
+	outputTokens                         int // reserved output (max_tokens); counts against the context window
 }
 
 func requirementsOf(f *Features) requirements {
@@ -192,11 +326,17 @@ func estimateFor(env Env, spec *policy.AliasSpec) estimates {
 	return e
 }
 
-// checkEligible applies, in order: alias check, capability requirements,
-// context window, key allowlist, and health. Unknown profile data never excludes a model.
+// checkEligible applies, in order: alias check, key allowlist, capability
+// requirements, context window (prompt estimate + reserved output), and health.
+// The allowlist goes first so a model the key may not use is always reported as
+// not_allowed, whatever else is wrong with it. Unknown profile data never
+// excludes a model.
 func checkEligible(model string, profiles map[string]*policy.ModelProfile, spec *policy.AliasSpec, req requirements, est estimates, env Env) (bool, string) {
 	if env.IsAlias != nil && env.IsAlias(model) {
-		return false, "is_alias"
+		return false, ReasonIsAlias
+	}
+	if env.Allowed != nil && !env.Allowed(model) {
+		return false, ReasonNotAllowed
 	}
 	if p := profiles[model]; p != nil {
 		c := p.Capabilities
@@ -215,17 +355,14 @@ func checkEligible(model string, profiles map[string]*policy.ModelProfile, spec 
 		if p.ContextWindow > 0 {
 			if n, ok := est[model]; ok {
 				limit := int(float64(p.ContextWindow) * spec.ContextBuffer)
-				if n > limit {
-					return false, fmt.Sprintf("context_window(est=%d>limit=%d)", n, limit)
+				if n+req.outputTokens > limit {
+					return false, fmt.Sprintf("%s(est=%d,out=%d>limit=%d)", ReasonContextWindow, n, req.outputTokens, limit)
 				}
 			}
 		}
 	}
-	if env.Allowed != nil && !env.Allowed(model) {
-		return false, "not_allowed"
-	}
 	if env.Healthy != nil && !env.Healthy(model) {
-		return false, "no_healthy_agent"
+		return false, ReasonNoHealthyAgent
 	}
 	return true, ""
 }
@@ -322,13 +459,23 @@ func argmax(spec *policy.AliasSpec, scores map[string]float64) (int, float64) {
 	return best, bestScore
 }
 
+// indexOf returns the index of the named route, or 0 when absent (only used
+// for default_route, which the loader guarantees exists).
 func indexOf(spec *policy.AliasSpec, name string) int {
+	if i := routeIndex(spec, name); i >= 0 {
+		return i
+	}
+	return 0
+}
+
+// routeIndex returns the index of the named route, or -1.
+func routeIndex(spec *policy.AliasSpec, name string) int {
 	for i := range spec.Routes {
 		if spec.Routes[i].Name == name {
 			return i
 		}
 	}
-	return 0 // validated at load: default_route always exists
+	return -1
 }
 
 func anyPinned(spec *policy.AliasSpec) bool {

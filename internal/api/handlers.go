@@ -258,8 +258,9 @@ type Handlers struct {
 	// resolver turns a semantic alias (e.g. "auto") into a concrete model; see
 	// AliasMiddleware. Always non-nil; inert unless a policy document declares
 	// an alias. decisionLog (optional, nil = off) records every decision.
-	resolver    *semantic.Resolver
-	decisionLog *semantic.DecisionLog
+	resolver         *semantic.Resolver
+	decisionLog      *semantic.DecisionLog
+	semanticObserver SemanticObserver // metrics hook, nil = off
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.

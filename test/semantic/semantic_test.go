@@ -72,9 +72,12 @@ func testProfiles() map[string]*policy.ModelProfile {
 	}
 }
 
+// reminderMarkers is the loader's default strip_markers pair.
+var reminderMarkers = []string{"<system-reminder>", "</system-reminder>"}
+
 func view(t testing.TB, body string, d semantic.Dialect) *semantic.RequestView {
 	t.Helper()
-	v, err := semantic.ParseView([]byte(body), d)
+	v, err := semantic.ParseView([]byte(body), d, reminderMarkers)
 	if err != nil {
 		t.Fatalf("ParseView: %v", err)
 	}
@@ -160,7 +163,7 @@ func TestParseView_ReasoningOff(t *testing.T) {
 func features(t testing.TB, v *semantic.RequestView) *semantic.Features {
 	t.Helper()
 	f := &semantic.Features{}
-	semantic.Structural{}.Extract(v, semantic.ExtractOptions{RecentTurns: 3, StripMarkers: []string{"<system-reminder>", "</system-reminder>"}}, f)
+	semantic.Structural{}.Extract(v, semantic.ExtractOptions{RecentTurns: 3}, f)
 	return f
 }
 
@@ -341,7 +344,7 @@ func TestResolve_UnknownProfilePasses(t *testing.T) {
 // task header separates tasks that share a fingerprint.
 func TestResolve_Pinning(t *testing.T) {
 	spec := mustAlias(t, aliasYAML)
-	pins := semantic.NewPinStore(0)
+	pins := semantic.NewPinStore(0, 0)
 	now := time.Unix(1_700_000_000, 0)
 	pins.SetClock(func() time.Time { return now })
 	r := semantic.NewResolver(pins)
@@ -392,19 +395,19 @@ func TestTaskKey_Stability(t *testing.T) {
 	a := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task A"}]}`, semantic.DialectOpenAI)
 	a2 := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task A"},{"role":"assistant","content":"x"},{"role":"user","content":"more"}]}`, semantic.DialectOpenAI)
 	b := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task B"}]}`, semantic.DialectOpenAI)
-	if semantic.TaskKey("", "k", a) != semantic.TaskKey("", "k", a2) {
+	if semantic.TaskKey("auto", "", "k", a) != semantic.TaskKey("auto", "", "k", a2) {
 		t.Error("fingerprint must be stable across turns of one task")
 	}
-	if semantic.TaskKey("", "k", a) == semantic.TaskKey("", "k", b) {
+	if semantic.TaskKey("auto", "", "k", a) == semantic.TaskKey("auto", "", "k", b) {
 		t.Error("different tasks must not collide")
 	}
 }
 
 // TestPinStore_Bounded: the store never exceeds its cap.
 func TestPinStore_Bounded(t *testing.T) {
-	s := semantic.NewPinStore(3)
+	s := semantic.NewPinStore(3, 0)
 	for i := range 10 {
-		s.Put(string(rune('a'+i)), "m", "r", time.Minute)
+		s.Put(string(rune('a'+i)), "owner", "m", "r", time.Minute, 0)
 	}
 	if s.Len() > 3 {
 		t.Errorf("len = %d, want <= 3", s.Len())
@@ -475,7 +478,7 @@ func BenchmarkResolve_ClaudeCodeLike(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		v, err := semantic.ParseView(body, semantic.DialectAnthropic)
+		v, err := semantic.ParseView(body, semantic.DialectAnthropic, reminderMarkers)
 		if err != nil {
 			b.Fatal(err)
 		}

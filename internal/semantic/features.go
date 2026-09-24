@@ -15,8 +15,8 @@ import (
 // keyword rules match against.
 type Features struct {
 	values map[string]float64
-	// window is the lower-cased text of the last RecentTurns human turns, with
-	// StripMarkers blocks removed. Keyword rules match here.
+	// window is the lower-cased text of the last RecentTurns human turns
+	// (already stripped of marker blocks by ParseView). Keyword rules match here.
 	window string
 }
 
@@ -48,8 +48,7 @@ func (f *Features) Window() string { return f.window }
 
 // ExtractOptions are the alias-level knobs that shape feature extraction.
 type ExtractOptions struct {
-	RecentTurns  int
-	StripMarkers []string // open/close pairs
+	RecentTurns int
 }
 
 // Signal computes request features. It is the plug point for later signal
@@ -101,7 +100,6 @@ func (Structural) Extract(v *RequestView, opts ExtractOptions, f *Features) {
 	f.Set("needs_reasoning", b2f(v.ReasoningAsked))
 
 	recent := recentUserText(v, opts.RecentTurns)
-	recent = stripMarked(recent, opts.StripMarkers)
 	f.Set("code_presence", b2f(hasCode(recent)))
 	f.Set("stack_trace", b2f(stackTraceRe.MatchString(recent)))
 	f.Set("math_presence", b2f(mathRe.MatchString(recent)))
@@ -137,7 +135,8 @@ func recentUserText(v *RequestView, n int) string {
 }
 
 // stripMarked removes every block enclosed by an open/close marker pair
-// (inclusive). An unterminated block is removed to the end of the text.
+// (inclusive). An unterminated block is removed to the end of the text. An
+// empty close marker removes just the open marker (the loader rejects it).
 func stripMarked(s string, markers []string) string {
 	for i := 0; i+1 < len(markers); i += 2 {
 		open, closeTag := markers[i], markers[i+1]

@@ -34,16 +34,21 @@ func DialectForPath(path string) Dialect {
 
 // Message is the routing-relevant view of one conversation message.
 type Message struct {
-	Role        string
-	Text        string // concatenated text parts (tool results excluded)
+	Role string
+	// Text is the concatenated text parts (tool results excluded) with the
+	// alias's strip markers already removed, so harness-injected blocks such as
+	// <system-reminder> never count as something the human wrote.
+	Text        string
 	Images      int
 	ToolCalls   int // assistant tool_calls (OpenAI) or tool_use blocks (Anthropic)
 	ToolResults int // role "tool" (OpenAI) or tool_result blocks (Anthropic)
 	ToolErrors  int // tool results flagged is_error, or whose text looks like a failure
 }
 
-// IsUserTurn reports whether the message is a human turn (a user message that
-// is not merely carrying tool results back to the model).
+// IsUserTurn reports whether the message is a human turn: a user message that
+// is not merely carrying tool results back to the model. Text is already
+// stripped, so a tool-result message that only adds a harness reminder is not
+// a human turn.
 func (m *Message) IsUserTurn() bool {
 	return m.Role == "user" && (m.ToolResults == 0 || strings.TrimSpace(m.Text) != "")
 }
@@ -56,28 +61,41 @@ type RequestView struct {
 	Dialect        Dialect
 	Messages       []Message
 	System         string // top-level system (Anthropic) + system/developer messages (OpenAI)
-	FirstUserText  string // first human turn, for the task fingerprint
+	FirstUserText  string // first human turn (stripped), for the task fingerprint
+	EndUser        string // OpenAI "user" / Anthropic metadata.user_id, for the task fingerprint
 	ToolCount      int    // entries in "tools"
 	StructuredOut  bool   // response_format json_schema / json_object
 	ReasoningAsked bool   // reasoning_effort / reasoning / thinking requested
 	Stream         bool
 	RequestBytes   int
-	// PromptBytes approximates the prompt text the backend tokenizes: message
-	// text, tool-result text, system prompt and tool schemas. It is at least the
-	// router's own domain.PromptTextBytes measure (which skips tool results), so
-	// token estimates built from it err on the large side for the context filter.
-	PromptBytes int
+	// EstimatorBytes is the prompt size in the exact unit the router's token
+	// estimator learns its per-model ratio on (domain.PromptTextBytes): raw
+	// message text, the system prompt and the tool schemas, with Anthropic
+	// tool_result / tool_use blocks excluded. Feeding it any other byte count
+	// would multiply a ratio learned on one measure by another and mis-estimate
+	// the prompt, e.g. count tool results twice on agentic traffic.
+	EstimatorBytes int
+	// MaxOutputTokens is the output the request reserves (max_tokens /
+	// max_completion_tokens, whichever is larger; 0 when unset). The context
+	// window must hold prompt + output.
+	MaxOutputTokens int
 }
 
 type rawRequest struct {
-	Messages        []rawMessage    `json:"messages"`
-	System          json.RawMessage `json:"system"`
-	Tools           json.RawMessage `json:"tools"`
-	ResponseFormat  json.RawMessage `json:"response_format"`
-	ReasoningEffort string          `json:"reasoning_effort"`
-	Reasoning       json.RawMessage `json:"reasoning"`
-	Thinking        json.RawMessage `json:"thinking"`
-	Stream          bool            `json:"stream"`
+	Messages            []rawMessage    `json:"messages"`
+	System              json.RawMessage `json:"system"`
+	Tools               json.RawMessage `json:"tools"`
+	ResponseFormat      json.RawMessage `json:"response_format"`
+	ReasoningEffort     string          `json:"reasoning_effort"`
+	Reasoning           json.RawMessage `json:"reasoning"`
+	Thinking            json.RawMessage `json:"thinking"`
+	Stream              bool            `json:"stream"`
+	MaxTokens           json.RawMessage `json:"max_tokens"`
+	MaxCompletionTokens json.RawMessage `json:"max_completion_tokens"`
+	// User and Metadata are decoded leniently (RawMessage): an odd shape must
+	// not turn into a 400 on a field that only refines the task fingerprint.
+	User     json.RawMessage `json:"user"`
+	Metadata json.RawMessage `json:"metadata"`
 }
 
 type rawMessage struct {
@@ -94,25 +112,33 @@ type rawPart struct {
 	Content json.RawMessage `json:"content"` // tool_result payload: string or parts
 }
 
-// ParseView builds a RequestView from a raw request body.
-func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
+// parsedContent is what one string-or-parts content yields.
+type parsedContent struct {
+	text        string // text parts joined by '\n'
+	estBytes    int    // bytes domain.PromptTextBytes would count ("text" parts / plain string)
+	images      int
+	toolCalls   int // tool_use blocks
+	toolResults int // tool_result blocks
+	toolErrors  int // tool_result blocks flagged or looking like a failure
+}
+
+// ParseView builds a RequestView from a raw request body. stripMarkers lists
+// open/close tag pairs (see policy.AliasSpec.StripMarkers) removed from every
+// message's text before it is classified or matched.
+func ParseView(body []byte, dialect Dialect, stripMarkers []string) (*RequestView, error) {
 	var raw rawRequest
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("semantic: invalid request body: %w", err)
 	}
 	v := &RequestView{
-		Dialect:      dialect,
-		Stream:       raw.Stream,
-		RequestBytes: len(body),
-		Messages:     make([]Message, 0, len(raw.Messages)),
+		Dialect:         dialect,
+		Stream:          raw.Stream,
+		RequestBytes:    len(body),
+		Messages:        make([]Message, 0, len(raw.Messages)),
+		EstimatorBytes:  len(raw.Tools),
+		MaxOutputTokens: max(jsonInt(raw.MaxTokens), jsonInt(raw.MaxCompletionTokens)),
+		EndUser:         endUser(raw),
 	}
-
-	var system strings.Builder
-	if len(raw.System) > 0 {
-		t, _, _ := contentText(raw.System)
-		system.WriteString(t)
-	}
-	v.PromptBytes = len(raw.Tools)
 	if len(raw.Tools) > 0 {
 		var tools []json.RawMessage
 		if json.Unmarshal(raw.Tools, &tools) == nil {
@@ -122,32 +148,40 @@ func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
 	v.StructuredOut = wantsStructuredOutput(raw.ResponseFormat)
 	v.ReasoningAsked = wantsReasoning(raw)
 
+	var system strings.Builder
+	if len(raw.System) > 0 {
+		pc := parseContent(raw.System)
+		system.WriteString(pc.text)
+		v.EstimatorBytes += pc.estBytes
+	}
 	for _, rm := range raw.Messages {
-		m := Message{Role: rm.Role, ToolCalls: len(rm.ToolCalls)}
+		pc := parseContent(rm.Content)
+		v.EstimatorBytes += pc.estBytes
 		switch rm.Role {
 		case "system", "developer":
-			t, _, _ := contentText(rm.Content)
 			if system.Len() > 0 {
 				system.WriteByte('\n')
 			}
-			system.WriteString(t)
+			system.WriteString(pc.text)
 			continue
-		case "tool": // OpenAI tool result
-			t, _, _ := contentText(rm.Content)
-			m.ToolResults = 1
-			if looksLikeFailure(t) {
+		case "tool": // OpenAI tool result: the whole content is the result
+			m := Message{Role: rm.Role, ToolResults: 1}
+			if looksLikeFailure(pc.text) {
 				m.ToolErrors = 1
 			}
-			v.PromptBytes += len(t)
-		default:
-			var resultBytes int
-			m.Text, m.Images, m.ToolResults, m.ToolErrors, m.ToolCalls, resultBytes = parseContent(rm.Content, m.ToolCalls)
-			v.PromptBytes += len(m.Text) + resultBytes
+			v.Messages = append(v.Messages, m)
+			continue
 		}
-		v.Messages = append(v.Messages, m)
+		v.Messages = append(v.Messages, Message{
+			Role:        rm.Role,
+			Text:        stripMarked(pc.text, stripMarkers),
+			Images:      pc.images,
+			ToolCalls:   len(rm.ToolCalls) + pc.toolCalls,
+			ToolResults: pc.toolResults,
+			ToolErrors:  pc.toolErrors,
+		})
 	}
 	v.System = system.String()
-	v.PromptBytes += len(v.System)
 	for i := range v.Messages {
 		if v.Messages[i].IsUserTurn() {
 			v.FirstUserText = v.Messages[i].Text
@@ -157,21 +191,23 @@ func ParseView(body []byte, dialect Dialect) (*RequestView, error) {
 	return v, nil
 }
 
-// parseContent handles a message content that is either a string or an array
-// of typed parts (OpenAI multimodal parts or Anthropic content blocks).
-func parseContent(c json.RawMessage, toolCalls int) (text string, images, results, errs, calls, resultBytes int) {
-	calls = toolCalls
+// parseContent handles a content that is either a string or an array of typed
+// parts (OpenAI multimodal parts or Anthropic content blocks). Malformed
+// content yields the zero value: routing degrades, it does not fail.
+func parseContent(c json.RawMessage) parsedContent {
+	var pc parsedContent
 	if len(c) == 0 || string(c) == "null" {
-		return
+		return pc
 	}
-	var s string
-	if json.Unmarshal(c, &s) == nil {
-		text = s
-		return
+	if c[0] == '"' {
+		if json.Unmarshal(c, &pc.text) == nil {
+			pc.estBytes = len(pc.text)
+		}
+		return pc
 	}
 	var parts []rawPart
 	if json.Unmarshal(c, &parts) != nil {
-		return
+		return pc
 	}
 	var b strings.Builder
 	for _, p := range parts {
@@ -181,50 +217,49 @@ func parseContent(c json.RawMessage, toolCalls int) (text string, images, result
 				b.WriteByte('\n')
 			}
 			b.WriteString(p.Text)
+			if p.Type == "text" {
+				pc.estBytes += len(p.Text)
+			}
 		case "image_url", "image", "input_image":
-			images++
+			pc.images++
 		case "tool_use":
-			calls++
+			pc.toolCalls++
 		case "tool_result":
-			results++
-			rt, _, _ := contentText(p.Content)
-			resultBytes += len(rt)
-			if p.IsError || looksLikeFailure(rt) {
-				errs++
+			pc.toolResults++
+			if p.IsError || looksLikeFailure(parseContent(p.Content).text) {
+				pc.toolErrors++
 			}
 		}
 	}
-	text = b.String()
-	return
+	pc.text = b.String()
+	return pc
 }
 
-// contentText returns the concatenated text of a string-or-parts content.
-func contentText(c json.RawMessage) (string, int, error) {
-	if len(c) == 0 || string(c) == "null" {
-		return "", 0, nil
+// jsonInt decodes a JSON number into an int; anything else is 0.
+func jsonInt(r json.RawMessage) int {
+	var n float64
+	if len(r) == 0 || json.Unmarshal(r, &n) != nil || n < 0 {
+		return 0
 	}
+	return int(n)
+}
+
+// endUser returns the caller-supplied end-user id, if any: OpenAI "user" or
+// Anthropic metadata.user_id.
+func endUser(r rawRequest) string {
 	var s string
-	if err := json.Unmarshal(c, &s); err == nil {
-		return s, 0, nil
+	if len(r.User) > 0 && json.Unmarshal(r.User, &s) == nil && s != "" {
+		return s
 	}
-	var parts []rawPart
-	if err := json.Unmarshal(c, &parts); err != nil {
-		return "", 0, err
-	}
-	var b strings.Builder
-	images := 0
-	for _, p := range parts {
-		switch p.Type {
-		case "text", "input_text":
-			if b.Len() > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(p.Text)
-		case "image_url", "image", "input_image":
-			images++
+	if len(r.Metadata) > 0 {
+		var md struct {
+			UserID string `json:"user_id"`
+		}
+		if json.Unmarshal(r.Metadata, &md) == nil {
+			return md.UserID
 		}
 	}
-	return b.String(), images, nil
+	return ""
 }
 
 func wantsStructuredOutput(rf json.RawMessage) bool {

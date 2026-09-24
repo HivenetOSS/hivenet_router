@@ -36,16 +36,22 @@ type DecisionRecord struct {
 
 // DecisionLog appends DecisionRecords to a file as JSON lines from a single
 // background writer. Write never blocks the request path: when the buffer is
-// full the record is dropped and counted. A nil *DecisionLog is a valid no-op.
+// full the record is dropped and counted. Write is safe to call concurrently
+// with and after Close (records written after Close are dropped), so shutdown
+// never races in-flight requests. A nil *DecisionLog is a valid no-op.
 type DecisionLog struct {
-	ch      chan DecisionRecord
-	f       *os.File
-	wg      sync.WaitGroup
-	dropped atomic.Int64
-	once    sync.Once
+	ch        chan DecisionRecord
+	f         *os.File
+	wg        sync.WaitGroup
+	mu        sync.RWMutex // Write holds R while sending; Close holds W to close ch
+	closed    bool         // guarded by mu
+	dropped   atomic.Int64
+	writeErrs atomic.Int64
+	once      sync.Once
 }
 
-// OpenDecisionLog opens (appending) path and starts the writer.
+// OpenDecisionLog opens (appending) path and starts the writer. buffer is the
+// number of records queued before new ones are dropped (<=0 means 4096).
 func OpenDecisionLog(path string, buffer int) (*DecisionLog, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -65,17 +71,31 @@ func (l *DecisionLog) run() {
 	w := bufio.NewWriter(l.f)
 	enc := json.NewEncoder(w)
 	for rec := range l.ch {
-		_ = enc.Encode(rec) // Encode appends '\n'
+		if err := enc.Encode(rec); err != nil { // Encode appends '\n'
+			l.writeErrs.Add(1)
+		}
 		if len(l.ch) == 0 {
-			_ = w.Flush() // flush when idle so the file is tail-able in real time
+			// Flush when idle so the file is tail-able in real time.
+			if err := w.Flush(); err != nil {
+				l.writeErrs.Add(1)
+			}
 		}
 	}
-	_ = w.Flush()
+	if err := w.Flush(); err != nil {
+		l.writeErrs.Add(1)
+	}
 }
 
-// Write enqueues rec without blocking.
+// Write enqueues rec without blocking. It drops (and counts) the record when
+// the buffer is full or the log is closed.
 func (l *DecisionLog) Write(rec DecisionRecord) {
 	if l == nil {
+		return
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed {
+		l.dropped.Add(1)
 		return
 	}
 	select {
@@ -85,7 +105,7 @@ func (l *DecisionLog) Write(rec DecisionRecord) {
 	}
 }
 
-// Dropped returns how many records were dropped because the buffer was full.
+// Dropped returns how many records were dropped (buffer full or log closed).
 func (l *DecisionLog) Dropped() int64 {
 	if l == nil {
 		return 0
@@ -93,15 +113,27 @@ func (l *DecisionLog) Dropped() int64 {
 	return l.dropped.Load()
 }
 
-// Close drains pending records and closes the file. Safe to call more than once.
-// Write must not be called after Close.
+// WriteErrors returns how many encode or flush errors the writer hit (e.g. a
+// full disk). Records affected by an error may be partially written or lost.
+func (l *DecisionLog) WriteErrors() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.writeErrs.Load()
+}
+
+// Close drains pending records and closes the file. Safe to call more than
+// once and concurrently with Write.
 func (l *DecisionLog) Close() error {
 	if l == nil {
 		return nil
 	}
 	var err error
 	l.once.Do(func() {
+		l.mu.Lock()
+		l.closed = true
 		close(l.ch)
+		l.mu.Unlock()
 		l.wg.Wait()
 		err = l.f.Close()
 	})

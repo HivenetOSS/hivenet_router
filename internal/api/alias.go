@@ -55,6 +55,33 @@ var semanticPaths = map[string]bool{
 // the server starts serving.
 func (h *Handlers) SetDecisionLog(l *semantic.DecisionLog) { h.decisionLog = l }
 
+// SetResolver replaces the alias resolver (e.g. to size its pin store from
+// config). Call before the server starts serving; nil is ignored.
+func (h *Handlers) SetResolver(r *semantic.Resolver) {
+	if r != nil {
+		h.resolver = r
+	}
+}
+
+// SemanticObserver receives one call per alias decision: the alias, the route
+// and source chosen (empty on failure), the outcome (see decisionOutcome*) and
+// the time the alias added, in seconds.
+type SemanticObserver func(alias, route, source, outcome string, seconds float64)
+
+// SetSemanticObserver installs the metrics hook for alias decisions (nil = off).
+// Call before the server starts serving.
+func (h *Handlers) SetSemanticObserver(o SemanticObserver) { h.semanticObserver = o }
+
+// Outcome labels passed to SemanticObserver.
+const (
+	decisionOutcomeOK          = "ok"
+	decisionOutcomeInvalid     = "invalid"     // 400: bad body or task header
+	decisionOutcomeForbidden   = "forbidden"   // 403: key may use no candidate
+	decisionOutcomeTooLong     = "too_long"    // 400: no candidate window fits
+	decisionOutcomeUnsupported = "unsupported" // 400: no candidate has a needed capability
+	decisionOutcomeUnavailable = "unavailable" // 503: allowed candidates are down
+)
+
 // Resolver exposes the alias resolver (tests / diagnostics).
 func (h *Handlers) Resolver() *semantic.Resolver { return h.resolver }
 
@@ -85,58 +112,63 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 	c.Set(auditKeyAlias, alias)
 	c.Set(auditKeyModel, alias) // overwritten with the resolved model by parsePassthroughRequest
 
-	body, ok := cachedBody(c)
-	if !ok {
-		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, "request body is required", domain.SourceRouter)
+	fail := func(status int, code domain.ErrorCode, outcome, msg string) bool {
+		h.observeDecision(alias, "", "", outcome, time.Since(start))
+		abortWithRouterError(c, status, code, msg, domain.SourceRouter)
 		return false
 	}
-	view, err := semantic.ParseView(body, semantic.DialectForPath(path))
+	taskHeader := c.GetHeader(semantic.TaskIDHeader)
+	if len(taskHeader) > semantic.MaxTaskIDLen {
+		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid,
+			fmt.Sprintf("%s must be at most %d bytes", semantic.TaskIDHeader, semantic.MaxTaskIDLen))
+	}
+	body, ok := cachedBody(c)
+	if !ok {
+		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid, "request body is required")
+	}
+	view, err := semantic.ParseView(body, semantic.DialectForPath(path), spec.StripMarkers)
 	if err != nil {
-		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, "Invalid request: "+err.Error(), domain.SourceRouter)
-		return false
+		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid, "Invalid request: "+err.Error())
 	}
 
 	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowed := func(m string) bool {
+		if unrestricted {
+			return true
+		}
+		_, ok := allowSet[m]
+		return ok
+	}
 	env := semantic.Env{
-		Allowed: func(m string) bool {
-			if unrestricted {
-				return true
-			}
-			_, ok := allowSet[m]
-			return ok
-		},
+		Allowed:    allowed,
 		IsAlias:    h.executor.IsAlias,
 		KeyID:      callerIdentity(c),
-		TaskHeader: c.GetHeader(semantic.TaskIDHeader),
+		TaskHeader: taskHeader,
 		CountOnly:  path == "/v1/messages/count_tokens",
 	}
 	if h.healthyAgentCount != nil {
 		env.Healthy = func(m string) bool { return h.healthyAgentCount(m) > 0 }
 	}
 	if h.estimator != nil {
+		// EstimatorBytes is the unit the estimator's per-model ratio is learned
+		// on (domain.PromptTextBytes); any other byte count mis-scales it.
 		n := len(view.Messages)
-		env.EstimateTokens = func(m string) int { return h.estimator.Estimate(m, view.PromptBytes, n) }
+		env.EstimateTokens = func(m string) int { return h.estimator.Estimate(m, view.EstimatorBytes, n) }
 	}
 
 	d, resolveErr := h.resolver.Resolve(alias, spec, sv.Profiles, view, env)
 	if resolveErr != nil {
 		h.logDecision(c, path, d, resolveErr, time.Since(start))
-		status, code := http.StatusServiceUnavailable, domain.ErrCodeBackendUnavailable
-		if allReasons(d.FilteredOut, "not_allowed") {
-			status, code = http.StatusForbidden, domain.ErrCodeModelForbidden
-		}
-		abortWithRouterError(c, status, code,
-			fmt.Sprintf("no model available for %q (route %s): %s", alias, d.Route, describeFiltered(d.FilteredOut)),
-			domain.SourceRouter)
-		return false
+		status, code, outcome := failureResponse(semantic.Classify(d.FilteredOut))
+		return fail(status, code, outcome,
+			fmt.Sprintf("no model available for %q: %s", alias, describeFiltered(d.FilteredOut, allowed)))
 	}
 
 	patched, err := replaceTopLevelModel(body, d.Model)
 	// decision_us covers everything the alias adds: parse, resolve and rewrite.
 	h.logDecision(c, path, d, err, time.Since(start))
 	if err != nil {
-		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, "Invalid request: "+err.Error(), domain.SourceRouter)
-		return false
+		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid, "Invalid request: "+err.Error())
 	}
 	c.Set(gin.BodyBytesKey, patched)
 	c.Set(ctxKeyPeekedModel, d.Model)
@@ -144,7 +176,30 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 	c.Header(HeaderRoutedModel, d.Model)
 	c.Header(HeaderRoute, d.Route)
 	c.Header(HeaderRouteSource, d.Source)
+	h.observeDecision(alias, d.Route, d.Source, decisionOutcomeOK, time.Since(start))
 	return true
+}
+
+// failureResponse maps a failed decision to the HTTP answer. Only an outage is
+// a 503: a key that may use no candidate gets 403, and a request no allowed
+// candidate can ever serve (too long, or needing a missing capability) gets a
+// 400 the client can act on (compact, drop the image, ...) instead of retrying.
+func failureResponse(f semantic.Failure) (int, domain.ErrorCode, string) {
+	switch f {
+	case semantic.FailureForbidden:
+		return http.StatusForbidden, domain.ErrCodeModelForbidden, decisionOutcomeForbidden
+	case semantic.FailureTooLong:
+		return http.StatusBadRequest, domain.ErrCodeInputTooLong, decisionOutcomeTooLong
+	case semantic.FailureUnsupported:
+		return http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeUnsupported
+	}
+	return http.StatusServiceUnavailable, domain.ErrCodeBackendUnavailable, decisionOutcomeUnavailable
+}
+
+func (h *Handlers) observeDecision(alias, route, source, outcome string, took time.Duration) {
+	if h.semanticObserver != nil {
+		h.semanticObserver(alias, route, source, outcome, took.Seconds())
+	}
 }
 
 func (h *Handlers) logDecision(c *gin.Context, path string, d semantic.Decision, err error, took time.Duration) {
@@ -198,25 +253,19 @@ func callerIdentity(c *gin.Context) string {
 	return c.GetString("tenant_id") + "/" + c.GetString("key_preview")
 }
 
-func allReasons(filtered map[string]string, reason string) bool {
-	if len(filtered) == 0 {
-		return false
-	}
-	for _, r := range filtered {
-		if r != reason {
-			return false
-		}
-	}
-	return true
-}
-
-func describeFiltered(filtered map[string]string) string {
-	if len(filtered) == 0 {
-		return "no candidates"
-	}
+// describeFiltered explains, for the client, why each candidate the caller's
+// key may use was rejected. Models the key may not use are never named (that
+// would disclose fleet models and their health); the decision log keeps the
+// full picture for operators.
+func describeFiltered(filtered map[string]string, allowed func(string) bool) string {
 	parts := make([]string, 0, len(filtered))
 	for m, r := range filtered {
-		parts = append(parts, m+"="+r)
+		if allowed(m) {
+			parts = append(parts, m+"="+r)
+		}
+	}
+	if len(parts) == 0 {
+		return "your API key does not have access to any of its candidate models"
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ", ")
