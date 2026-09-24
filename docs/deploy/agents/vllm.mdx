@@ -253,6 +253,28 @@ The explicit value overrides automatic discovery.
   The model name registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
+## Use a vLLM server that requires an API key
+
+If you start vLLM with `--api-key`, it rejects every `/v1/*` request that lacks `Authorization: Bearer <key>`, including the model discovery request the agent sends before any client traffic exists. Give the agent the same key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/vllm.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<vllm-api-key>"
+```
+</CodeGroup>
+
+When a backend API key is set, the agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks, model discovery, metrics scrapes, and inference. For inference requests it replaces the credentials the client sent to Hivenet Router and removes any `X-Api-Key` header, so the client's router API key never reaches vLLM. When both are provided, `--backend-api-key-file` wins.
+
+<Warning>
+Without a backend API key, the agent forwards the client's request headers to the backend unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.
+</Warning>
+
+The same setting works for any backend that expects a bearer key, such as SGLang or llama.cpp started with `--api-key`, or another OpenAI-compatible endpoint.
+
 ## Connect multiple models
 
 Each agent registers as an independent peer and represents one model.

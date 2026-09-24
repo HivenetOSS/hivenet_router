@@ -79,6 +79,7 @@ func main() {
 	engineSampleInterval := flag.Duration("engine-sample-interval", cfg.EngineSampleInterval, "How often the engine metrics poller scrapes the backend /metrics endpoint (vLLM, SGLang, llama.cpp)")
 	routingSignalInterval := flag.Duration("routing-signal-interval", cfg.RoutingSignalInterval, "How often the agent pushes fresh engine+hardware metrics to the router's /routing-signals endpoint (default 500ms)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
+	backendAPIKeyFile := flag.String("backend-api-key-file", "", "Path to file containing an API key sent as 'Authorization: Bearer' on every backend request, replacing the client's credentials (env: HIVENET_ROUTER_BACKEND_API_KEY)")
 	gpuDevicesFile := flag.String("gpu-devices-file", "", "Path to a file containing the GPU UUIDs assigned to the engine (NVIDIA_VISIBLE_DEVICES format). When set, hardware metrics are restricted to those GPUs only.")
 	gpuModel := flag.String("gpu-model", os.Getenv("HIVENET_ROUTER_GPU_MODEL"), "Hardware identifier used as routing metadata (e.g. RTX4090, RTX5090). Env: HIVENET_ROUTER_GPU_MODEL")
 	deploymentID := flag.String("deployment-id", os.Getenv("HIVENET_ROUTER_DEPLOYMENT_ID"), "Identifier of the logical deployment this agent serves. Env: HIVENET_ROUTER_DEPLOYMENT_ID")
@@ -148,6 +149,16 @@ func main() {
 	}
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT secret is required — set HIVENET_ROUTER_JWT_SECRET or use --jwt-secret-file")
+	}
+	if *backendAPIKeyFile != "" {
+		data, err := os.ReadFile(*backendAPIKeyFile)
+		if err != nil {
+			log.Fatalf("cannot read --backend-api-key-file %q: %v", *backendAPIKeyFile, err)
+		}
+		cfg.BackendAPIKey = strings.TrimSpace(string(data))
+	}
+	if cfg.BackendAPIKey != "" {
+		log.Info("Backend API key configured — every backend request (health, discovery, inference) carries it, replacing client credentials")
 	}
 
 	if *tagsStr != "" {

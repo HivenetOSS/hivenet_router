@@ -756,6 +756,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), replacing the client's credentials; any `X-Api-Key` header is removed. The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty forwards the client's headers unchanged. See [Use a vLLM server that requires an API key](/deploy/agents/vllm#use-a-vllm-server-that-requires-an-api-key) |
 
 ### Supported engines
 
@@ -1079,6 +1080,7 @@ The complete current agent flag set is:
 | `--engine-sample-interval` | — | `500ms` |
 | `--routing-signal-interval` | — | `500ms` |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty |
 | `--gpu-devices-file` | — | Empty |
 | `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty |
 | `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty |
