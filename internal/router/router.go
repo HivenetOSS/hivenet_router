@@ -24,6 +24,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
+	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
 	"hivenet_router/internal/transport/grpc"
@@ -597,6 +598,7 @@ func (r *Router) startHTTPServer() {
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
 	)
+	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
