@@ -299,7 +299,7 @@ When the agent reaches its declared capacity, Hivenet Router stops assigning new
 Test the backend under representative load before increasing capacity.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify SGLang concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify SGLang concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection

@@ -382,13 +382,11 @@ The value is:
 active requests / declared capacity
 ```
 
-For non-streaming requests, the slot normally remains occupied until the response completes. For streaming requests, the current implementation releases the agent capacity slot when response headers arrive and streaming begins, while backend generation can continue.
+For non-streaming requests, the slot remains occupied until the response completes. For streaming requests, the slot remains occupied until the stream fully drains, whether the stream ends normally or the client disconnects. The metric therefore covers the whole generation in both response modes.
 
-<Warning>
-  Do not use `hivenet_agent_capacity_utilization` as the authoritative count of ongoing streaming generations.
-
-  For streaming-heavy workloads, compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL.
-</Warning>
+<Note>
+  `hivenet_agent_capacity_utilization` counts only requests routed through Hivenet Router against the agent’s declared `--capacity`. Compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL to confirm that the declared capacity matches what the engine can sustain.
+</Note>
 
 Show agents above 80%:
 

@@ -332,7 +332,7 @@ hivenet_agent_gpu_utilization_percent > 95
 
   A GPU can be highly utilized before the agent reaches capacity, or lightly utilized while every declared request slot is occupied.
 
-  For streaming requests, Hivenet Router currently releases the declared capacity slot when response headers arrive while backend generation continues. Use engine running and waiting requests, KV-cache pressure, TTFT, and ITL alongside capacity-based gates for streaming-heavy workloads.
+  Streaming requests hold the declared capacity slot until the stream fully drains, so capacity-based gates account for the whole generation. Use engine running and waiting requests, KV-cache pressure, TTFT, and ITL alongside capacity-based gates to catch GPU pressure that declared slots do not reflect.
 </Note>
 
 ## Avoid host CPU and memory pressure
