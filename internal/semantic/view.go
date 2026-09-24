@@ -7,7 +7,7 @@
 // It runs only for requests whose model is an alias; concrete-model requests
 // never reach it. Everything here is in-process and stdlib-only (no cgo, no
 // network): request parsing, structural signals, route scoring, candidate
-// filtering and task pinning.
+// filtering, task pinning and a JSONL decision log.
 package semantic
 
 import (

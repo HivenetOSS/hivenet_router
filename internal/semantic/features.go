@@ -34,7 +34,7 @@ func (f *Features) Set(name string, v float64) {
 	f.values[name] = v
 }
 
-// Values returns a copy of all numeric features (for logging and diagnostics).
+// Values returns a copy of all numeric features (for the decision log).
 func (f *Features) Values() map[string]float64 {
 	out := make(map[string]float64, len(f.values))
 	for k, v := range f.values {

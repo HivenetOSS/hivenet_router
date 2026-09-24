@@ -221,6 +221,16 @@ type RouterMetrics struct {
 	// Labels: trigger (api|sighup), result (success|error).
 	policyReloadTotal *prometheus.CounterVec
 
+	// semanticDecisions counts semantic alias decisions.
+	// Labels: alias, route, source (pinned|affinity|scored|default|fallback|count, empty
+	// on failure), outcome (ok|invalid|forbidden|too_long|unsupported|unavailable).
+	// All label values come from operator config or fixed sets, so cardinality
+	// is bounded by the alias YAML.
+	semanticDecisions *prometheus.CounterVec
+	// semanticDecisionSeconds is the time an alias adds to a request (parse,
+	// resolve, body rewrite). Label: alias.
+	semanticDecisionSeconds *prometheus.HistogramVec
+
 	// --- HTTP server RED metrics (Layer 1) ---
 
 	// httpRequestDuration is the per-endpoint request duration histogram.
@@ -842,6 +852,21 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"trigger", "result"},
 		),
+		semanticDecisions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_semantic_decisions_total",
+				Help: "Semantic alias decisions by alias, chosen route, decision source and outcome (ok|invalid|forbidden|too_long|unsupported|unavailable).",
+			},
+			[]string{"alias", "route", "source", "outcome"},
+		),
+		semanticDecisionSeconds: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "hivenet_semantic_decision_seconds",
+				Help:    "Time a semantic alias adds to a request (parse, resolve, body rewrite), by alias.",
+				Buckets: []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.3},
+			},
+			[]string{"alias"},
+		),
 	}
 
 	m.registry.MustRegister(
@@ -923,6 +948,9 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueWaitSeconds,
 		// Policy management
 		m.policyReloadTotal,
+		// Semantic alias routing
+		m.semanticDecisions,
+		m.semanticDecisionSeconds,
 	)
 
 	// Go runtime metrics: goroutine count, memory, GC, scheduler latency.
@@ -1525,6 +1553,30 @@ func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64)
 // result is "success" or "error".
 func (m *RouterMetrics) PolicyReload(trigger, result string) {
 	m.policyReloadTotal.With(prometheus.Labels{"trigger": trigger, "result": result}).Inc()
+}
+
+// SemanticDecision records one semantic alias decision: its route, source and
+// outcome, and the time the alias added (seconds). Matches api.SemanticObserver.
+func (m *RouterMetrics) SemanticDecision(alias, route, source, outcome string, seconds float64) {
+	m.semanticDecisions.With(prometheus.Labels{"alias": alias, "route": route, "source": source, "outcome": outcome}).Inc()
+	m.semanticDecisionSeconds.With(prometheus.Labels{"alias": alias}).Observe(seconds)
+}
+
+// RegisterSemanticDecisionLog exports the decision log's drop and write-error
+// counts (hivenet_semantic_decision_log_dropped_total and
+// hivenet_semantic_decision_log_write_errors_total). Call once, when the log is
+// opened; the functions are read on every scrape.
+func (m *RouterMetrics) RegisterSemanticDecisionLog(dropped, writeErrors func() int64) {
+	m.registry.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_semantic_decision_log_dropped_total",
+			Help: "Semantic decision log records dropped because the write buffer was full or the log was closed.",
+		}, func() float64 { return float64(dropped()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_semantic_decision_log_write_errors_total",
+			Help: "Encode or flush errors hit by the semantic decision log writer (e.g. a full disk).",
+		}, func() float64 { return float64(writeErrors()) }),
+	)
 }
 
 // ObserveHTTPRequest records the duration and status of an HTTP request for RED metrics.
