@@ -210,3 +210,18 @@ func TestLoadFromEnv_SemanticPinKnobs(t *testing.T) {
 		t.Errorf("overrides = %d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey)
 	}
 }
+
+// TestLoadFromEnv_SemanticDecisionLog: the decision log path and buffer come
+// from the environment; an invalid buffer keeps the default.
+func TestLoadFromEnv_SemanticDecisionLog(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if cfg.SemanticDecisionLog != "" || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("defaults = %q/%d", cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+	}
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG", "/var/log/decisions.jsonl")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER", "0") // invalid → default kept
+	cfg = config.LoadFromEnv()
+	if cfg.SemanticDecisionLog != "/var/log/decisions.jsonl" || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("overrides = %q/%d", cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+	}
+}
