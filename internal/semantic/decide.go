@@ -453,7 +453,7 @@ func pickCandidate(route *policy.Route, profiles map[string]*policy.ModelProfile
 }
 
 // scoreRoutes computes Σ weight·match / Σ weight per route, and the signals
-// that matched (Decision.RouteMatches, for diagnostics). The loader requires each route's
+// that matched (for the decision log). The loader requires each route's
 // weights to sum to 1, so the division only guards specs built in code.
 // Routes without signals score 0.
 func scoreRoutes(spec *policy.AliasSpec, f *Features) (map[string]float64, map[string][]string) {

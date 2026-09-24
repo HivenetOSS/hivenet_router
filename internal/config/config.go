@@ -82,6 +82,14 @@ type Config struct {
 	// Flag: --semantic-pin-max / --semantic-pin-max-per-key
 	SemanticPinMax       int
 	SemanticPinMaxPerKey int
+	// SemanticDecisionLog is the path of the JSONL log that records every semantic
+	// alias decision. Empty = disabled.
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
+	SemanticDecisionLog string
+	// SemanticDecisionLogBuffer is how many decision records may queue before
+	// new ones are dropped (counted in hivenet_semantic_decision_log_dropped_total).
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER  Flag: --semantic-decision-log-buffer
+	SemanticDecisionLogBuffer int
 
 	// Per-model wait queue: max requests that park waiting for a slot before being rejected.
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
@@ -173,6 +181,9 @@ func DefaultConfig() *Config {
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
+
+		// Semantic decision log queue (the log itself is off unless a path is set).
+		SemanticDecisionLogBuffer: 4096,
 	}
 }
 
@@ -217,9 +228,13 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_POLICY_MODEL_DIR"); v != "" {
 		cfg.PolicyModelDir = v
 	}
+	if v := os.Getenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG"); v != "" {
+		cfg.SemanticDecisionLog = v
+	}
 	for env, dst := range map[string]*int{
-		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":         &cfg.SemanticPinMax,
-		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY": &cfg.SemanticPinMaxPerKey,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":             &cfg.SemanticPinMax,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY":     &cfg.SemanticPinMaxPerKey,
+		"HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER": &cfg.SemanticDecisionLogBuffer,
 	} {
 		if v := os.Getenv(env); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {

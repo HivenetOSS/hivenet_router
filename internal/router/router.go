@@ -95,6 +95,9 @@ var log = logging.Logger("router")
 
 // Router is the main Hivenet Router
 type Router struct {
+	// decisionLog records semantic alias decisions when configured (nil = off).
+	decisionLog *semantic.DecisionLog
+
 	cfg *config.Config
 
 	// P2P networking
@@ -315,6 +318,18 @@ func New(cfg *config.Config) (*Router, error) {
 	// waiting for the first request from each tenant.
 	if r.keyRegistry != nil {
 		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
+	}
+	// Open the semantic decision log here, before Start launches any goroutine,
+	// so the field is written once and only read afterwards (no data race with
+	// Close on the signal goroutine). A failure disables the log, not the router.
+	if cfg.SemanticDecisionLog != "" {
+		dl, err := semantic.OpenDecisionLog(cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+		if err != nil {
+			log.Errorf("semantic decision log disabled: %v", err)
+		} else {
+			r.decisionLog = dl
+			routerMetrics.RegisterSemanticDecisionLog(dl.Dropped, dl.WriteErrors)
+		}
 	}
 	return r, nil
 }
@@ -539,7 +554,13 @@ func (r *Router) Close() error {
 		r.p2pHost.Close()
 	}
 
-	// 5. Close storage (safe — no goroutine can write to it now).
+	// 5. Flush the semantic decision log (nil-safe). The HTTP server is still
+	//    serving here; DecisionLog.Write is safe after Close and drops the record.
+	if err := r.decisionLog.Close(); err != nil {
+		log.Warnf("closing semantic decision log: %v", err)
+	}
+
+	// 6. Close storage (safe — no goroutine can write to it now).
 	return r.storage.Close()
 }
 
@@ -599,6 +620,10 @@ func (r *Router) startHTTPServer() {
 		tokenizer.NewEstimator(),
 	)
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
+	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
+	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
+		handlers.SetDecisionLog(r.decisionLog)
+	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
