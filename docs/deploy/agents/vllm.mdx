@@ -308,7 +308,7 @@ When an agent reaches its declared capacity, the router stops assigning new requ
 Capacity does not change vLLM’s own scheduler limit. It tells Hivenet Router how much work the agent is prepared to accept.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify vLLM concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify vLLM concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection

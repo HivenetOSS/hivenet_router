@@ -283,7 +283,7 @@ active requests >= declared capacity
 even when no capacity-utilization rule is configured.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. The active-request count is therefore a routing-admission signal, not a complete count of ongoing streams.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. The active-request count therefore includes ongoing streams routed through Hivenet Router, and capacity gates apply for the whole generation.
 </Note>
 
 ### Success rate
@@ -404,6 +404,8 @@ Agent A ranks first.
 Agents must register a positive capacity. Non-positive values are rejected before the agent joins the routing pool.
 
 When two agents have the same ratio, Hivenet Router currently resolves the tie using the deterministic peer-ID order returned by the registry. This is stable for a given set of peer IDs, but it is not round-robin and should not be used as client affinity.
+
+Because streaming requests hold their agent slot until the stream fully drains, an agent serving active streams has a higher load ratio than an idle one. `least-loaded` therefore spreads concurrent streaming traffic across agents instead of repeatedly selecting the first agent in peer-ID order.
 
 The following strategies are not implemented:
 

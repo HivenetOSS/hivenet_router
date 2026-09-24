@@ -752,7 +752,9 @@ For a streaming response, the router pipes bytes to the client while a stream me
 
 For non-streaming responses, the selected agent’s capacity slot remains occupied until the complete response finishes, fails, or is cancelled.
 
-For streaming responses, the current implementation releases the agent capacity slot and router forwarding slot after response headers arrive and streaming begins, while backend generation can continue. Engine-level running and waiting metrics therefore provide the more reliable view of active streaming work.
+For streaming responses, the selected agent’s capacity slot remains occupied until the stream fully drains. The router releases it when the stream ends normally or when the client disconnects. Active-request counts, capacity utilization, capacity gates, and `least-loaded` ranking therefore cover the whole streaming generation.
+
+The router’s `--max-concurrent` forwarding slot is released earlier, after response headers arrive and streaming begins.
 
 ### 12. Result accounting
 
