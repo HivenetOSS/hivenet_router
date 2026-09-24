@@ -114,8 +114,12 @@ func NewAgent(cfg *config.AgentConfig, engine Engine) *Agent {
 		cfg:       cfg,
 		engine:    engine,
 		collector: hardware.NewCollector(cfg.GPUDevicesFile),
+		// All backend traffic goes through this client, so the backend API key
+		// (if configured) applies to health checks and model discovery as well
+		// as inference.
 		httpClient: &http.Client{
-			Timeout: cfg.HTTPTimeout,
+			Timeout:   cfg.HTTPTimeout,
+			Transport: BackendTransport(nil, cfg.BackendAPIKey),
 		},
 		stopCh: make(chan struct{}),
 	}
