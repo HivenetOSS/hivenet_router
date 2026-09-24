@@ -74,6 +74,14 @@ type Config struct {
 	PolicyFile      string // path to routing policy YAML; empty = built-in default (least-loaded)
 	PolicyModelDir  string // path to directory of per-model policy YAML files; empty = disabled
 	MaxTriesPerStep int    // global default for steps that don't set max_tries
+	// SemanticPinMax caps the semantic task pins held in memory;
+	// SemanticPinMaxPerKey caps one API key's share so a single caller cannot
+	// evict everyone else's pins. At either cap the least recently used pin is
+	// evicted.
+	// Env: HIVENET_ROUTER_SEMANTIC_PIN_MAX / HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY
+	// Flag: --semantic-pin-max / --semantic-pin-max-per-key
+	SemanticPinMax       int
+	SemanticPinMaxPerKey int
 
 	// Per-model wait queue: max requests that park waiting for a slot before being rejected.
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
@@ -159,6 +167,8 @@ func DefaultConfig() *Config {
 		SessionTTL:             1 * time.Hour,
 		ProtocolID:             "/hivenet_router/1.0.0",
 		MaxTriesPerStep:        3,
+		SemanticPinMax:         100_000,
+		SemanticPinMaxPerKey:   10_000,
 		QueueDepth:             30,
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
@@ -206,6 +216,16 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_POLICY_MODEL_DIR"); v != "" {
 		cfg.PolicyModelDir = v
+	}
+	for env, dst := range map[string]*int{
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":         &cfg.SemanticPinMax,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY": &cfg.SemanticPinMaxPerKey,
+	} {
+		if v := os.Getenv(env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				*dst = n
+			}
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_TRIES_PER_STEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

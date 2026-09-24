@@ -16,6 +16,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
 
@@ -253,6 +254,11 @@ type Handlers struct {
 	// admission gates, and learns from each backend usage report. Nil falls back
 	// to the legacy len/4 estimate (tests).
 	estimator *tokenizer.Estimator
+
+	// resolver turns a semantic alias (e.g. "auto") into a concrete model; see
+	// AliasMiddleware. Always non-nil; inert unless a policy document declares
+	// an alias.
+	resolver *semantic.Resolver
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -306,6 +312,7 @@ func NewHandlers(
 		minuteLimiter:        minuteLimiter,
 		onAdmissionReject:    onAdmissionReject,
 		estimator:            estimator,
+		resolver:             semantic.NewResolver(nil),
 	}
 }
 
@@ -1177,6 +1184,7 @@ func (h *Handlers) writeModelList(c *gin.Context, applyAllowSet bool) {
 		}
 		data = append(data, m)
 	}
+	data = append(data, h.aliasModelObjects(c, models, applyAllowSet)...)
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
