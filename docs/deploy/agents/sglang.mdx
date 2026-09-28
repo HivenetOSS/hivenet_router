@@ -273,6 +273,26 @@ The explicit value overrides automatic discovery.
   The model registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
+## Use an SGLang server that requires an API key
+
+If you start SGLang with `--api-key`, its OpenAI-compatible API expects `Authorization: Bearer <key>`, including the model discovery request the agent sends before any client traffic exists. Give the agent the same key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/sglang.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<sglang-api-key>"
+```
+</CodeGroup>
+
+The agent then sends `Authorization: Bearer <key>` on every request to SGLang: readiness checks, model discovery, metrics scrapes, and inference. For inference requests it replaces the credentials the client sent to Hivenet Router and removes any `X-Api-Key` header. When both are provided, `--backend-api-key-file` wins. See [Backend API key](/reference/configuration-reference#backend-api-key).
+
+<Warning>
+Without a backend API key, the agent forwards the client's request headers to SGLang unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.
+</Warning>
+
 ## Set agent capacity
 
 `--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.

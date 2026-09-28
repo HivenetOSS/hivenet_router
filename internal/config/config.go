@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -283,7 +284,8 @@ type AgentConfig struct {
 	// Authorization: Bearer <key>, replacing the client's credentials; any
 	// x-api-key header is dropped. Use it when the backend requires its own key,
 	// e.g. vLLM, SGLang or llama.cpp started with --api-key.
-	// Empty (default) forwards the client's headers unchanged.
+	// Empty (default) forwards the client's headers unchanged. Surrounding
+	// whitespace is trimmed from both the env value and the file contents.
 	// Env: HIVENET_ROUTER_BACKEND_API_KEY  Flag: --backend-api-key-file
 	BackendAPIKey string
 	Engine        string
@@ -382,7 +384,7 @@ var BuildVersion = "dev"
 func DefaultAgentConfig() *AgentConfig {
 	return &AgentConfig{
 		JWTSecret:              os.Getenv("HIVENET_ROUTER_JWT_SECRET"),
-		BackendAPIKey:          os.Getenv("HIVENET_ROUTER_BACKEND_API_KEY"),
+		BackendAPIKey:          strings.TrimSpace(os.Getenv("HIVENET_ROUTER_BACKEND_API_KEY")),
 		Model:                  "", // Auto-detected from backend if empty
 		Capacity:               10,
 		Version:                BuildVersion,

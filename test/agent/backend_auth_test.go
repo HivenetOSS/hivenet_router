@@ -5,11 +5,14 @@ package agent_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"hivenet_router/internal/agent"
+	"hivenet_router/internal/domain"
 )
 
 // headerEcho records the credentials of the last request it received.
@@ -113,6 +116,136 @@ func TestBackendTransport_ModelDiscovery(t *testing.T) {
 			}
 			if !tc.wantErr && (len(models) != 1 || models[0] != "org/model-a") {
 				t.Errorf("models = %v", models)
+			}
+		})
+	}
+}
+
+// keyedBackend mimics any engine started with an API key, strictly: every
+// route answers 401 unless the request carries exactly one Authorization
+// header equal to "Bearer <key>" and no X-Api-Key (real servers may leave
+// /health or /metrics open; guarding them all proves the key is sent on every
+// path). It serves the routes of every engine and records, per path, the
+// Authorization values and X-Api-Key of each request.
+type keyedBackend struct {
+	key  string
+	mu   sync.Mutex
+	seen map[string][][]string // path → Authorization values per request
+	xKey []string              // X-Api-Key values seen (should stay empty)
+}
+
+func (b *keyedBackend) start(t *testing.T) string {
+	t.Helper()
+	b.seen = map[string][][]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		auth := r.Header.Values("Authorization")
+		b.mu.Lock()
+		b.seen[r.URL.Path] = append(b.seen[r.URL.Path], auth)
+		if x := r.Header.Get("X-Api-Key"); x != "" {
+			b.xKey = append(b.xKey, x)
+		}
+		b.mu.Unlock()
+		if len(auth) != 1 || auth[0] != "Bearer "+b.key || r.Header.Get("X-Api-Key") != "" {
+			http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"org/model-a","object":"model"}]}`)
+		case "/api/tags":
+			_, _ = io.WriteString(w, `{"models":[{"name":"org/model-a:latest"}]}`)
+		case "/v1/chat/completions":
+			_, _ = io.WriteString(w, `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"PONG"}}]}`)
+		case "/metrics":
+			_, _ = io.WriteString(w, "vllm:num_requests_running 1\nsglang:num_running_reqs 1\nllamacpp:requests_processing 1\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestBackendKey_Engines: for every engine that talks to an OpenAI-compatible
+// backend, a configured backend key reaches the backend exactly once on every
+// call the agent makes (readiness, model discovery, chat forwarding and, where
+// the engine scrapes them, metrics) and replaces the client's credentials.
+// For Ollama this also covers its "Bearer ollama" default: ForwardChat gets a
+// request with empty HttpHeaders, the case that default targets, and the
+// backend still sees only the configured key. Without the key every call is
+// rejected, so the test would catch a path that bypasses the transport.
+// Streaming is covered end to end in test/e2e.
+func TestBackendKey_Engines(t *testing.T) {
+	const key = "sk-backend"
+	engines := []struct {
+		engine    agent.Engine
+		readyPath string
+		modelPath string
+	}{
+		{&agent.VLLMEngine{}, "/health", "/v1/models"},
+		{&agent.SGLangEngine{}, "/health", "/v1/models"},
+		{&agent.LlamaCPPEngine{}, "/health", "/v1/models"},
+		{&agent.OllamaEngine{}, "/api/tags", "/api/tags"},
+	}
+	chat := domain.ChatRequest{RawBytes: []byte(`{"model":"org/model-a","messages":[{"role":"user","content":"hi"}]}`)}
+	for _, tc := range engines {
+		t.Run(tc.engine.Name(), func(t *testing.T) {
+			ctx := context.Background()
+			be := &keyedBackend{key: key}
+			url := be.start(t)
+			client := &http.Client{Transport: agent.BackendTransport(nil, key)}
+
+			if err := tc.engine.WaitForReady(ctx, url, client); err != nil {
+				t.Fatalf("WaitForReady: %v", err)
+			}
+			if models, err := tc.engine.DiscoverModels(ctx, url, client); err != nil || len(models) != 1 || models[0] != "org/model-a" {
+				t.Fatalf("DiscoverModels = %v, %v", models, err)
+			}
+			// The client sent no credentials; HttpHeaders is set (and empty), as
+			// Ollama's default expects.
+			noAuth := chat
+			noAuth.HttpHeaders = http.Header{}
+			if _, _, err := tc.engine.ForwardChat(ctx, url, client, "org/model-a", noAuth, agent.WithHttpHeader(http.Header{})); err != nil {
+				t.Fatalf("ForwardChat without client credentials: %v", err)
+			}
+			// The client sent its router key in both headers.
+			clientHdr := http.Header{"Authorization": {"Bearer sk-hivenet-client"}, "X-Api-Key": {"sk-hivenet-client"}}
+			if _, _, err := tc.engine.ForwardChat(ctx, url, client, "org/model-a", chat, agent.WithHttpHeader(clientHdr)); err != nil {
+				t.Fatalf("ForwardChat with client credentials: %v", err)
+			}
+			paths := []string{tc.readyPath, tc.modelPath, "/v1/chat/completions"}
+			if mp, ok := tc.engine.(agent.MetricsProvider); ok {
+				if _, err := mp.ScrapeMetrics(ctx, url, client); err != nil {
+					t.Fatalf("ScrapeMetrics: %v", err)
+				}
+				paths = append(paths, "/metrics")
+			}
+
+			be.mu.Lock()
+			defer be.mu.Unlock()
+			for _, p := range paths {
+				if len(be.seen[p]) == 0 {
+					t.Errorf("%s: no request reached the backend", p)
+				}
+				for _, auth := range be.seen[p] {
+					if len(auth) != 1 || auth[0] != "Bearer "+key {
+						t.Errorf("%s: Authorization = %q, want exactly [\"Bearer %s\"]", p, auth, key)
+					}
+				}
+			}
+			if len(be.xKey) != 0 {
+				t.Errorf("X-Api-Key reached the backend: %q", be.xKey)
+			}
+		})
+		t.Run(tc.engine.Name()+"/without key", func(t *testing.T) {
+			be := &keyedBackend{key: key}
+			url := be.start(t)
+			client := &http.Client{Transport: agent.BackendTransport(nil, "")}
+			if _, err := tc.engine.DiscoverModels(context.Background(), url, client); err == nil {
+				t.Error("DiscoverModels succeeded against a key-protected backend without the key")
 			}
 		})
 	}

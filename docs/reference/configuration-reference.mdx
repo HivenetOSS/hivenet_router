@@ -756,7 +756,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
-| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), replacing the client's credentials; any `X-Api-Key` header is removed. The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty forwards the client's headers unchanged. See [Use a vLLM server that requires an API key](/deploy/agents/vllm#use-a-vllm-server-that-requires-an-api-key) |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), replacing the client's credentials; any `X-Api-Key` header is removed. The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty forwards the client's headers unchanged. See [Backend API key](#backend-api-key) |
 
 ### Supported engines
 
@@ -846,6 +846,18 @@ Set:
 ```
 
 to disable it.
+
+### Backend API key
+
+Set a backend API key when the inference server behind the agent requires its own key: vLLM, SGLang, or llama.cpp started with `--api-key`, or any other OpenAI-compatible backend that expects `Authorization: Bearer <key>`. It works the same way for every `--engine`.
+
+- `--backend-api-key-file` reads the key from a file, so it does not appear in the process list. `HIVENET_ROUTER_BACKEND_API_KEY` holds the raw value. When both are set, the file wins. Surrounding whitespace, such as a trailing newline, is trimmed from both.
+- The agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks (including a custom engine's `--health-url`), model discovery, metrics scrapes, and inference, streaming or not.
+- For inference requests, the key replaces the credentials the client sent to Hivenet Router, and any `X-Api-Key` header is removed. The backend receives exactly one `Authorization` header, for every engine, Ollama included.
+
+<Warning>
+Without a backend API key, the agent forwards the client's request headers to the backend unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.
+</Warning>
 
 ## Agent router and libp2p settings
 

@@ -273,7 +273,7 @@ When a backend API key is set, the agent sends `Authorization: Bearer <key>` on 
 Without a backend API key, the agent forwards the client's request headers to the backend unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.
 </Warning>
 
-The same setting works for any backend that expects a bearer key, such as SGLang or llama.cpp started with `--api-key`, or another OpenAI-compatible endpoint.
+The setting is not specific to vLLM. It works the same way for every engine and any OpenAI-compatible backend that expects a bearer key. See [Backend API key](/reference/configuration-reference#backend-api-key).
 
 ## Connect multiple models
 
