@@ -23,6 +23,10 @@ Aliases apply to `POST /v1/chat/completions`, `POST /v1/messages`, and `POST /v1
 
 A `profile:` block describes the models its document claims. The resolver uses it to skip models that cannot serve a request. Every field is optional: an unknown value never excludes a model.
 
+<Warning>
+An unset capability counts as supported. A model whose profile omits `vision`, for example, or a model with no `profile:` at all, can be chosen for a request with images, tools, or JSON output that it cannot serve. Set every capability a model lacks to `false`.
+</Warning>
+
 ```yaml
 # policies/qwen3.6-35b-a3b.yaml: profile only, inherits the global routing policy
 models: ["HivenetQuant/Qwen3.6-35B-A3B"]
@@ -138,7 +142,7 @@ Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` o
 
 <Steps>
   <Step title="Pin lookup">
-    If any route of the alias sets `pin_task`, the router looks up the task's pin. A pin is used only if its route still exists and still pins, its model is still one of that route's candidates, and the model passes the eligibility checks below. Otherwise the pin is dropped.
+    If any route of the alias sets `pin_task`, the router looks up the task's pin. A pin is used only if its route still exists and still pins, its model is still one of that route's candidates, and the model passes the eligibility checks below. A pin that fails only the health check, or a capability only this request needs, is kept for later requests; any other failure drops it. See [Task pinning](#task-pinning).
   </Step>
   <Step title="Score routes">
     Each route scores `Σ weight × match` over its own signals. Among routes that reach their own `min_score`, the highest-scoring route wins if its score is above `0` and at least `abstain_below`; ties go to the route declared first. Otherwise the decision abstains to `default_route`.
@@ -152,7 +156,7 @@ Each signal sets exactly one of `feature` or `keywords`, and a `weight` of `0` o
 </Steps>
 
 <Note>
-A route with a single signal scores `1.0` whenever that signal matches. If one weak signal should not be enough, add a second signal or set `min_score`.
+A route with a single signal scores `1.0` whenever that signal matches, which passes any `min_score` and `abstain_below`. If one weak signal should not be enough on its own, give the route a second signal and set `min_score` above the weak signal's weight. For example, two signals weighted `0.5` with `min_score: 1` require both to match.
 </Note>
 
 A candidate is eligible when all of these hold, checked in this order:
@@ -163,6 +167,10 @@ A candidate is eligible when all of these hold, checked in this order:
 4. The estimated prompt tokens plus the request's `max_tokens` (or `max_completion_tokens`) fit within `context_window × context_buffer`.
 5. At least one healthy agent serves it.
 
+<Warning>
+Grant API keys the concrete candidate models, not the alias name. Model access is checked on the candidates, through the key's allowlist or its per-model quota entries. Listing `auto` in `allowed_models` is neither needed nor enough. A key that may use none of an alias's candidates gets `403 model_forbidden`. See [Model restrictions](/security/model-restrictions).
+</Warning>
+
 ## Task pinning
 
 Routes with `pin_task: true` keep a multi-call task, such as an agent session, on one model. The task key is:
@@ -171,6 +179,11 @@ Routes with `pin_task: true` keep a multi-call task, such as an agent session, o
 - a fingerprint of the API key, the end user (OpenAI `user` or Anthropic `metadata.user_id`), the system prompt, and the first human message.
 
 Keys are scoped to the alias and the API key, and stored as hashes. A pin lasts while the task keeps calling within `pin_ttl`, up to `pin_max_age`.
+
+When the pinned model cannot serve one request, that request goes to another candidate:
+
+- If the pinned model has no healthy agent, or lacks a capability only this request needs (for example, one turn with an image on a `vision: false` model), the pin is kept. The next request that the model can serve returns to it.
+- If the key may no longer use the model, or the prompt no longer fits its context window, the pin is dropped. If the route that serves the request sets `pin_task`, the task is pinned to the model that served it.
 
 <Warning>
 Without `X-Hivenet-Task-ID` or an end-user field, conversations that share an API key, a system prompt, and a first message share one pin. Send `X-Hivenet-Task-ID` when many users share one key.
@@ -193,7 +206,7 @@ alias:
   affinity_margin: 0.2
 ```
 
-The conversation switches when the newly chosen route scores at least `affinity_margin` more than its current route. It also moves on when its model is no longer eligible (for example, no healthy agent), or when a reload removes that model from the route. Affinity entries share the pin store and its limits. A route with `pin_task` uses its task pin instead.
+The conversation switches when the newly chosen route scores at least `affinity_margin` more than its current route. It also moves on when a reload removes that model from the route, or when the key may no longer use the model or the prompt outgrows its context window. A turn whose model has no healthy agent, or lacks a capability only that turn needs, is served elsewhere, and the conversation returns to its model on the next turn. Affinity entries share the pin store and its limits. A route with `pin_task` uses its task pin instead.
 
 ## Responses
 
@@ -206,6 +219,10 @@ A resolved request carries these response headers:
 | `X-Hivenet-Route-Source` | `pinned`, `affinity`, `scored`, `default`, `fallback`, or `count` |
 
 The response body's `model` field is the resolved model, not the alias.
+
+<Note>
+The router does not rewrite the response body, so `model` is the name the backend reports for the resolved model. If a client or SDK checks that the response echoes the model it requested, relax that check for aliases, or read `X-Hivenet-Routed-Model` instead.
+</Note>
 
 When no candidate is eligible, the router answers before quota or routing runs:
 
@@ -226,7 +243,19 @@ The error message names only models the API key may use.
 
 - **Audit log:** alias requests add `alias` and `semantic_route` fields; `model` holds the resolved model. See [Audit logging](/observability/audit-logging).
 - **Metrics:** `hivenet_semantic_decisions_total`, `hivenet_semantic_decision_seconds`, `hivenet_semantic_decision_log_dropped_total`, and `hivenet_semantic_decision_log_write_errors_total`. See [Prometheus metrics](/observability/prometheus-metrics#semantic-alias-metrics).
-- **Decision log:** set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision: requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds. Prompt text is not written. The file is not rotated by the router. When more than `--semantic-decision-log-buffer` records are queued, new records are dropped and counted.
+- **Decision log:** see [Decision log](#decision-log).
+
+### Decision log
+
+Set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision. Each line holds the requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds.
+
+A single background writer appends to the file, so logging never blocks a request. When more than `--semantic-decision-log-buffer` records are queued, new records are dropped and counted in `hivenet_semantic_decision_log_dropped_total`. Encode and write failures, such as a full disk, are counted in `hivenet_semantic_decision_log_write_errors_total`.
+
+The router opens the file once, in append mode, and never rotates or reopens it. Rotate it with copy-and-truncate (for example, `copytruncate` in logrotate). With rename-based rotation the router keeps writing to the renamed file until it restarts.
+
+<Info>
+Prompt text is not written, but the log is still sensitive. `route_matches` lists which of your configured keywords matched each request, which reveals that the prompt contained those words. `key_id` holds the caller's key ID, or the tenant and masked key preview for static keys. `filtered_out` names every rejected candidate, including models the caller's key may not use. The router creates the file with mode `0600`. Keep it at least as protected as your audit log.
+</Info>
 
 ## Reload
 
