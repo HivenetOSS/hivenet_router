@@ -217,6 +217,8 @@ func parseContent(c json.RawMessage) parsedContent {
 				b.WriteByte('\n')
 			}
 			b.WriteString(p.Text)
+			// input_text is routing text only: domain.PromptTextBytes, the unit
+			// the token estimator learns on, counts "text" parts alone.
 			if p.Type == "text" {
 				pc.estBytes += len(p.Text)
 			}

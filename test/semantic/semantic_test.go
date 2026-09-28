@@ -337,7 +337,9 @@ func TestResolve_UnknownProfilePasses(t *testing.T) {
 }
 
 // TestResolve_Pinning: a pinned task keeps its model even when later turns
-// look different; an unhealthy pinned model is re-routed; pins expire; the
+// look different; a request its unhealthy pinned model cannot serve is
+// re-routed (TestResolve_PinSurvivesTransientIneligibility covers what
+// happens to the pin); pins expire; the
 // task header separates tasks that share a fingerprint.
 func TestResolve_Pinning(t *testing.T) {
 	spec := mustAlias(t, aliasYAML)

@@ -52,7 +52,7 @@ func (s aliasStorage) ListAgents() ([]*domain.AgentRegistration, error) {
 	return out, nil
 }
 
-func newAliasHandlers(t *testing.T, healthy map[string]int) *api.Handlers {
+func newAliasHandlers(t testing.TB, healthy map[string]int) *api.Handlers {
 	t.Helper()
 	exec := policy.NewExecutor(nil, nil, policy.Default(), 3, 0)
 	doc, err := policy.LoadModelDocBytes([]byte(aliasDocYAML))
@@ -291,7 +291,7 @@ func TestListModels_IncludesAlias(t *testing.T) {
 func TestAliasMiddleware_ModelKeyPlacement(t *testing.T) {
 	tests := []struct{ name, body string }{
 		{"model after messages", `{"messages":[{"role":"user","content":"hi \"model\": {x}"}],"stream":false,"model":"auto"}`},
-		{"escaped key", `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`},
+		{"escaped key", `{"mod\u0065l":"auto","messages":[{"role":"user","content":"hi"}]}`},
 		{"duplicate keys, alias last", `{"model":"coder","messages":[{"role":"user","content":"hi"}],"model":"auto"}`},
 		{"whitespace everywhere", "{ \"model\" :\n \"auto\" ,\t\"messages\" : [ {\"role\":\"user\",\"content\":\"hi\"} ] }"},
 	}
@@ -307,8 +307,8 @@ func TestAliasMiddleware_ModelKeyPlacement(t *testing.T) {
 			if got := modelOf(t, out.body); got != routed || routed == "" {
 				t.Errorf("decoded model %q, routed %q; body %s", got, routed, out.body)
 			}
-			if len(out.body)-len(tc.body) != len(routed)-len("auto") && !strings.Contains(tc.body, `e`) {
-				t.Errorf("more than the model value changed: %s", out.body)
+			if want := strings.Replace(tc.body, `"auto"`, `"`+routed+`"`, 1); string(out.body) != want {
+				t.Errorf("more than the model value changed:\n got %s\nwant %s", out.body, want)
 			}
 		})
 	}

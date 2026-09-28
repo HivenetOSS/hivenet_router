@@ -88,7 +88,8 @@ func (r *Resolver) Pins() *PinStore { return r.pins }
 
 // Resolve picks the model for a request to alias. Order: a live pin for the
 // task (if the alias pins, the pin is still valid for the current config and
-// its model is still eligible), else the best-scoring route (or the default
+// its model is still eligible; see keepsEntry for when an ineligible pin
+// survives the request), else the best-scoring route (or the default
 // route when nothing reaches abstain_below), then the default route, then every
 // other route by descending score, taking the first eligible candidate. When no
 // route has one it returns ErrNoEligibleModel; Classify(d.FilteredOut) says why.
@@ -124,6 +125,11 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 	if pinnable || affinity {
 		d.TaskKey = TaskKey(alias, env.TaskHeader, env.KeyID, v)
 	}
+	// keepEntry is set when a pin or affinity entry is still valid but its model
+	// cannot serve this one request (see keepsEntry): the request is served by a
+	// fallback without overwriting the entry, so the task returns to its model
+	// on the next turn it fits.
+	keepEntry := false
 	if pinnable {
 		if model, route, ok := r.pins.Get(d.TaskKey); ok {
 			reason := pinStale(spec, route, model)
@@ -133,11 +139,15 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 					d.Model, d.Route, d.Source = model, route, SourcePinned
 					return d, nil
 				}
+				keepEntry = keepsEntry(reason)
 			}
-			// The pin no longer fits the config or the model can no longer serve
-			// this task: drop it, re-route and (if the new route pins) re-pin.
-			d.FilteredOut[model] = "pinned_but_" + reason
-			r.pins.Delete(d.TaskKey)
+			d.FilteredOut[model] = reasonPinnedPrefix + reason
+			if !keepEntry {
+				// The pin no longer fits the config or the model can no longer
+				// serve this task: drop it, re-route and (if the new route pins)
+				// re-pin.
+				r.pins.Delete(d.TaskKey)
+			}
 		}
 	}
 
@@ -152,8 +162,11 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 		}
 	}
 
+	keepSticky := false
 	if affinity {
-		if model, route, ok := r.stickyChoice(spec, d.TaskKey, first, d.RouteScores, eligible); ok {
+		var model, route string
+		var ok bool
+		if model, route, ok, keepSticky = r.stickyChoice(spec, d.TaskKey, first, d.RouteScores, eligible); ok {
 			d.Model, d.Route, d.Source = model, route, SourceAffinity
 			return d, nil
 		}
@@ -170,9 +183,11 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 			d.Source = SourceFallback
 		}
 		switch {
+		case keepEntry:
+			// A kept pin must not be overwritten by this request's fallback.
 		case pinnable && route.PinTask:
 			r.pins.Put(d.TaskKey, env.KeyID, model, route.Name, route.PinDuration(), spec.PinMaxAgeDuration())
-		case affinity:
+		case affinity && !keepSticky:
 			r.pins.Put(affinityKey(d.TaskKey), env.KeyID, model, route.Name, spec.AffinityDuration(), spec.PinMaxAgeDuration())
 		}
 		return d, nil
@@ -189,26 +204,41 @@ func affinityKey(taskKey string) string { return "a" + taskKey }
 // stickyChoice returns the model the conversation used last (affinity_ttl),
 // unless the newly chosen route (index first) beats the sticky route's score by
 // at least affinity_margin, the sticky entry no longer matches the config, or
-// its model is no longer eligible. Stale entries are dropped.
-func (r *Resolver) stickyChoice(spec *policy.AliasSpec, taskKey string, first int, scores map[string]float64, eligible func(string) (bool, string)) (model, route string, ok bool) {
+// its model is no longer eligible. Stale entries are dropped; an entry whose
+// model only misses this request (see keepsEntry) is kept, and keep reports
+// that so the caller does not re-stick the conversation to its fallback.
+func (r *Resolver) stickyChoice(spec *policy.AliasSpec, taskKey string, first int, scores map[string]float64, eligible func(string) (bool, string)) (model, route string, ok, keep bool) {
 	key := affinityKey(taskKey)
 	model, route, found := r.pins.Get(key)
 	if !found {
-		return "", "", false
+		return "", "", false, false
 	}
 	if routeHasCandidate(spec, route, model) != "" {
 		r.pins.Delete(key)
-		return "", "", false
+		return "", "", false, false
 	}
 	chosen := spec.Routes[first].Name
 	if chosen != route && scores[chosen] >= scores[route]+spec.AffinityMargin {
-		return "", "", false // a clearly better route: switch (and re-stick below)
+		return "", "", false, false // a clearly better route: switch (and re-stick below)
 	}
-	if okE, _ := eligible(model); !okE {
+	if okE, reason := eligible(model); !okE {
+		if keepsEntry(reason) {
+			return "", "", false, true
+		}
 		r.pins.Delete(key)
-		return "", "", false
+		return "", "", false, false
 	}
-	return model, route, true
+	return model, route, true, false
+}
+
+// keepsEntry reports whether a pin or affinity entry whose model is ineligible
+// for reason should survive this request. Transient (no healthy agent) and
+// per-request (a capability only this turn needs) misses keep it. Everything
+// else drops it: the key may no longer use the model, the model became an
+// alias, or the prompt outgrew the context window (a conversation only grows,
+// so every later turn would miss too).
+func keepsEntry(reason string) bool {
+	return reason == ReasonNoHealthyAgent || capabilityReasons[reason]
 }
 
 // routeOrder lists route indexes in the order Resolve tries them: first, then

@@ -182,8 +182,9 @@ const failureProbeBytes = 256
 var failureMarkers = []string{"traceback (most recent call last)", "command failed", "panic: "}
 
 // looksLikeFailure reports whether tool output reads like a failure. Used for
-// OpenAI "tool" messages, which have no is_error flag, and to corroborate
-// Anthropic tool_result blocks.
+// OpenAI "tool" messages, which have no is_error flag, and for Anthropic
+// tool_result blocks, where it also counts results the harness did not flag
+// (is_error OR looksLikeFailure).
 func looksLikeFailure(s string) bool {
 	if s == "" {
 		return false

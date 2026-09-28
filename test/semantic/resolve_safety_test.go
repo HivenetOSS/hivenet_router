@@ -80,6 +80,82 @@ func TestResolve_PinStaysInsideAliasCandidates(t *testing.T) {
 	}
 }
 
+// TestResolve_PinSurvivesTransientIneligibility: when a pinned model cannot
+// serve one request, the request goes to a fallback. The pin survives a miss
+// that is transient (no healthy agent) or specific to that request (a
+// capability only this turn needs), so the task returns to its model on the
+// next turn. It is replaced when the miss will persist: the key may no longer
+// use the model, or the prompt outgrew the model's context window.
+func TestResolve_PinSurvivesTransientIneligibility(t *testing.T) {
+	spec := mustAlias(t, pinDoc("auto", "{ model: big }, { model: small }"))
+	first := `{"role":"user","content":"start the task"}`
+	turn := `{"messages":[` + first + `,{"role":"assistant","content":"ok"},{"role":"user","content":"next step"}]}`
+	image := `{"messages":[` + first + `,{"role":"assistant","content":"ok"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`
+	tests := []struct {
+		name       string
+		missBody   string       // the request the pinned model cannot serve
+		missEnv    semantic.Env // its env (KeyID is set for every request)
+		wantReason string       // why the pinned model was skipped (FilteredOut prefix)
+		wantPinned string       // model the task is pinned to afterwards
+	}{
+		{
+			// big loses its agent for one request.
+			name: "no healthy agent keeps the pin", missBody: turn,
+			missEnv:    semantic.Env{Healthy: func(m string) bool { return m != "big" }},
+			wantReason: "no_healthy_agent", wantPinned: "big",
+		},
+		{
+			// One turn carries an image; big has vision: false.
+			name: "capability miss keeps the pin", missBody: image,
+			wantReason: "no_vision", wantPinned: "big",
+		},
+		{
+			// The prompt no longer fits big's context window; it only grows.
+			name: "context window miss re-pins", missBody: turn,
+			missEnv: semantic.Env{EstimateTokens: func(m string) int {
+				if m == "big" {
+					return 1_000_000
+				}
+				return 10
+			}},
+			wantReason: "context_window", wantPinned: "small",
+		},
+		{
+			// The key may no longer use big.
+			name: "not allowed re-pins", missBody: turn,
+			missEnv:    semantic.Env{Allowed: func(m string) bool { return m != "big" }},
+			wantReason: "not_allowed", wantPinned: "small",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := semantic.NewResolver(nil)
+			resolve := func(body string, env semantic.Env) semantic.Decision {
+				t.Helper()
+				env.KeyID = "k"
+				d, err := r.Resolve("auto", spec, testProfiles(), view(t, body, semantic.DialectOpenAI), env)
+				if err != nil {
+					t.Fatalf("resolve: %v (filtered %v)", err, d.FilteredOut)
+				}
+				return d
+			}
+			if d := resolve(turn, semantic.Env{}); d.Model != "big" {
+				t.Fatalf("first request pinned %s, want big", d.Model)
+			}
+			miss := resolve(tc.missBody, tc.missEnv)
+			if miss.Model != "small" || miss.Source == semantic.SourcePinned {
+				t.Errorf("miss: model=%s source=%s, want a small fallback", miss.Model, miss.Source)
+			}
+			if !strings.HasPrefix(miss.FilteredOut["big"], tc.wantReason) {
+				t.Errorf("miss: FilteredOut[big]=%q, want prefix %q", miss.FilteredOut["big"], tc.wantReason)
+			}
+			if d := resolve(turn, semantic.Env{}); d.Source != semantic.SourcePinned || d.Model != tc.wantPinned {
+				t.Errorf("next turn: model=%s source=%s, want pinned to %s", d.Model, d.Source, tc.wantPinned)
+			}
+		})
+	}
+}
+
 // TestResolve_TriesEveryRoute: when the scored and default routes have no
 // usable candidate, another route's candidate is used, so an alias the key can
 // see in /v1/models (any candidate allowed) also resolves.
@@ -182,6 +258,9 @@ func TestEstimatorBytes_MatchesPromptTextBytes(t *testing.T) {
 			{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"t","name":"Bash","input":{}}]},
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"` + strings.ReplaceAll(bigResult, "\n", `\n`) + `"},{"type":"text","text":"<system-reminder>r</system-reminder>"}]}]}`, semantic.DialectAnthropic},
 		{"plain string system", `{"system":"be brief","messages":[{"role":"user","content":"hi"}]}`, semantic.DialectAnthropic},
+		// input_text parts are routing text, but PromptTextBytes counts only
+		// "text" parts, so neither side sizes them.
+		{"input_text excluded", `{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"input_text","text":"` + strings.Repeat("x", 500) + `"}]}]}`, semantic.DialectOpenAI},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

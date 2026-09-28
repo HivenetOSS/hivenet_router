@@ -69,7 +69,7 @@ func conversation(last string) string {
 
 // TestResolve_Affinity: a conversation stays on the model that answered its
 // previous turn unless the new route is clearly better (by affinity_margin);
-// the sticky entry is dropped when its model is no longer eligible.
+// a turn the sticky model cannot serve goes elsewhere.
 func TestResolve_Affinity(t *testing.T) {
 	spec := mustAlias(t, affinityAlias)
 	code := "```go\\nfunc a(){}\\n```"
@@ -93,8 +93,9 @@ func TestResolve_Affinity(t *testing.T) {
 			wantModel: "big", wantSource: semantic.SourceAffinity,
 		},
 		{
-			// The sticky model loses its agent: the conversation moves on.
-			name: "unhealthy sticky model is dropped", turns: []string{"refactor " + code, "thanks"},
+			// The sticky model loses its agent: this turn moves on (the entry
+			// itself survives, see TestResolve_AffinitySurvivesUnhealthyTurn).
+			name: "unhealthy sticky model is skipped", turns: []string{"refactor " + code, "thanks"},
 			lastEnv:   semantic.Env{Healthy: func(m string) bool { return m != "big" }},
 			wantModel: "small", wantSource: semantic.SourceDefault,
 		},
@@ -119,6 +120,32 @@ func TestResolve_Affinity(t *testing.T) {
 				t.Errorf("last turn: model=%s source=%s, want %s/%s (scores %v)", d.Model, d.Source, tc.wantModel, tc.wantSource, d.RouteScores)
 			}
 		})
+	}
+}
+
+// TestResolve_AffinitySurvivesUnhealthyTurn: a turn whose sticky model has no
+// healthy agent is served elsewhere without re-sticking the conversation, so
+// the next turn returns to the model that holds its prefix cache.
+func TestResolve_AffinitySurvivesUnhealthyTurn(t *testing.T) {
+	spec := mustAlias(t, affinityAlias)
+	code := "```go\\nfunc a(){}\\n```"
+	r := semantic.NewResolver(nil)
+	turns := []struct {
+		last       string
+		env        semantic.Env
+		wantModel  string
+		wantSource string
+	}{
+		{"refactor " + code, semantic.Env{}, "big", semantic.SourceScored},
+		{"thanks", semantic.Env{Healthy: func(m string) bool { return m != "big" }}, "small", semantic.SourceDefault},
+		{"and then?", semantic.Env{}, "big", semantic.SourceAffinity},
+	}
+	for i, tc := range turns {
+		tc.env.KeyID = "k"
+		d, err := r.Resolve("auto", spec, nil, view(t, conversation(tc.last), semantic.DialectOpenAI), tc.env)
+		if err != nil || d.Model != tc.wantModel || d.Source != tc.wantSource {
+			t.Errorf("turn %d: model=%s source=%s err=%v, want %s/%s", i, d.Model, d.Source, err, tc.wantModel, tc.wantSource)
+		}
 	}
 }
 
