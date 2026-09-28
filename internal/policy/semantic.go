@@ -41,7 +41,9 @@ type ModelProfile struct {
 
 // ModelCapabilities declares request features the model can serve.
 // nil means unknown (treated as supported); false excludes the model from any
-// request that needs the feature.
+// request that needs the feature. Unknown is permissive: a model whose profile
+// omits a capability, or that has no profile at all, can be chosen for a
+// request that needs it, so declare false for every feature a model lacks.
 type ModelCapabilities struct {
 	ToolCalling      *bool `yaml:"tool_calling"      json:"tool_calling,omitempty"`
 	StructuredOutput *bool `yaml:"structured_output" json:"structured_output,omitempty"`
@@ -119,8 +121,12 @@ type Route struct {
 	Prefer  string       `yaml:"prefer"     json:"prefer,omitempty"`
 	Signals []SignalRule `yaml:"signals"    json:"signals,omitempty"`
 	// MinScore is the lowest score at which this route may win, on top of the
-	// alias's abstain_below. [0,1], default 0. Use it on a route whose single
-	// signal is weak evidence, since that signal alone scores 1.0.
+	// alias's abstain_below. [0,1], default 0. It only has an effect on a route
+	// with two or more signals (e.g. min_score: 1 with two 0.5 signals requires
+	// both): a single-signal route scores exactly 0 or 1, and 1 passes any
+	// min_score or abstain_below. To keep one weak signal from winning, give the
+	// route a second, corroborating signal and set min_score above the weak
+	// signal's weight.
 	MinScore   float64     `yaml:"min_score"  json:"min_score,omitempty"`
 	Candidates []Candidate `yaml:"candidates" json:"candidates"`
 
