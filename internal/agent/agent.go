@@ -792,7 +792,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// so we must not write anything to w after it returns on success.
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
 			chatReq.RawBytes, a.engine.Name(),
-			WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()),
+			WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
 			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout))
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
@@ -814,7 +814,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, responseHeader, err := a.engine.ForwardChat(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model, chatReq,
-		WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()))
+		WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -918,7 +918,7 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 		return
 	}
 	// Clone all incoming headers (preserves W3C trace context injected by the router).
-	req.Header = r.Header.Clone()
+	req.Header = forwardableHeaders(r.Header)
 	req.Header.Del("Content-Length") // Go's http client sets this from the body.
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -1093,4 +1093,15 @@ func (a *Agent) sleepOrStop(d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
+}
+
+// forwardableHeaders returns a copy of the router's request headers that is
+// safe to send to the backend engine. The router already strips client
+// credentials; this is a second guard so a client's router key can never
+// reach the backend, even from an older router. The backend's own key, when
+// configured, is added later by BackendTransport.
+func forwardableHeaders(h http.Header) http.Header {
+	out := h.Clone()
+	domain.StripClientCredentials(out)
+	return out
 }
