@@ -215,3 +215,18 @@ func TestDefaultAgentConfig_BackendAPIKeyTrimmed(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadFromEnv_SemanticPinKnobs: the semantic pin store limits default
+// sensibly, take positive env overrides, and ignore invalid values.
+func TestLoadFromEnv_SemanticPinKnobs(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if cfg.SemanticPinMax != 100_000 || cfg.SemanticPinMaxPerKey != 10_000 {
+		t.Errorf("defaults = %d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey)
+	}
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX", "500")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY", "-1") // invalid → default kept
+	cfg = config.LoadFromEnv()
+	if cfg.SemanticPinMax != 500 || cfg.SemanticPinMaxPerKey != 10_000 {
+		t.Errorf("overrides = %d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey)
+	}
+}
