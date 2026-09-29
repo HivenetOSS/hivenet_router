@@ -30,6 +30,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -158,7 +159,14 @@ func main() {
 		cfg.BackendAPIKey = strings.TrimSpace(string(data))
 	}
 	if cfg.BackendAPIKey != "" {
-		log.Info("Backend API key configured — every backend request (health, discovery, inference) carries it, replacing client credentials")
+		// The key is only sent to these hosts, so a URL without one would
+		// silently leave every backend request unauthenticated.
+		for _, f := range []struct{ flag, raw string }{{"--backend-url", cfg.BackendURL}, {"--health-url", cfg.HealthURL}} {
+			if u, err := url.Parse(f.raw); f.raw != "" && (err != nil || u.Scheme == "" || u.Host == "") {
+				log.Fatalf("%s %q must be an absolute URL (scheme://host[:port]) when a backend API key is set", f.flag, f.raw)
+			}
+		}
+		log.Info("Backend API key configured — every backend request (health, discovery, inference) carries it, replacing client credentials; it is sent only to the --backend-url and --health-url hosts")
 	}
 
 	if *tagsStr != "" {

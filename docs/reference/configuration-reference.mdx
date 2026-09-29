@@ -854,6 +854,8 @@ Set a backend API key when the inference server behind the agent requires its ow
 - `--backend-api-key-file` reads the key from a file, so it does not appear in the process list. `HIVENET_ROUTER_BACKEND_API_KEY` holds the raw value. When both are set, the file wins. Surrounding whitespace, such as a trailing newline, is trimmed from both.
 - The agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks (including a custom engine's `--health-url`), model discovery, metrics scrapes, and inference, streaming or not.
 - For inference requests, the key replaces the credentials the client sent to Hivenet Router, and any `X-Api-Key` header is removed. The backend receives exactly one `Authorization` header, for every engine, Ollama included.
+- The key is sent only to the scheme, host, and port of `--backend-url` and, when set, `--health-url`. If the backend redirects a request to any other host or port, the agent sends it without an `Authorization` header, so neither the key nor the client's credentials follow the redirect.
+- When a key is set, `--backend-url` and `--health-url` must be absolute URLs, such as `http://localhost:8000`. Otherwise the agent exits at startup.
 
 <Warning>
 Without a backend API key, the agent forwards the client's request headers to the backend unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.

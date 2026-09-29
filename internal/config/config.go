@@ -283,7 +283,9 @@ type AgentConfig struct {
 	// to its backend (health checks, model discovery, metrics, inference) as
 	// Authorization: Bearer <key>, replacing the client's credentials; any
 	// x-api-key header is dropped. Use it when the backend requires its own key,
-	// e.g. vLLM, SGLang or llama.cpp started with --api-key.
+	// e.g. vLLM, SGLang or llama.cpp started with --api-key. The key is sent
+	// only to the BackendURL and HealthURL hosts; a request to any other host
+	// (such as a redirect) goes out with no Authorization header.
 	// Empty (default) forwards the client's headers unchanged. Surrounding
 	// whitespace is trimmed from both the env value and the file contents.
 	// Env: HIVENET_ROUTER_BACKEND_API_KEY  Flag: --backend-api-key-file

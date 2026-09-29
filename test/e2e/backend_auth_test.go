@@ -145,3 +145,58 @@ func TestBackendAPIKeyEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestBackendAPIKeyEndToEnd_CustomHealthURLOnOtherHost: a custom engine whose
+// --health-url is on a different host than --backend-url. Both hosts require
+// the backend key, so the agent registers only if NewAgent allows the health
+// URL's host, and chat still reaches the backend with the key.
+func TestBackendAPIKeyEndToEnd_CustomHealthURLOnOtherHost(t *testing.T) {
+	be := &keyedBackend{}
+	backend := be.start(t)
+	var healthAuth sync.Map // Authorization values seen by the health host
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthAuth.Store(r.Header.Get("Authorization"), true)
+		if r.Header.Get("Authorization") != "Bearer "+backendKey {
+			http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(health.Close)
+	base, rcfg := startRouter(t)
+
+	acfg := config.DefaultAgentConfig()
+	acfg.JWTSecret = jwtSecret
+	acfg.Engine = "custom"
+	acfg.Model = stubModel
+	acfg.BackendURL = backend.URL
+	acfg.HealthURL = health.URL + "/healthz"
+	acfg.BackendAPIKey = backendKey
+	acfg.RouterGRPCAddr = "127.0.0.1" + rcfg.GRPCPort
+	acfg.RouterP2PAddr = fmt.Sprintf("/ip4/127.0.0.1/tcp/%s", rcfg.P2PPort)
+	acfg.IdentityPath = filepath.Join(t.TempDir(), "agent.key")
+	acfg.Capacity = 2
+	a := agent.NewAgent(acfg, &agent.CustomEngine{HealthURL: acfg.HealthURL})
+	go a.Run() //nolint:errcheck // exits via Stop; failures surface as the readiness timeout
+	t.Cleanup(a.Stop)
+	waitFor(t, 20*time.Second, "agent passed the keyed health check and registered", func() bool { return modelHealthy(base) })
+	if _, ok := healthAuth.Load("Bearer " + backendKey); !ok {
+		t.Fatal("the health host never received the backend key")
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"stub-model","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer client-router-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK || !bytes.Contains(b, []byte("PONG")) {
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
+	if got, want := be.last(), "/v1/chat/completions Bearer "+backendKey+" "; got != want {
+		t.Errorf("backend saw %q, want %q", got, want)
+	}
+}
