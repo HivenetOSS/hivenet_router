@@ -4,7 +4,9 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +21,7 @@ import (
 	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/router"
+	"hivenet_router/internal/semantic"
 )
 
 const semanticAliasDoc = `
@@ -94,6 +97,7 @@ func TestSemanticAliasEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(policyDir, "auto.yaml"), []byte(semanticAliasDoc), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	decisions := filepath.Join(dir, "decisions.jsonl")
 
 	t.Setenv("HIVENET_ROUTER_ALLOW_INSECURE_ADMIN", "true")
 	cfg := config.DefaultConfig()
@@ -105,12 +109,20 @@ func TestSemanticAliasEndToEnd(t *testing.T) {
 	cfg.JWTSecret = jwtSecret
 	cfg.DiskDBPath = filepath.Join(dir, "badger")
 	cfg.PolicyModelDir = policyDir
+	cfg.SemanticDecisionLog = decisions
 	r, err := router.New(cfg)
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
-	go r.Start()                    //nolint:errcheck
-	t.Cleanup(func() { r.Close() }) //nolint:errcheck
+	go r.Start() //nolint:errcheck
+	closed := false
+	closeRouter := func() {
+		if !closed {
+			closed = true
+			r.Close() //nolint:errcheck
+		}
+	}
+	t.Cleanup(closeRouter)
 	base := "http://127.0.0.1" + cfg.HTTPPort
 
 	acfg := config.DefaultAgentConfig()
@@ -188,4 +200,28 @@ func TestSemanticAliasEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("decision log records the decisions", func(t *testing.T) {
+		closeRouter() // flushes the decision log
+		f, err := os.Open(decisions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		var recs []semantic.DecisionRecord
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1<<20), 1<<20)
+		for sc.Scan() {
+			var rec semantic.DecisionRecord
+			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+				t.Fatalf("bad line: %v", err)
+			}
+			recs = append(recs, rec)
+		}
+		if len(recs) != 2 {
+			t.Fatalf("got %d decision records, want 2 (alias requests only)", len(recs))
+		}
+		if recs[0].Route != "software" || recs[0].ResolvedModel != stubModel || recs[0].Features["stack_trace"] != 1 {
+			t.Errorf("first record = %+v", recs[0])
+		}
+	})
 }

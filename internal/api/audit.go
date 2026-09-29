@@ -150,7 +150,7 @@ func AuditMiddleware() gin.HandlerFunc {
 				traceID = sc.TraceID().String()
 			}
 
-			auditLog.Info("",
+			fields := []zap.Field{
 				zap.String("level", level),
 				zap.String("trace_id", traceID),
 				zap.String("request_id", strDefault(reqID, "")),
@@ -165,7 +165,14 @@ func AuditMiddleware() gin.HandlerFunc {
 				zap.String("error_code", errorCode),
 				zap.String("source_ip", c.ClientIP()),
 				zap.Time("ts", start.In(cetLocation)),
-			)
+			}
+			// Semantic alias requests: model above is the resolved model; record
+			// the alias the client asked for and the route that chose it.
+			if alias, ok := c.Get(auditKeyAlias); ok {
+				route, _ := c.Get(auditKeySemanticRoute)
+				fields = append(fields, zap.String("alias", strDefault(alias, "")), zap.String("semantic_route", strDefault(route, "")))
+			}
+			auditLog.Info("", fields...)
 		}()
 
 		c.Next()
