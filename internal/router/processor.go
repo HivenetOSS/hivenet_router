@@ -358,18 +358,15 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			// Record the tenant failure here (not in forwardToAgent) so it fires exactly
 			// once per client-visible failure regardless of internal retry attempts.
 			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-			// Token-limit rejections are purely router-side quota decisions: the agent
-			// completed the request successfully (HTTP 200). Recording a failure would
-			// degrade the agent's success-rate and consecutiveFails streak, potentially
-			// triggering policy exclusion for a healthy agent. Use RecordSuccess with
-			// zero token counts so SRTT and success-rate stay accurate.
-			// All other non-retryable codes (context_length_exceeded, invalid_parameter,
-			// etc.) are genuine agent-side failures and use RecordFailure as normal.
-			if re.Code == domain.ErrCodeTokenLimitExceeded {
-				p.counters.RecordSuccess(agent, 0, 0, rttMs)
-			} else {
-				p.counters.RecordFailure(agent, rttMs)
-			}
+			// Every non-retryable code is a verdict on the request, not the agent: a
+			// token-limit rejection is a router-side quota decision on a completed
+			// request, and context_length_exceeded / invalid_parameter mean the backend
+			// answered correctly that the request is invalid. Recording a failure would
+			// degrade the agent's success-rate and consecutiveFails streak, so a client
+			// repeatedly sending over-long prompts could get a healthy agent excluded by
+			// policy. Use RecordSuccess with zero token counts so SRTT and success-rate
+			// stay accurate.
+			p.counters.RecordSuccess(agent, 0, 0, rttMs)
 			pending.Error <- re
 			return
 		}

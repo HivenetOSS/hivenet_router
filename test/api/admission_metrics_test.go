@@ -39,7 +39,7 @@ func TestAdmissionRejectReason(t *testing.T) {
 	t.Run("b1", func(t *testing.T) {
 		var reason string
 		h := meteredHandler(make(chan *domain.PendingRequest, 1), &policy.Policy{MaxInputTokens: 10}, nil, nil, nil, &reason)
-		c, w := newCtx("/v1/chat/completions", textBody(28, 0)) // input 11 > 10
+		c, w := newCtx("/v1/chat/completions", textBody(48, 0)) // input 16 > 1.5 × 10
 		h.Passthrough(c)
 		assertReason(t, w.Code, http.StatusBadRequest, reason, "b1")
 	})

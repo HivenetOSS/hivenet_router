@@ -488,7 +488,7 @@ Common responses include:
 | HTTP status | Example code | Meaning |
 | --- | --- | --- |
 | `400` | `request_invalid` | Malformed request or missing model |
-| `400` | `input_too_long` | Prompt estimate exceeds `max_input_tokens`, or the request exceeds `images_max` |
+| `400` | `input_too_long` | Prompt estimate exceeds 1.5× `max_input_tokens`, or the request exceeds `images_max` |
 | `400` | `context_length_exceeded` | Backend rejected the context length |
 | `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid credentials |

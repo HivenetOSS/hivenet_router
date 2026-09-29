@@ -65,7 +65,7 @@ fallback_provider:
 | --- | --- | --- | --- |
 | `models` | Array of strings | For per-model policy documents | Models that use this policy |
 | `mode` | String | No | Admission profile: `reserved` (default) or `serverless` |
-| `max_input_tokens` | Integer | No | Maximum learned prompt estimate per request; `0` disables B1 |
+| `max_input_tokens` | Integer | No | Model input limit; B1 rejects when the learned prompt estimate exceeds 1.5× this value; `0` disables B1 |
 | `images_max` | Integer | No | Maximum images per request; `0` disables the image check |
 | `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` disables the token budget |
 | `max_inflight` | Integer | No | Per-replica in-flight request backstop; `0` disables the count limit |
@@ -107,7 +107,7 @@ All numeric limits default to `0`, which disables the corresponding check. Negat
 
 ### `max_input_tokens` and `images_max`
 
-These are the B1 hard caps. The token check uses the same learned estimate used by occupancy and token quotas. It includes message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON. The image check counts OpenAI `image_url` parts and Anthropic `image` blocks. Either breach returns HTTP `400 input_too_long`.
+These are the B1 hard caps. The token check uses the same learned estimate used by occupancy and token quotas. It includes message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON. The image check counts OpenAI `image_url` parts and Anthropic `image` blocks. The token check rejects only when the estimate exceeds 1.5× `max_input_tokens`; closer prompts are left to the backend, which counts exactly. Either breach returns HTTP `400 input_too_long`.
 
 ### `admit_budget_tokens` and `max_inflight`
 
