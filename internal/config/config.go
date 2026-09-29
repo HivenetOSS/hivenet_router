@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -278,8 +279,19 @@ type AgentConfig struct {
 	RouterGRPCAddr string
 	RouterP2PAddr  string
 	BackendURL     string
-	Engine         string
-	HTTPTimeout    time.Duration
+	// BackendAPIKey, when non-empty, is sent on every request the agent makes
+	// to its backend (health checks, model discovery, metrics, inference) as
+	// Authorization: Bearer <key>, replacing the client's credentials; any
+	// x-api-key header is dropped. Use it when the backend requires its own key,
+	// e.g. vLLM, SGLang or llama.cpp started with --api-key. The key is sent
+	// only to the BackendURL and HealthURL hosts; a request to any other host
+	// (such as a redirect) goes out with no Authorization header.
+	// Empty (default) forwards the client's headers unchanged. Surrounding
+	// whitespace is trimmed from both the env value and the file contents.
+	// Env: HIVENET_ROUTER_BACKEND_API_KEY  Flag: --backend-api-key-file
+	BackendAPIKey string
+	Engine        string
+	HTTPTimeout   time.Duration
 	// StreamWriteIdleTimeout bounds how long a single streaming-response chunk may
 	// block while being written back to the router. Applied as a rolling per-chunk
 	// deadline so a reader that stops reading cannot leave the agent's write blocked
@@ -374,6 +386,7 @@ var BuildVersion = "dev"
 func DefaultAgentConfig() *AgentConfig {
 	return &AgentConfig{
 		JWTSecret:              os.Getenv("HIVENET_ROUTER_JWT_SECRET"),
+		BackendAPIKey:          strings.TrimSpace(os.Getenv("HIVENET_ROUTER_BACKEND_API_KEY")),
 		Model:                  "", // Auto-detected from backend if empty
 		Capacity:               10,
 		Version:                BuildVersion,

@@ -195,3 +195,23 @@ func TestDefaultAgentConfig_JWTFromEnv(t *testing.T) {
 		t.Errorf("unexpected agent defaults: %+v", a)
 	}
 }
+
+// TestDefaultAgentConfig_BackendAPIKeyTrimmed: the backend key from the
+// environment is trimmed like the key file is, so a trailing newline (common
+// with "export KEY=$(cat file)" or secret mounts) does not break auth.
+func TestDefaultAgentConfig_BackendAPIKeyTrimmed(t *testing.T) {
+	tests := []struct{ name, env, want string }{
+		{"trailing newline", "sk-backend\n", "sk-backend"},
+		{"surrounding spaces", "  sk-backend\t", "sk-backend"},
+		{"whitespace only means no key", " \n", ""},
+		{"unset", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HIVENET_ROUTER_BACKEND_API_KEY", tc.env)
+			if got := config.DefaultAgentConfig().BackendAPIKey; got != tc.want {
+				t.Errorf("BackendAPIKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
