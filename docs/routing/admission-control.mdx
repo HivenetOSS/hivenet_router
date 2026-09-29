@@ -69,7 +69,7 @@ All four numeric limits are optional. `0` or an omitted field disables that chec
 
 | Field | Current behavior |
 | --- | --- |
-| `max_input_tokens` | Rejects a request when the learned prompt estimate exceeds the limit |
+| `max_input_tokens` | Rejects a request when the learned prompt estimate exceeds 1.5× the limit |
 | `images_max` | Rejects a request carrying more images than the limit |
 | `admit_budget_tokens` | Per-replica token-weighted occupancy capacity |
 | `max_inflight` | Per-replica in-flight request-count backstop |
@@ -85,7 +85,7 @@ The estimate includes:
 - raw `tools` JSON, because tool schemas become part of the model prompt
 - a small per-message overhead, including for textless messages
 
-The estimator starts at one token per 3.2 bytes and learns a separate tokens-per-byte ratio for each model from exact backend usage. New observations use an EWMA weight of `0.2` and are clamped to `0.05` through `1.0` tokens per byte so one abnormal report cannot poison later estimates. The learned state resets when the router restarts.
+The estimator starts at one token per 3.2 bytes and learns a separate tokens-per-byte ratio for each model from exact backend usage. New observations use an EWMA weight of `0.2` and are clamped to `0.05` through `1.0` tokens per byte so one abnormal report cannot poison later estimates. Only prompts with at least 4 KB of text teach the ratio: on shorter prompts the chat template's fixed header dominates `prompt_tokens` and would inflate it. The learned state resets when the router restarts.
 
 OpenAI usage fields (`prompt_tokens`, `completion_tokens`) and Anthropic fields (`input_tokens`, `output_tokens`) are normalized to the same internal totals. Streaming Anthropic `message_start` and `message_delta` usage is also recognized.
 
@@ -93,13 +93,13 @@ Image content is not byte-estimable. The router counts OpenAI `image_url` parts 
 
 ## B1: request caps
 
-The router checks the learned input estimate and image count independently. A breach returns HTTP `400` with `input_too_long`:
+The router checks the learned input estimate and image count independently. The token check rejects only when the estimate exceeds `1.5 × max_input_tokens`, so an estimation error never blocks a prompt the model would accept. Prompts between the limit and that margin are forwarded, and the backend enforces its exact context limit with `context_length_exceeded`. A breach returns HTTP `400` with `input_too_long`:
 
 ```json
 {
   "error": {
     "code": "input_too_long",
-    "message": "input is 140000 tokens, over the model limit of 131072",
+    "message": "input is an estimated 200000 tokens, well over the model limit of 131072",
     "source": "router"
   }
 }

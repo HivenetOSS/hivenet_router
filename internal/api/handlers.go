@@ -528,6 +528,12 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 	return false
 }
 
+// inputCapTolerance is how far the input estimate may exceed max_input_tokens
+// before B1 rejects. It covers the estimator's worst realistic over-count (cold
+// start assumes code density, ~1.6x English prose on gpt-oss's tokenizer), so
+// B1 only fires on prompts that are over the limit whatever the tokenizer.
+const inputCapTolerance = 1.5
+
 // enforceRequestCaps applies the per-request hard caps declared by the model's
 // policy: the estimated prompt must fit max_input_tokens and the image count
 // must fit images_max. inputTokens is the same admission estimate B2 reserves
@@ -540,6 +546,13 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 // token cap by design and is held only by images_max). Each caps the worst
 // single request and returns a clean 400 input_too_long; aggregate load safety
 // is a separate concern handled at admission, not here.
+//
+// The token cap rejects only when the estimate exceeds max_input_tokens by
+// inputCapTolerance. The estimate is biased high on purpose (B2 must not
+// under-reserve), but for B1 a high estimate is the harmful direction: it
+// rejects prompts the model would accept. Between the cap and the tolerance the
+// request is forwarded and the backend, which counts exactly, enforces its own
+// context limit with context_length_exceeded.
 //
 // The governing policy is resolved per model (named override, else the global
 // policy). A cap of zero is "unset" and disables that check, so the gate is a
@@ -555,10 +568,10 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest, i
 		return true
 	}
 	if pol.MaxInputTokens > 0 {
-		if inputTokens > pol.MaxInputTokens {
+		if float64(inputTokens) > float64(pol.MaxInputTokens)*inputCapTolerance {
 			h.fireAdmissionReject("b1", req.Model)
 			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
-				fmt.Sprintf("input is %d tokens, over the model limit of %d", inputTokens, pol.MaxInputTokens),
+				fmt.Sprintf("input is an estimated %d tokens, well over the model limit of %d", inputTokens, pol.MaxInputTokens),
 				domain.SourceRouter)
 			return false
 		}

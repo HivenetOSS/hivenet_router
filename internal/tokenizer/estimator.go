@@ -40,6 +40,17 @@ const (
 	maxRatio = 1.0
 )
 
+// MinLearnBytes is the smallest prompt (in text bytes) whose usage is folded
+// into the ratio. Chat templates add a fixed per-request header the byte count
+// cannot see (~70-90 tokens on gpt-oss's harmony format), so a short prompt's
+// prompt_tokens/bytes is dominated by that overhead: a 2-byte "hi" reports ~80
+// tokens and would teach a ratio clamped to 1.0, ~6x the real prose density.
+// A few such samples pushed long-prompt estimates 25-200% over the backend's
+// count and made B1 reject prompts the model accepts. At 4 KB the header is a
+// few percent of the count, so only prompts where the byte ratio is meaningful
+// teach the estimator; short prompts are still estimated, just not learned from.
+const MinLearnBytes = 4096
+
 // Estimator holds a per-model tokens-per-byte ratio, learned from backend usage.
 // It is safe for concurrent use.
 type Estimator struct {
@@ -89,9 +100,10 @@ func (e *Estimator) Estimate(model string, textBytes, messageCount int) int {
 // Observe folds an exact prompt_tokens (from a backend usage report) for a
 // request of textBytes into the model's ratio via EWMA. The first sample blends
 // with the cold-start ratio, so the estimate moves off cold-start gradually
-// rather than snapping to one noisy request. Non-positive samples are ignored.
+// rather than snapping to one noisy request. Non-positive samples and prompts
+// under MinLearnBytes are ignored.
 func (e *Estimator) Observe(model string, textBytes, promptTokens int) {
-	if textBytes <= 0 || promptTokens <= 0 {
+	if textBytes < MinLearnBytes || promptTokens <= 0 {
 		return
 	}
 	obs := float64(promptTokens) / float64(textBytes)

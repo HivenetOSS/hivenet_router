@@ -16,6 +16,16 @@ import (
 	"hivenet_router/internal/tokenizer"
 )
 
+// learnPromptTokens is the exact prompt_tokens the fake backend reports for
+// learnBody: above the cold-start estimate, so learning visibly moves the ratio.
+const learnPromptTokens = 4000
+
+// learnBody builds a request for b2Model whose prompt is 8 KB of text: large
+// enough to clear tokenizer.MinLearnBytes, so its usage teaches the estimator.
+func learnBody() []byte {
+	return []byte(`{"model":"` + b2Model + `","messages":[{"role":"user","content":"` + strings.Repeat("a", 8192) + `"}]}`)
+}
+
 // TestLearnsInputRatioFromResponse verifies the true-up wiring: after a request
 // completes, the handler folds the backend's exact prompt_tokens into the
 // per-model estimator, so its ratio moves off cold-start toward the observed
@@ -32,17 +42,17 @@ func TestLearnsInputRatioFromResponse(t *testing.T) {
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, est,
 	)
-	c, w := newCtx("/v1/chat/completions", b2Body(0)) // model "gemma", "hi" prompt
+	c, w := newCtx("/v1/chat/completions", learnBody())
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
 	select {
 	case pending := <-q:
-		// The backend reports a much higher prompt_tokens than the tiny prompt's
-		// cold estimate, so the learned ratio must rise.
+		// The backend reports a higher prompt_tokens than the cold estimate
+		// (4000 over 8 KB ≈ 0.49 tokens/byte vs cold 0.3125), so the ratio must rise.
 		pending.Response <- &domain.ChatResponse{
 			RawBytes: []byte(`{"ok":true}`),
-			Usage:    domain.Usage{PromptTokens: 50, CompletionTokens: 5, TotalTokens: 55},
+			Usage:    domain.Usage{PromptTokens: learnPromptTokens, CompletionTokens: 5, TotalTokens: learnPromptTokens + 5},
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request was not enqueued")
@@ -76,9 +86,11 @@ func TestDoesNotLearnFromImageRequest(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	est := tokenizer.NewEstimator()
 	h := learnHandler(q, est)
-	// imageBody uses model "m"; capture that model's ratio.
+	// 8 KB of text clears MinLearnBytes, so only the image guard can skip it.
 	before := est.RatioFor("m")
-	c, w := newCtx("/v1/chat/completions", imageBody(1))
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"` +
+		strings.Repeat("a", 8192) + `"},{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}`)
+	c, w := newCtx("/v1/chat/completions", body)
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
@@ -86,7 +98,7 @@ func TestDoesNotLearnFromImageRequest(t *testing.T) {
 	case pending := <-q:
 		pending.Response <- &domain.ChatResponse{
 			RawBytes: []byte(`{"ok":true}`),
-			Usage:    domain.Usage{PromptTokens: 900, CompletionTokens: 5, TotalTokens: 905}, // image tokens
+			Usage:    domain.Usage{PromptTokens: 4000, CompletionTokens: 5, TotalTokens: 4005}, // text + image tokens
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request was not enqueued")
@@ -108,7 +120,7 @@ func TestDoesNotLearnFromEstimatedUsage(t *testing.T) {
 	est := tokenizer.NewEstimator()
 	h := learnHandler(q, est)
 	before := est.RatioFor(b2Model)
-	c, w := newCtx("/v1/chat/completions", b2Body(0))
+	c, w := newCtx("/v1/chat/completions", learnBody())
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
@@ -138,7 +150,7 @@ func streamLearn(t *testing.T, promptTokens int, exact bool) (before, after floa
 	est := tokenizer.NewEstimator()
 	h := learnHandler(q, est)
 	before = est.RatioFor(b2Model)
-	c, w := newCtx("/v1/chat/completions", b2Body(0))
+	c, w := newCtx("/v1/chat/completions", learnBody())
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
@@ -162,7 +174,7 @@ func streamLearn(t *testing.T, promptTokens int, exact bool) (before, after floa
 // TestLearnsFromStreamingExactUsage verifies the streaming path learns when the
 // prompt count came from a real backend usage object.
 func TestLearnsFromStreamingExactUsage(t *testing.T) {
-	before, after := streamLearn(t, 50, true)
+	before, after := streamLearn(t, learnPromptTokens, true)
 	if after <= before {
 		t.Errorf("streaming exact usage must move the ratio: %.4f → %.4f", before, after)
 	}
@@ -171,7 +183,7 @@ func TestLearnsFromStreamingExactUsage(t *testing.T) {
 // TestDoesNotLearnFromStreamingEstimate verifies the streaming path does NOT
 // learn when the prompt count is a fallback estimate (no include_usage).
 func TestDoesNotLearnFromStreamingEstimate(t *testing.T) {
-	before, after := streamLearn(t, 50, false)
+	before, after := streamLearn(t, learnPromptTokens, false)
 	if after != before {
 		t.Errorf("streaming estimate (non-exact) must not move the ratio: %.4f → %.4f", before, after)
 	}
@@ -187,7 +199,7 @@ func TestDoesNotLearnFromProviderFallback(t *testing.T) {
 	est := tokenizer.NewEstimator()
 	h := learnHandler(q, est)
 	before := est.RatioFor(b2Model)
-	c, w := newCtx("/v1/chat/completions", b2Body(0))
+	c, w := newCtx("/v1/chat/completions", learnBody())
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
@@ -196,7 +208,7 @@ func TestDoesNotLearnFromProviderFallback(t *testing.T) {
 		pending.Response <- &domain.ChatResponse{
 			RawBytes:    []byte(`{"ok":true}`),
 			ProcessedBy: "provider:openai",
-			Usage:       domain.Usage{PromptTokens: 50, CompletionTokens: 5, TotalTokens: 55},
+			Usage:       domain.Usage{PromptTokens: learnPromptTokens, CompletionTokens: 5, TotalTokens: learnPromptTokens + 5},
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request was not enqueued")
@@ -208,5 +220,38 @@ func TestDoesNotLearnFromProviderFallback(t *testing.T) {
 	}
 	if after := est.RatioFor(b2Model); after != before {
 		t.Errorf("provider-served usage must not teach the local ratio: %.4f -> %.4f", before, after)
+	}
+}
+
+// TestDoesNotLearnFromShortPrompt reproduces the HAI-389 poisoning: a short
+// prompt's prompt_tokens is dominated by the chat template's fixed header (a
+// 2-byte "hi" reports ~80 tokens on gpt-oss), so learning from it would push the
+// ratio toward the 1.0 clamp and inflate every long-prompt estimate. Prompts
+// under tokenizer.MinLearnBytes must leave the ratio untouched.
+func TestDoesNotLearnFromShortPrompt(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	est := tokenizer.NewEstimator()
+	h := learnHandler(q, est)
+	before := est.RatioFor(b2Model)
+	c, w := newCtx("/v1/chat/completions", b2Body(0)) // "hi" prompt
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{
+			RawBytes: []byte(`{"ok":true}`),
+			Usage:    domain.Usage{PromptTokens: 80, CompletionTokens: 5, TotalTokens: 85},
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if after := est.RatioFor(b2Model); after != before {
+		t.Errorf("a short prompt must not teach the ratio: %.4f -> %.4f", before, after)
 	}
 }
