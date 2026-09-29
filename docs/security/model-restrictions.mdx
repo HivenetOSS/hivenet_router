@@ -374,6 +374,8 @@ A disallowed request does not:
 
 This keeps access control independent of fleet state.
 
+A request that names a [semantic model alias](/routing/semantic-routing) is checked on the concrete model the alias resolves to. Grant the key the alias's candidate models, not the alias name.
+
 ## Provider fallback
 
 Provider fallback authorizes the model originally requested by the client.
