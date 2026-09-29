@@ -75,7 +75,7 @@ func main() {
 	httpTimeout := flag.Duration("http-timeout", cfg.HTTPTimeout, "HTTP timeout for backend requests")
 	streamWriteTimeout := flag.Duration("stream-write-timeout", cfg.StreamWriteIdleTimeout, "Rolling per-chunk deadline for writing a streaming response back to the router; bounds how long a stalled write may block before the stream is released (0 disables)")
 	identityPath := flag.String("identity-path", cfg.IdentityPath, "Path to the persistent libp2p private key file (stable peer ID across restarts)")
-	p2pListenPort := flag.Int("p2p-listen-port", cfg.P2PListenPort, "TCP port for the agent's libp2p node (0 = random; set a fixed port when running in Docker)")
+	p2pListenPort := flag.Int("p2p-listen-port", cfg.P2PListenPort, "Local libp2p port, bound to 127.0.0.1 only (0 = random). The agent needs no inbound port: it dials the router.")
 	hardwareSampleInterval := flag.Duration("hardware-sample-interval", cfg.HardwareSampleInterval, "How often the background hardware sampler collects GPU/CPU/memory metrics")
 	engineSampleInterval := flag.Duration("engine-sample-interval", cfg.EngineSampleInterval, "How often the engine metrics poller scrapes the backend /metrics endpoint (vLLM, SGLang, llama.cpp)")
 	routingSignalInterval := flag.Duration("routing-signal-interval", cfg.RoutingSignalInterval, "How often the agent pushes fresh engine+hardware metrics to the router's /routing-signals endpoint (default 500ms)")
