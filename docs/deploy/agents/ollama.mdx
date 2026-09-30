@@ -338,7 +338,7 @@ export HIVENET_ROUTER_BACKEND_API_KEY="<proxy-api-key>"
 ```
 </CodeGroup>
 
-The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. It replaces the credentials the client sent to Hivenet Router, and any `X-Api-Key` header is removed. See [Backend API key](/reference/configuration-reference#backend-api-key).
+The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. The client's router credentials are never forwarded to the backend, with or without this key. See [Backend API key](/reference/configuration-reference#backend-api-key).
 
 ## Set agent capacity
 

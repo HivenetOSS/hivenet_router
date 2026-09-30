@@ -1196,16 +1196,29 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	peerID, err := peer.Decode(payload.PeerID)
-	if err != nil {
-		http.Error(w, "invalid peer ID", http.StatusBadRequest)
+	// The agent is identified by the libp2p peer that sent this request, which
+	// the Noise handshake authenticated, never by the peer ID written in the
+	// body. Otherwise a session holder could register (and take over) another
+	// agent's peer ID. A body peer_id, when present, must match.
+	peerID := p2phttp.ClientPeerID(req)
+	if peerID == "" {
+		http.Error(w, "registration must arrive over libp2p", http.StatusUnauthorized)
+		return
+	}
+	if payload.PeerID != "" && payload.PeerID != peerID.String() {
+		log.Warnf("handleAgentRegister: body peer_id %.16s does not match the connection peer %s", payload.PeerID, shortID(peerID))
+		http.Error(w, "peer ID does not match the connection", http.StatusForbidden)
 		return
 	}
 
 	// Bind the peer ID to the session so that heartbeat and routing-signal
 	// handlers can resolve the agent in O(1) via session.PeerID instead of
-	// scanning the full agent registry with ForEach.
-	r.sessionManager.LinkPeerID(payload.SessionToken, peerID)
+	// scanning the full agent registry with ForEach. A session can be bound to
+	// one peer only.
+	if !r.sessionManager.LinkPeerID(payload.SessionToken, peerID) {
+		http.Error(w, "session already bound to another peer", http.StatusForbidden)
+		return
+	}
 
 	// The agent-initiated connection this registration arrived on is the only
 	// path the router has to the agent — inference streams are opened back over
