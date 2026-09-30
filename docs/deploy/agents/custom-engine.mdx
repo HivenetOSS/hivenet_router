@@ -263,7 +263,7 @@ For a non-streaming request, the agent sends:
 POST <backend-url>/v1/chat/completions
 ```
 
-It forwards the original JSON body and request headers to the backend. When a [backend API key](/reference/configuration-reference#backend-api-key) is set, the client's `Authorization` header is replaced with `Authorization: Bearer <key>` and any `X-Api-Key` header is removed. The key is also sent to `--health-url`, which may be on another host. It is never sent to any other host, including one the backend redirects to.
+It forwards the original JSON body and request headers to the backend, except the client's router credentials (`Authorization`, `X-Api-Key`, `Cookie`, `Proxy-Authorization`), which are always removed. When a [backend API key](/reference/configuration-reference#backend-api-key) is set, the agent adds `Authorization: Bearer <key>`. The key is also sent to `--health-url`, which may be on another host. It is never sent to any other host, including one the backend redirects to.
 
 For example, a client request to:
 
