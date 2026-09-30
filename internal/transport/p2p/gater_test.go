@@ -87,11 +87,19 @@ func TestAgentHostRefusesPeersOtherThanRouter(t *testing.T) {
 
 	if err := stranger.Connect(ctx, agentInfo); err == nil {
 		// The dial can report success before the agent's gater closes the
-		// connection; the agent must not keep it.
-		time.Sleep(200 * time.Millisecond)
-		if len(agent.Network().ConnsToPeer(stranger.ID())) != 0 {
-			t.Fatal("agent kept a connection from a peer that is not its router")
+		// connection. Watch it from the stranger's side, where it exists as
+		// soon as Connect returns: it must be closed within the deadline. An
+		// agent that kept it would leave it open and fail here.
+		deadline := time.Now().Add(3 * time.Second)
+		for len(stranger.Network().ConnsToPeer(agent.ID())) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("agent kept a connection from a peer that is not its router")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
+	}
+	if len(agent.Network().ConnsToPeer(stranger.ID())) != 0 {
+		t.Fatal("agent holds a connection from a peer that is not its router")
 	}
 	if err := router.Connect(ctx, agentInfo); err != nil {
 		t.Fatalf("router must be able to connect: %v", err)

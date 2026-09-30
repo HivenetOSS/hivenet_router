@@ -22,8 +22,9 @@ import (
 // bypass the router's API keys, quotas and policy.
 //
 // Allowed peers are learned from the gRPC auth response (the router's peer
-// ID) and replaced on every new session. The set holds several IDs so an
-// agent connected to several routers can allow all of them.
+// ID). SetRouters replaces the whole set on every new session, so today an
+// agent trusts exactly one router. An agent connected to several routers at
+// once will need an additive method; SetRouters alone would drop the others.
 type RouterGater struct {
 	mu      sync.RWMutex
 	allowed map[peer.ID]struct{}
