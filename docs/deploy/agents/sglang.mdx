@@ -125,7 +125,15 @@ The model ID returned here is the value clients must use when sending requests t
 
 <Tabs>
   <Tab title="Docker">
-    From the Hivenet Router repository, build the agent image if you have not already done so:
+    Pull the prebuilt agent image from the GitHub Container Registry:
+
+    ```bash
+    docker pull ghcr.io/hivenetoss/hivenet-agent:latest
+    ```
+
+    Use `:nightly` if you want the moving pre-release tag built from the latest commit on `main`. Immutable `:nightly-<shortsha>` tags are also published.
+
+    To build a custom image from source instead, clone the Hivenet Router repository and run:
 
     ```bash
     docker build \
@@ -187,7 +195,7 @@ The model ID returned here is the value clients must use when sending requests t
       --gpus all \
       -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
       -v /opt/hivenet-router:/data \
-      hivenet-router/agent:latest \
+      ghcr.io/hivenetoss/hivenet-agent:latest \
       --engine sglang \
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
