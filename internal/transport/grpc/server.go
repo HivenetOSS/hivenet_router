@@ -16,7 +16,9 @@ import (
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/host"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	pb "hivenet_router/proto"
 )
@@ -57,7 +59,12 @@ func NewAuthServer(
 // 3. Create a session token
 // 4. Return libp2p connection info and router configuration
 func (s *AuthServer) Authenticate(ctx context.Context, req *pb.AuthRequest) (*pb.AuthResponse, error) {
-	log.Debugf("gRPC Auth: Request from agent (model: %s)", req.Metadata.Model)
+	// Metadata is optional on the wire: a request without it must be refused
+	// before anything reads its fields.
+	if req.GetMetadata() == nil {
+		return &pb.AuthResponse{Success: false, Message: "Invalid metadata: metadata is required"}, nil
+	}
+	log.Debugf("gRPC Auth: Request from agent (model: %s)", req.GetMetadata().GetModel())
 
 	// Validate JWT Token (On success, this returns the agent's unique identity)
 	agentID, err := s.jwtValidator.ValidateToken(req.Credentials)
@@ -109,6 +116,9 @@ func (s *AuthServer) Authenticate(ctx context.Context, req *pb.AuthRequest) (*pb
 
 // validateMetadata ensures required fields are present and valid
 func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
+	if meta == nil {
+		return fmt.Errorf("metadata is required")
+	}
 	if meta.Model == "" {
 		return fmt.Errorf("model is required")
 	}
@@ -145,9 +155,25 @@ func StartServer(port string, authServer *AuthServer, tlsCert tls.Certificate) e
 		Certificates: []tls.Certificate{tlsCert},
 		MinVersion:   tls.VersionTLS13,
 	}
-	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
+	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.UnaryInterceptor(recoverUnary),
+	)
 	pb.RegisterAuthServiceServer(grpcServer, authServer)
 
 	log.Info("gRPC Auth server ready")
 	return grpcServer.Serve(lis)
+}
+
+// recoverUnary turns a panic in a unary handler into an Internal error.
+// grpc-go does not recover handler panics itself, so without this a single bad
+// request would take down the whole router process.
+func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Errorf("gRPC %s: recovered from panic: %v", info.FullMethod, p)
+			resp, err = nil, status.Error(codes.Internal, "internal error")
+		}
+	}()
+	return handler(ctx, req)
 }

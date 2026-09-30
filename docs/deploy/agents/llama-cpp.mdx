@@ -290,6 +290,26 @@ You can also pin the model explicitly:
 
 The value must match the model alias returned by llama.cpp.
 
+## Use a llama.cpp server that requires an API key
+
+If you start `llama-server` with `--api-key`, it answers `401` to API requests without the key, including the model discovery request the agent sends before any client traffic exists. `/health` stays public. Give the agent the same key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/llamacpp.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<llamacpp-api-key>"
+```
+</CodeGroup>
+
+The agent then sends `Authorization: Bearer <key>` on every request to llama.cpp: readiness checks, model discovery, metrics scrapes, and inference. The client's router credentials, including any `X-Api-Key` header that llama.cpp would otherwise also accept as a key, are never forwarded to llama.cpp, with or without this key. When both are provided, `--backend-api-key-file` wins. See [Backend API key](/reference/configuration-reference#backend-api-key).
+
+<Note>
+The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
+</Note>
+
 ## Set agent capacity
 
 `--capacity` limits how many concurrent requests Hivenet Router may assign to the agent.

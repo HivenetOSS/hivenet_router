@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -43,17 +44,25 @@ func LoadOrCreateIdentity(path string) (crypto.PrivKey, error) {
 	return priv, nil
 }
 
-// NewHost creates a new libp2p Host node.
+// NewHost creates the agent's libp2p Host node.
 // identity may be nil, in which case libp2p generates a fresh random key
 // (different peer ID on every call — only suitable for tests).
-// No announce-address override is supported: the router never dials agents —
-// it opens inference streams back over the agent→router connection — so the
-// listen addresses libp2p shares via identify are informational only, and no
-// announce address is needed even behind NAT/Docker.
-func NewHost(listenAddr string, identity crypto.PrivKey) (host.Host, error) {
-	opts := []libp2p.Option{libp2p.ListenAddrStrings(listenAddr)}
+//
+// The agent never needs inbound connections: it dials the router, and the
+// router opens inference streams back over that connection. The host still
+// needs one listen address for the libp2p HTTP server to serve those streams,
+// so it listens on loopback only: 127.0.0.1 on listenPort (0 = random port).
+// Nothing outside the machine can reach it.
+//
+// gater, when non-nil, restricts every connection to the peers it allows
+// (see RouterGater).
+func NewHost(identity crypto.PrivKey, listenPort int, gater connmgr.ConnectionGater) (host.Host, error) {
+	opts := []libp2p.Option{libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", listenPort))}
 	if identity != nil {
 		opts = append(opts, libp2p.Identity(identity))
+	}
+	if gater != nil {
+		opts = append(opts, libp2p.ConnectionGater(gater))
 	}
 	h, err := libp2p.New(opts...)
 	if err != nil {

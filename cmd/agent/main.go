@@ -30,6 +30,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -74,11 +75,12 @@ func main() {
 	httpTimeout := flag.Duration("http-timeout", cfg.HTTPTimeout, "HTTP timeout for backend requests")
 	streamWriteTimeout := flag.Duration("stream-write-timeout", cfg.StreamWriteIdleTimeout, "Rolling per-chunk deadline for writing a streaming response back to the router; bounds how long a stalled write may block before the stream is released (0 disables)")
 	identityPath := flag.String("identity-path", cfg.IdentityPath, "Path to the persistent libp2p private key file (stable peer ID across restarts)")
-	p2pListenPort := flag.Int("p2p-listen-port", cfg.P2PListenPort, "TCP port for the agent's libp2p node (0 = random; set a fixed port when running in Docker)")
+	p2pListenPort := flag.Int("p2p-listen-port", cfg.P2PListenPort, "Local libp2p port, bound to 127.0.0.1 only (0 = random). The agent needs no inbound port: it dials the router.")
 	hardwareSampleInterval := flag.Duration("hardware-sample-interval", cfg.HardwareSampleInterval, "How often the background hardware sampler collects GPU/CPU/memory metrics")
 	engineSampleInterval := flag.Duration("engine-sample-interval", cfg.EngineSampleInterval, "How often the engine metrics poller scrapes the backend /metrics endpoint (vLLM, SGLang, llama.cpp)")
 	routingSignalInterval := flag.Duration("routing-signal-interval", cfg.RoutingSignalInterval, "How often the agent pushes fresh engine+hardware metrics to the router's /routing-signals endpoint (default 500ms)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
+	backendAPIKeyFile := flag.String("backend-api-key-file", "", "Path to file containing an API key sent as 'Authorization: Bearer' on every backend request, replacing the client's credentials (env: HIVENET_ROUTER_BACKEND_API_KEY)")
 	gpuDevicesFile := flag.String("gpu-devices-file", "", "Path to a file containing the GPU UUIDs assigned to the engine (NVIDIA_VISIBLE_DEVICES format). When set, hardware metrics are restricted to those GPUs only.")
 	gpuModel := flag.String("gpu-model", os.Getenv("HIVENET_ROUTER_GPU_MODEL"), "Hardware identifier used as routing metadata (e.g. RTX4090, RTX5090). Env: HIVENET_ROUTER_GPU_MODEL")
 	deploymentID := flag.String("deployment-id", os.Getenv("HIVENET_ROUTER_DEPLOYMENT_ID"), "Identifier of the logical deployment this agent serves. Env: HIVENET_ROUTER_DEPLOYMENT_ID")
@@ -148,6 +150,23 @@ func main() {
 	}
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT secret is required — set HIVENET_ROUTER_JWT_SECRET or use --jwt-secret-file")
+	}
+	if *backendAPIKeyFile != "" {
+		data, err := os.ReadFile(*backendAPIKeyFile)
+		if err != nil {
+			log.Fatalf("cannot read --backend-api-key-file %q: %v", *backendAPIKeyFile, err)
+		}
+		cfg.BackendAPIKey = strings.TrimSpace(string(data))
+	}
+	if cfg.BackendAPIKey != "" {
+		// The key is only sent to these hosts, so a URL without one would
+		// silently leave every backend request unauthenticated.
+		for _, f := range []struct{ flag, raw string }{{"--backend-url", cfg.BackendURL}, {"--health-url", cfg.HealthURL}} {
+			if u, err := url.Parse(f.raw); f.raw != "" && (err != nil || u.Scheme == "" || u.Host == "") {
+				log.Fatalf("%s %q must be an absolute URL (scheme://host[:port]) when a backend API key is set", f.flag, f.raw)
+			}
+		}
+		log.Info("Backend API key configured — every backend request (health, discovery, inference) carries it, replacing client credentials; it is sent only to the --backend-url and --health-url hosts")
 	}
 
 	if *tagsStr != "" {

@@ -81,6 +81,8 @@ The timestamp and values above are examples.
 | `agent_id` | Selected agent peer ID or provider marker; empty when no dispatch occurred |
 | `error_code` | Hivenet Router domain error code; empty for successful responses |
 | `source_ip` | Client IP resolved by Gin |
+| `alias` | Present only on [semantic alias](/routing/semantic-routing) requests: the alias the client named. `model` holds the resolved model, or the alias when resolution failed |
+| `semantic_route` | Present only on semantic alias requests: the route that chose the model; empty when resolution failed |
 | `ts` | Request start time in the `Europe/Rome` time zone, including the active UTC offset |
 
 ### Request IDs

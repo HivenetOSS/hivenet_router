@@ -16,6 +16,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
 
@@ -253,6 +254,13 @@ type Handlers struct {
 	// admission gates, and learns from each backend usage report. Nil falls back
 	// to the legacy len/4 estimate (tests).
 	estimator *tokenizer.Estimator
+
+	// resolver turns a semantic alias (e.g. "auto") into a concrete model; see
+	// AliasMiddleware. Always non-nil; inert unless a policy document declares
+	// an alias. decisionLog (optional, nil = off) records every decision.
+	resolver         *semantic.Resolver
+	decisionLog      *semantic.DecisionLog
+	semanticObserver SemanticObserver // metrics hook, nil = off
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -306,6 +314,7 @@ func NewHandlers(
 		minuteLimiter:        minuteLimiter,
 		onAdmissionReject:    onAdmissionReject,
 		estimator:            estimator,
+		resolver:             semantic.NewResolver(nil),
 	}
 }
 
@@ -528,6 +537,12 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 	return false
 }
 
+// inputCapTolerance is how far the input estimate may exceed max_input_tokens
+// before B1 rejects. It covers the estimator's worst realistic over-count (cold
+// start assumes code density, ~1.6x English prose on gpt-oss's tokenizer), so
+// B1 only fires on prompts that are over the limit whatever the tokenizer.
+const inputCapTolerance = 1.5
+
 // enforceRequestCaps applies the per-request hard caps declared by the model's
 // policy: the estimated prompt must fit max_input_tokens and the image count
 // must fit images_max. inputTokens is the same admission estimate B2 reserves
@@ -540,6 +555,13 @@ func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 // token cap by design and is held only by images_max). Each caps the worst
 // single request and returns a clean 400 input_too_long; aggregate load safety
 // is a separate concern handled at admission, not here.
+//
+// The token cap rejects only when the estimate exceeds max_input_tokens by
+// inputCapTolerance. The estimate is biased high on purpose (B2 must not
+// under-reserve), but for B1 a high estimate is the harmful direction: it
+// rejects prompts the model would accept. Between the cap and the tolerance the
+// request is forwarded and the backend, which counts exactly, enforces its own
+// context limit with context_length_exceeded.
 //
 // The governing policy is resolved per model (named override, else the global
 // policy). A cap of zero is "unset" and disables that check, so the gate is a
@@ -555,10 +577,10 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest, i
 		return true
 	}
 	if pol.MaxInputTokens > 0 {
-		if inputTokens > pol.MaxInputTokens {
+		if float64(inputTokens) > float64(pol.MaxInputTokens)*inputCapTolerance {
 			h.fireAdmissionReject("b1", req.Model)
 			writeRouterError(c, http.StatusBadRequest, domain.ErrCodeInputTooLong,
-				fmt.Sprintf("input is %d tokens, over the model limit of %d", inputTokens, pol.MaxInputTokens),
+				fmt.Sprintf("input is an estimated %d tokens, well over the model limit of %d", inputTokens, pol.MaxInputTokens),
 				domain.SourceRouter)
 			return false
 		}
@@ -954,8 +976,10 @@ func (h *Handlers) fireTokenLimited(m reqMeta, model string) {
 // processor can forward them verbatim. Returns false (after writing the error)
 // when the cached body is missing or malformed.
 func captureRawBody(c *gin.Context, req *domain.ChatRequest, requestID string) bool {
-	// Preserve any custom headers added by the client library.
+	// Preserve any custom headers added by the client library, but never the
+	// client's router credentials: agents and backends must not see them.
 	req.HttpHeaders = c.Request.Header.Clone()
+	domain.StripClientCredentials(req.HttpHeaders)
 
 	cb, ok := c.Get(gin.BodyBytesKey)
 	if !ok {
@@ -1177,6 +1201,7 @@ func (h *Handlers) writeModelList(c *gin.Context, applyAllowSet bool) {
 		}
 		data = append(data, m)
 	}
+	data = append(data, h.aliasModelObjects(c, models, applyAllowSet)...)
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",

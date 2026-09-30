@@ -69,7 +69,8 @@
           "routing/fallback-chains",
           "routing/provider-fallback",
           "routing/policy-gates",
-          "routing/admission-control"
+          "routing/admission-control",
+            "routing/semantic-routing"
         ]
       },
       {

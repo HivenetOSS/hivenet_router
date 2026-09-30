@@ -195,3 +195,53 @@ func TestDefaultAgentConfig_JWTFromEnv(t *testing.T) {
 		t.Errorf("unexpected agent defaults: %+v", a)
 	}
 }
+
+// TestDefaultAgentConfig_BackendAPIKeyTrimmed: the backend key from the
+// environment is trimmed like the key file is, so a trailing newline (common
+// with "export KEY=$(cat file)" or secret mounts) does not break auth.
+func TestDefaultAgentConfig_BackendAPIKeyTrimmed(t *testing.T) {
+	tests := []struct{ name, env, want string }{
+		{"trailing newline", "sk-backend\n", "sk-backend"},
+		{"surrounding spaces", "  sk-backend\t", "sk-backend"},
+		{"whitespace only means no key", " \n", ""},
+		{"unset", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HIVENET_ROUTER_BACKEND_API_KEY", tc.env)
+			if got := config.DefaultAgentConfig().BackendAPIKey; got != tc.want {
+				t.Errorf("BackendAPIKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadFromEnv_SemanticPinKnobs: the semantic pin store limits default
+// sensibly, take positive env overrides, and ignore invalid values.
+func TestLoadFromEnv_SemanticPinKnobs(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if cfg.SemanticPinMax != 100_000 || cfg.SemanticPinMaxPerKey != 10_000 {
+		t.Errorf("defaults = %d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey)
+	}
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX", "500")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY", "-1") // invalid → default kept
+	cfg = config.LoadFromEnv()
+	if cfg.SemanticPinMax != 500 || cfg.SemanticPinMaxPerKey != 10_000 {
+		t.Errorf("overrides = %d/%d", cfg.SemanticPinMax, cfg.SemanticPinMaxPerKey)
+	}
+}
+
+// TestLoadFromEnv_SemanticDecisionLog: the decision log path and buffer come
+// from the environment; an invalid buffer keeps the default.
+func TestLoadFromEnv_SemanticDecisionLog(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if cfg.SemanticDecisionLog != "" || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("defaults = %q/%d", cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+	}
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG", "/var/log/decisions.jsonl")
+	t.Setenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER", "0") // invalid → default kept
+	cfg = config.LoadFromEnv()
+	if cfg.SemanticDecisionLog != "/var/log/decisions.jsonl" || cfg.SemanticDecisionLogBuffer != 4096 {
+		t.Errorf("overrides = %q/%d", cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
+	}
+}

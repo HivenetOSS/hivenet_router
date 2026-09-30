@@ -539,13 +539,13 @@ Streaming output is accounted for after delivery. When it exceeds the remaining 
 HTTP 400
 ```
 
-This response is produced before routing when a policy's `max_input_tokens` or `images_max` cap is exceeded:
+This response is produced before routing when the prompt estimate exceeds 1.5× a policy's `max_input_tokens`, or the image count exceeds `images_max`. Prompts closer to the limit are forwarded, and the backend answers `context_length_exceeded` if they do not fit:
 
 ```json
 {
   "error": {
     "code": "input_too_long",
-    "message": "input is 140000 tokens, over the model limit of 131072",
+    "message": "input is an estimated 200000 tokens, well over the model limit of 131072",
     "source": "router"
   }
 }

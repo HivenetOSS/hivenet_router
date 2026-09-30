@@ -91,13 +91,41 @@ func Load(path string) (*Policy, error) {
 }
 
 // LoadBytes parses and validates a YAML policy from a byte slice.
-// Used by PUT /admin/policy to accept an inline YAML body.
+// Used for the global policy (--policy-file, _default.yaml, PUT /admin/policy),
+// which must always declare routing and cannot carry per-model semantic blocks.
 func LoadBytes(data []byte) (*Policy, error) {
 	var p Policy
 	if err := yaml.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("policy: parse YAML: %w", err)
 	}
+	if p.Profile != nil || p.Alias != nil {
+		return nil, fmt.Errorf("policy: profile and alias are only valid in per-model policy documents")
+	}
 	if err := Validate(&p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// LoadModelDocBytes parses and validates a per-model policy document (a file in
+// --policy-model-dir or a PUT /admin/policy/models/{name} body). Unlike
+// LoadBytes it accepts the semantic profile: and alias: blocks, and a document
+// that carries only those (no routing_policy) inherits the global routing.
+func LoadModelDocBytes(data []byte) (*Policy, error) {
+	var p Policy
+	if err := yaml.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("policy: parse YAML: %w", err)
+	}
+	if p.InheritsRouting() {
+		if err := validateModelDoc(&p); err != nil {
+			return nil, err
+		}
+		return &p, nil
+	}
+	if err := Validate(&p); err != nil {
+		return nil, err
+	}
+	if err := validateSemantic(&p); err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -259,7 +287,7 @@ func LoadDirSnapshot(dir string) (*DirSnapshot, error) {
 			continue
 		}
 
-		p, err := LoadBytes(data)
+		p, err := LoadModelDocBytes(data)
 		if err != nil {
 			log.Warnf("policy dir: skipping %q: %v", name, err)
 			continue
