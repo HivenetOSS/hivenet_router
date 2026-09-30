@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestEstimatePerMessageFloor(t *testing.T) {
 func TestLearnedRatioConvergesPerModel(t *testing.T) {
 	e := tokenizer.NewEstimator()
 	// Feed a true density of 2.5 chars/token (ratio 0.40) for modelA only.
-	const bytes, trueTokens = 1000, 400 // 0.40 tokens/byte
+	const bytes, trueTokens = 10_000, 4_000 // 0.40 tokens/byte
 	for i := 0; i < 50; i++ {
 		e.Observe("modelA", bytes, trueTokens)
 	}
@@ -80,7 +81,7 @@ func TestObserveIgnoresDegenerateSamples(t *testing.T) {
 	e := tokenizer.NewEstimator()
 	before := e.RatioFor(model)
 	e.Observe(model, 0, 100)
-	e.Observe(model, 100, 0)
+	e.Observe(model, 10_000, 0)
 	if after := e.RatioFor(model); after != before {
 		t.Errorf("degenerate samples changed the ratio: %.4f → %.4f", before, after)
 	}
@@ -94,6 +95,9 @@ func TestCodingCorpusErrorUnderFewPercent(t *testing.T) {
 
 	var legacyErr, learnedErr float64
 	for _, text := range corpus {
+		// Repeat each fixture past MinLearnBytes so it teaches the estimator;
+		// repetition keeps its bytes-per-token density unchanged.
+		text = strings.Repeat(text, tokenizer.MinLearnBytes/len(text)+1)
 		bytes := len(text)
 		trueTokens := int(math.Round(float64(bytes) / codeDensityCharsPerToken))
 
@@ -126,8 +130,8 @@ func TestEstimatorConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e.Observe(model, 1000, 300)
-			_ = e.Estimate(model, 1000, 1)
+			e.Observe(model, 10_000, 3_000)
+			_ = e.Estimate(model, 10_000, 1)
 			_ = e.RatioFor(model)
 		}()
 	}
@@ -169,10 +173,10 @@ func loadCorpus(t *testing.T) []string {
 func TestObserveClampsOutlierSamples(t *testing.T) {
 	e := tokenizer.NewEstimator()
 
-	// 100 bytes reported as 5,000 tokens → 50 tokens/byte, far beyond any real
-	// tokenizer. The sample must be clamped to the 1 token/byte ceiling, so the
-	// ratio after one EWMA step stays at most alpha·1.0 + (1−alpha)·cold < 1.
-	e.Observe("m", 100, 5000)
+	// 5,000 bytes reported as 250,000 tokens → 50 tokens/byte, far beyond any
+	// real tokenizer. The sample must be clamped to the 1 token/byte ceiling, so
+	// the ratio after one EWMA step stays at most alpha·1.0 + (1−alpha)·cold < 1.
+	e.Observe("m", 5_000, 250_000)
 	if r := e.RatioFor("m"); r > 1.0 {
 		t.Errorf("ratio after absurd high sample = %.3f, must stay <= 1.0", r)
 	}
@@ -185,5 +189,55 @@ func TestObserveClampsOutlierSamples(t *testing.T) {
 	}
 	if r := e2.RatioFor("m"); r < 1.0/20.0-1e-9 {
 		t.Errorf("ratio after absurd low samples = %.5f, must stay >= 0.05", r)
+	}
+}
+
+// TestShortPromptsDoNotPoisonRatio reproduces HAI-389 on gpt-oss-20b. Short
+// chat requests report prompt_tokens dominated by the chat template header
+// (~80 tokens for a 2-byte "hi"), which clamps each sample to 1 token/byte.
+// Interleaved with long prompts, those samples used to drag the ratio to
+// 0.2-0.5 and estimate a 110K-token prompt at 139K-323K, over the 131,072 limit.
+// Short prompts must not be learned, so the ratio tracks the long prompts and
+// the estimate stays near the backend's count.
+func TestShortPromptsDoNotPoisonRatio(t *testing.T) {
+	const (
+		gptOSS         = "gpt-oss-20b"
+		trueRatio      = 10_068.0 / 60_000.0 // 10K words ≈ 60 KB → 10,068 tokens
+		longBytes      = 660_000             // 110K words
+		longTrueTokens = 110_068
+		limit          = 131_072
+	)
+	e := tokenizer.NewEstimator()
+	for range 20 {
+		e.Observe(gptOSS, 60_000, 10_068) // a long prompt
+		for range 5 {
+			e.Observe(gptOSS, 2, 80) // "hi": 2 bytes, template header dominates
+		}
+	}
+
+	if r := e.RatioFor(gptOSS); math.Abs(r-trueRatio)/trueRatio > 0.02 {
+		t.Errorf("ratio = %.4f, want within 2%% of the long-prompt ratio %.4f", r, trueRatio)
+	}
+	got := e.Estimate(gptOSS, longBytes, 1)
+	if got > limit {
+		t.Errorf("110K-word prompt estimated at %d tokens, over the %d limit the backend accepts it under", got, limit)
+	}
+	if relErr(got, longTrueTokens) > 0.05 {
+		t.Errorf("110K-word prompt estimated at %d tokens, want within 5%% of %d", got, longTrueTokens)
+	}
+}
+
+// TestObserveIgnoresShortPrompts verifies a sample under MinLearnBytes leaves
+// the ratio untouched, and one at the threshold is learned.
+func TestObserveIgnoresShortPrompts(t *testing.T) {
+	e := tokenizer.NewEstimator()
+	before := e.RatioFor(model)
+	e.Observe(model, tokenizer.MinLearnBytes-1, tokenizer.MinLearnBytes)
+	if after := e.RatioFor(model); after != before {
+		t.Errorf("a sample under MinLearnBytes moved the ratio: %.4f → %.4f", before, after)
+	}
+	e.Observe(model, tokenizer.MinLearnBytes, tokenizer.MinLearnBytes)
+	if after := e.RatioFor(model); after == before {
+		t.Error("a sample at MinLearnBytes must be learned")
 	}
 }

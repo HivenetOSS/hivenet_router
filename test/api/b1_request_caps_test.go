@@ -55,13 +55,14 @@ func imageBody(n int) []byte {
 	return fmt.Appendf(nil, `{"model":"m","messages":[{"role":"user","content":[%s]}]}`, strings.Join(parts, ","))
 }
 
-// TestB1_InputOverCap_400 verifies a prompt one token over max_input_tokens is
-// rejected with 400 input_too_long before queueing.
+// TestB1_InputOverCap_400 verifies a prompt whose estimate is over the 1.5x
+// tolerance on max_input_tokens is rejected with 400 input_too_long before
+// queueing.
 func TestB1_InputOverCap_400(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	h := newCapHandlers(q, &policy.Policy{MaxInputTokens: 10})
-	// contentLen 28 → 28/4 + 4 = 11 tokens, over the cap of 10.
-	c, w := newCtx("/v1/chat/completions", textBody(28, 0))
+	// contentLen 48 → 48/4 + 4 = 16 tokens, over 1.5 × the cap of 10.
+	c, w := newCtx("/v1/chat/completions", textBody(48, 0))
 
 	h.Passthrough(c)
 
@@ -76,13 +77,15 @@ func TestB1_InputOverCap_400(t *testing.T) {
 	}
 }
 
-// TestB1_InputAtCap_Passes verifies a prompt exactly at max_input_tokens is
-// admitted (the cap is inclusive) and reaches the queue.
-func TestB1_InputAtCap_Passes(t *testing.T) {
+// TestB1_InputAtTolerance_Passes verifies a prompt estimated exactly at
+// 1.5 × max_input_tokens is admitted (the tolerance is inclusive) and reaches
+// the queue: an estimate over the cap but inside the tolerance is left to the
+// backend, which counts exactly.
+func TestB1_InputAtTolerance_Passes(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	h := newCapHandlers(q, &policy.Policy{MaxInputTokens: 10})
-	// contentLen 24 → 24/4 + 4 = 10 tokens, exactly the cap.
-	c, w := newCtx("/v1/chat/completions", textBody(24, 0))
+	// contentLen 44 → 44/4 + 4 = 15 tokens, exactly 1.5 × the cap.
+	c, w := newCtx("/v1/chat/completions", textBody(44, 0))
 
 	done := make(chan struct{})
 	go func() { h.Passthrough(c); close(done) }()
@@ -90,11 +93,11 @@ func TestB1_InputAtCap_Passes(t *testing.T) {
 	case pending := <-q:
 		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
 	case <-time.After(time.Second):
-		t.Fatal("an at-cap prompt must pass B1 and be enqueued")
+		t.Fatal("a prompt at the tolerance must pass B1 and be enqueued")
 	}
 	<-done
 	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 for an at-cap prompt, got %d", w.Code)
+		t.Errorf("expected 200 for a prompt at the tolerance, got %d", w.Code)
 	}
 }
 
@@ -145,7 +148,7 @@ func TestB1_ImagesAcrossMessages_400(t *testing.T) {
 func TestB1_MixedTextAndImage_TextCounted(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	h := newCapHandlers(q, &policy.Policy{MaxInputTokens: 10, ImagesMax: 4})
-	text := strings.Repeat("a", 28) // 28/4 + 4 = 11 tokens, over the cap of 10
+	text := strings.Repeat("a", 48) // 48/4 + 4 = 16 tokens, over 1.5 × the cap of 10
 	body := fmt.Appendf(nil, `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":%q},{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}`, text)
 	c, w := newCtx("/v1/chat/completions", body)
 
@@ -318,7 +321,7 @@ func TestB1_PerModelPolicyCap(t *testing.T) {
 	h := api.NewHandlers(nil, nil, q, 2*time.Second, exec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// Over-cap request for the capped model → 400.
-	over := fmt.Appendf(nil, `{"model":"capped","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 28))
+	over := fmt.Appendf(nil, `{"model":"capped","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 48))
 	c, w := newCtx("/v1/chat/completions", over)
 	h.Passthrough(c)
 	if w.Code != http.StatusBadRequest {
@@ -326,7 +329,7 @@ func TestB1_PerModelPolicyCap(t *testing.T) {
 	}
 
 	// Same-size request for an unclaimed model → global (uncapped) → passes.
-	free := fmt.Appendf(nil, `{"model":"other","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 28))
+	free := fmt.Appendf(nil, `{"model":"other","messages":[{"role":"user","content":%q}]}`, strings.Repeat("a", 48))
 	c2, w2 := newCtx("/v1/chat/completions", free)
 	done := make(chan struct{})
 	go func() { h.Passthrough(c2); close(done) }()
@@ -339,5 +342,30 @@ func TestB1_PerModelPolicyCap(t *testing.T) {
 	<-done
 	if w2.Code != http.StatusOK {
 		t.Errorf("expected 200 for the uncapped model, got %d", w2.Code)
+	}
+}
+
+// TestB1_EstimateOverCapWithinTolerance_Forwarded reproduces HAI-389: a
+// gpt-oss-20b prompt the backend counts at ~110K tokens was estimated at 139,009
+// by the router and rejected against the 131,072 limit. An estimate that is over
+// the cap but within the tolerance must be forwarded, so the backend (which
+// counts exactly) decides.
+func TestB1_EstimateOverCapWithinTolerance_Forwarded(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	h := newCapHandlers(q, &policy.Policy{MaxInputTokens: 131072})
+	// contentLen 556,020 → 556,020/4 + 4 = 139,009 tokens, the reported estimate.
+	c, w := newCtx("/v1/chat/completions", textBody(556_020, 0))
+
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+	case <-time.After(time.Second):
+		t.Fatal("an estimate of 139,009 against a 131,072 cap must be forwarded, not rejected")
+	}
+	<-done
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
 	}
 }

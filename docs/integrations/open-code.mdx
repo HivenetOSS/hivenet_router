@@ -332,7 +332,7 @@ This is the authentication header Hivenet Router expects.
 <Note>
   `HIVENET_ROUTER_API_KEY` is an environment variable used by the OpenCode client.
 
-  It does not need to follow the lower-case `hivenet_router_*` convention used by the Hivenet Router router process.
+  It does not need to follow the lower-case `hivenet_*` convention used by the Hivenet Router router process.
 </Note>
 
 ## Read the key from a file
@@ -1010,7 +1010,7 @@ Request rate by model:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -1020,7 +1020,7 @@ Failed requests:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_tenant_requests_failed_total[5m]
+    hivenet_tenant_requests_failed_total[5m]
   )
 )
 ```

@@ -70,7 +70,7 @@ This boundary can be close to time to first token, but it is not the same measur
 
 It does not include the time needed to generate and deliver the complete response.
 
-This response-header boundary is also where the current implementation releases the agent’s declared capacity slot and the router’s forwarding slot for a streaming request. Backend generation can continue after the SRTT sample has been recorded and those slots have been released.
+The router’s `--max-concurrent` forwarding slot is released at this response-header boundary. The agent’s declared capacity slot is not. Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. The SRTT sample is recorded at stream start, but the agent’s active-request count covers the whole generation.
 
 ### Non-streaming Chat Completions
 
@@ -442,8 +442,8 @@ Before the agent has a sample:
 Hivenet Router exports:
 
 ```text
-hivenet_router_agent_srtt_ms
-hivenet_router_agent_rttvar_ms
+hivenet_agent_srtt_ms
+hivenet_agent_rttvar_ms
 ```
 
 Labels:
@@ -459,14 +459,14 @@ machine
 ### SRTT by agent
 
 ```promql
-hivenet_router_agent_srtt_ms
+hivenet_agent_srtt_ms
 ```
 
 ### Average SRTT by model
 
 ```promql
 avg by (model) (
-  hivenet_router_agent_srtt_ms
+  hivenet_agent_srtt_ms
 )
 ```
 
@@ -474,30 +474,30 @@ avg by (model) (
 
 ```promql
 avg by (engine) (
-  hivenet_router_agent_srtt_ms
+  hivenet_agent_srtt_ms
 )
 ```
 
 ### Agents above 500 milliseconds
 
 ```promql
-hivenet_router_agent_srtt_ms > 500
+hivenet_agent_srtt_ms > 500
 ```
 
 ### High variation
 
 ```promql
-hivenet_router_agent_rttvar_ms > 300
+hivenet_agent_rttvar_ms > 300
 ```
 
 ### SRTT compared with variation
 
 ```promql
-hivenet_router_agent_srtt_ms
+hivenet_agent_srtt_ms
 +
 4
 *
-hivenet_router_agent_rttvar_ms
+hivenet_agent_rttvar_ms
 ```
 
 This final query can be useful for visualization, but Hivenet Router does not use it as a TCP-style retransmission timeout.
@@ -655,7 +655,7 @@ groups:
       - alert: HivenetRouterHighSRTT
 
         expr: |
-          hivenet_router_agent_srtt_ms > 500
+          hivenet_agent_srtt_ms > 500
 
         for: 5m
 
@@ -673,7 +673,7 @@ groups:
       - alert: HivenetRouterUnstableLatency
 
         expr: |
-          hivenet_router_agent_rttvar_ms > 300
+          hivenet_agent_rttvar_ms > 300
 
         for: 10m
 
@@ -692,7 +692,7 @@ groups:
 
         expr: |
           avg by (model) (
-            hivenet_router_agent_srtt_ms
+            hivenet_agent_srtt_ms
           ) > 750
 
         for: 5m

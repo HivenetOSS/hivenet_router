@@ -64,7 +64,7 @@ Use the binary’s built-in help to confirm the options available in the version
   The environment-variable prefix is exactly:
 
   ```text
-  hivenet_router_
+  hivenet_
   ```
 
   Environment-variable names are case-sensitive on Linux. Use the capitalization shown in this reference.
@@ -320,6 +320,10 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | --- | --- | --- | --- |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty | Global routing-policy YAML file |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty | Directory containing global and per-model policies |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty | JSONL file that records every [semantic alias](/routing/semantic-routing) decision; empty disables it |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` | Decision records queued before new ones are dropped |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` | Maximum semantic task pins held in memory; least recently used pins are evicted beyond it |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues |
@@ -736,6 +740,10 @@ The complete current router flag set is:
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |
 | `--policy-model-dir` | `HIVENET_ROUTER_POLICY_MODEL_DIR` | Empty |
+| `--semantic-decision-log` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG` | Empty |
+| `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` |
+| `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` |
+| `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |
@@ -756,6 +764,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
 
 ### Supported engines
 
@@ -846,6 +855,20 @@ Set:
 
 to disable it.
 
+### Backend API key
+
+Set a backend API key when the inference server behind the agent requires its own key: vLLM, SGLang, or llama.cpp started with `--api-key`, or any other OpenAI-compatible backend that expects `Authorization: Bearer <key>`. It works the same way for every `--engine`.
+
+- `--backend-api-key-file` reads the key from a file, so it does not appear in the process list. `HIVENET_ROUTER_BACKEND_API_KEY` holds the raw value. When both are set, the file wins. Surrounding whitespace, such as a trailing newline, is trimmed from both.
+- The agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks (including a custom engine's `--health-url`), model discovery, metrics scrapes, and inference, streaming or not.
+- For inference requests, the backend receives exactly one `Authorization` header, this key, for every engine, Ollama included. The client's router credentials are always removed first.
+- The key is sent only to the scheme, host, and port of `--backend-url` and, when set, `--health-url`. If the backend redirects a request to any other host or port, the agent sends it without an `Authorization` header, so neither the key nor the client's credentials follow the redirect.
+- When a key is set, `--backend-url` and `--health-url` must be absolute URLs, such as `http://localhost:8000`. Otherwise the agent exits at startup.
+
+<Note>
+The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
+</Note>
+
 ## Agent router and libp2p settings
 
 | Flag | Environment variable | Default | Description |
@@ -853,7 +876,7 @@ to disable it.
 | `--router-grpc` | — | `localhost:50051` | Router gRPC authentication address; the response supplies the router’s libp2p connection details |
 | `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Deprecated no-op retained for CLI compatibility |
 | `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
-| `--p2p-listen-port` | — | `0` | Local libp2p port; agents initiate the router connection and normally do not need a fixed inbound port |
+| `--p2p-listen-port` | — | `0` | Local libp2p port, bound to `127.0.0.1` only (`0` = random). Agents dial the router and need no inbound port |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Shared agent-authentication secret |
 
 ### Router discovery
@@ -1079,6 +1102,7 @@ The complete current agent flag set is:
 | `--engine-sample-interval` | — | `500ms` |
 | `--routing-signal-interval` | — | `500ms` |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty |
 | `--gpu-devices-file` | — | Empty |
 | `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty |
 | `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty |

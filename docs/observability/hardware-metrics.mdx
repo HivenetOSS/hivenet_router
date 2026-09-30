@@ -149,7 +149,7 @@ It is not the NVIDIA GPU UUID.
 ## GPU utilization
 
 ```text
-hivenet_router_agent_gpu_utilization_percent
+hivenet_agent_gpu_utilization_percent
 ```
 
 GPU utilization is the percentage of the recent NVML sampling window during which the GPU’s compute engine was active.
@@ -163,14 +163,14 @@ The Prometheus value uses:
 Examples:
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent
+hivenet_agent_gpu_utilization_percent
 ```
 
 Average utilization by model:
 
 ```promql
 avg by (model) (
-  hivenet_router_agent_gpu_utilization_percent
+  hivenet_agent_gpu_utilization_percent
 )
 ```
 
@@ -178,7 +178,7 @@ Maximum utilization on each agent:
 
 ```promql
 max by (peer_id, model) (
-  hivenet_router_agent_gpu_utilization_percent
+  hivenet_agent_gpu_utilization_percent
 )
 ```
 
@@ -199,9 +199,9 @@ Hivenet Router’s hard routing-capacity gate uses the agent’s declared capaci
 Hivenet Router exports:
 
 ```text
-hivenet_router_agent_gpu_vram_used_bytes
-hivenet_router_agent_gpu_vram_free_bytes
-hivenet_router_agent_gpu_vram_total_bytes
+hivenet_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_free_bytes
+hivenet_agent_gpu_vram_total_bytes
 ```
 
 | Metric | Meaning |
@@ -213,7 +213,7 @@ hivenet_router_agent_gpu_vram_total_bytes
 Show VRAM in GiB:
 
 ```promql
-hivenet_router_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_used_bytes
 /
 1024
 /
@@ -225,10 +225,10 @@ hivenet_router_agent_gpu_vram_used_bytes
 Calculate the fraction in use:
 
 ```promql
-hivenet_router_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_used_bytes
 /
 clamp_min(
-  hivenet_router_agent_gpu_vram_total_bytes,
+  hivenet_agent_gpu_vram_total_bytes,
   1
 )
 ```
@@ -238,10 +238,10 @@ Calculate the percentage in use:
 ```promql
 100
 *
-hivenet_router_agent_gpu_vram_used_bytes
+hivenet_agent_gpu_vram_used_bytes
 /
 clamp_min(
-  hivenet_router_agent_gpu_vram_total_bytes,
+  hivenet_agent_gpu_vram_total_bytes,
   1
 )
 ```
@@ -265,20 +265,20 @@ VRAM can contain:
 ## GPU temperature
 
 ```text
-hivenet_router_agent_gpu_temperature_celsius
+hivenet_agent_gpu_temperature_celsius
 ```
 
 The value comes from the GPU’s NVML temperature sensor and is expressed in degrees Celsius.
 
 ```promql
-hivenet_router_agent_gpu_temperature_celsius
+hivenet_agent_gpu_temperature_celsius
 ```
 
 Maximum temperature by agent:
 
 ```promql
 max by (peer_id, model) (
-  hivenet_router_agent_gpu_temperature_celsius
+  hivenet_agent_gpu_temperature_celsius
 )
 ```
 
@@ -305,20 +305,20 @@ The value above is an example, not a universal safe limit.
 ## GPU power
 
 ```text
-hivenet_router_agent_gpu_power_watts
+hivenet_agent_gpu_power_watts
 ```
 
 NVML reports power in milliwatts. The agent converts it to watts before sending the snapshot.
 
 ```promql
-hivenet_router_agent_gpu_power_watts
+hivenet_agent_gpu_power_watts
 ```
 
 Total reported GPU power by machine:
 
 ```promql
 sum by (machine) (
-  hivenet_router_agent_gpu_power_watts
+  hivenet_agent_gpu_power_watts
 )
 ```
 
@@ -326,7 +326,7 @@ Total reported GPU power by region:
 
 ```promql
 sum by (region) (
-  hivenet_router_agent_gpu_power_watts
+  hivenet_agent_gpu_power_watts
 )
 ```
 
@@ -456,7 +456,7 @@ are different exact-match values.
 ## CPU usage
 
 ```text
-hivenet_router_agent_cpu_usage_percent
+hivenet_agent_cpu_usage_percent
 ```
 
 The agent uses gopsutil to collect node-wide CPU utilization.
@@ -470,14 +470,14 @@ The Prometheus value uses:
 It represents the combined utilization across the machine rather than one series per CPU core.
 
 ```promql
-hivenet_router_agent_cpu_usage_percent
+hivenet_agent_cpu_usage_percent
 ```
 
 Average CPU use by engine:
 
 ```promql
 avg by (engine) (
-  hivenet_router_agent_cpu_usage_percent
+  hivenet_agent_cpu_usage_percent
 )
 ```
 
@@ -485,7 +485,7 @@ Maximum CPU use by machine:
 
 ```promql
 max by (machine) (
-  hivenet_router_agent_cpu_usage_percent
+  hivenet_agent_cpu_usage_percent
 )
 ```
 
@@ -506,9 +506,9 @@ The collector seeds its CPU baseline when it starts so the first reported sample
 Hivenet Router exports:
 
 ```text
-hivenet_router_agent_memory_used_percent
-hivenet_router_agent_memory_available_bytes
-hivenet_router_agent_memory_total_bytes
+hivenet_agent_memory_used_percent
+hivenet_agent_memory_available_bytes
+hivenet_agent_memory_total_bytes
 ```
 
 | Metric | Unit | Meaning |
@@ -520,7 +520,7 @@ hivenet_router_agent_memory_total_bytes
 Show available memory in GiB:
 
 ```promql
-hivenet_router_agent_memory_available_bytes
+hivenet_agent_memory_available_bytes
 /
 1024
 /
@@ -532,7 +532,7 @@ hivenet_router_agent_memory_available_bytes
 Show used memory by agent:
 
 ```promql
-hivenet_router_agent_memory_used_percent
+hivenet_agent_memory_used_percent
 ```
 
 System-memory pressure can cause:
@@ -660,7 +660,7 @@ Policy YAML uses:
 For example, Prometheus:
 
 ```promql
-hivenet_router_agent_gpu_utilization_percent > 90
+hivenet_agent_gpu_utilization_percent > 90
 ```
 
 corresponds to:
@@ -741,7 +741,7 @@ groups:
       - alert: HivenetRouterGPUHighTemperature
 
         expr: |
-          hivenet_router_agent_gpu_temperature_celsius > 85
+          hivenet_agent_gpu_temperature_celsius > 85
 
         for: 5m
 
@@ -760,10 +760,10 @@ groups:
 
         expr: |
           (
-            hivenet_router_agent_gpu_vram_used_bytes
+            hivenet_agent_gpu_vram_used_bytes
             /
             clamp_min(
-              hivenet_router_agent_gpu_vram_total_bytes,
+              hivenet_agent_gpu_vram_total_bytes,
               1
             )
           ) > 0.9
@@ -784,7 +784,7 @@ groups:
       - alert: HivenetRouterHostHighMemory
 
         expr: |
-          hivenet_router_agent_memory_used_percent > 90
+          hivenet_agent_memory_used_percent > 90
 
         for: 5m
 
@@ -806,7 +806,7 @@ Use agent heartbeat age as the nearest fleet-health indicator:
 time()
 -
 (
-  hivenet_router_routing_agent_last_seen_timestamp
+  hivenet_routing_agent_last_seen_timestamp
   / 1000
 )
 > 15
@@ -963,7 +963,7 @@ Increase declared capacity gradually rather than deriving it from one hardware m
     ```bash
     curl -s \
       http://localhost:2112/metrics \
-      | grep hivenet_router_agent_gpu
+      | grep hivenet_agent_gpu
     ```
 
     Then check Prometheus’s router target.

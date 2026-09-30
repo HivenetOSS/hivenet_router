@@ -74,7 +74,7 @@ Different observability signals cover different parts of this path.
 | Client-observed latency | Client request start to completed response | Yes |
 | Audit `latency_ms` | Router middleware entry to handler completion | Yes |
 | `http_server_request_duration_seconds` | Complete router HTTP handling | Yes |
-| `hivenet_router_tenant_request_duration_seconds` | Successful tenant request through the router | Yes |
+| `hivenet_tenant_request_duration_seconds` | Successful tenant request through the router | Yes |
 | `queue_wait` trace span | Time in the per-model capacity queue | No |
 | `dispatch` trace span | Policy selection and router-to-agent forwarding until the processor receives a response | Depends on response mode |
 | `forward_to_agent` trace span | Router request to agent response headers or completed non-streaming body | Depends on response mode |
@@ -121,32 +121,28 @@ Measure all four separately when the user experience depends on progressive outp
 
 ## Current streaming-capacity behavior
 
-For a non-streaming response, Hivenet Router holds the selected agent’s declared capacity slot until the complete response has been received and parsed.
+Hivenet Router holds the selected agent’s declared capacity slot for the complete generation in both response modes:
 
-For a streaming response, the current implementation releases:
+- For a non-streaming response, the slot is held until the complete response has been received and parsed.
+- For a streaming response, the slot is held until the stream fully drains. Hivenet Router releases it when the stream ends normally or when the client disconnects.
 
-- the selected agent’s declared capacity slot
-- the router’s `--max-concurrent` forwarding slot
+As a result, `active_requests`, `hivenet_agent_capacity_utilization`, the hard capacity gate, `capacity_utilization` policy gates, and `least-loaded` ranking cover the whole streaming generation. This matches how inference engines count running sequences, such as vLLM’s `--max-num-seqs`.
 
-after response headers arrive and streaming begins.
+The router’s `--max-concurrent` forwarding slot behaves differently. For a streaming request, Hivenet Router releases it after response headers arrive and streaming begins. The global forwarding semaphore therefore limits concurrent dispatches, not concurrent active streams.
 
-The backend can continue generating tokens after those slots have been released.
-
-<Warning>
-  `active_requests`, `capacity_utilization`, and `--max-concurrent` do not currently represent the complete lifetime of active streaming generations.
-
-  A fleet dominated by long streams can therefore receive more ongoing backend work than the configured agent capacity appears to allow.
-</Warning>
+<Note>
+  Long streams now occupy agent capacity for their full duration. A fleet dominated by long streams reaches its declared agent capacity sooner than it did when slots were released at stream start. Requests that find every eligible agent full wait in the per-model capacity queue.
+</Note>
 
 For streaming-heavy workloads:
 
-- use a conservative agent `--capacity`
+- size agent `--capacity` to the number of concurrent sequences the engine can run well, for example close to vLLM’s `--max-num-seqs`
 - monitor engine-level running and waiting requests
 - monitor KV-cache pressure, TTFT, ITL, GPU use, and preemptions
 - test sustained streams rather than only short request bursts
-- do not treat Hivenet Router’s active-request counter as the backend’s authoritative concurrency count
+- size the per-model capacity queue (`--queue-depth`) and router request timeout for the longer slot hold times of streaming requests
 
-The inference engine’s own scheduler metrics provide the clearer view of ongoing streaming work.
+The inference engine’s own scheduler metrics remain the authoritative view of backend work, including traffic that does not pass through Hivenet Router.
 
 ## Routing-selection cost
 
@@ -320,7 +316,7 @@ limits the number of request-processor goroutines that have entered the dispatch
 
 For non-streaming requests, the slot normally remains occupied until the response completes.
 
-For streaming requests, it is released when streaming begins.
+For streaming requests, it is released when streaming begins. The selected agent’s capacity slot is held separately until the stream fully drains.
 
 ### Per-model capacity queue
 
@@ -874,7 +870,7 @@ That interval can include:
 It is not the same as the explicit `queue_wait` trace span or:
 
 ```text
-hivenet_router_queue_wait_seconds
+hivenet_queue_wait_seconds
 ```
 
 Those represent the per-model capacity queue specifically.
@@ -1104,19 +1100,19 @@ A practical tuning order is:
 Monitor:
 
 ```text
-hivenet_router_agent_capacity_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_p90_ttft_seconds
-hivenet_router_agent_engine_p90_itl_seconds
-hivenet_router_queue_depth
-hivenet_router_queue_wait_seconds
-hivenet_router_policy_fallback_routed_total
-hivenet_router_policy_exhausted_total
+hivenet_agent_capacity_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_p90_itl_seconds
+hivenet_queue_depth
+hivenet_queue_wait_seconds
+hivenet_policy_fallback_routed_total
+hivenet_policy_exhausted_total
 ```
 
-For streaming workloads, give engine-level concurrency and queue metrics more weight than Hivenet Router’s agent active-request count.
+For streaming workloads, compare Hivenet Router’s agent active-request count with engine-level running and waiting requests. Both cover the full generation, so a persistent gap usually points to a capacity mismatch or to traffic that bypasses the router.
 
 ## Useful performance queries
 
@@ -1181,7 +1177,7 @@ histogram_quantile(
   0.95,
   sum by (le, model) (
     rate(
-      hivenet_router_queue_wait_seconds_bucket[5m]
+      hivenet_queue_wait_seconds_bucket[5m]
     )
   )
 )
@@ -1191,7 +1187,7 @@ histogram_quantile(
 
 ```promql
 sum by (model) (
-  hivenet_router_agent_engine_waiting_requests
+  hivenet_agent_engine_waiting_requests
 )
 ```
 
@@ -1200,7 +1196,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_routing_requests_failed_total[5m]
+    hivenet_routing_requests_failed_total[5m]
   )
 )
 ```
@@ -1210,7 +1206,7 @@ sum by (model) (
 ```promql
 sum by (model) (
   rate(
-    hivenet_router_policy_fallback_routed_total[5m]
+    hivenet_policy_fallback_routed_total[5m]
   )
 )
 ```
@@ -1226,7 +1222,7 @@ sum by (model) (
 | Increasing `queue_full` | Request channel, processor load, CPU | Router admission pressure |
 | High policy-evaluation time | Agents per model, fallback steps, dynamic gates | Candidate-selection cost |
 | Uneven traffic at equal load | Peer-ID tie behavior and short sequential requests | `least-loaded` tie handling |
-| Low Hivenet Router capacity use but high engine running requests | Active streams | Streaming slot-release behavior |
+| Low Hivenet Router capacity use but high engine running requests | Agent `--capacity` versus engine limits, direct engine traffic | Capacity mismatch or traffic outside the router |
 | Memory growth under large prompts | Request sizes and concurrent buffered bodies | Router or agent request buffering |
 | Memory growth with stable traffic | Metric cardinality, dynamic keys, goroutines | Control-plane state |
 | Streaming ends at about the same duration | Router request timeout | Deadline truncation |

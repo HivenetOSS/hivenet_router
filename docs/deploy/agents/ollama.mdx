@@ -332,6 +332,22 @@ Each agent on the same host needs a separate `--identity-path` so every process 
 
 The agents can share the same Ollama backend URL.
 
+## Use an Ollama server behind an authenticating proxy
+
+Ollama has no API key of its own. If you place it behind a reverse proxy that requires `Authorization: Bearer <key>`, give the agent that key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/ollama.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<proxy-api-key>"
+```
+</CodeGroup>
+
+The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. The client's router credentials are never forwarded to the backend, with or without this key. See [Backend API key](/reference/configuration-reference#backend-api-key).
+
 ## Set agent capacity
 
 `--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
@@ -359,7 +375,7 @@ Test the backend under representative load before raising capacity.
 When the agent reaches capacity, Hivenet Router stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify Ollama concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection

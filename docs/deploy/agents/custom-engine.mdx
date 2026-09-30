@@ -271,7 +271,7 @@ For a non-streaming request, the agent sends:
 POST <backend-url>/v1/chat/completions
 ```
 
-It forwards the original JSON body and request headers to the backend.
+It forwards the original JSON body and request headers to the backend, except the client's router credentials (`Authorization`, `X-Api-Key`, `Cookie`, `Proxy-Authorization`), which are always removed. When a [backend API key](/reference/configuration-reference#backend-api-key) is set, the agent adds `Authorization: Bearer <key>`. The key is also sent to `--health-url`, which may be on another host. It is never sent to any other host, including one the backend redirects to.
 
 For example, a client request to:
 
@@ -341,7 +341,7 @@ Start conservatively and test with representative traffic.
 When the agent reaches capacity, Hivenet Router considers another matching agent, waits if queueing is configured, or moves through the policy’s fallback chain.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify the custom backend under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify the custom backend concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection

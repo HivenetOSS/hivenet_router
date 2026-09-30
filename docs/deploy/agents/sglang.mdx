@@ -281,6 +281,26 @@ The explicit value overrides automatic discovery.
   The model registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
+## Use an SGLang server that requires an API key
+
+If you start SGLang with `--api-key`, its OpenAI-compatible API expects `Authorization: Bearer <key>`, including the model discovery request the agent sends before any client traffic exists. Give the agent the same key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/sglang.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<sglang-api-key>"
+```
+</CodeGroup>
+
+The agent then sends `Authorization: Bearer <key>` on every request to SGLang: readiness checks, model discovery, metrics scrapes, and inference. The client's router credentials are never forwarded to SGLang, with or without this key. When both are provided, `--backend-api-key-file` wins. See [Backend API key](/reference/configuration-reference#backend-api-key).
+
+<Note>
+The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
+</Note>
+
 ## Set agent capacity
 
 `--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
@@ -307,7 +327,7 @@ When the agent reaches its declared capacity, Hivenet Router stops assigning new
 Test the backend under representative load before increasing capacity.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify SGLang concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify SGLang concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection
@@ -373,17 +393,17 @@ View engine metrics on the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep hivenet_router_agent_engine
+  | grep hivenet_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
-hivenet_router_agent_engine_avg_ttft_seconds
-hivenet_router_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
+hivenet_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
 ```
 
 View current values through the routing table:

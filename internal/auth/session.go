@@ -68,17 +68,23 @@ func (m *SessionManager) ValidateSession(token string) (*domain.Session, bool) {
 }
 
 // LinkPeerID binds a libp2p peer ID to an existing session.
-// Called once from handleAgentRegister after the peer ID is decoded from the
-// registration payload. After this call, ValidateSession returns a session with
+// Called from handleAgentRegister with the authenticated libp2p peer of the
+// registration request. After this call, ValidateSession returns a session with
 // a non-zero PeerID, enabling O(1) agent lookup in the hot heartbeat and
 // routing-signal handlers without scanning the entire agent registry.
-// Returns false if the token is unknown or already expired.
+// Returns false if the token is unknown, already expired, or already bound to a
+// different peer.
 func (m *SessionManager) LinkPeerID(token string, id peer.ID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	session, exists := m.sessions[token]
 	if !exists || session.IsExpired() {
+		return false
+	}
+	// A session belongs to the first peer that registers with it. Re-linking
+	// the same peer is fine; switching to a different peer is refused.
+	if session.PeerID != "" && session.PeerID != id {
 		return false
 	}
 	session.PeerID = id

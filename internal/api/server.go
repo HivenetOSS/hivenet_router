@@ -149,6 +149,10 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
+	// Resolve semantic aliases (model: "auto") to a concrete model before quota,
+	// so quota, authorization, admission and routing all see the resolved model.
+	// A no-op map lookup for concrete model names.
+	inference.Use(s.handlers.AliasMiddleware())
 	inference.Use(QuotaMiddleware(s.rateLimiter, s.routerMetrics, s.healthyAgentCount))
 	{
 		// Generic allowlisted passthrough: routed by top-level "model" and

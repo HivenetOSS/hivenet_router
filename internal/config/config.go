@@ -6,6 +6,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -74,6 +75,22 @@ type Config struct {
 	PolicyFile      string // path to routing policy YAML; empty = built-in default (least-loaded)
 	PolicyModelDir  string // path to directory of per-model policy YAML files; empty = disabled
 	MaxTriesPerStep int    // global default for steps that don't set max_tries
+	// SemanticPinMax caps the semantic task pins held in memory;
+	// SemanticPinMaxPerKey caps one API key's share so a single caller cannot
+	// evict everyone else's pins. At either cap the least recently used pin is
+	// evicted.
+	// Env: HIVENET_ROUTER_SEMANTIC_PIN_MAX / HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY
+	// Flag: --semantic-pin-max / --semantic-pin-max-per-key
+	SemanticPinMax       int
+	SemanticPinMaxPerKey int
+	// SemanticDecisionLog is the path of the JSONL log that records every semantic
+	// alias decision. Empty = disabled.
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
+	SemanticDecisionLog string
+	// SemanticDecisionLogBuffer is how many decision records may queue before
+	// new ones are dropped (counted in hivenet_semantic_decision_log_dropped_total).
+	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER  Flag: --semantic-decision-log-buffer
+	SemanticDecisionLogBuffer int
 
 	// Per-model wait queue: max requests that park waiting for a slot before being rejected.
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
@@ -159,10 +176,15 @@ func DefaultConfig() *Config {
 		SessionTTL:             1 * time.Hour,
 		ProtocolID:             "/hivenet_router/1.0.0",
 		MaxTriesPerStep:        3,
+		SemanticPinMax:         100_000,
+		SemanticPinMaxPerKey:   10_000,
 		QueueDepth:             30,
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
+
+		// Semantic decision log queue (the log itself is off unless a path is set).
+		SemanticDecisionLogBuffer: 4096,
 	}
 }
 
@@ -206,6 +228,20 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_POLICY_MODEL_DIR"); v != "" {
 		cfg.PolicyModelDir = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SEMANTIC_DECISION_LOG"); v != "" {
+		cfg.SemanticDecisionLog = v
+	}
+	for env, dst := range map[string]*int{
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":             &cfg.SemanticPinMax,
+		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY":     &cfg.SemanticPinMaxPerKey,
+		"HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER": &cfg.SemanticDecisionLogBuffer,
+	} {
+		if v := os.Getenv(env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				*dst = n
+			}
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_TRIES_PER_STEP"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -278,8 +314,19 @@ type AgentConfig struct {
 	RouterGRPCAddr string
 	RouterP2PAddr  string
 	BackendURL     string
-	Engine         string
-	HTTPTimeout    time.Duration
+	// BackendAPIKey, when non-empty, is sent on every request the agent makes
+	// to its backend (health checks, model discovery, metrics, inference) as
+	// Authorization: Bearer <key>, replacing the client's credentials; any
+	// x-api-key header is dropped. Use it when the backend requires its own key,
+	// e.g. vLLM, SGLang or llama.cpp started with --api-key. The key is sent
+	// only to the BackendURL and HealthURL hosts; a request to any other host
+	// (such as a redirect) goes out with no Authorization header.
+	// Empty (default) forwards the client's headers unchanged. Surrounding
+	// whitespace is trimmed from both the env value and the file contents.
+	// Env: HIVENET_ROUTER_BACKEND_API_KEY  Flag: --backend-api-key-file
+	BackendAPIKey string
+	Engine        string
+	HTTPTimeout   time.Duration
 	// StreamWriteIdleTimeout bounds how long a single streaming-response chunk may
 	// block while being written back to the router. Applied as a rolling per-chunk
 	// deadline so a reader that stops reading cannot leave the agent's write blocked
@@ -288,9 +335,9 @@ type AgentConfig struct {
 	StreamWriteIdleTimeout time.Duration
 	IdentityPath           string // Path to the persistent libp2p private key file (Ed25519)
 
-	// P2PListenPort is the TCP port the agent's libp2p node listens on.
-	// Default 0 lets the OS pick a random port (fine for bare-metal).
-	// Set to a fixed value when running in Docker so the port can be mapped.
+	// P2PListenPort is the local port of the agent's libp2p node, bound to
+	// 127.0.0.1 only (0 = random). The agent needs no inbound port: it dials the
+	// router, and the router sends inference back over that connection.
 	P2PListenPort int
 
 	// HardwareSampleInterval controls how often the background sampler collects
@@ -374,6 +421,7 @@ var BuildVersion = "dev"
 func DefaultAgentConfig() *AgentConfig {
 	return &AgentConfig{
 		JWTSecret:              os.Getenv("HIVENET_ROUTER_JWT_SECRET"),
+		BackendAPIKey:          strings.TrimSpace(os.Getenv("HIVENET_ROUTER_BACKEND_API_KEY")),
 		Model:                  "", // Auto-detected from backend if empty
 		Capacity:               10,
 		Version:                BuildVersion,

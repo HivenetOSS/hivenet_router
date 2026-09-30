@@ -81,6 +81,10 @@ type Agent struct {
 	identity   crypto.PrivKey // persistent libp2p identity — same peer ID across reconnects
 	peerID     peer.ID        // derived from identity once at startup; stamped on agent-side spans so Tempo spanmetrics carry peer_id
 
+	// gater restricts the libp2p node to the routers this agent authenticated
+	// against. Set to the router's peer ID from the auth response before dialing.
+	gater *p2p.RouterGater
+
 	// Hardware metric collection — sampled in background, read on every heartbeat.
 	collector  hardware.Collector
 	snapshotMu sync.RWMutex
@@ -114,8 +118,13 @@ func NewAgent(cfg *config.AgentConfig, engine Engine) *Agent {
 		cfg:       cfg,
 		engine:    engine,
 		collector: hardware.NewCollector(cfg.GPUDevicesFile),
+		gater:     p2p.NewRouterGater(),
+		// All backend traffic goes through this client, so the backend API key
+		// (if configured) applies to health checks and model discovery as well
+		// as inference. The key only goes to the backend and health URL hosts.
 		httpClient: &http.Client{
-			Timeout: cfg.HTTPTimeout,
+			Timeout:   cfg.HTTPTimeout,
+			Transport: BackendTransport(nil, cfg.BackendAPIKey, cfg.BackendURL, cfg.HealthURL),
 		},
 		stopCh: make(chan struct{}),
 	}
@@ -263,9 +272,11 @@ func (a *Agent) Run() error {
 // protocol using SetHTTPHandler + ServeMux, and starts serving.
 // Using SetHTTPHandler (not SetHTTPHandlerAtPath) keeps the well-known path equal
 // to the protocol ID, which is what NamespacedClient on the router side resolves.
+//
+// The node does not listen by default and only accepts the authenticated
+// router (see p2p.RouterGater); the handlers check the caller again.
 func (a *Agent) startP2PServer() (host.Host, *p2phttp.Host, error) {
-	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", a.cfg.P2PListenPort)
-	node, err := p2p.NewHost(listenAddr, a.identity)
+	node, err := p2p.NewHost(a.identity, a.cfg.P2PListenPort, a.gater)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create libp2p node: %w", err)
 	}
@@ -277,11 +288,25 @@ func (a *Agent) startP2PServer() (host.Host, *p2phttp.Host, error) {
 	mux.HandleFunc("/v1/chat/completions", a.chatHandler)
 	mux.HandleFunc("/", a.proxyHandler)
 	mux.HandleFunc("/health", a.healthHandler)
-	httpHost.SetHTTPHandler(inferenceProtocolID, mux)
+	httpHost.SetHTTPHandler(inferenceProtocolID, a.routerOnly(mux))
 
 	go httpHost.Serve() //nolint:errcheck
 
 	return node, httpHost, nil
+}
+
+// routerOnly rejects any request whose libp2p peer is not an authenticated
+// router. The connection gater already drops other peers; this is a second
+// check at the handler, in case the gater is ever bypassed or misconfigured.
+func (a *Agent) routerOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if caller := p2phttp.ClientPeerID(r); !a.gater.Allowed(caller) {
+			log.Warnf("Rejected request from unauthorized peer %q on %s", caller, r.URL.Path)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // buildRouterClient parses the router's libp2p info from the auth response,
@@ -311,6 +336,10 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 	if len(routerAddrs) == 0 {
 		return nil, fmt.Errorf("no valid router addresses in auth response")
 	}
+
+	// Allow the router through the connection gater before dialing it. It is
+	// the only peer this agent will talk to.
+	a.gater.SetRouters(routerPeerID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -763,7 +792,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// so we must not write anything to w after it returns on success.
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
 			chatReq.RawBytes, a.engine.Name(),
-			WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()),
+			WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
 			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout))
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
@@ -785,7 +814,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBytes, responseHeader, err := a.engine.ForwardChat(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model, chatReq,
-		WithHttpHeader(r.Header.Clone()), WithPeerID(a.peerID.String()))
+		WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -889,7 +918,7 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 		return
 	}
 	// Clone all incoming headers (preserves W3C trace context injected by the router).
-	req.Header = r.Header.Clone()
+	req.Header = forwardableHeaders(r.Header)
 	req.Header.Del("Content-Length") // Go's http client sets this from the body.
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -1064,4 +1093,15 @@ func (a *Agent) sleepOrStop(d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
+}
+
+// forwardableHeaders returns a copy of the router's request headers that is
+// safe to send to the backend engine. The router already strips client
+// credentials; this is a second guard so a client's router key can never
+// reach the backend, even from an older router. The backend's own key, when
+// configured, is added later by BackendTransport.
+func forwardableHeaders(h http.Header) http.Header {
+	out := h.Clone()
+	domain.StripClientCredentials(out)
+	return out
 }

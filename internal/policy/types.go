@@ -55,6 +55,11 @@ type Policy struct {
 	// ShedIf holds front-door shed thresholds; only kv_cache_utilization and
 	// waiting_requests are accepted (see knownShedIfFields in loader.go).
 	ShedIf map[string]ThresholdRule `yaml:"shed_if" json:"shed_if,omitempty"`
+
+	// Profile and Alias configure semantic (model-level) routing; see semantic.go.
+	// Both are valid only in per-model documents (LoadModelDocBytes).
+	Profile *ModelProfile `yaml:"profile" json:"profile,omitempty"`
+	Alias   *AliasSpec    `yaml:"alias"   json:"alias,omitempty"`
 }
 
 // PolicyMode selects the admission-limit profile for a policy's replicas.

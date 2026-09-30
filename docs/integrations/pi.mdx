@@ -1174,7 +1174,7 @@ Request rate by model:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_routing_requests_routed_total[5m]
+    hivenet_routing_requests_routed_total[5m]
   )
 )
 ```
@@ -1184,7 +1184,7 @@ Failed requests:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_tenant_requests_failed_total[5m]
+    hivenet_tenant_requests_failed_total[5m]
   )
 )
 ```

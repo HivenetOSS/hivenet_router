@@ -235,3 +235,45 @@ func TestDispatchNilPeerCloser_NoPanic(t *testing.T) {
 		t.Fatalf("error = %v, want code %s", err, domain.ErrCodeNoAgentsAvailable)
 	}
 }
+
+// A client-side error from the backend (context_length_exceeded,
+// invalid_parameter) is a verdict on the request, not the agent: it must not
+// raise the agent's consecutive-failure streak or lower its success rate, or a
+// client repeatedly sending over-long prompts could get a healthy agent
+// excluded by policy.
+func TestDispatchClientError_DoesNotPenalizeAgent(t *testing.T) {
+	for _, code := range []domain.ErrorCode{domain.ErrCodeContextLengthExceeded, domain.ErrCodeInvalidParameter} {
+		t.Run(string(code), func(t *testing.T) {
+			exec, counters, m := newExec(t)
+			queue := make(chan *domain.PendingRequest, 1)
+			forward := func(_ context.Context, a *domain.Agent, _ *domain.PendingRequest) (*domain.ChatResponse, float64, error) {
+				a.DecrementLoad()
+				return nil, 5, domain.NewRouterError(code, "rejected by backend", domain.SourceBackend)
+			}
+			p := router.NewRequestProcessor(queue, exec, nil, m, counters, 10, nil, nil,
+				router.WithForwardFunc(forward), router.WithPeerCloser(&fakePeerCloser{}))
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go p.Start(ctx)
+
+			for range 3 {
+				pending := newPending()
+				queue <- pending
+				if _, err := awaitResult(t, pending); err == nil {
+					t.Fatal("expected the backend error to reach the client")
+				}
+			}
+
+			successRate, _, consecutiveFails, ok := counters.LiveSnapshot(peer.ID("agent-pid-0001"))
+			if !ok {
+				t.Fatal("no counter state for the agent")
+			}
+			if consecutiveFails != 0 {
+				t.Errorf("consecutiveFails = %d, want 0 after client-side errors", consecutiveFails)
+			}
+			if successRate != 1 {
+				t.Errorf("successRate = %.2f, want 1 after client-side errors", successRate)
+			}
+		})
+	}
+}

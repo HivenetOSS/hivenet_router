@@ -261,6 +261,28 @@ The explicit value overrides automatic discovery.
   The model name registered by the agent must match the model name clients send to Hivenet Router.
 </Note>
 
+## Use a vLLM server that requires an API key
+
+If you start vLLM with `--api-key`, it rejects every `/v1/*` request that lacks `Authorization: Bearer <key>`, including the model discovery request the agent sends before any client traffic exists. Give the agent the same key:
+
+<CodeGroup>
+```bash Key file
+--backend-api-key-file /opt/hivenet-router/vllm.key
+```
+
+```bash Environment variable
+export HIVENET_ROUTER_BACKEND_API_KEY="<vllm-api-key>"
+```
+</CodeGroup>
+
+When a backend API key is set, the agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks, model discovery, metrics scrapes, and inference. The client's router API key never reaches vLLM, with or without a backend key: the agent removes the client's credentials before every request. When both are provided, `--backend-api-key-file` wins.
+
+<Note>
+The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
+</Note>
+
+The setting is not specific to vLLM. It works the same way for every engine and any OpenAI-compatible backend that expects a bearer key. See [Backend API key](/reference/configuration-reference#backend-api-key).
+
 ## Connect multiple models
 
 Each agent registers as an independent peer and represents one model.
@@ -316,7 +338,7 @@ When an agent reaches its declared capacity, the router stops assigning new requ
 Capacity does not change vLLM’s own scheduler limit. It tells Hivenet Router how much work the agent is prepared to accept.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify vLLM concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify vLLM concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection
@@ -388,20 +410,20 @@ View all engine metrics on the router:
 
 ```bash
 curl http://192.168.1.100:2112/metrics \
-  | grep hivenet_router_agent_engine
+  | grep hivenet_agent_engine
 ```
 
 Useful exported metrics include:
 
 ```text
-hivenet_router_agent_engine_kv_cache_utilization
-hivenet_router_agent_engine_running_requests
-hivenet_router_agent_engine_waiting_requests
-hivenet_router_agent_engine_preemptions_total
-hivenet_router_agent_engine_avg_ttft_seconds
-hivenet_router_agent_engine_p90_ttft_seconds
-hivenet_router_agent_engine_avg_itl_seconds
-hivenet_router_agent_engine_p90_itl_seconds
+hivenet_agent_engine_kv_cache_utilization
+hivenet_agent_engine_running_requests
+hivenet_agent_engine_waiting_requests
+hivenet_agent_engine_preemptions_total
+hivenet_agent_engine_avg_ttft_seconds
+hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_avg_itl_seconds
+hivenet_agent_engine_p90_itl_seconds
 ```
 
 View live values through the routing table:

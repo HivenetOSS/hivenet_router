@@ -221,6 +221,16 @@ type RouterMetrics struct {
 	// Labels: trigger (api|sighup), result (success|error).
 	policyReloadTotal *prometheus.CounterVec
 
+	// semanticDecisions counts semantic alias decisions.
+	// Labels: alias, route, source (pinned|affinity|scored|default|fallback|count, empty
+	// on failure), outcome (ok|invalid|forbidden|too_long|unsupported|unavailable).
+	// All label values come from operator config or fixed sets, so cardinality
+	// is bounded by the alias YAML.
+	semanticDecisions *prometheus.CounterVec
+	// semanticDecisionSeconds is the time an alias adds to a request (parse,
+	// resolve, body rewrite). Label: alias.
+	semanticDecisionSeconds *prometheus.HistogramVec
+
 	// --- HTTP server RED metrics (Layer 1) ---
 
 	// httpRequestDuration is the per-endpoint request duration histogram.
@@ -302,7 +312,7 @@ type RouterMetrics struct {
 	engineAvgTTFT *prometheus.GaugeVec
 
 	// engineP90TTFT is the 90th-percentile TTFT. Kept as a scalar gauge
-	// alongside the hivenet_router_agent_engine_ttft_seconds histogram because the
+	// alongside the hivenet_agent_engine_ttft_seconds histogram because the
 	// Inference Engine dashboard's per-peer status-history panels read it
 	// directly (one value per peer, no aggregation needed). For fleet-wide
 	// percentiles use histogram_quantile() on the histogram instead.
@@ -349,35 +359,35 @@ func NewRouterMetrics() *RouterMetrics {
 		registry: prometheus.NewRegistry(),
 		agentInfo: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_routing_agent_info",
+				Name: "hivenet_routing_agent_info",
 				Help: "Constant 1 for each agent currently registered in the routing table.",
 			},
 			agentLabels,
 		),
 		agentHealthy: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_routing_agent_healthy",
+				Name: "hivenet_routing_agent_healthy",
 				Help: "1 if the agent is healthy, 0 if the health monitor has marked it unhealthy.",
 			},
 			agentLabels,
 		),
 		agentLastSeen: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_routing_agent_last_seen_timestamp",
+				Name: "hivenet_routing_agent_last_seen_timestamp",
 				Help: "Unix timestamp of the last heartbeat received from the agent.",
 			},
 			agentLabels,
 		),
 		requestsRouted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_routing_requests_routed_total",
+				Name: "hivenet_routing_requests_routed_total",
 				Help: "Total number of inference requests successfully forwarded to an agent.",
 			},
 			[]string{"region", "engine", "model", "tenant_id"},
 		),
 		requestsFailed: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_routing_requests_failed_total",
+				Name: "hivenet_routing_requests_failed_total",
 				Help: "Total number of inference requests that could not be forwarded.",
 			},
 			[]string{"region", "engine", "model", "tenant_id"},
@@ -385,195 +395,195 @@ func NewRouterMetrics() *RouterMetrics {
 		// Per-tenant billing metrics
 		tenantInputTokens: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_input_tokens_total",
+				Name: "hivenet_tenant_input_tokens_total",
 				Help: "Lifetime prompt tokens per tenant, API key, and deployment.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id", "model"},
 		),
 		tenantOutputTokens: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_output_tokens_total",
+				Name: "hivenet_tenant_output_tokens_total",
 				Help: "Lifetime completion tokens per tenant, API key, and deployment.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id", "model"},
 		),
 		tenantRequestSuccess: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_requests_success_total",
+				Name: "hivenet_tenant_requests_success_total",
 				Help: "Successfully served requests per tenant, API key, and deployment.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id", "model"},
 		),
 		tenantRequestFailed: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_requests_failed_total",
+				Name: "hivenet_tenant_requests_failed_total",
 				Help: "Failed or rejected requests per tenant, API key, and deployment.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id", "model"},
 		),
 		tenantRateLimited: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_rate_limited_total",
+				Name: "hivenet_tenant_rate_limited_total",
 				Help: "Requests rejected due to RPM quota per tenant and API key.",
 			},
 			[]string{"tenant_id", "key_id"},
 		),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_quota_rpm_limit",
+				Name: "hivenet_tenant_quota_rpm_limit",
 				Help: "Configured RPM limit per tenant (0 = unlimited).",
 			},
 			[]string{"tenant_id"},
 		),
 		tenantQuotaTPDLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_quota_tpd_limit",
-				Help: "Configured tokens-per-day limit per tenant (0 = unlimited). Flat-shape keys only — per-model keys are reported via hivenet_router_tenant_per_model_quota_tpd_limit.",
+				Name: "hivenet_tenant_quota_tpd_limit",
+				Help: "Configured tokens-per-day limit per tenant (0 = unlimited). Flat-shape keys only — per-model keys are reported via hivenet_tenant_per_model_quota_tpd_limit.",
 			},
 			[]string{"tenant_id"},
 		),
 		tenantPerModelQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_per_model_quota_rpm_limit",
+				Name: "hivenet_tenant_per_model_quota_rpm_limit",
 				Help: "Effective per-minute RPM ceiling for a (tenant, model) pair on a per-model quota key. For per-replica quotas this is per_replica × live_healthy_replicas, refreshed on admission. 0 = unlimited.",
 			},
 			[]string{"tenant_id", "model"},
 		),
 		tenantPerModelQuotaTPDLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_per_model_quota_tpd_limit",
+				Name: "hivenet_tenant_per_model_quota_tpd_limit",
 				Help: "Configured tokens-per-day budget for a (tenant, model) pair on a per-model quota key (0 = unlimited).",
 			},
 			[]string{"tenant_id", "model"},
 		),
 		tenantTokensUsedToday: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_tokens_used_today",
+				Name: "hivenet_tenant_tokens_used_today",
 				Help: "Tokens consumed by the tenant so far today (UTC calendar day). Resets at midnight UTC.",
 			},
 			[]string{"tenant_id"},
 		),
 		tenantTokenLimited: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_tenant_token_limited_total",
+				Name: "hivenet_tenant_token_limited_total",
 				Help: "Requests rejected due to daily token budget per tenant, API key, and deployment, by phase (input|output).",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id", "phase"},
 		),
 		quotaBackendErrors: prometheus.NewCounter(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_quota_backend_errors_total",
+				Name: "hivenet_quota_backend_errors_total",
 				Help: "Redis quota backend call failures (fail-open events).",
 			},
 		),
 		admissionRejections: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_admission_rejections_total",
+				Name: "hivenet_admission_rejections_total",
 				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
 			},
 			[]string{"reason", "model"},
 		),
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_admission_occupancy_tokens",
+				Name: "hivenet_admission_occupancy_tokens",
 				Help: "Current weighted in-flight token sum (Σw) per model — the occupancy-budget numerator.",
 			},
 			[]string{"model"},
 		),
 		admissionBudgetTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_admission_budget_tokens",
+				Name: "hivenet_admission_budget_tokens",
 				Help: "Effective occupancy admit budget (admit_fraction × admit_budget_tokens) per model — the occupancy-budget denominator.",
 			},
 			[]string{"model"},
 		),
 		admissionInflightRequests: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_admission_inflight_requests",
+				Name: "hivenet_admission_inflight_requests",
 				Help: "Current in-flight request count per model, against the max_inflight backstop.",
 			},
 			[]string{"model"},
 		),
 		admissionMaxInflight: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_admission_max_inflight",
+				Name: "hivenet_admission_max_inflight",
 				Help: "Configured max_inflight backstop per model — the concurrency-utilization denominator. 0 = no backstop.",
 			},
 			[]string{"model"},
 		),
 		agentSuccessTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_requests_success_total",
+				Name: "hivenet_agent_requests_success_total",
 				Help: "Lifetime successful requests (HTTP 200) per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentFailedTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_requests_failed_total",
+				Name: "hivenet_agent_requests_failed_total",
 				Help: "Lifetime failed requests per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentSuccessRate: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_success_rate",
+				Name: "hivenet_agent_success_rate",
 				Help: "Derived success rate (0–1.0) per agent; recomputed on every write.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentCapacityUtil: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_capacity_utilization",
+				Name: "hivenet_agent_capacity_utilization",
 				Help: "Real-time ActiveRequests/Capacity ratio per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentInputTokens: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_input_tokens_total",
+				Name: "hivenet_agent_input_tokens_total",
 				Help: "Lifetime prompt tokens consumed per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentOutputTokens: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_output_tokens_total",
+				Name: "hivenet_agent_output_tokens_total",
 				Help: "Lifetime completion tokens produced per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentRejectedTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_rejected_requests_total",
+				Name: "hivenet_agent_rejected_requests_total",
 				Help: "Times TryAcquireSlot returned false (agent at full capacity) per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentDisconnections: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_disconnections_total",
+				Name: "hivenet_agent_disconnections_total",
 				Help: "Lifetime disconnection count per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentConnectionResets: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_connection_resets_total",
+				Name: "hivenet_agent_connection_resets_total",
 				Help: "Stale-connection evictions performed by the dispatcher on a connection-level forward failure.",
 			},
 			[]string{"model", "reason"},
 		),
 		agentSRTT: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_srtt_ms",
+				Name: "hivenet_agent_srtt_ms",
 				Help: "RFC 6298 smoothed RTT in milliseconds per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentRTTVAR: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_rttvar_ms",
+				Name: "hivenet_agent_rttvar_ms",
 				Help: "RFC 6298 RTT variance in milliseconds per agent.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
@@ -582,70 +592,70 @@ func NewRouterMetrics() *RouterMetrics {
 		// Hardware metrics — HAI-65
 		gpuUtil: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_utilization_percent",
+				Name: "hivenet_agent_gpu_utilization_percent",
 				Help: "GPU compute utilization percent per device.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		gpuVRAMUsed: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_vram_used_bytes",
+				Name: "hivenet_agent_gpu_vram_used_bytes",
 				Help: "VRAM currently in use per device (bytes).",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		gpuVRAMFree: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_vram_free_bytes",
+				Name: "hivenet_agent_gpu_vram_free_bytes",
 				Help: "VRAM available per device (bytes).",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		gpuVRAMTotal: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_vram_total_bytes",
+				Name: "hivenet_agent_gpu_vram_total_bytes",
 				Help: "Total VRAM capacity per device (bytes).",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		gpuTemp: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_temperature_celsius",
+				Name: "hivenet_agent_gpu_temperature_celsius",
 				Help: "GPU die temperature in Celsius per device.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		gpuPower: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_gpu_power_watts",
+				Name: "hivenet_agent_gpu_power_watts",
 				Help: "GPU power draw in watts per device.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "gpu_index", "gpu_id", "organization", "machine"},
 		),
 		cpuUsage: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_cpu_usage_percent",
+				Name: "hivenet_agent_cpu_usage_percent",
 				Help: "Node-level CPU utilization percent.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "organization", "machine"},
 		),
 		memUsedPct: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_memory_used_percent",
+				Name: "hivenet_agent_memory_used_percent",
 				Help: "System memory used as a percentage.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "organization", "machine"},
 		),
 		memAvailable: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_memory_available_bytes",
+				Name: "hivenet_agent_memory_available_bytes",
 				Help: "System memory available in bytes.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "organization", "machine"},
 		),
 		memTotal: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_memory_total_bytes",
+				Name: "hivenet_agent_memory_total_bytes",
 				Help: "Total system memory in bytes.",
 			},
 			[]string{"peer_id", "region", "model", "engine", "organization", "machine"},
@@ -654,56 +664,56 @@ func NewRouterMetrics() *RouterMetrics {
 		// Engine punctual metrics — HAI-60
 		engineKVCache: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_kv_cache_utilization",
+				Name: "hivenet_agent_engine_kv_cache_utilization",
 				Help: "Fraction of pre-allocated GPU KV-cache in use (0.0–1.0). Near 1.0 signals imminent preemptions.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineRunning: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_running_requests",
+				Name: "hivenet_agent_engine_running_requests",
 				Help: "Number of requests currently being processed by the inference engine.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineWaiting: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_waiting_requests",
+				Name: "hivenet_agent_engine_waiting_requests",
 				Help: "Number of requests queued in the engine scheduler. Non-zero means the scheduler is saturated.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		enginePreemptions: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_preemptions_total",
+				Name: "hivenet_agent_engine_preemptions_total",
 				Help: "Cumulative count of requests preempted by the engine. Use rate() in Prometheus to detect KV-cache thrashing.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineAvgTTFT: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_avg_ttft_seconds",
+				Name: "hivenet_agent_engine_avg_ttft_seconds",
 				Help: "Running average time-to-first-token in seconds (histogram sum/count). Absent when no requests have completed.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineP90TTFT: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_p90_ttft_seconds",
+				Name: "hivenet_agent_engine_p90_ttft_seconds",
 				Help: "P90 time-to-first-token in seconds (histogram quantile). Absent when no requests have completed.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineAvgITL: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_avg_itl_seconds",
+				Name: "hivenet_agent_engine_avg_itl_seconds",
 				Help: "Running average inter-token latency in seconds (histogram sum/count). Absent when no tokens have been generated.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		engineP90ITL: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_p90_itl_seconds",
+				Name: "hivenet_agent_engine_p90_itl_seconds",
 				Help: "P90 inter-token latency in seconds (histogram quantile). Absent when no tokens have been generated.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
@@ -711,7 +721,7 @@ func NewRouterMetrics() *RouterMetrics {
 		engineHistograms: newEngineHistogramCollector(),
 		engineFinishReason: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_engine_request_success_total",
+				Name: "hivenet_agent_engine_request_success_total",
 				Help: "Requests completed on the inference engine, partitioned by vLLM finished_reason (stop|length|abort|...). Incremented from cumulative-count deltas observed across scrapes; pod restarts are handled as counter resets.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine", "finished_reason"},
@@ -719,28 +729,28 @@ func NewRouterMetrics() *RouterMetrics {
 		engineFinishState: newEngineFinishReasonTracker(),
 		enginePredictedTPS: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_predicted_tps",
+				Name: "hivenet_agent_engine_predicted_tps",
 				Help: "Token generation throughput in tokens/sec (last-second average). Source: llamacpp:predicted_tokens_seconds.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		enginePromptTPS: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_agent_engine_prompt_tps",
+				Name: "hivenet_agent_engine_prompt_tps",
 				Help: "Prompt ingestion throughput in tokens/sec (last-second average). Source: llamacpp:prompt_tokens_seconds.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		agentFailureTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_agent_failure_total",
+				Name: "hivenet_agent_failure_total",
 				Help: "Total number of times an agent was marked unhealthy due to missed heartbeats (network/process death).",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
 		),
 		modelBackendFailureTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_model_backend_failure_total",
+				Name: "hivenet_model_backend_failure_total",
 				Help: "Total number of times an agent reported its inference backend as unhealthy via heartbeat health check.",
 			},
 			[]string{"peer_id", "model", "engine", "organization", "machine"},
@@ -771,42 +781,42 @@ func NewRouterMetrics() *RouterMetrics {
 		),
 		policyPrimaryRouted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_policy_primary_routed_total",
+				Name: "hivenet_policy_primary_routed_total",
 				Help: "Total requests served by the primary routing_policy step.",
 			},
 			[]string{"model"},
 		),
 		policyFallbackRouted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_policy_fallback_routed_total",
+				Name: "hivenet_policy_fallback_routed_total",
 				Help: "Total requests served by a fallback chain step (primary step was skipped or exhausted).",
 			},
 			[]string{"model"},
 		),
 		policyExhausted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_policy_exhausted_total",
+				Name: "hivenet_policy_exhausted_total",
 				Help: "Total requests where all policy steps were exhausted and the client received a 503.",
 			},
 			[]string{"model"},
 		),
 		policyProviderFallbackRouted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_policy_provider_fallback_total",
+				Name: "hivenet_policy_provider_fallback_total",
 				Help: "Total requests served by the closed-source provider fallback after all local steps were exhausted.",
 			},
 			[]string{"model"},
 		),
 		queueDepth: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_queue_depth",
+				Name: "hivenet_queue_depth",
 				Help: "Current number of requests waiting for a concurrency slot per model.",
 			},
 			[]string{"model"},
 		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "hivenet_router_queue_wait_seconds",
+				Name:    "hivenet_queue_wait_seconds",
 				Help:    "Time requests spend waiting in the per-model capacity queue before being dispatched.",
 				Buckets: prometheus.ExponentialBuckets(0.01, 2, 13), // 10ms to ~40s (0.01 × 2^12 = 40.96s)
 			},
@@ -814,7 +824,7 @@ func NewRouterMetrics() *RouterMetrics {
 		),
 		tenantRequestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "hivenet_router_tenant_request_duration_seconds",
+				Name:    "hivenet_tenant_request_duration_seconds",
 				Help:    "End-to-end request duration in seconds per tenant, API key, deployment, and model (handler entry to response written).",
 				Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
 			},
@@ -822,7 +832,7 @@ func NewRouterMetrics() *RouterMetrics {
 		),
 		requestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "hivenet_router_request_duration_seconds",
+				Name:    "hivenet_request_duration_seconds",
 				Help:    "End-to-end request duration from handler entry to response, labeled by tenant, agent, model, and status.",
 				Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
 			},
@@ -830,17 +840,32 @@ func NewRouterMetrics() *RouterMetrics {
 		),
 		tenantLastRequestTimestamp: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "hivenet_router_tenant_last_request_timestamp",
+				Name: "hivenet_tenant_last_request_timestamp",
 				Help: "Unix timestamp (seconds) of the most recent request per tenant, API key, and deployment. Use max() to get last-used time per key.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id"},
 		),
 		policyReloadTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "hivenet_router_policy_reload_total",
+				Name: "hivenet_policy_reload_total",
 				Help: "Total number of routing policy reload attempts, partitioned by trigger (api|sighup) and result (success|error).",
 			},
 			[]string{"trigger", "result"},
+		),
+		semanticDecisions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_semantic_decisions_total",
+				Help: "Semantic alias decisions by alias, chosen route, decision source and outcome (ok|invalid|forbidden|too_long|unsupported|unavailable).",
+			},
+			[]string{"alias", "route", "source", "outcome"},
+		),
+		semanticDecisionSeconds: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "hivenet_semantic_decision_seconds",
+				Help:    "Time a semantic alias adds to a request (parse, resolve, body rewrite), by alias.",
+				Buckets: []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.3},
+			},
+			[]string{"alias"},
 		),
 	}
 
@@ -923,6 +948,9 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueWaitSeconds,
 		// Policy management
 		m.policyReloadTotal,
+		// Semantic alias routing
+		m.semanticDecisions,
+		m.semanticDecisionSeconds,
 	)
 
 	// Go runtime metrics: goroutine count, memory, GC, scheduler latency.
@@ -1137,7 +1165,7 @@ func (m *RouterMetrics) TenantSetTPDLimit(tenantID string, tpd int) {
 // a (tenant, model) pair on a per-model quota key. The value already includes
 // the replica multiplication (per_replica × live_healthy_replicas), so the
 // gauge reflects the actual ceiling admission would apply at this moment —
-// dashboards can compare it against hivenet_router_tenant_per_model_request_total to
+// dashboards can compare it against hivenet_tenant_per_model_request_total to
 // derive utilization. Idempotent to call on every request; pure overwrite.
 func (m *RouterMetrics) TenantSetPerModelQuotaLimit(tenantID, model string, rpm int) {
 	m.tenantPerModelQuotaRPMLimit.With(prometheus.Labels{"tenant_id": tenantID, "model": model}).Set(float64(rpm))
@@ -1525,6 +1553,30 @@ func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64)
 // result is "success" or "error".
 func (m *RouterMetrics) PolicyReload(trigger, result string) {
 	m.policyReloadTotal.With(prometheus.Labels{"trigger": trigger, "result": result}).Inc()
+}
+
+// SemanticDecision records one semantic alias decision: its route, source and
+// outcome, and the time the alias added (seconds). Matches api.SemanticObserver.
+func (m *RouterMetrics) SemanticDecision(alias, route, source, outcome string, seconds float64) {
+	m.semanticDecisions.With(prometheus.Labels{"alias": alias, "route": route, "source": source, "outcome": outcome}).Inc()
+	m.semanticDecisionSeconds.With(prometheus.Labels{"alias": alias}).Observe(seconds)
+}
+
+// RegisterSemanticDecisionLog exports the decision log's drop and write-error
+// counts (hivenet_semantic_decision_log_dropped_total and
+// hivenet_semantic_decision_log_write_errors_total). Call once, when the log is
+// opened; the functions are read on every scrape.
+func (m *RouterMetrics) RegisterSemanticDecisionLog(dropped, writeErrors func() int64) {
+	m.registry.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_semantic_decision_log_dropped_total",
+			Help: "Semantic decision log records dropped because the write buffer was full or the log was closed.",
+		}, func() float64 { return float64(dropped()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_semantic_decision_log_write_errors_total",
+			Help: "Encode or flush errors hit by the semantic decision log writer (e.g. a full disk).",
+		}, func() float64 { return float64(writeErrors()) }),
+	)
 }
 
 // ObserveHTTPRequest records the duration and status of an HTTP request for RED metrics.

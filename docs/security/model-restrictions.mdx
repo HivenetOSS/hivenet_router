@@ -374,6 +374,8 @@ A disallowed request does not:
 
 This keeps access control independent of fleet state.
 
+A request that names a [semantic model alias](/routing/semantic-routing) is checked on the concrete model the alias resolves to. Grant the key the alias's candidate models, not the alias name.
+
 ## Provider fallback
 
 Provider fallback authorizes the model originally requested by the client.
@@ -760,7 +762,7 @@ Inspect successful routed traffic by tenant and model:
 ```promql
 sum by (tenant_id, model) (
   rate(
-    hivenet_router_routing_requests_routed_total[1h]
+    hivenet_routing_requests_routed_total[1h]
   )
 )
 ```
@@ -770,7 +772,7 @@ Inspect all failed or rejected tenant requests:
 ```promql
 sum by (tenant_id, key_id, model) (
   rate(
-    hivenet_router_tenant_requests_failed_total[5m]
+    hivenet_tenant_requests_failed_total[5m]
   )
 )
 ```

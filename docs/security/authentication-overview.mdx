@@ -115,6 +115,8 @@ An agent joins the network in two stages.
     - the short-lived session
 
     Router-agent traffic then uses libp2p with Noise encryption.
+
+    The agent accepts libp2p connections only from the router it authenticated against. Its libp2p node listens on `127.0.0.1` only, and any other peer is disconnected right after the Noise handshake. Inference requests therefore always go through the router, with its API keys, quotas and routing policy.
   </Step>
 </Steps>
 
@@ -523,7 +525,7 @@ Hivenet Router protects different network paths differently.
 | Path | Transport protection |
 | --- | --- |
 | Agent → Router gRPC authentication | TLS 1.3 with a pinned key derived from the JWT secret |
-| Router ↔ Agent libp2p traffic | Noise encryption |
+| Router ↔ Agent libp2p traffic | Noise encryption; the agent accepts only its authenticated router |
 | Client → Router HTTP API | No built-in TLS termination |
 
 For production client traffic, place Hivenet Router behind a reverse proxy, ingress, or load balancer that provides HTTPS.
