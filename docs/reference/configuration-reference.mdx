@@ -876,7 +876,7 @@ Without a backend API key, the agent forwards the client's request headers to th
 | `--router-grpc` | — | `localhost:50051` | Router gRPC authentication address; the response supplies the router’s libp2p connection details |
 | `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Deprecated no-op retained for CLI compatibility |
 | `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
-| `--p2p-listen-port` | — | `0` | Local libp2p port; agents initiate the router connection and normally do not need a fixed inbound port |
+| `--p2p-listen-port` | — | `0` | Local libp2p port, bound to `127.0.0.1` only (`0` = random). Agents dial the router and need no inbound port |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Shared agent-authentication secret |
 
 ### Router discovery
