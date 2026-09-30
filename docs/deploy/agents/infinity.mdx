@@ -394,7 +394,7 @@ Treat these as starting points. The appropriate value depends on:
 Because both agents share one Infinity process and one set of hardware resources, their capacities are not independent physical limits. Test the combined workload before raising either value.
 
 <Note>
-  For streaming-capable workloads, Hivenet Router releases an agent capacity slot when response headers arrive, while backend work can continue. Infinity embeddings and reranking are normally non-streaming, but the same `--capacity` value remains a routing-admission setting rather than a direct backend scheduler limit.
+  Hivenet Router holds an agent capacity slot until the response completes, including for streaming responses, which hold the slot until the stream fully drains. Infinity embeddings and reranking are normally non-streaming. `--capacity` limits requests routed through Hivenet Router, but it does not change Infinity’s own scheduler limits.
 </Note>
 
 ## Verify both agents

@@ -459,7 +459,7 @@ gate[6] capacity [at_capacity=3]
 </Warning>
 
 <Note>
-  For streaming responses, Hivenet Router releases the capacity slot when response headers arrive, while backend generation can continue. Gate 6 therefore limits routing admission rather than the complete lifetime of active streams.
+  For streaming responses, Hivenet Router holds the capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. Gate 6 therefore applies for the complete lifetime of active streams.
 </Note>
 
 ## Gate 7: Dynamic metric thresholds
