@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
+
+package router
+
+import (
+	"errors"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+
+	"hivenet_router/internal/domain"
+	"hivenet_router/internal/metrics"
+)
+
+const truncatedFrameMarker = "stream_truncated"
+
+// failingReader emits its data, then returns fail on every subsequent read —
+// a stand-in for an agent response body whose stream dies mid-generation
+// (connection reset, request deadline).
+type failingReader struct {
+	data string
+	pos  int
+	fail error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if f.pos < len(f.data) {
+		n := copy(p, f.data[f.pos:])
+		f.pos += n
+		return n, nil
+	}
+	return 0, f.fail
+}
+
+// counterValue reads a single counter series (by metric name and label set)
+// from the router's private registry. A missing series reads as zero.
+func counterValue(t *testing.T, m *metrics.RouterMetrics, name string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := m.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, mtr := range f.GetMetric() {
+			match := true
+			for _, l := range mtr.GetLabel() {
+				if labels[l.GetName()] != l.GetValue() {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			c := mtr.GetCounter()
+			if c == nil {
+				t.Fatalf("metric %s is not a counter", name)
+			}
+			return c.GetValue()
+		}
+	}
+	return 0
+}
+
+func drainTestAgent(t *testing.T) *domain.Agent {
+	t.Helper()
+	agent := domain.NewAgent(peer.ID("agent-trunc-1"), domain.AgentMetadata{
+		Model: "test-model", Capacity: 2, Capability: domain.CapabilityLLM, Engine: "vllm",
+	}, "")
+	if !agent.TryAcquireSlot() {
+		t.Fatal("failed to acquire slot")
+	}
+	return agent
+}
+
+// drainAndRead runs drainStream against body and reads everything the client
+// pipe delivers, including the terminal error frame if one is injected.
+func drainAndRead(t *testing.T, p *RequestProcessor, agent *domain.Agent, body io.Reader) string {
+	t.Helper()
+	pending := newDrainPending()
+	pr, pw := io.Pipe()
+	go p.drainStream(agent, pending, pw, newStreamingResponse(body), func() {}, NewSSETokenMeter(),
+		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad() })
+	out, err := io.ReadAll(pr)
+	if err != nil {
+		t.Fatalf("reading client pipe: %v", err)
+	}
+	return string(out)
+}
+
+// TestDrainStream_UpstreamErrorInjectsErrorFrame pins the silent-truncation
+// fix: when the agent stream dies mid-generation, the client must receive a
+// terminal SSE error frame (so a partial response is never mistaken for a
+// complete one) and the truncation must be visible in metrics.
+func TestDrainStream_UpstreamErrorInjectsErrorFrame(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	body := &failingReader{
+		data: "data: {\"choices\":[{\"delta\":{\"content\":\"partial \"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"content\":\"text\"}}]}\n\n",
+		fail: errors.New("upstream stream reset"),
+	}
+
+	out := drainAndRead(t, p, agent, body)
+
+	if !strings.Contains(out, truncatedFrameMarker) {
+		t.Fatalf("client stream missing terminal error frame; got: %q", out)
+	}
+	if !strings.Contains(out, `"error"`) {
+		t.Fatalf("terminal frame is not an OpenAI error frame; got: %q", out)
+	}
+	// The partial content must still be delivered, frame included at the end.
+	idxPartial := strings.Index(out, "partial")
+	idxFrame := strings.Index(out, truncatedFrameMarker)
+	if idxPartial < 0 || idxFrame < idxPartial {
+		t.Fatalf("error frame must come after the partial content; got: %q", out)
+	}
+	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+		map[string]string{"model": "test-model", "reason": "upstream_error"}); got != 1 {
+		t.Fatalf("stream_truncated_total{upstream_error} = %v, want 1", got)
+	}
+	// The truncated stream still counts as served (tokens were generated); the
+	// truncation counter is the visibility signal.
+	if got := agent.GetLoad(); got != 0 {
+		t.Fatalf("load after upstream error = %d, want 0", got)
+	}
+}
+
+// TestDrainStream_MissingTerminalInjectsErrorFrame covers the agent-side
+// abort: the agent's own write failed and its handler returned, so the router
+// sees a CLEAN EOF — but the stream never carried a finish_reason or [DONE].
+func TestDrainStream_MissingTerminalInjectsErrorFrame(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	body := io.NopCloser(
+		strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"only a delta\"}}]}\n\n"),
+	)
+
+	out := drainAndRead(t, p, agent, body)
+
+	if !strings.Contains(out, truncatedFrameMarker) {
+		t.Fatalf("client stream missing terminal error frame; got: %q", out)
+	}
+	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+		map[string]string{"model": "test-model", "reason": "missing_terminal"}); got != 1 {
+		t.Fatalf("stream_truncated_total{missing_terminal} = %v, want 1", got)
+	}
+}
+
+// TestDrainStream_CompleteStreamNoFrame is the negative case: a healthy stream
+// (delta + terminal finish_reason + [DONE]) must pass through untouched, with
+// no injected frame and no truncation counter.
+func TestDrainStream_CompleteStreamNoFrame(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	body := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n",
+	))
+
+	out := drainAndRead(t, p, agent, body)
+
+	if strings.Contains(out, truncatedFrameMarker) {
+		t.Fatalf("complete stream must not carry an error frame; got: %q", out)
+	}
+	if strings.Contains(out, `"error"`) {
+		t.Fatalf("complete stream must not carry an error frame; got: %q", out)
+	}
+	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+		map[string]string{"model": "test-model"}); got != 0 {
+		t.Fatalf("stream_truncated_total = %v, want 0 for a complete stream", got)
+	}
+	// Byte-exact forwarding must survive: the [DONE] marker is still the last
+	// thing the client sees.
+	if !strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]") {
+		t.Fatalf("stream must end with the [DONE] marker; got: %q", out)
+	}
+}
+
+// TestDrainStream_ClientDisconnectNotCounted pins the client-side boundary:
+// when the CLIENT goes away (handler closes the pipe), the failed write is not
+// an upstream truncation — no error frame is expected and the counter must
+// stay at zero.
+func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	pending := newDrainPending()
+	pr, pw := io.Pipe()
+
+	go p.drainStream(agent, pending, pw, newStreamingResponse(infiniteReader{}), func() {}, NewSSETokenMeter(),
+		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad() })
+
+	// Let the first write land, then disconnect the client.
+	time.Sleep(20 * time.Millisecond)
+	if err := pr.Close(); err != nil {
+		t.Fatalf("closing pipe: %v", err)
+	}
+
+	// The drain goroutine exits when the next write fails; give it a beat,
+	// then assert the counter was untouched.
+	var got float64
+	for i := 0; i < 100; i++ {
+		got = counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+			map[string]string{"model": "test-model"})
+		if got != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got != 0 {
+		t.Fatalf("client disconnect must not count as truncation; counter = %v", got)
+	}
+	if got := agent.GetLoad(); got != 0 {
+		t.Fatalf("load after client disconnect = %d, want 0", got)
+	}
+}
+
+// TestDrainStream_AnthropicStreamNotMisjudged guards against false positives:
+// Anthropic-dialect streams end with a message_stop event, never with an
+// OpenAI finish_reason or [DONE]. They must not be flagged as truncated.
+func TestDrainStream_AnthropicStreamNotMisjudged(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	body := io.NopCloser(strings.NewReader(
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n",
+	))
+
+	out := drainAndRead(t, p, agent, body)
+
+	if strings.Contains(out, truncatedFrameMarker) {
+		t.Fatalf("Anthropic-dialect stream must not carry an error frame; got: %q", out)
+	}
+	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+		map[string]string{"model": "test-model"}); got != 0 {
+		t.Fatalf("Anthropic-dialect stream must not count as truncated; counter = %v", got)
+	}
+}

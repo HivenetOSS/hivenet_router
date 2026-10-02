@@ -295,6 +295,13 @@ The exact event structure comes from the backend.
   Hivenet Router can relay a backend’s SSE stream, but it cannot convert a non-streaming backend response into streaming output.
 </Info>
 
+<Warning>
+  If the upstream stream is cut short mid-generation (agent disconnection, request deadline), the router appends a terminal
+  `data: {"error":{"code":"stream_truncated",…}}` frame before closing the stream. Everything before that frame is partial;
+  treat the frame as a retryable error rather than a complete answer. The event is counted in the
+  `hivenet_stream_truncated_total` router metric.
+</Warning>
+
 ## Anthropic Messages
 
 Send Anthropic-compatible requests to:

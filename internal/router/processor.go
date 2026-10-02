@@ -737,6 +737,14 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 // disconnect — so least-loaded observes the agent's real concurrent load for the
 // whole generation, not just the TTFT window.
 //
+// Truncation handling: if the upstream stream dies mid-generation (agent
+// connection reset, request deadline) or closes without the terminal marker
+// (finish_reason / [DONE]), the client would otherwise see a partial stream end
+// silently and treat it as a complete answer. drainStream therefore injects a
+// terminal SSE error frame before closing the pipe and records
+// hivenet_stream_truncated_total. A client-side failure (the handler closed the
+// pipe because the client went away) fails the frame write and is not counted.
+//
 // The goroutine owns resp.Body and cancel: both stay open until the stream has
 // fully drained, which is what makes the late slot release safe.
 func (p *RequestProcessor) drainStream(
@@ -754,8 +762,40 @@ func (p *RequestProcessor) drainStream(
 	defer pw.Close()
 	defer resp.Body.Close()
 	// Forward bytes to the client byte-exact while a copy feeds the token
-	// meter (TeeReader never alters the forwarded stream).
-	io.Copy(pw, io.TeeReader(resp.Body, meter)) //nolint:errcheck
+	// meter (TeeReader never alters the forwarded stream). The capturing
+	// reader records an upstream (agent) read failure separately so it can be
+	// told apart from a client-side write failure after io.Copy returns.
+	var srcErr error
+	io.Copy(pw, &errCaptureReader{r: io.TeeReader(resp.Body, meter), e: &srcErr}) //nolint:errcheck
+
+	// Detect a truncated stream before the pipe closes: (1) the agent stream
+	// errored mid-generation (connection reset, deadline), or (2) the stream
+	// closed cleanly but never carried the terminal marker — the agent's own
+	// write side failed and the handler returned early, which the router sees
+	// as a clean EOF with no finish_reason / [DONE]. Anthropic-dialect
+	// streams never set sawOpenAI, so they are never misjudged.
+	var truncReason string
+	switch {
+	case srcErr != nil:
+		truncReason = "upstream_error"
+	case meter.SawOpenAIChunks() && !meter.SawTerminal():
+		truncReason = "missing_terminal"
+	}
+	if truncReason != "" {
+		p.metrics.StreamTruncated(model, truncReason)
+		extra := ""
+		if srcErr != nil {
+			extra = ": " + srcErr.Error()
+		}
+		log.Warnf("Stream for request %s truncated (%s%s) — injecting terminal error frame",
+			pending.ID, truncReason, extra)
+		// Terminal SSE error frame (OpenAI convention): clients that understand
+		// it surface a retryable error instead of a silent partial answer.
+		// If the client already went away the write fails — a no-op, the
+		// metric above still records the event.
+		frame := "data: {\"error\":{\"code\":\"stream_truncated\",\"message\":\"upstream stream ended before completion; the response may be partial\",\"type\":\"server_error\"}}\n\n"
+		_, _ = pw.Write([]byte(frame))
+	}
 
 	// Stream finished — the token counts are now known. Accounting is
 	// post-hoc: the response is already delivered, so this deducts the
@@ -788,6 +828,24 @@ func (p *RequestProcessor) drainStream(
 	// reads GetLoad() directly, so this is metric-accuracy only.
 	releaseSlot()
 	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
+}
+
+// errCaptureReader wraps a reader and records the first non-EOF read error
+// into e. drainStream uses it to tell an upstream (agent) stream failure apart
+// from a client-side write failure after io.Copy returns: a read error means
+// the agent's stream died and the client deserves a terminal error frame, a
+// write error means the client went away and the frame would only be noise.
+type errCaptureReader struct {
+	r io.Reader
+	e *error
+}
+
+func (rc *errCaptureReader) Read(p []byte) (int, error) {
+	n, err := rc.r.Read(p)
+	if err != nil && err != io.EOF && rc.e != nil && *rc.e == nil {
+		*rc.e = err
+	}
+	return n, err
 }
 
 // tryProviderFallback forwards pending to the named closed-source provider using the
