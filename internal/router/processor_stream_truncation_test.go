@@ -36,6 +36,22 @@ func (f *failingReader) Read(p []byte) (int, error) {
 	return 0, f.fail
 }
 
+// openAIChunkReader streams OpenAI-dialect delta chunks forever — the
+// production client-disconnect scenario: the client goes away mid-OpenAI
+// stream, leaving sawOpenAI set with no terminal marker. Without the
+// clientGone guard in drainStream that would be miscounted as missing_terminal.
+type openAIChunkReader struct{ pos int }
+
+func (r *openAIChunkReader) Read(p []byte) (int, error) {
+	chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+	n := copy(p, chunk[r.pos:])
+	r.pos += n
+	if r.pos >= len(chunk) {
+		r.pos = 0
+	}
+	return n, nil
+}
+
 // counterValue reads a single counter series (by metric name and label set)
 // from the router's private registry. A missing series reads as zero.
 func counterValue(t *testing.T, m *metrics.RouterMetrics, name string, labels map[string]string) float64 {
@@ -65,6 +81,30 @@ func counterValue(t *testing.T, m *metrics.RouterMetrics, name string, labels ma
 			}
 			return c.GetValue()
 		}
+	}
+	return 0
+}
+
+// counterTotal sums every series of a counter family, across all label sets.
+// A missing family reads as zero. Use this when the test does not know (or
+// care which) reason label the increment landed under.
+func counterTotal(t *testing.T, m *metrics.RouterMetrics, name string) float64 {
+	t.Helper()
+	families, err := m.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		var sum float64
+		for _, mtr := range f.GetMetric() {
+			if c := mtr.GetCounter(); c != nil {
+				sum += c.GetValue()
+			}
+		}
+		return sum
 	}
 	return 0
 }
@@ -189,9 +229,11 @@ func TestDrainStream_CompleteStreamNoFrame(t *testing.T) {
 }
 
 // TestDrainStream_ClientDisconnectNotCounted pins the client-side boundary:
-// when the CLIENT goes away (handler closes the pipe), the failed write is not
-// an upstream truncation — no error frame is expected and the counter must
-// stay at zero.
+// when the CLIENT goes away mid-OpenAI-stream (handler closes the pipe), the
+// failed write is not an upstream truncation — no error frame is expected and
+// the counter must stay at zero. The upstream streams OpenAI-dialect chunks
+// forever (sawOpenAI set, no terminal), i.e. the production scenario where a
+// user aborts pi mid-generation.
 func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
 	agent := drainTestAgent(t)
 	p := newTestProcessor(t)
@@ -199,21 +241,33 @@ func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
 	pending := newDrainPending()
 	pr, pw := io.Pipe()
 
-	go p.drainStream(agent, pending, pw, newStreamingResponse(infiniteReader{}), func() {}, NewSSETokenMeter(),
+	go p.drainStream(agent, pending, pw, newStreamingResponse(&openAIChunkReader{}), func() {}, NewSSETokenMeter(),
 		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad() })
 
-	// Let the first write land, then disconnect the client.
-	time.Sleep(20 * time.Millisecond)
+	// Consume the pipe in the background: io.Pipe is unbuffered, so without a
+	// reader the very first write blocks forever and the token meter would
+	// see no chunks. The reader must see the OpenAI chunks land before the
+	// client disconnects, or the case under test never arises.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(io.Discard, pr)
+	}()
+
+	// Let chunks flow, then disconnect the client.
+	time.Sleep(30 * time.Millisecond)
 	if err := pr.Close(); err != nil {
 		t.Fatalf("closing pipe: %v", err)
 	}
+	<-done
 
-	// The drain goroutine exits when the next write fails; give it a beat,
-	// then assert the counter was untouched.
+	// The drain goroutine exits when its next write fails; give it a beat,
+	// then assert the counter was untouched. Sum the whole family: the test
+	// must not pass because an increment landed under a label set it cannot
+	// see — counterValue with a partial label set matches nothing here.
 	var got float64
 	for i := 0; i < 100; i++ {
-		got = counterValue(t, p.metrics, "hivenet_stream_truncated_total",
-			map[string]string{"model": "test-model"})
+		got = counterTotal(t, p.metrics, "hivenet_stream_truncated_total")
 		if got != 0 {
 			break
 		}
