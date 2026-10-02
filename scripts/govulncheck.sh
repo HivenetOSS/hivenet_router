@@ -17,13 +17,10 @@ GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
 #   Hivenet Router uses the TCP/QUIC libp2p transports, not WebRTC/DTLS, so the
 #   vulnerable handshake path is not exercised. Re-check when pion ships a fix.
 #
-# GO-2026-6505 — otel exporter config logging may leak endpoint URLs in info
-#   logs (CVE-2026-81870, GHSA-8wmf-6v46-5gfg). Fixed in go.opentelemetry.io/otel
-#   1.45.0; the module is pinned at 1.44.0. TEMPORARY: this entry unblocks CI
-#   until the dependency bump lands (the dependabot group-bump PR bundles 14
-#   modules and is currently red on test/lint/e2e, so the org needs a minimal
-#   otel bump first). REMOVE this entry when otel >= 1.45.0 is merged.
-ALLOWLIST="GO-2026-4479 GO-2026-6505"
+# (GO-2026-6505, the otel endpoint-URL log leak, was temporarily allowlisted
+# while otel 1.44.0 was pinned; the module is now at 1.45.0, which contains
+# the fix, so the entry is gone.)
+ALLOWLIST="GO-2026-4479"
 
 echo "Running govulncheck@${GOVULNCHECK_VERSION} ..."
 json="$(go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" -format json ./...)"
