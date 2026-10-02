@@ -766,7 +766,16 @@ func (p *RequestProcessor) drainStream(
 	// reader records an upstream (agent) read failure separately so it can be
 	// told apart from a client-side write failure after io.Copy returns.
 	var srcErr error
-	io.Copy(pw, &errCaptureReader{r: io.TeeReader(resp.Body, meter), e: &srcErr}) //nolint:errcheck
+	_, copyErr := io.Copy(pw, &errCaptureReader{r: io.TeeReader(resp.Body, meter), e: &srcErr})
+
+	// A write failure (copyErr set, no upstream read error) means the client
+	// went away mid-stream: the client chose to stop, so this is not a system
+	// truncation — do not count it and do not inject a frame (the write would
+	// be a no-op anyway).
+	clientGone := copyErr != nil && srcErr == nil
+	if clientGone {
+		log.Debugf("Stream for request %s ended because the client disconnected — not counted as truncation", pending.ID)
+	}
 
 	// Detect a truncated stream before the pipe closes: (1) the agent stream
 	// errored mid-generation (connection reset, deadline), or (2) the stream
@@ -778,7 +787,7 @@ func (p *RequestProcessor) drainStream(
 	switch {
 	case srcErr != nil:
 		truncReason = "upstream_error"
-	case meter.SawOpenAIChunks() && !meter.SawTerminal():
+	case !clientGone && meter.SawOpenAIChunks() && !meter.SawTerminal():
 		truncReason = "missing_terminal"
 	}
 	if truncReason != "" {
