@@ -37,6 +37,16 @@ type SSETokenMeter struct {
 	usagePrompt     int
 	usageCompletion int
 
+	// sawOpenAI reports whether any OpenAI-dialect event was seen (a chunk with
+	// a choices array or the [DONE] marker). Anthropic-dialect streams never
+	// set it, so truncation detection (which is keyed off OpenAI terminal
+	// markers) does not misfire on Anthropic streams that terminate with a
+	// message_stop event instead.
+	sawOpenAI bool
+	// sawTerminal reports whether the OpenAI-dialect terminal marker was seen:
+	// a choices chunk with a non-null, non-empty finish_reason, or [DONE].
+	sawTerminal bool
+
 	// onContent, when set, is called with each streamed delta's content as it is
 	// parsed. It lets the occupancy budget grow an undeclared request's footprint
 	// live, before the stream's total is known. Never called after the stream ends.
@@ -104,6 +114,9 @@ type sseChunk struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
+		// Pointer: intermediate chunks carry "finish_reason": null, which must
+		// not count as a terminal marker.
+		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -128,12 +141,25 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 		return
 	}
 	payload := bytes.TrimSpace(line[len("data:"):])
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+	if len(payload) == 0 {
+		return
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		m.sawOpenAI = true
+		m.sawTerminal = true
 		return
 	}
 	var c sseChunk
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return // non-JSON comment/keepalive — ignore
+	}
+	if len(c.Choices) > 0 {
+		m.sawOpenAI = true
+		for _, ch := range c.Choices {
+			if ch.FinishReason != nil && *ch.FinishReason != "" {
+				m.sawTerminal = true
+			}
+		}
 	}
 	if c.Usage != nil && (c.Usage.PromptTokens > 0 || c.Usage.CompletionTokens > 0) {
 		m.haveUsage = true
@@ -178,6 +204,15 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 // message_delta). When false, Tokens returns an estimate, which the caller must
 // not feed back into the learned estimator.
 func (m *SSETokenMeter) HaveUsage() bool { return m.haveUsage }
+
+// SawOpenAIChunks reports whether the stream carried any OpenAI-dialect event
+// (a chunk with a choices array or the [DONE] marker).
+func (m *SSETokenMeter) SawOpenAIChunks() bool { return m.sawOpenAI }
+
+// SawTerminal reports whether the OpenAI-dialect terminal marker was seen
+// (a non-null finish_reason or [DONE]). A stream that ended (EOF or upstream
+// error) with SawOpenAIChunks() && !SawTerminal() was truncated.
+func (m *SSETokenMeter) SawTerminal() bool { return m.sawTerminal }
 
 // Tokens returns the prompt and completion token counts for the stream. It
 // prefers the backend-reported usage (exact) and otherwise estimates: prompt

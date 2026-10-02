@@ -87,6 +87,12 @@ type RouterMetrics struct {
 	// dispatcher when a forward fails on a dead libp2p connection. Labels: model, reason.
 	agentConnectionResets *prometheus.CounterVec
 
+	// streamTruncatedTotal counts streamed responses that ended before the
+	// backend's terminal marker (finish_reason / [DONE]) — the client received
+	// a partial response and the router injected a terminal SSE error frame.
+	// Labels: model, reason (upstream_error | missing_terminal).
+	streamTruncatedTotal *prometheus.CounterVec
+
 	// agentFailureTotal counts times the health monitor marked an agent unhealthy
 	// due to missed heartbeats (network/process death).
 	// Labels: peer_id, model, engine, organization, machine.
@@ -574,6 +580,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model", "reason"},
 		),
+		streamTruncatedTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_stream_truncated_total",
+				Help: "Streamed responses that ended before the backend's terminal marker (finish_reason / [DONE]), leaving the client a partial response.",
+			},
+			[]string{"model", "reason"},
+		),
 		agentSRTT: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_agent_srtt_ms",
@@ -905,6 +918,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.agentRejectedTotal,
 		m.agentDisconnections,
 		m.agentConnectionResets,
+		m.streamTruncatedTotal,
 		m.agentSRTT,
 		m.agentRTTVAR,
 		// Hardware metrics
@@ -1289,6 +1303,15 @@ func (m *RouterMetrics) PolicyExhausted(model string) {
 // a fresh one. reason is the failure category (currently "forward_failure").
 func (m *RouterMetrics) AgentConnectionReset(model, reason string) {
 	m.agentConnectionResets.With(prometheus.Labels{"model": model, "reason": reason}).Inc()
+}
+
+// StreamTruncated records a streamed response that ended before the backend's
+// terminal marker (finish_reason / [DONE]) — the client received a partial
+// response and the router injected a terminal SSE error frame. reason is
+// "upstream_error" (the agent stream died mid-generation) or
+// "missing_terminal" (the stream closed cleanly but was incomplete).
+func (m *RouterMetrics) StreamTruncated(model, reason string) {
+	m.streamTruncatedTotal.With(prometheus.Labels{"model": model, "reason": reason}).Inc()
 }
 
 // ResetAgentSeries clears every per-agent lifetime series so a metrics reset starts

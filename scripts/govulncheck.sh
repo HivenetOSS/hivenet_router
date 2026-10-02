@@ -16,6 +16,10 @@ GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.5.0}"
 #   go-libp2p's WebRTC transport (go-libp2p → webrtc → pion/stun → pion/dtls/v2);
 #   Hivenet Router uses the TCP/QUIC libp2p transports, not WebRTC/DTLS, so the
 #   vulnerable handshake path is not exercised. Re-check when pion ships a fix.
+#
+# (GO-2026-6505, the otel endpoint-URL log leak, was temporarily allowlisted
+# while otel 1.44.0 was pinned; the module is now at 1.45.0, which contains
+# the fix, so the entry is gone.)
 ALLOWLIST="GO-2026-4479"
 
 echo "Running govulncheck@${GOVULNCHECK_VERSION} ..."

@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /hivenet-router ./cmd/router/
 RUN apk --no-cache add git && OUT=/licenses ./scripts/collect-licenses.sh ./cmd/router
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.22
 
 # ca-certificates required for TLS connections (gRPC, libp2p)
 RUN apk --no-cache add ca-certificates
