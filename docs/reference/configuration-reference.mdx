@@ -470,6 +470,8 @@ Agents normally:
 | `--universal-flush-interval` | — | `30s` | Frequency for flushing per-agent history and persistent quota changes |
 | `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup |
 
+The `GET /health` probe verifies that this directory remains accessible (write, flush, read-back, and delete of a small file) on every call. Set `HIVENET_ROUTER_STORAGE_VOLUME_NAME` and `HIVENET_ROUTER_STORAGE_CLASS` (environment-only, see [Router environment-only settings](#router-environment-only-settings)) so the warning logged on a failed check names the backing volume and its storage class.
+
 The persistent database can contain:
 
 - per-agent request and token history
@@ -576,6 +578,8 @@ These settings do not have equivalent router command-line flags.
 | `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of `admit_budget_tokens` available for occupancy admission; valid range `(0, 1]` |
 | `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | Maximum time an over-budget request waits for occupancy to free; `0` rejects immediately |
 | `HIVENET_ROUTER_RPM_BURST_SECONDS` | `0` | RPM bucket burst window in seconds; `0` keeps a full minute of burst capacity, valid range `[0, 60)` |
+| `HIVENET_ROUTER_STORAGE_VOLUME_NAME` | Empty | Name of the volume backing the persistent BadgerDB directory (the PVC name in Kubernetes deployments); included in `/health` storage-fault warning logs so operators can correlate a fault with the pod's volume |
+| `HIVENET_ROUTER_STORAGE_CLASS` | Empty | Storage class of the volume backing the persistent BadgerDB directory (for example `longhorn-1r`); included in `/health` storage-fault warning logs |
 | `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | `false` | Set to `true` to permit unauthenticated `/admin/*` endpoints when administrator mode is `none`; development and testing only |
 
 ### `HIVENET_ROUTER_AUTH_MODE`

@@ -485,6 +485,8 @@ Expected response:
 }
 ```
 
+A `503` response with `"error": "storage unavailable"` means the volume behind the router's data directory (`--disk-db-path`) is faulted, detached, or read-only — check the router log for the storage-fault warning and the Longhorn volume state before restarting the container.
+
 Check the operational health endpoint:
 
 ```bash

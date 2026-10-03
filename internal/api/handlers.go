@@ -261,6 +261,12 @@ type Handlers struct {
 	resolver         *semantic.Resolver
 	decisionLog      *semantic.DecisionLog
 	semanticObserver SemanticObserver // metrics hook, nil = off
+
+	// storageHealth performs the storage-accessibility check behind the /health
+	// probe (HAI-404): a faulted, detached, or read-only volume makes the probe
+	// return 503 so the pod drops out of Ready. Nil in tests — the probe then
+	// stays an unconditional 200.
+	storageHealth *StorageHealth
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -325,12 +331,34 @@ func (h *Handlers) fireAdmissionReject(reason, model string) {
 	}
 }
 
-// Liveness is the public health probe — always returns 200 as long as the
-// router process is running. Intended for load balancer health checks,
-// Kubernetes liveness/readiness probes, and uptime monitors.
-// It intentionally exposes no operational data.
+// Liveness is the public health probe — intended for load balancer health
+// checks, Kubernetes liveness/readiness probes, and uptime monitors. It
+// returns 200 while the router process is running AND its storage is
+// accessible (HAI-404): every call performs a small write, flush, read-back,
+// and delete in the BadgerDB data directory (the PVC mount point in
+// Kubernetes deployments). When that volume is faulted, detached, or
+// read-only the probe returns 503 instead, the pod loses Ready, and the
+// endpoint stops reporting Active.
+// It intentionally exposes no operational data beyond the storage fault.
 func (h *Handlers) Liveness(c *gin.Context) {
+	if h.storageHealth != nil {
+		if err := h.storageHealth.Verify(); err != nil {
+			log.Warnf("storage health check failed — /health reports 503: volume=%s storage_class=%s data_dir=%s err=%v",
+				h.storageHealth.VolumeName(), h.storageHealth.StorageClass(), h.storageHealth.DataDir(), err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "unavailable",
+				"error":  "storage unavailable",
+			})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// SetStorageHealth wires the storage-accessibility check into the /health
+// probe (HAI-404). Pass nil to keep the probe an unconditional 200.
+func (h *Handlers) SetStorageHealth(sh *StorageHealth) {
+	h.storageHealth = sh
 }
 
 // AdminHealth returns the full operational status of the router:

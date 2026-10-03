@@ -162,6 +162,9 @@ func main() {
 	log.Infof("  Heartbeat interval:  %v", cfg.HeartbeatInterval)
 	log.Info("Storage:")
 	log.Infof("  Disk DB path:        %s", cfg.DiskDBPath)
+	if cfg.StorageVolumeName != "" {
+		log.Infof("  Storage volume:      %s (class: %s)", cfg.StorageVolumeName, cfg.StorageClassName)
+	}
 	if cfg.DiskDBTTLDays == 0 {
 		log.Info("  Disk DB TTL:         disabled")
 	} else {
