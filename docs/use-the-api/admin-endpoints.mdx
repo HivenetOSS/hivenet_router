@@ -16,7 +16,7 @@ Use these endpoints to inspect agents, models, storage, and routing state; updat
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Public process liveness |
+| `GET` | `/health` | Process liveness and storage availability |
 | `GET` | `/admin/health` | Router and agent health summary |
 | `GET` | `/admin/routing-table` | Complete live agent state |
 | `GET` | `/admin/registration-stream` | Server-sent event feed of agent registration changes |
@@ -121,7 +121,18 @@ Response:
 }
 ```
 
-It returns HTTP `200` while the router process is running. It does not report whether agents or inference backends are available.
+The probe also verifies that the storage behind the router is accessible. On every call it performs a small write, flush, read-back, and delete inside the persistent database directory (`--disk-db-path`; the mounted PVC in Kubernetes deployments). If that volume is faulted, detached, or read-only, the probe fails and the endpoint returns HTTP `503`:
+
+```json
+{
+  "status": "unavailable",
+  "error": "storage unavailable"
+}
+```
+
+The router also logs a warning on every failed check, including the data directory, volume name (`HIVENET_ROUTER_STORAGE_VOLUME_NAME`), and storage class (`HIVENET_ROUTER_STORAGE_CLASS`). A Kubernetes readiness probe on this path therefore marks the pod not Ready while the volume is down, and the owning inference endpoint stops reporting Active.
+
+It returns HTTP `200` while the router process is running and its storage is accessible. It does not report whether agents or inference backends are available.
 
 Use it for load balancers, process monitoring, and liveness probes.
 

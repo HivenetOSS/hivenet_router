@@ -621,6 +621,10 @@ func (r *Router) startHTTPServer() {
 	)
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
+	// HAI-404: make /health report 503 while the volume backing the data
+	// directory is faulted or detached, so the pod drops out of Ready and the
+	// endpoint leaves state Active instead of reporting "Router pod is Ready".
+	handlers.SetStorageHealth(api.NewStorageHealth(r.cfg.DiskDBPath, r.cfg.StorageVolumeName, r.cfg.StorageClassName))
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
 	}

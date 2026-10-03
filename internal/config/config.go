@@ -54,6 +54,16 @@ type Config struct {
 	DiskDBTTLDays          int           // TTL for diskDB entries in days; 0 means no expiry
 	UniversalFlushInterval time.Duration // how often universalHistory counters are flushed to diskDB
 
+	// Storage volume identity for operator correlation in the /health storage
+	// check warning log (HAI-404). StorageVolumeName is the backing volume's
+	// name (the PVC name in Kubernetes deployments, e.g. "badger-<endpoint>");
+	// StorageClassName is its storage class (e.g. "longhorn-1r"). Both are
+	// optional: when unset, the warning log falls back to the mount source of
+	// the data directory (e.g. /dev/longhorn/pvc-<uuid>) and "unknown".
+	// Env: HIVENET_ROUTER_STORAGE_VOLUME_NAME / HIVENET_ROUTER_STORAGE_CLASS
+	StorageVolumeName string
+	StorageClassName  string
+
 	// Session
 	SessionTTL time.Duration
 
@@ -217,6 +227,12 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_DISK_DB_PATH"); v != "" {
 		cfg.DiskDBPath = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_STORAGE_VOLUME_NAME"); v != "" {
+		cfg.StorageVolumeName = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_STORAGE_CLASS"); v != "" {
+		cfg.StorageClassName = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_REQUEST_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
