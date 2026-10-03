@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,6 +182,25 @@ func isConnectionLevelError(err error) bool {
 		return re.Code == domain.ErrCodeAgentDisconnected
 	}
 	return false
+}
+
+// isRequestDeadlineError reports whether err is a request-deadline expiry in
+// either form the forward path can produce: the request context's deadline
+// (context.DeadlineExceeded) or the net-level read deadline p2phttp arms on the
+// libp2p stream from that same context (os.ErrDeadlineExceeded, surfaced as
+// "i/o deadline reached"). Both mean "the agent was too slow for this request's
+// budget" — NOT "the agent's connection is dead" — so they must map to a
+// request timeout. Misclassifying them as agent_disconnected triggers ClosePeer:
+// a GOAWAY that makes a healthy agent drop and re-register, truncating every
+// other in-flight stream on its connection.
+func isRequestDeadlineError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	// Safety net: some stream/multiplexer layers surface the deadline as a fresh
+	// error carrying only os.ErrDeadlineExceeded's message without unwrapping to
+	// the sentinel.
+	return err != nil && strings.Contains(err.Error(), "i/o deadline reached")
 }
 
 // Start begins processing requests from the queue.
@@ -371,6 +392,24 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			return
 		}
 
+		// Request deadline expired while waiting on a slow-but-healthy agent: the
+		// request context (or the stream read deadline p2phttp arms from it) fired
+		// before the agent produced a response. The connection is fine, so do NOT
+		// evict it — ClosePeer would GOAWAY the agent, making it drop and
+		// re-register and truncating every other in-flight stream on the
+		// connection. Do NOT charge the agent either: queueing behind long
+		// generations is not an agent defect, and a multi-minute RTT would poison
+		// its SRTT / consecutive-failure streak. All remaining attempts share this
+		// same, now-expired request deadline, so fail the request now instead of
+		// burning policy try budget on doomed re-dispatches.
+		if errors.As(fwdErr, &re) && re.Code == domain.ErrCodeRequestTimeout && re.Source == domain.SourceRouter {
+			log.Warnf("dispatch: request %s exceeded its deadline on agent %s — failing request, keeping the connection (error: %v)",
+				pending.ID, shortID(agent.ID), fwdErr)
+			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+			pending.Error <- fwdErr
+			return
+		}
+
 		// Connection-level failure: the libp2p path to this agent is dead (a stale
 		// connection), not an agent-application error. Drop the connection so the
 		// agent's next heartbeat fails fast and it reconnects + re-registers (the
@@ -532,7 +571,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			forwardSpan.RecordError(err)
 			forwardSpan.SetStatus(codes.Error, err.Error())
 			p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-			if errors.Is(err, context.DeadlineExceeded) {
+			if isRequestDeadlineError(err) {
 				return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 			}
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
@@ -600,7 +639,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		forwardSpan.RecordError(err)
 		forwardSpan.SetStatus(codes.Error, err.Error())
 		p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-		if errors.Is(err, context.DeadlineExceeded) {
+		if isRequestDeadlineError(err) {
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 		}
 		return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
