@@ -139,7 +139,15 @@ The response should contain the model you pulled.
 
 <Tabs>
   <Tab title="Docker">
-    From the Hivenet Router repository, build the agent image if you have not already done so:
+    Pull the prebuilt agent image from the GitHub Container Registry:
+
+    ```bash
+    docker pull ghcr.io/hivenetoss/hivenet-agent:latest
+    ```
+
+    Use `:nightly` if you want the moving pre-release tag built from the latest commit on `main`. Immutable `:nightly-<shortsha>` tags are also published.
+
+    To build a custom image from source instead, clone the Hivenet Router repository and run:
 
     ```bash
     docker build \
@@ -203,7 +211,7 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
       --gpus all \
       -v /opt/hivenet-router/jwt.secret:/jwt.secret:ro \
       -v /opt/hivenet-router:/data \
-      hivenet-router/agent:latest \
+      ghcr.io/hivenetoss/hivenet-agent:latest \
       --engine ollama \
       --model llama3.1:8b \
       --backend-url http://localhost:11434 \
@@ -338,7 +346,7 @@ export HIVENET_ROUTER_BACKEND_API_KEY="<proxy-api-key>"
 ```
 </CodeGroup>
 
-The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. It replaces the credentials the client sent to Hivenet Router, and any `X-Api-Key` header is removed. See [Backend API key](/reference/configuration-reference#backend-api-key).
+The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. The client's router credentials are never forwarded to the backend, with or without this key. See [Backend API key](/reference/configuration-reference#backend-api-key).
 
 ## Set agent capacity
 
@@ -367,7 +375,7 @@ Test the backend under representative load before raising capacity.
 When the agent reaches capacity, Hivenet Router stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
 
 <Note>
-  For streaming responses, Hivenet Router releases the agent capacity slot when response headers arrive, while backend generation can continue. Treat `--capacity` as a routing-admission setting rather than a hard limit on ongoing streams, and verify Ollama concurrency under sustained streaming load.
+  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify Ollama concurrency under sustained streaming load before raising it.
 </Note>
 
 ## Verify the connection

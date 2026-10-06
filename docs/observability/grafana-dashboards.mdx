@@ -226,7 +226,7 @@ active requests / declared capacity
 
 A high value means Hivenet Router has assigned most of the capacity currently represented by its routing slots.
 
-For streaming requests, the current implementation releases the agent slot when response headers arrive, while backend generation can continue. Compare this panel with engine running and waiting requests, KV-cache pressure, TTFT, and ITL when the workload is stream-heavy.
+Streaming requests hold the agent slot until the stream fully drains, so this panel covers the whole generation for both streaming and non-streaming traffic. Compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL to check that the declared capacity matches what the engine can sustain.
 
 ### SRTT and RTTVAR
 

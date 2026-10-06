@@ -764,7 +764,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
-| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), replacing the client's credentials; any `X-Api-Key` header is removed. The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty forwards the client's headers unchanged. See [Backend API key](#backend-api-key) |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
 
 ### Supported engines
 
@@ -861,13 +861,13 @@ Set a backend API key when the inference server behind the agent requires its ow
 
 - `--backend-api-key-file` reads the key from a file, so it does not appear in the process list. `HIVENET_ROUTER_BACKEND_API_KEY` holds the raw value. When both are set, the file wins. Surrounding whitespace, such as a trailing newline, is trimmed from both.
 - The agent sends `Authorization: Bearer <key>` on every request to the backend: readiness and health checks (including a custom engine's `--health-url`), model discovery, metrics scrapes, and inference, streaming or not.
-- For inference requests, the key replaces the credentials the client sent to Hivenet Router, and any `X-Api-Key` header is removed. The backend receives exactly one `Authorization` header, for every engine, Ollama included.
+- For inference requests, the backend receives exactly one `Authorization` header, this key, for every engine, Ollama included. The client's router credentials are always removed first.
 - The key is sent only to the scheme, host, and port of `--backend-url` and, when set, `--health-url`. If the backend redirects a request to any other host or port, the agent sends it without an `Authorization` header, so neither the key nor the client's credentials follow the redirect.
 - When a key is set, `--backend-url` and `--health-url` must be absolute URLs, such as `http://localhost:8000`. Otherwise the agent exits at startup.
 
-<Warning>
-Without a backend API key, the agent forwards the client's request headers to the backend unchanged, including the `Authorization` header that carries the client's Hivenet Router API key.
-</Warning>
+<Note>
+The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
+</Note>
 
 ## Agent router and libp2p settings
 
@@ -876,7 +876,7 @@ Without a backend API key, the agent forwards the client's request headers to th
 | `--router-grpc` | — | `localhost:50051` | Router gRPC authentication address; the response supplies the router’s libp2p connection details |
 | `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Deprecated no-op retained for CLI compatibility |
 | `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
-| `--p2p-listen-port` | — | `0` | Local libp2p port; agents initiate the router connection and normally do not need a fixed inbound port |
+| `--p2p-listen-port` | — | `0` | Local libp2p port, bound to `127.0.0.1` only (`0` = random). Agents dial the router and need no inbound port |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Shared agent-authentication secret |
 
 ### Router discovery

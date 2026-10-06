@@ -121,6 +121,19 @@ func (p *PendingRequest) IsExpired() bool {
 	return time.Now().After(p.Deadline)
 }
 
+// clientCredentialHeaders are the headers a client uses to authenticate to the
+// router. They are the client's router credentials, so they must never travel
+// on to agents or backend engines.
+var clientCredentialHeaders = []string{"Authorization", "Proxy-Authorization", "X-Api-Key", "Cookie"}
+
+// StripClientCredentials removes the client's router credentials from h. Call
+// it on any client header set that will be forwarded downstream.
+func StripClientCredentials(h http.Header) {
+	for _, k := range clientCredentialHeaders {
+		h.Del(k)
+	}
+}
+
 func CopyHttpHeaders(dst, src http.Header) {
 	if dst == nil {
 		return
