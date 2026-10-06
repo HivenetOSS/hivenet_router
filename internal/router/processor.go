@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -764,9 +765,13 @@ func (p *RequestProcessor) drainStream(
 	// Forward bytes to the client byte-exact while a copy feeds the token
 	// meter (TeeReader never alters the forwarded stream). The capturing
 	// reader records an upstream (agent) read failure separately so it can be
-	// told apart from a client-side write failure after io.Copy returns.
+	// told apart from a client-side write failure after io.Copy returns. The
+	// line writer forwards whole lines only, so a stream cut mid-line never
+	// leaves a half event in front of the terminal error frame.
 	var srcErr error
-	_, copyErr := io.Copy(pw, &errCaptureReader{r: io.TeeReader(resp.Body, meter), e: &srcErr})
+	out := &lineWriter{w: pw}
+	_, copyErr := io.Copy(out, &errCaptureReader{r: io.TeeReader(resp.Body, meter), e: &srcErr})
+	meter.Flush()
 
 	// A write failure (copyErr set, no upstream read error) means the client
 	// went away mid-stream: the client chose to stop, so this is not a system
@@ -781,16 +786,20 @@ func (p *RequestProcessor) drainStream(
 	// errored mid-generation (connection reset, deadline), or (2) the stream
 	// closed cleanly but never carried the terminal marker — the agent's own
 	// write side failed and the handler returned early, which the router sees
-	// as a clean EOF with no finish_reason / [DONE]. Anthropic-dialect
-	// streams never set sawOpenAI, so they are never misjudged.
+	// as a clean EOF with no finish_reason / [DONE] (OpenAI) or message_stop
+	// (Anthropic). A body with no recognised events is never misjudged.
 	var truncReason string
 	switch {
 	case srcErr != nil:
 		truncReason = "upstream_error"
-	case !clientGone && meter.SawOpenAIChunks() && !meter.SawTerminal():
+	case !clientGone && meter.SawEvents() && !meter.SawTerminal():
 		truncReason = "missing_terminal"
 	}
-	if truncReason != "" {
+	if truncReason == "" {
+		if !clientGone {
+			_ = out.flush()
+		}
+	} else {
 		p.metrics.StreamTruncated(model, truncReason)
 		extra := ""
 		if srcErr != nil {
@@ -798,12 +807,13 @@ func (p *RequestProcessor) drainStream(
 		}
 		log.Warnf("Stream for request %s truncated (%s%s) — injecting terminal error frame",
 			pending.ID, truncReason, extra)
-		// Terminal SSE error frame (OpenAI convention): clients that understand
-		// it surface a retryable error instead of a silent partial answer.
-		// If the client already went away the write fails — a no-op, the
-		// metric above still records the event.
-		frame := "data: {\"error\":{\"code\":\"stream_truncated\",\"message\":\"upstream stream ended before completion; the response may be partial\",\"type\":\"server_error\"}}\n\n"
-		_, _ = pw.Write([]byte(frame))
+		// Terminal SSE error frame in the request's dialect: clients that
+		// understand it surface a retryable error instead of a silent partial
+		// answer. A held partial line is dropped (it cannot be completed), and
+		// an open event is closed first so the frame is parsed on its own. If
+		// the client already went away the write fails — a no-op, the metric
+		// above still records the event.
+		_, _ = pw.Write([]byte(out.eventBoundary() + truncationFrame(pending.Path)))
 	}
 
 	// Stream finished — the token counts are now known. Accounting is
@@ -837,6 +847,91 @@ func (p *RequestProcessor) drainStream(
 	// reads GetLoad() directly, so this is metric-accuracy only.
 	releaseSlot()
 	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
+}
+
+// truncationFrame returns the terminal SSE error frame drainStream injects into
+// a truncated stream, shaped for the request's dialect: an Anthropic error
+// event for /v1/messages, the OpenAI error chunk convention otherwise.
+func truncationFrame(path string) string {
+	const msg = "upstream stream ended before completion; the response may be partial"
+	if strings.HasPrefix(path, "/v1/messages") {
+		return "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"stream_truncated: " + msg + "\"}}\n\n"
+	}
+	return "data: {\"error\":{\"code\":\"stream_truncated\",\"message\":\"" + msg + "\",\"type\":\"server_error\"}}\n\n"
+}
+
+// lineWriter forwards only newline-terminated lines and holds back a partial
+// trailing line until its newline arrives. SSE consumers cannot act on a
+// partial line anyway, so holding it adds no visible latency, and it lets
+// drainStream drop the half line of a stream cut mid-event instead of gluing
+// the terminal error frame onto it. A line longer than maxHeldLine is
+// forwarded as-is: holding is best-effort and must neither grow without bound
+// nor stall a stream that never sends a newline.
+type lineWriter struct {
+	w    io.Writer
+	held []byte
+	// tail is the last two bytes forwarded, used to tell whether the client
+	// is between events (after a blank line) or inside one.
+	tail [2]byte
+	n    int
+}
+
+// maxHeldLine bounds the partial line lineWriter holds back.
+const maxHeldLine = 64 << 10
+
+func (lw *lineWriter) Write(p []byte) (int, error) {
+	i := bytes.LastIndexByte(p, '\n')
+	if i < 0 {
+		lw.held = append(lw.held, p...)
+		if len(lw.held) > maxHeldLine {
+			if err := lw.flush(); err != nil {
+				return 0, err
+			}
+		}
+		return len(p), nil
+	}
+	if err := lw.forward(append(lw.held, p[:i+1]...)); err != nil {
+		return 0, err
+	}
+	lw.held = append(lw.held[:0], p[i+1:]...)
+	return len(p), nil
+}
+
+// flush forwards the held partial line, if any. Used when the stream ended
+// complete, so an unterminated final line still reaches the client.
+func (lw *lineWriter) flush() error {
+	if len(lw.held) == 0 {
+		return nil
+	}
+	err := lw.forward(lw.held)
+	lw.held = nil
+	return err
+}
+
+func (lw *lineWriter) forward(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	if _, err := lw.w.Write(b); err != nil {
+		return err
+	}
+	if len(b) >= 2 {
+		lw.tail = [2]byte{b[len(b)-2], b[len(b)-1]}
+	} else {
+		lw.tail = [2]byte{lw.tail[1], b[0]}
+	}
+	lw.n += len(b)
+	return nil
+}
+
+// eventBoundary returns what must be written before a new SSE event so it is
+// not merged into the event the client is currently reading: nothing at the
+// start of the stream or after a blank line, a newline after a complete line.
+func (lw *lineWriter) eventBoundary() string {
+	if lw.n == 0 || lw.tail == [2]byte{'\n', '\n'} {
+		return ""
+	}
+	return "\n"
 }
 
 // errCaptureReader wraps a reader and records the first non-EOF read error

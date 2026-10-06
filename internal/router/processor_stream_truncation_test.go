@@ -4,6 +4,7 @@
 package router
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -38,7 +39,7 @@ func (f *failingReader) Read(p []byte) (int, error) {
 
 // openAIChunkReader streams OpenAI-dialect delta chunks forever — the
 // production client-disconnect scenario: the client goes away mid-OpenAI
-// stream, leaving sawOpenAI set with no terminal marker. Without the
+// stream, leaving events seen with no terminal marker. Without the
 // clientGone guard in drainStream that would be miscounted as missing_terminal.
 type openAIChunkReader struct{ pos int }
 
@@ -124,7 +125,15 @@ func drainTestAgent(t *testing.T) *domain.Agent {
 // pipe delivers, including the terminal error frame if one is injected.
 func drainAndRead(t *testing.T, p *RequestProcessor, agent *domain.Agent, body io.Reader) string {
 	t.Helper()
+	return drainPathAndRead(t, p, agent, "", body)
+}
+
+// drainPathAndRead is drainAndRead for a request forwarded to path (e.g.
+// "/v1/messages"), which selects the dialect of the injected error frame.
+func drainPathAndRead(t *testing.T, p *RequestProcessor, agent *domain.Agent, path string, body io.Reader) string {
+	t.Helper()
 	pending := newDrainPending()
+	pending.Path = path
 	pr, pw := io.Pipe()
 	go p.drainStream(agent, pending, pw, newStreamingResponse(body), func() {}, NewSSETokenMeter(),
 		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad() })
@@ -217,8 +226,7 @@ func TestDrainStream_CompleteStreamNoFrame(t *testing.T) {
 	if strings.Contains(out, `"error"`) {
 		t.Fatalf("complete stream must not carry an error frame; got: %q", out)
 	}
-	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
-		map[string]string{"model": "test-model"}); got != 0 {
+	if got := counterTotal(t, p.metrics, "hivenet_stream_truncated_total"); got != 0 {
 		t.Fatalf("stream_truncated_total = %v, want 0 for a complete stream", got)
 	}
 	// Byte-exact forwarding must survive: the [DONE] marker is still the last
@@ -241,8 +249,11 @@ func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
 	pending := newDrainPending()
 	pr, pw := io.Pipe()
 
+	// drained closes once drainStream has released the slot, which happens
+	// after the truncation decision — so the counter is final by then.
+	drained := make(chan struct{})
 	go p.drainStream(agent, pending, pw, newStreamingResponse(&openAIChunkReader{}), func() {}, NewSSETokenMeter(),
-		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad() })
+		"EU-France", "vllm", "test-model", 5.0, func() { agent.DecrementLoad(); close(drained) })
 
 	// Consume the pipe in the background: io.Pipe is unbuffered, so without a
 	// reader the very first write blocks forever and the token meter would
@@ -261,19 +272,14 @@ func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
 	}
 	<-done
 
-	// The drain goroutine exits when its next write fails; give it a beat,
-	// then assert the counter was untouched. Sum the whole family: the test
-	// must not pass because an increment landed under a label set it cannot
-	// see — counterValue with a partial label set matches nothing here.
-	var got float64
-	for i := 0; i < 100; i++ {
-		got = counterTotal(t, p.metrics, "hivenet_stream_truncated_total")
-		if got != 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainStream did not finish after the client disconnected")
 	}
-	if got != 0 {
+	// Sum the whole family: the test must not pass because an increment
+	// landed under a label set it cannot see.
+	if got := counterTotal(t, p.metrics, "hivenet_stream_truncated_total"); got != 0 {
 		t.Fatalf("client disconnect must not count as truncation; counter = %v", got)
 	}
 	if got := agent.GetLoad(); got != 0 {
@@ -281,26 +287,136 @@ func TestDrainStream_ClientDisconnectNotCounted(t *testing.T) {
 	}
 }
 
+// anthropicEvents renders Anthropic-dialect SSE events (event + data lines).
+func anthropicEvents(events ...string) string {
+	var b strings.Builder
+	for _, data := range events {
+		var head struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal([]byte(data), &head)
+		b.WriteString("event: " + head.Type + "\ndata: " + data + "\n\n")
+	}
+	return b.String()
+}
+
+var anthropicPrefix = []string{
+	`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`,
+	`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+	`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+}
+
 // TestDrainStream_AnthropicStreamNotMisjudged guards against false positives:
-// Anthropic-dialect streams end with a message_stop event, never with an
-// OpenAI finish_reason or [DONE]. They must not be flagged as truncated.
+// a complete Anthropic-dialect stream ends with message_stop, never with an
+// OpenAI finish_reason or [DONE]. It must not be flagged as truncated.
 func TestDrainStream_AnthropicStreamNotMisjudged(t *testing.T) {
 	agent := drainTestAgent(t)
 	p := newTestProcessor(t)
 
+	body := io.NopCloser(strings.NewReader(anthropicEvents(append(anthropicPrefix,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}`,
+		`{"type":"message_stop"}`,
+	)...)))
+
+	out := drainPathAndRead(t, p, agent, "/v1/messages", body)
+
+	if strings.Contains(out, truncatedFrameMarker) {
+		t.Fatalf("Anthropic-dialect stream must not carry an error frame; got: %q", out)
+	}
+	if got := counterTotal(t, p.metrics, "hivenet_stream_truncated_total"); got != 0 {
+		t.Fatalf("Anthropic-dialect stream must not count as truncated; counter = %v", got)
+	}
+}
+
+// TestDrainStream_AnthropicMissingStopInjectsAnthropicError covers a clean-EOF
+// cut of an Anthropic stream: no message_stop arrived, so the client must get
+// an Anthropic-shaped error event (event: error) it will actually surface.
+func TestDrainStream_AnthropicMissingStopInjectsAnthropicError(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	out := drainPathAndRead(t, p, agent, "/v1/messages",
+		io.NopCloser(strings.NewReader(anthropicEvents(anthropicPrefix...))))
+
+	if !strings.HasSuffix(out, "\n\n") || !strings.Contains(out, "event: error\ndata: ") {
+		t.Fatalf("missing Anthropic error event; got: %q", out)
+	}
+	frame := out[strings.LastIndex(out, "data: ")+len("data: "):]
+	var ev struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(frame)), &ev); err != nil {
+		t.Fatalf("error event is not valid JSON: %v; got: %q", err, frame)
+	}
+	if ev.Type != "error" || ev.Error.Type != "api_error" || !strings.Contains(ev.Error.Message, truncatedFrameMarker) {
+		t.Fatalf("unexpected Anthropic error event: %+v", ev)
+	}
+	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
+		map[string]string{"model": "test-model", "reason": "missing_terminal"}); got != 1 {
+		t.Fatalf("stream_truncated_total{missing_terminal} = %v, want 1", got)
+	}
+}
+
+// TestDrainStream_CutMidLineDropsPartialLine pins the frame boundary: when the
+// upstream dies in the middle of a data line, the half line is not forwarded,
+// so every data line the client parses is valid JSON and the last one is the
+// stream_truncated error.
+func TestDrainStream_CutMidLineDropsPartialLine(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
+	body := &failingReader{
+		data: "data: {\"choices\":[{\"delta\":{\"content\":\"whole\"}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"cont",
+		fail: errors.New("upstream stream reset"),
+	}
+
+	out := drainAndRead(t, p, agent, body)
+
+	var last string
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		last = strings.TrimPrefix(line, "data: ")
+		if !json.Valid([]byte(last)) {
+			t.Fatalf("client received a data line that is not valid JSON: %q (stream: %q)", line, out)
+		}
+	}
+	if !strings.Contains(last, truncatedFrameMarker) {
+		t.Fatalf("last data line must be the truncation error; got: %q", out)
+	}
+	if !strings.Contains(out, "whole") {
+		t.Fatalf("complete lines before the cut must still be delivered; got: %q", out)
+	}
+}
+
+// TestDrainStream_UnterminatedFinalLineNotTruncated covers a complete stream
+// whose final "data: [DONE]" has no trailing newline: it must still count as
+// terminated, and the held final line must reach the client.
+func TestDrainStream_UnterminatedFinalLineNotTruncated(t *testing.T) {
+	agent := drainTestAgent(t)
+	p := newTestProcessor(t)
+
 	body := io.NopCloser(strings.NewReader(
-		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" +
-			"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n" +
-			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+			"data: [DONE]",
 	))
 
 	out := drainAndRead(t, p, agent, body)
 
 	if strings.Contains(out, truncatedFrameMarker) {
-		t.Fatalf("Anthropic-dialect stream must not carry an error frame; got: %q", out)
+		t.Fatalf("unterminated [DONE] must not be judged truncated; got: %q", out)
 	}
-	if got := counterValue(t, p.metrics, "hivenet_stream_truncated_total",
-		map[string]string{"model": "test-model"}); got != 0 {
-		t.Fatalf("Anthropic-dialect stream must not count as truncated; counter = %v", got)
+	if !strings.HasSuffix(out, "data: [DONE]") {
+		t.Fatalf("the unterminated final line must be forwarded; got: %q", out)
+	}
+	if got := counterTotal(t, p.metrics, "hivenet_stream_truncated_total"); got != 0 {
+		t.Fatalf("stream_truncated_total = %v, want 0", got)
 	}
 }

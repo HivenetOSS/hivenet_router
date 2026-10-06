@@ -206,3 +206,93 @@ func TestMeter_ParsesAnthropicEvents(t *testing.T) {
 		t.Errorf("content observer saw %q, want %q", streamed, "Hello world")
 	}
 }
+
+// TestMeter_TerminalMarkers pins the stream-completion flags drainStream uses
+// to detect truncation: which events count as "a stream was seen" and which
+// as its terminal marker, in both dialects.
+func TestMeter_TerminalMarkers(t *testing.T) {
+	cases := []struct {
+		name         string
+		stream       string
+		wantEvents   bool
+		wantTerminal bool
+	}{
+		{
+			name:       "openai delta with null finish_reason is not terminal",
+			stream:     `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n",
+			wantEvents: true,
+		},
+		{
+			name:       "openai empty finish_reason is not terminal",
+			stream:     `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":""}]}` + "\n\n",
+			wantEvents: true,
+		},
+		{
+			name:         "openai finish_reason is terminal",
+			stream:       `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			wantEvents:   true,
+			wantTerminal: true,
+		},
+		{
+			name:         "openai [DONE] is terminal",
+			stream:       "data: [DONE]\n\n",
+			wantEvents:   true,
+			wantTerminal: true,
+		},
+		{
+			name: "anthropic without message_stop is not terminal",
+			stream: "event: message_start\n" +
+				`data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}` + "\n\n" +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}` + "\n\n",
+			wantEvents: true,
+		},
+		{
+			name:         "anthropic message_stop is terminal",
+			stream:       "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n",
+			wantEvents:   true,
+			wantTerminal: true,
+		},
+		{
+			name:         "anthropic error event is terminal",
+			stream:       "event: error\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}` + "\n\n",
+			wantEvents:   true,
+			wantTerminal: true,
+		},
+		{
+			name:   "keepalives and comments are not events",
+			stream: ": ping\n\ndata: keepalive\n\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := router.NewSSETokenMeter()
+			if _, err := m.Write([]byte(tc.stream)); err != nil {
+				t.Fatalf("Write returned error: %v", err)
+			}
+			m.Flush()
+			if got := m.SawEvents(); got != tc.wantEvents {
+				t.Errorf("SawEvents() = %v, want %v", got, tc.wantEvents)
+			}
+			if got := m.SawTerminal(); got != tc.wantTerminal {
+				t.Errorf("SawTerminal() = %v, want %v", got, tc.wantTerminal)
+			}
+		})
+	}
+}
+
+// TestMeter_FlushParsesUnterminatedFinalLine verifies a final line without a
+// trailing newline is parsed only once Flush is called at end of stream.
+func TestMeter_FlushParsesUnterminatedFinalLine(t *testing.T) {
+	m := router.NewSSETokenMeter()
+	if _, err := m.Write([]byte(`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" + "data: [DONE]")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if m.SawTerminal() {
+		t.Fatal("an unterminated line must not be parsed before Flush")
+	}
+	m.Flush()
+	if !m.SawTerminal() {
+		t.Fatal("Flush must parse the unterminated final [DONE]")
+	}
+}

@@ -920,6 +920,29 @@ sum by (model, reason) (
 )
 ```
 
+### Truncated streams
+
+```promql
+hivenet_stream_truncated_total
+```
+
+Labels:
+
+```text
+model
+reason
+```
+
+Counts streamed responses that ended before the backend's terminal marker (`finish_reason` or `[DONE]` for OpenAI, `message_stop` for Anthropic). The router appends a `stream_truncated` error event to these streams. `reason` is `upstream_error` when the agent stream failed mid-generation, or `missing_terminal` when it closed cleanly but incomplete. Client disconnects are not counted.
+
+```promql
+sum by (model, reason) (
+  rate(
+    hivenet_stream_truncated_total[5m]
+  )
+)
+```
+
 ### Policy reloads
 
 ```promql
