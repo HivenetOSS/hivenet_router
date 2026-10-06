@@ -182,6 +182,28 @@ func isConnectionLevelError(err error) bool {
 	return false
 }
 
+// requestDeadlinePassed reports whether the request's own deadline has expired,
+// i.e. whether a forward error means "the agent was too slow for this
+// request's budget" rather than "the agent's connection is broken". It checks
+// the request context, not the error: the transport surfaces a deadline in
+// several shapes (context.DeadlineExceeded, the multiplexer's own stream
+// timeout error), and libp2phttp opens the stream under a separate, shorter
+// timeout whose expiry looks the same. Only an expired request deadline maps
+// to a request timeout; anything else stays on the connection-failure path,
+// so a stalled stream open still evicts and fails over to another agent.
+// Misclassifying a request deadline as agent_disconnected would trigger
+// ClosePeer: a GOAWAY that makes a healthy agent drop and re-register,
+// truncating every other in-flight stream on its connection.
+func requestDeadlinePassed(ctx context.Context) bool {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	// The stream's read deadline is armed from the same instant as the context
+	// timer and can fire a moment before ctx.Err() is set.
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
+}
+
 // Start begins processing requests from the queue.
 // It returns when ctx is cancelled or the requestQueue channel is closed.
 func (p *RequestProcessor) Start(ctx context.Context) {
@@ -371,6 +393,27 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			return
 		}
 
+		// Request deadline expired while waiting on the agent: the request's own
+		// budget ran out before the agent produced a response. The connection is
+		// fine, so do NOT evict it — ClosePeer would GOAWAY the agent, making it
+		// drop and re-register and truncating every other in-flight stream on the
+		// connection. Do NOT record a failure either: queueing behind long
+		// generations is not an agent defect, and a multi-minute RTT would poison
+		// its SRTT / consecutive-failure streak. Only the dedicated timeout streak
+		// grows (reset by any success), so an agent whose backend is hung — every
+		// request times out, none succeed — is still caught by a
+		// consecutive_timeouts gate. All remaining attempts share this same,
+		// now-expired request deadline, so fail the request now instead of
+		// burning policy try budget on doomed re-dispatches.
+		if errors.As(fwdErr, &re) && re.Code == domain.ErrCodeRequestTimeout && re.Source == domain.SourceRouter {
+			log.Warnf("dispatch: request %s exceeded its deadline on agent %s — failing request, keeping the connection (error: %v)",
+				pending.ID, shortID(agent.ID), fwdErr)
+			p.counters.RecordTimeout(agent)
+			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+			pending.Error <- fwdErr
+			return
+		}
+
 		// Connection-level failure: the libp2p path to this agent is dead (a stale
 		// connection), not an agent-application error. Drop the connection so the
 		// agent's next heartbeat fails fast and it reconnects + re-registers (the
@@ -532,7 +575,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			forwardSpan.RecordError(err)
 			forwardSpan.SetStatus(codes.Error, err.Error())
 			p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-			if errors.Is(err, context.DeadlineExceeded) {
+			if requestDeadlinePassed(ctx) {
 				return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 			}
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
@@ -600,7 +643,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		forwardSpan.RecordError(err)
 		forwardSpan.SetStatus(codes.Error, err.Error())
 		p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-		if errors.Is(err, context.DeadlineExceeded) {
+		if requestDeadlinePassed(ctx) {
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 		}
 		return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
