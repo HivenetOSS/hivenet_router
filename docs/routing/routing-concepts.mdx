@@ -263,6 +263,7 @@ These signals can apply to every agent when the underlying history is available.
 | `success_rate` | Lifetime successful-request fraction | `{ lt: 0.95 }` |
 | `srtt` | Smoothed round-trip time in milliseconds | `{ gt: 500 }` |
 | `consecutive_failures` | Forward failures since the last success | `{ gte: 3 }` |
+| `consecutive_timeouts` | Forwards that hit the request deadline since the last success | `{ gte: 3 }` |
 
 ### Capacity utilization
 

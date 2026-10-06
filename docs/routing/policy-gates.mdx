@@ -518,6 +518,7 @@ Unknown fields and rules with zero or several operators are rejected when the po
 | `success_rate` | Fraction `0.0`–`1.0` | Successful forwards divided by all completed forwards |
 | `srtt` | Milliseconds | Smoothed router-agent request time |
 | `consecutive_failures` | Count | Failures since the last successful forward |
+| `consecutive_timeouts` | Count | Forwards that hit the request deadline since the last successful forward |
 
 ### Engine signals
 
@@ -591,6 +592,7 @@ These include:
 - `success_rate`
 - `srtt`
 - `consecutive_failures`
+- `consecutive_timeouts`
 - TTFT and ITL values before the backend has completed requests
 
 A new agent therefore passes gates using those fields until the router or backend has collected enough data.
@@ -690,6 +692,16 @@ Success rate is a broader historical signal.
 Consecutive failures reacts more quickly to a recent failure streak.
 
 Using both can protect against persistent and sudden instability.
+
+### Exclude hung agents
+
+```yaml
+exclude_if:
+  consecutive_timeouts:
+    gte: 3
+```
+
+A request that runs out of time on an agent is not counted as a failure, because a busy agent working through long generations is still healthy. Timeouts are counted separately instead, and any successful request resets the count. An agent whose backend has stopped responding while its heartbeats continue never completes a request, so this gate removes it from rotation.
 
 ### Avoid hot GPUs
 

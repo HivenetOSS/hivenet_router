@@ -405,6 +405,7 @@ These gates can apply to any agent once the necessary runtime history exists.
 | `success_rate` | `0.0`–`1.0` | Lifetime fraction of successful forwards |
 | `srtt` | `0+` | Smoothed round-trip time in milliseconds |
 | `consecutive_failures` | `0+` | Forward failures since the last success |
+| `consecutive_timeouts` | `0+` | Forwards that hit the request deadline since the last success |
 
 ### Capacity utilization
 
@@ -455,6 +456,16 @@ exclude_if:
 ```
 
 The counter increases after forward failures and resets after a successful request.
+
+### Consecutive timeouts
+
+```yaml
+exclude_if:
+  consecutive_timeouts:
+    gte: 3
+```
+
+The counter increases when a forward reaches the request deadline and resets after a successful request. Timeouts do not count as failures and do not change `success_rate` or `srtt`, so a busy but healthy agent is not penalised, while an agent that never completes a request is excluded.
 
 ## Engine metrics
 

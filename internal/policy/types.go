@@ -165,6 +165,7 @@ type AgentSnapshot struct {
 	SuccessRate         *float64 // fraction 0.0–1.0
 	SRTT                *float64 // milliseconds (RFC 6298 smoothed RTT)
 	ConsecutiveFailures *float64 // absolute count; reset to 0 on any success
+	ConsecutiveTimeouts *float64 // forwards that hit the request deadline; reset to 0 on any success
 
 	// Engine (vLLM / SGLang) — nil for non-vLLM/SGLang agents.
 	KVCacheUtilization *float64 // fraction 0.0–1.0

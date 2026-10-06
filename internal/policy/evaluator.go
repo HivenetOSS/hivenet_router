@@ -62,6 +62,13 @@ func (e *Evaluator) Snapshot(peerID peer.ID, agent *domain.Agent) AgentSnapshot 
 		v := float64(cf)
 		snap.ConsecutiveFailures = &v
 	}
+	// ConsecutiveTimeouts is read separately: deadlines are not recorded as
+	// completed forwards, so an agent that has only ever timed out has no
+	// LiveSnapshot history yet must still be gateable.
+	if ct, ok := e.counters.ConsecutiveTimeouts(peerID); ok {
+		v := float64(ct)
+		snap.ConsecutiveTimeouts = &v
+	}
 
 	if bm, err := e.storage.GetEnginePunctual(peerID); err == nil && bm != nil {
 		snap.KVCacheUtilization = bm.KVCacheUtilization
@@ -128,6 +135,8 @@ func (snap AgentSnapshot) getValue(field string) *float64 {
 		return snap.SRTT
 	case "consecutive_failures":
 		return snap.ConsecutiveFailures
+	case "consecutive_timeouts":
+		return snap.ConsecutiveTimeouts
 	// Engine (vLLM)
 	case "kv_cache_utilization":
 		return snap.KVCacheUtilization
