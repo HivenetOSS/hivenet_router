@@ -122,10 +122,8 @@ func disconnected() error {
 	return domain.NewRouterError(domain.ErrCodeAgentDisconnected, "Agent unreachable: dial failed", domain.SourceRouter)
 }
 
-// deadlineTimeout is the error the forward path returns when the request deadline
-// fires while waiting on a slow-but-healthy agent (the stream read deadline p2phttp
-// arms from the request context surfaces as os.ErrDeadlineExceeded / "i/o deadline
-// reached").
+// deadlineTimeout is the error the forward path returns when the request's own
+// deadline has expired while waiting on the agent.
 func deadlineTimeout() error {
 	return domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 }
@@ -297,10 +295,14 @@ func TestDispatchDeadline_DoesNotPenalizeAgent(t *testing.T) {
 		t.Fatal("expected the deadline error to reach the client")
 	}
 
+	// Only the dedicated timeout streak moves.
+	if n, _ := counters.ConsecutiveTimeouts(peer.ID("agent-pid-0001")); n != 1 {
+		t.Errorf("consecutiveTimeouts = %d, want 1", n)
+	}
 	successRate, srtt, consecutiveFails, ok := counters.LiveSnapshot(peer.ID("agent-pid-0001"))
 	if !ok {
-		// No counter state at all: nothing was recorded against the agent — exactly
-		// what we want.
+		// No completed-forward history at all: nothing was recorded against the
+		// agent's success rate or SRTT — exactly what we want.
 		return
 	}
 	if consecutiveFails != 0 {
@@ -311,6 +313,56 @@ func TestDispatchDeadline_DoesNotPenalizeAgent(t *testing.T) {
 	}
 	if successRate != 0 {
 		t.Errorf("successRate = %v, want 0 (no successes were recorded)", successRate)
+	}
+}
+
+// An agent whose backend is hung (heartbeats fine, every request hits the
+// deadline) must still be caught: each deadline grows the consecutive-timeout
+// streak until a consecutive_timeouts gate excludes the agent, and any success
+// (e.g. a long generation finishing on a merely busy agent) clears it.
+func TestDispatchDeadline_TimeoutStreakGatesHungAgent(t *testing.T) {
+	exec, counters, m := newExec(t)
+	queue := make(chan *domain.PendingRequest, 1)
+	p := router.NewRequestProcessor(queue, exec, nil, m, counters, 10, nil, nil,
+		router.WithForwardFunc(func(_ context.Context, a *domain.Agent, _ *domain.PendingRequest) (*domain.ChatResponse, float64, error) {
+			a.DecrementLoad()
+			return nil, 5, deadlineTimeout()
+		}),
+		router.WithPeerCloser(&fakePeerCloser{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.Start(ctx)
+
+	for i := 0; i < 3; i++ {
+		pending := newPending()
+		queue <- pending
+		if _, err := awaitResult(t, pending); err == nil {
+			t.Fatal("expected the deadline error to reach the client")
+		}
+	}
+
+	agent := domain.NewAgent(peer.ID("agent-pid-0001"), domain.AgentMetadata{
+		Model: testModel, Capacity: 10, Capability: domain.CapabilityLLM, Engine: "vllm",
+	}, "")
+	eval := policy.NewEvaluator(&stubStorage{}, counters)
+	three := 3.0
+	gates := map[string]policy.ThresholdRule{"consecutive_timeouts": {GTE: &three}}
+
+	snap := eval.Snapshot(agent.ID, agent)
+	if snap.ConsecutiveTimeouts == nil || *snap.ConsecutiveTimeouts != 3 {
+		t.Fatalf("ConsecutiveTimeouts = %v, want 3", snap.ConsecutiveTimeouts)
+	}
+	if policy.PassesGates(snap, gates) {
+		t.Fatal("an agent with 3 consecutive timeouts must fail the consecutive_timeouts gate")
+	}
+
+	counters.RecordSuccess(agent, 1, 1, 10)
+	snap = eval.Snapshot(agent.ID, agent)
+	if snap.ConsecutiveTimeouts == nil || *snap.ConsecutiveTimeouts != 0 {
+		t.Fatalf("ConsecutiveTimeouts after a success = %v, want 0", snap.ConsecutiveTimeouts)
+	}
+	if !policy.PassesGates(snap, gates) {
+		t.Fatal("a success must clear the timeout streak and readmit the agent")
 	}
 }
 

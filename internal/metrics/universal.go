@@ -36,6 +36,10 @@ type agentCounterState struct {
 	// Circuit breaker — session-scoped consecutive failure streak, not persisted.
 	// Reset to 0 on any RecordSuccess; incremented on every RecordFailure.
 	consecutiveFails atomic.Int64
+	// Session-scoped streak of forwards that hit the request deadline, not
+	// persisted. Kept apart from consecutiveFails (a slow agent is not a
+	// failing one) and reset to 0 on any RecordSuccess.
+	consecutiveTimeouts atomic.Int64
 
 	// Baselines loaded from diskDB on Bootstrap — added to atomic values when flushing
 	baseSuccessful      int64
@@ -189,6 +193,7 @@ func (u *UniversalCounterStore) RecordSuccess(agent *domain.Agent, inputTokens, 
 
 	s.mu.Lock()
 	s.consecutiveFails.Store(0) // reset streak atomically with RTT update
+	s.consecutiveTimeouts.Store(0)
 	u.updateRTT(s, rttMs)
 	srtt := s.srtt
 	rttvar := s.rttvar
@@ -209,6 +214,24 @@ func (u *UniversalCounterStore) RecordSuccess(agent *domain.Agent, inputTokens, 
 		0, 0,
 		srtt, rttvar,
 	)
+}
+
+// RecordTimeout is called by the processor when a forward outlived the
+// request deadline. It only grows the consecutive-timeout streak: success
+// rate, the failure streak and SRTT are left alone, because a deadline on a
+// busy agent is not a failure and its multi-minute RTT would poison SRTT.
+func (u *UniversalCounterStore) RecordTimeout(agent *domain.Agent) {
+	u.getOrInit(agent).consecutiveTimeouts.Add(1)
+}
+
+// ConsecutiveTimeouts returns the agent's current consecutive-timeout streak.
+// ok is false when the router holds no counter state for peerID.
+func (u *UniversalCounterStore) ConsecutiveTimeouts(peerID peer.ID) (n int64, ok bool) {
+	raw, loaded := u.states.Load(peerID)
+	if !loaded {
+		return 0, false
+	}
+	return raw.(*agentCounterState).consecutiveTimeouts.Load(), true
 }
 
 // RecordFailure is called by the processor on any non-200 or forwarding error.

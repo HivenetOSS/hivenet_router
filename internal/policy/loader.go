@@ -26,6 +26,7 @@ var knownExcludeIfFields = map[string]struct{}{
 	"success_rate":         {},
 	"srtt":                 {},
 	"consecutive_failures": {},
+	"consecutive_timeouts": {},
 	// Engine (vLLM / SGLang)
 	"kv_cache_utilization": {},
 	"running_requests":     {},

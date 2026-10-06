@@ -5,39 +5,45 @@ package router
 
 import (
 	"context"
-	"errors"
-	"net/url"
-	"os"
 	"testing"
+	"time"
 )
 
-// TestIsRequestDeadlineError pins the two deadline forms the forward path can
-// produce, the message-string safety net, and — just as important — that
-// genuine transport failures do NOT match (they must keep routing through the
-// agent_disconnected eviction path).
-func TestIsRequestDeadlineError(t *testing.T) {
+// TestRequestDeadlinePassed pins the request-timeout classification: only an
+// expired request deadline counts. A deadline-shaped transport error while the
+// request still has budget (e.g. libp2phttp's own stream-open timeout) must
+// stay on the connection-failure path so the request fails over to another
+// agent instead of returning 504 with most of its budget left.
+func TestRequestDeadlinePassed(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	// Deadline instant reached but the context timer may not have fired yet:
+	// the stream read deadline can surface first.
+	justNow, cancelJustNow := context.WithDeadline(context.Background(), time.Now())
+	defer cancelJustNow()
+
+	budgetLeft, cancelBudgetLeft := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelBudgetLeft()
+
+	cancelled, cancel := context.WithTimeout(context.Background(), time.Minute)
+	cancel()
+
 	cases := []struct {
 		name string
-		err  error
+		ctx  context.Context
 		want bool
 	}{
-		{"context deadline", context.DeadlineExceeded, true},
-		{"os deadline bare", os.ErrDeadlineExceeded, true},
-		{"url.Error wrapping os deadline", &url.Error{
-			Op:  "Post",
-			URL: "/hivenet_router/inference/1.0.0/v1/chat/completions",
-			Err: os.ErrDeadlineExceeded,
-		}, true},
-		{"message-only wrapper", errors.New(`Post "/hivenet_router/inference/1.0.0/v1/chat/completions": i/o deadline reached`), true},
-		{"connection reset", errors.New("read: connection reset by peer"), false},
-		{"no addresses", errors.New("failed to dial: no addresses"), false},
-		{"stream reset", errors.New("transport error: sent go away, code: 0"), false},
-		{"nil", nil, false},
+		{"deadline expired", expired, true},
+		{"deadline instant reached", justNow, true},
+		{"budget left (stream-open timeout)", budgetLeft, false},
+		{"cancelled, not expired", cancelled, false},
+		{"no deadline", context.Background(), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isRequestDeadlineError(tc.err); got != tc.want {
-				t.Fatalf("isRequestDeadlineError(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := requestDeadlinePassed(tc.ctx); got != tc.want {
+				t.Fatalf("requestDeadlinePassed = %v, want %v", got, tc.want)
 			}
 		})
 	}
