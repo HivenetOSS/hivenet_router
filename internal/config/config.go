@@ -335,9 +335,9 @@ type AgentConfig struct {
 	StreamWriteIdleTimeout time.Duration
 	IdentityPath           string // Path to the persistent libp2p private key file (Ed25519)
 
-	// P2PListenPort is the TCP port the agent's libp2p node listens on.
-	// Default 0 lets the OS pick a random port (fine for bare-metal).
-	// Set to a fixed value when running in Docker so the port can be mapped.
+	// P2PListenPort is the local port of the agent's libp2p node, bound to
+	// 127.0.0.1 only (0 = random). The agent needs no inbound port: it dials the
+	// router, and the router sends inference back over that connection.
 	P2PListenPort int
 
 	// HardwareSampleInterval controls how often the background sampler collects

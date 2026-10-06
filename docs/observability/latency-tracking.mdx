@@ -70,7 +70,7 @@ This boundary can be close to time to first token, but it is not the same measur
 
 It does not include the time needed to generate and deliver the complete response.
 
-This response-header boundary is also where the current implementation releases the agent’s declared capacity slot and the router’s forwarding slot for a streaming request. Backend generation can continue after the SRTT sample has been recorded and those slots have been released.
+The router’s `--max-concurrent` forwarding slot is released at this response-header boundary. The agent’s declared capacity slot is not. Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. The SRTT sample is recorded at stream start, but the agent’s active-request count covers the whole generation.
 
 ### Non-streaming Chat Completions
 

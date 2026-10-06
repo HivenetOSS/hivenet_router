@@ -395,7 +395,7 @@ The two values are observed at different layers and times.
 For example:
 
 - the agent may have accepted a request that has not entered the engine’s running batch yet
-- a long streaming generation can continue after Hivenet Router releases its declared capacity slot when response headers arrive
+- the engine may also run requests that did not pass through Hivenet Router
 - a backend may continue work briefly after a client disconnects
 - collection and routing snapshots may arrive at slightly different times
 

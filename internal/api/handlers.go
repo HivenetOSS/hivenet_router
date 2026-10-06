@@ -976,8 +976,10 @@ func (h *Handlers) fireTokenLimited(m reqMeta, model string) {
 // processor can forward them verbatim. Returns false (after writing the error)
 // when the cached body is missing or malformed.
 func captureRawBody(c *gin.Context, req *domain.ChatRequest, requestID string) bool {
-	// Preserve any custom headers added by the client library.
+	// Preserve any custom headers added by the client library, but never the
+	// client's router credentials: agents and backends must not see them.
 	req.HttpHeaders = c.Request.Header.Clone()
+	domain.StripClientCredentials(req.HttpHeaders)
 
 	cb, ok := c.Get(gin.BodyBytesKey)
 	if !ok {
