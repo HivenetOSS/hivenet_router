@@ -125,10 +125,12 @@ func TestDrainStream_HoldsSlotUntilStreamEnds(t *testing.T) {
 }
 
 // infiniteReader never ends on its own — a stream that only stops when the
-// reader side of the pipe goes away (client disconnect).
+// reader side of the pipe goes away (client disconnect). It emits whole SSE
+// comment lines so drainStream forwards each one immediately instead of
+// holding a newline-free buffer until the partial-line cap.
 type infiniteReader struct{}
 
-func (infiniteReader) Read(p []byte) (int, error) { return copy(p, "x"), nil }
+func (infiniteReader) Read(p []byte) (int, error) { return copy(p, ": x\n"), nil }
 
 // TestDrainStream_ReleasesSlotOnClientDisconnect covers the early-termination
 // path: the handler closes the client pipe (client went away), io.Copy fails on

@@ -37,6 +37,17 @@ type SSETokenMeter struct {
 	usagePrompt     int
 	usageCompletion int
 
+	// sawEvents reports whether any recognised stream event was seen: an
+	// OpenAI chunk with a choices array or the [DONE] marker, or an Anthropic
+	// event carrying a "type". A stream with none (empty body, unknown
+	// dialect) is never judged truncated on a clean EOF.
+	sawEvents bool
+	// sawTerminal reports whether the stream's terminal marker was seen.
+	// OpenAI: a choices chunk with a non-null, non-empty finish_reason, or
+	// [DONE]. Anthropic: a message_stop event, or an error event (the
+	// backend already told the client the stream failed).
+	sawTerminal bool
+
 	// onContent, when set, is called with each streamed delta's content as it is
 	// parsed. It lets the occupancy budget grow an undeclared request's footprint
 	// live, before the stream's total is known. Never called after the stream ends.
@@ -93,6 +104,17 @@ func (m *SSETokenMeter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Flush parses a final line left in the buffer without a trailing newline.
+// Call it once the stream has ended: a complete stream whose last line
+// ("data: [DONE]") is unterminated must still register its terminal marker.
+func (m *SSETokenMeter) Flush() {
+	if m.buf.Len() == 0 {
+		return
+	}
+	m.parseLine(m.buf.Bytes())
+	m.buf.Reset()
+}
+
 // sseChunk is the minimal union of the OpenAI and Anthropic streaming shapes we
 // need. OpenAI: per-delta text under choices[].delta.content plus the optional
 // terminal usage object. Anthropic: message_start carries usage.input_tokens
@@ -100,10 +122,14 @@ func (m *SSETokenMeter) Write(p []byte) (int, error) {
 // and message_delta carries the cumulative usage.output_tokens at the top
 // level. The field sets do not collide, so one struct decodes both dialects.
 type sseChunk struct {
+	Type    string `json:"type"` // Anthropic event type (message_start … message_stop)
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
+		// Pointer: intermediate chunks carry "finish_reason": null, which must
+		// not count as a terminal marker.
+		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -128,12 +154,30 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 		return
 	}
 	payload := bytes.TrimSpace(line[len("data:"):])
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+	if len(payload) == 0 {
+		return
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		m.sawEvents = true
+		m.sawTerminal = true
 		return
 	}
 	var c sseChunk
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return // non-JSON comment/keepalive — ignore
+	}
+	if len(c.Choices) > 0 {
+		m.sawEvents = true
+		for _, ch := range c.Choices {
+			if ch.FinishReason != nil && *ch.FinishReason != "" {
+				m.sawTerminal = true
+			}
+		}
+	} else if c.Type != "" {
+		m.sawEvents = true
+		if c.Type == "message_stop" || c.Type == "error" {
+			m.sawTerminal = true
+		}
 	}
 	if c.Usage != nil && (c.Usage.PromptTokens > 0 || c.Usage.CompletionTokens > 0) {
 		m.haveUsage = true
@@ -178,6 +222,15 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 // message_delta). When false, Tokens returns an estimate, which the caller must
 // not feed back into the learned estimator.
 func (m *SSETokenMeter) HaveUsage() bool { return m.haveUsage }
+
+// SawEvents reports whether the stream carried any recognised event (OpenAI
+// choices chunk or [DONE], or an Anthropic typed event).
+func (m *SSETokenMeter) SawEvents() bool { return m.sawEvents }
+
+// SawTerminal reports whether the stream's terminal marker was seen (OpenAI:
+// a non-null finish_reason or [DONE]; Anthropic: message_stop or error). A
+// stream that ended with SawEvents() && !SawTerminal() was truncated.
+func (m *SSETokenMeter) SawTerminal() bool { return m.sawTerminal }
 
 // Tokens returns the prompt and completion token counts for the stream. It
 // prefers the backend-reported usage (exact) and otherwise estimates: prompt
