@@ -703,7 +703,7 @@ exclude_if:
 
 A request that runs out of time on an agent is not counted as a failure, because a busy agent working through long generations is still healthy. Timeouts are counted separately instead, and any successful request resets the count. An agent whose backend has stopped responding while its heartbeats continue never completes a request, so this gate removes it from rotation.
 
-The exclusion is sticky: the count only resets on a successful request, so an excluded agent comes back only once it serves one. Keep a later step without this gate (the default policy's `global-any` fallback, for example) so the agent still receives an occasional request and can rejoin after its backend recovers. In a policy where every step applies the gate, the agent stays excluded until it reconnects. `consecutive_failures` behaves the same way.
+The exclusion is sticky: the count only resets on a successful request, so an excluded agent comes back only once it serves one. Keep a later step without this gate (the default policy's `global-any` fallback, for example) so the agent can still receive a request when earlier steps have no eligible agent, and rejoin after its backend recovers. In a policy where every step applies the gate, the agent stays excluded until it reconnects. `consecutive_failures` behaves the same way.
 
 ### Avoid hot GPUs
 
