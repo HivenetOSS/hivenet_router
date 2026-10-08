@@ -131,6 +131,7 @@ Clients should therefore handle:
 | `queue_full` | `503` | `router` | The router’s global pending-request channel remained full |
 | `backend_error` | `500` or `502` | `router` or `backend` | Unexpected internal, backend, provider, or response-format failure |
 | `request_timeout` | `504` | `router` | The router-side request deadline expired |
+| `stream_truncated` | `200` (in-stream frame) | `router` | An upstream stream was cut short mid-generation after the response started |
 
 The status shown is the normal mapping. Some internal failures explicitly return HTTP `500` with `backend_error`, while forwarded backend or provider failures normally map it to HTTP `502`.
 
@@ -762,6 +763,23 @@ Request timed out before provider fallback could be attempted
 Request timeout
 ```
 
+When the request's own deadline expires while the router is forwarding to an agent, Hivenet Router treats it as a slow request rather than a broken agent. The router:
+
+- returns `504` with `request_timeout`
+- keeps the agent registered and does not reset its connection, so the agent's other in-flight streams continue
+- does not retry the request on another agent
+- does not count the timeout against the agent's success rate, failure streak, or SRTT
+
+Instead, the router increments the agent's `consecutive_timeouts` count. Any successful forward resets it to `0`. The default policy excludes an agent once `consecutive_timeouts` reaches `3` or more, which removes an agent whose backend hangs from rotation. See [Exclude hung agents](/routing/policy-gates#exclude-hung-agents) to tune or disable this gate:
+
+```yaml
+exclude_if:
+  consecutive_timeouts:
+    gte: 3
+```
+
+Other deadline-shaped failures, such as a timeout while opening the stream to the agent, are still handled as connection failures. Those evict the agent and fail over as described in [`agent_disconnected`](#agent_disconnected).
+
 <Warning>
   A timeout is an ambiguous result.
 
@@ -1029,7 +1047,7 @@ Use audit logs, metrics, traces, and backend logs when the final error does not 
 
 ## Streaming error behavior
 
-A structured JSON error can be returned only before response headers and body have started.
+A structured JSON error with a non-`200` status can be returned only before response headers and body have started.
 
 After an SSE stream begins:
 
@@ -1037,16 +1055,40 @@ After an SSE stream begins:
 - some output may already have reached the client
 - Hivenet Router cannot replace the stream with a JSON error envelope
 
-A failure during streaming can therefore appear as:
+When the upstream agent stream is cut short mid-generation, Hivenet Router appends a terminal error frame before closing the stream. This covers an agent stream that fails partway through and a stream that closes without the backend's terminal marker (`finish_reason` or `[DONE]` for OpenAI, `message_stop` for Anthropic). See [`stream_truncated`](#stream_truncated) for the frame format.
 
-- a stream ending early
-- an incomplete SSE event
-- a connection reset
-- a client-side parsing error
+If the upstream stream is cut in the middle of an SSE line, Hivenet Router drops the incomplete line rather than forwarding a broken event. The client receives only complete events, followed by the error frame.
 
-The client should treat an incomplete stream as a failed or partial operation, even when the initial HTTP status was `200`.
+When the client itself disconnects, Hivenet Router does not send a frame and does not count the stream as truncated.
+
+A stream can still end without a terminal frame when the connection between the client and the router fails. The client should treat any stream that ends without the normal completion marker or with a `stream_truncated` frame as a failed or partial operation, even when the initial HTTP status was `200`.
 
 Use the request ID to inspect the associated audit record, router logs, agent logs, and trace.
+
+### `stream_truncated`
+
+```text
+HTTP 200, sent as the final SSE frame
+```
+
+Hivenet Router sends this frame when an upstream stream ended before completion. Everything delivered before the frame is partial output.
+
+On OpenAI-compatible streams, such as `/v1/chat/completions`, the frame is:
+
+```text
+data: {"error":{"code":"stream_truncated","message":"upstream stream ended before completion; the response may be partial","type":"server_error"}}
+```
+
+On the Anthropic Messages endpoint, `/v1/messages`, the frame is an Anthropic `error` event with an `api_error` whose message starts with `stream_truncated`:
+
+```text
+event: error
+data: {"type":"error","error":{"type":"api_error","message":"stream_truncated: upstream stream ended before completion; the response may be partial"}}
+```
+
+Treat the frame as a retryable error, not as a complete answer. Discard or flag the partial output, and retry only when repeating the operation is safe.
+
+Hivenet Router counts each truncated stream in the [`hivenet_stream_truncated_total`](/observability/prometheus-metrics#truncated-streams) metric, labeled by `model` and `reason`. See [Streaming responses](/use-the-api/chat-completions#streaming-responses) for how the router relays SSE streams.
 
 ## Error response headers
 
@@ -1220,6 +1262,7 @@ Before retrying, determine both:
 | `queue_full` | Retry with exponential backoff |
 | `backend_error` | Retry at most selectively and investigate repeated failures |
 | `request_timeout` | Retry only when duplicate execution is acceptable |
+| `stream_truncated` | Discard the partial output and retry when duplicate execution is acceptable |
 
 <Warning>
   Hivenet Router does not use `X-Request-ID` as an idempotency key.
