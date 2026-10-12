@@ -1,15 +1,15 @@
 ---
-title: "Hivenet Router vs. Hivenet Inference API and Compute"
-description: "Understand how Hivenet Router differs from Hivenet Inference API and Compute with Hivenet, and choose the right option for your workload."
+title: "Hivenet Router vs. Hivenet Inference Service and Compute"
+description: "Understand how Hivenet Router differs from Hivenet Inference Service and Compute with Hivenet, and choose the right option for your workload."
 sidebarTitle: "Hivenet Router and Hivenet services"
 ---
 
-Hivenet Router, Hivenet Inference API, and Compute with Hivenet all support AI inference workloads, but they solve different problems.
+Hivenet Router, Hivenet Inference Service, and Compute with Hivenet all support AI inference workloads, but they solve different problems.
 
 The main difference is who operates each layer.
 
 - With **Hivenet Router**, you operate the routing layer and connect your own inference infrastructure.
-- With **Hivenet Inference API**, Hivenet operates the inference service behind a managed API.
+- With **Hivenet Inference Service**, Hivenet operates the inference service behind a managed API.
 - With **Compute with Hivenet**, you rent infrastructure and decide what software to run on it.
 
 <Columns cols={3}>
@@ -17,7 +17,7 @@ The main difference is who operates each layer.
     Self-hosted routing for your own inference backends.
   </Card>
 
-  <Card title="Hivenet Inference API" icon="cloud">
+  <Card title="Hivenet Inference Service" icon="cloud">
     Managed inference endpoint operated by Hivenet.
   </Card>
 
@@ -27,7 +27,7 @@ The main difference is who operates each layer.
 </Columns>
 
 <Note>
-  These docs cover Hivenet Router. Information about Hivenet Inference API and Compute with Hivenet is included here only to explain where Hivenet Router fits.
+  These docs cover Hivenet Router. Information about Hivenet Inference Service and Compute with Hivenet is included here only to explain where Hivenet Router fits.
 </Note>
 
 ## Hivenet Router
@@ -55,20 +55,20 @@ Use Hivenet Router when you want to:
 - avoid depending on a hosted routing control plane
 - build a private or distributed inference setup
 
-## Hivenet Inference API
+## Hivenet Inference Service
 
-Hivenet Inference API is a managed inference service.
+Hivenet Inference Service is a managed inference service.
 
 You connect your application to an API endpoint operated by Hivenet. Hivenet runs and maintains the service infrastructure behind that endpoint, so you do not need to deploy a Hivenet Router router, agents, or inference engines yourself.
 
-Use Hivenet Inference API when you want to:
+Use Hivenet Inference Service when you want to:
 
 - call hosted models through a managed API
 - avoid operating inference infrastructure
 - avoid maintaining routers, agents, and model servers
 - use a commercial service with managed operations
 
-The models, regions, service limits, and commercial terms available through Hivenet Inference API are separate from Hivenet Router and may change independently.
+The models, regions, service limits, and commercial terms available through Hivenet Inference Service are separate from Hivenet Router and may change independently.
 
 ## Compute with Hivenet
 
@@ -88,7 +88,7 @@ Compute with Hivenet provides the machines. You remain responsible for the softw
 
 ## Compare the three options
 
-|  | Hivenet Router | Hivenet Inference API | Compute with Hivenet |
+|  | Hivenet Router | Hivenet Inference Service | Compute with Hivenet |
 | --- | --- | --- | --- |
 | What it provides | Inference routing software | Managed inference endpoint | GPU and CPU infrastructure |
 | Who operates it | You | Hivenet | You |
@@ -118,7 +118,7 @@ Hivenet Router does not require Hivenet infrastructure. It can run wherever its 
 
 Choose **Hivenet Router** when you want to operate your own inference setup and need routing across several backends.
 
-Choose **Hivenet Inference API** when you want a managed endpoint and do not want to operate the underlying inference service.
+Choose **Hivenet Inference Service** when you want a managed endpoint and do not want to operate the underlying inference service.
 
 Choose **Compute with Hivenet** when you need infrastructure for software and workloads that you control.
 
