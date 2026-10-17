@@ -1030,6 +1030,24 @@ func (h *Handlers) awaitResponse(c *gin.Context, pending *domain.PendingRequest,
 	}
 }
 
+// writeAffinityHeader exposes the agent-level prefix-affinity decision on the
+// response (X-Hivenet-Agent-Source: hit|miss|margin|ineligible). Called by
+// every response writer BEFORE the first flush — for streaming that means
+// before c.Status/SSE copy, since headers are committed on first write.
+//
+// Precedence is set-if-unset: an existing value (e.g. a proxy or the alias
+// middleware) is never overwritten, and an empty AffinitySource — affinity off
+// for this request — writes nothing at all. This header is deliberately
+// distinct from X-Hivenet-Route-Source, which the alias middleware owns.
+func (h *Handlers) writeAffinityHeader(c *gin.Context, resp *domain.ChatResponse) {
+	if resp == nil || resp.AffinitySource == "" {
+		return
+	}
+	if c.Writer.Header().Get(HeaderAgentSource) == "" {
+		c.Header(HeaderAgentSource, resp.AffinitySource)
+	}
+}
+
 // writeSuccessResponse streams or writes the agent response and records success
 // metrics and audit usage.
 func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingRequest, req *domain.ChatRequest, m reqMeta, resp *domain.ChatResponse) {
@@ -1061,6 +1079,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
 	domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+	h.writeAffinityHeader(c, resp)
 	c.Status(http.StatusOK)
 
 	if resp.Body == nil {
@@ -1436,6 +1455,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
 		domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+		h.writeAffinityHeader(c, resp)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:

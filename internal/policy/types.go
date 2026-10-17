@@ -126,6 +126,42 @@ type PolicyStep struct {
 	Strategy  string                   `yaml:"strategy"   json:"strategy"`
 	// MaxTries caps forward attempts for this step. 0 means use the global default.
 	MaxTries int `yaml:"max_tries" json:"max_tries,omitempty"`
+	// AgentAffinity pins a conversation to the agent that served it before, so
+	// the engine's automatic prefix cache (vLLM APC) stays warm across turns.
+	// nil (absent) = off; the executor then never allocates a pin store. See
+	// affinity.go for the selection semantics and docs/routing/
+	// policy-yaml-reference.mdx for the operator-facing reference.
+	AgentAffinity *AgentAffinity `yaml:"agent_affinity" json:"agent_affinity,omitempty"`
+}
+
+// AgentAffinity configures agent-level prefix affinity for one policy step.
+// Every field is optional; unset fields take the defaults in the comments
+// (applied at session resolution, so code-built policies get them too).
+// Load-time validation (loader.validateStep) rejects unparseable durations,
+// a negative max_age, a margin outside [0,1] and non-positive caps.
+type AgentAffinity struct {
+	// TTL is the sliding pin lifetime (Go duration, e.g. "30m"). Every pin hit
+	// extends it, so a conversation that keeps calling stays pinned; an idle one
+	// expires and is re-decided on its next turn. Must be > 0. Default "30m".
+	TTL string `yaml:"ttl" json:"ttl,omitempty"`
+	// LoadMargin is how much more loaded the pinned agent may be than the
+	// strategy's best candidate and still win the request (0..1 of capacity).
+	// 0 means the pin wins only when the best candidate is not strictly less
+	// loaded. Default 0.25.
+	LoadMargin *float64 `yaml:"load_margin" json:"load_margin,omitempty"`
+	// MaxAge is an absolute cap on one pin's lifetime (Go duration), which
+	// restarts on every re-pin (Put), not on hits. Unset = no cap: a pin shared
+	// by colliding fingerprints then lives only for its sliding TTLs.
+	// "0" disables the cap explicitly.
+	MaxAge string `yaml:"max_age" json:"max_age,omitempty"`
+	// MaxPins caps the executor's total agent-pin store (memory guard).
+	// At the cap the least recently used pin is evicted — one re-decision.
+	// Default 100000. Store caps are first-use-wins: the first agent_affinity
+	// step to run sizes the store, later changes need a router restart.
+	MaxPins *int `yaml:"max_pins" json:"max_pins,omitempty"`
+	// MaxPinsPerKey caps pins owned by one API key (owner-cap eviction: one
+	// re-decision for the evicted conversation's next turn). Default 10000.
+	MaxPinsPerKey *int `yaml:"max_pins_per_key" json:"max_pins_per_key,omitempty"`
 }
 
 // FallbackStep is a PolicyStep with an optional name used in logs and metrics.

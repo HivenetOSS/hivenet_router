@@ -212,6 +212,12 @@ type RouterMetrics struct {
 	// provider fallback (after all local steps were exhausted). Label: model.
 	policyProviderFallbackRouted *prometheus.CounterVec
 
+	// affinityTotal counts agent-level prefix-affinity decisions (the moment a
+	// request's agent was selected). Labels: tenant, result
+	// (hit|miss|margin|ineligible). Label values are a fixed set and the tenant
+	// label matches the other tenant-scoped counters, so cardinality stays bounded.
+	affinityTotal *prometheus.CounterVec
+
 	// --- Per-model wait queue metrics ---
 
 	// queueDepth is the instantaneous number of requests waiting for a
@@ -820,6 +826,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		affinityTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_router_affinity_total",
+				Help: "Agent-level prefix-affinity decisions by tenant and result (hit|miss|margin|ineligible), counted once per request when its agent was selected.",
+			},
+			[]string{"tenant", "result"},
+		),
 		queueDepth: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_queue_depth",
@@ -957,6 +970,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.policyFallbackRouted,
 		m.policyExhausted,
 		m.policyProviderFallbackRouted,
+		// Agent-level prefix affinity
+		m.affinityTotal,
 		// Wait queue metrics
 		m.queueDepth,
 		m.queueWaitSeconds,
@@ -1291,6 +1306,13 @@ func (m *RouterMetrics) PolicyPrimaryRouted(model string) {
 // PolicyFallbackRouted increments the counter for requests served by a fallback step.
 func (m *RouterMetrics) PolicyFallbackRouted(model string) {
 	m.policyFallbackRouted.With(prometheus.Labels{"model": model}).Inc()
+}
+
+// AffinityRouted records one agent-level prefix-affinity decision when a request
+// was selected for forwarding. result is hit|miss|margin|ineligible
+// (policy.AffinityResult.String()); requests with affinity off are not counted.
+func (m *RouterMetrics) AffinityRouted(tenantID, result string) {
+	m.affinityTotal.With(prometheus.Labels{"tenant": tenantID, "result": result}).Inc()
 }
 
 // PolicyExhausted increments the counter for requests where all steps were exhausted (503).

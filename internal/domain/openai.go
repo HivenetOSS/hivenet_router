@@ -129,6 +129,11 @@ type ChatResponse struct {
 	HttpHeaders http.Header   `json:"-"`
 	RawBytes    []byte        `json:"-"`
 	Body        io.ReadCloser `json:"-"` // non-nil for streaming responses; handler must Close
+	// AffinitySource is the agent-affinity decision that produced this response
+	// ("hit"|"miss"|"margin"|"ineligible"), stamped by the processor so the
+	// handler can emit X-Hivenet-Agent-Source before the first flush. Empty =
+	// affinity was off for the request and no header is written.
+	AffinitySource string `json:"-"`
 }
 
 // providerProcessedByPrefix marks a response served by a cloud provider

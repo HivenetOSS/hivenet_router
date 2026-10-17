@@ -418,7 +418,7 @@ The following strategies are not implemented:
 - `best-ttft`
 - `best-itl`
 
-A policy using one of these names is rejected at load time.
+A policy using one of these names is rejected at load time. `prefix-aware` stays reserved because prefix affinity is implemented differently: the optional `agent_affinity` step flag pins a conversation to one agent across turns (within a configurable `load_margin`) so the engine's automatic prefix cache stays warm, without changing the ranking strategy. See [Agent affinity](/routing/policy-yaml-reference#agent-affinity).
 
 ## Forward attempts
 

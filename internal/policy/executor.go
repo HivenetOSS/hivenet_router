@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/pin"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -155,6 +156,13 @@ type Executor struct {
 	queues  map[string]*WaitQueue // keyed by model name
 
 	queueMetrics QueueMetrics // optional; nil in tests
+
+	// affMu guards agentPins, the executor's own agent-affinity pin store. It is
+	// created lazily by affinityStore (nil until the first agent_affinity step
+	// runs) and shared by all sessions: pin state is per process, while the
+	// per-step knobs (ttl, margin, max age) travel in each resolvedStep.
+	affMu     sync.Mutex
+	agentPins *pin.PinStore
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -342,7 +350,12 @@ func (e *Executor) SetNamedPoliciesFromSnapshot(named map[string]*Policy) {
 //
 // capability filters agent selection to only agents whose Metadata.Capability
 // matches. Pass domain.CapabilityLLM ("llm") for chat completions.
-func (e *Executor) NewSession(model, capability string) *Session {
+//
+// aff is the agent-affinity identity for this request (see AffinityContext);
+// nil disables affinity entirely — the common case for policies whose steps
+// carry no agent_affinity block, where nothing affinity-related is allocated
+// or parsed.
+func (e *Executor) NewSession(model, capability string, aff *AffinityContext) *Session {
 	s := e.state.Load() // single atomic load — global and per-model are always consistent
 	pol := s.global
 	if mp, ok := s.modelPolicies[model]; ok {
@@ -368,10 +381,12 @@ func (e *Executor) NewSession(model, capability string) *Session {
 		executor:         e,
 		fallbackProvider: pol.FallbackProvider,
 		lastReason:       ErrAllStepsExhausted,
+		affCtx:           aff,
 	}
 }
 
-// resolve binds a PolicyStep to its concrete Strategy and computes its effective maxTries.
+// resolve binds a PolicyStep to its concrete Strategy, computes its effective
+// maxTries and normalises its agent_affinity block (nil when the step has none).
 func (e *Executor) resolve(name string, step PolicyStep) resolvedStep {
 	maxTries := step.MaxTries
 	if maxTries <= 0 {
@@ -382,15 +397,18 @@ func (e *Executor) resolve(name string, step PolicyStep) resolvedStep {
 		PolicyStep: step,
 		strategy:   Get(step.Strategy),
 		maxTries:   maxTries,
+		affinity:   affinityConfigOf(step.AgentAffinity),
 	}
 }
 
-// resolvedStep is a PolicyStep with its Strategy pre-looked up and maxTries resolved.
+// resolvedStep is a PolicyStep with its Strategy pre-looked up, maxTries
+// resolved and agent_affinity normalised.
 type resolvedStep struct {
 	name       string
-	PolicyStep          // embedded: Match, ExcludeIf, Strategy name, MaxTries
-	strategy   Strategy // concrete strategy instance
-	maxTries   int      // effective max forward attempts for this step
+	PolicyStep                 // embedded: Match, ExcludeIf, Strategy name, MaxTries
+	strategy   Strategy        // concrete strategy instance
+	maxTries   int             // effective max forward attempts for this step
+	affinity   *affinityConfig // nil = step has no agent_affinity block
 }
 
 // gateDiag records the outcome of one gate in the policy funnel for a single step.
@@ -434,6 +452,17 @@ type Session struct {
 	// lastGates holds the gate funnel from the most recent zero-candidate buildCandidates call.
 	// Consumed by advanceStep("no_candidates") to attach the funnel to the step trace.
 	lastGates []gateDiag
+	// Agent affinity state. affTried is ONE-SHOT across the whole request (it
+	// spans the forward-retry loop, so a failed forward never re-pins mid-request);
+	// affResult is the decision to report via AffinityResult(); affPendingPin
+	// defers the actual store write until an agent has won a slot, so only the
+	// agent that really serves gets pinned.
+	affCtx        *AffinityContext
+	affTried      bool
+	affResult     AffinityResult
+	affPendingPin bool
+	affKey        string // computed once, see affKeyOrCompute
+	affCfg        *affinityConfig
 }
 
 // Select picks the next eligible agent, advancing through fallback steps as needed.
@@ -491,6 +520,21 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 
 		chosen := step.strategy.Select(candidates)
 
+		// One-shot agent affinity (step.agent_affinity): decided at most once per
+		// request — the flag survives the whole retry loop below — and only for a
+		// step that declares the block. A hit arrives with its slot already
+		// acquired; every other outcome falls through to the strategy's pick, which
+		// then pins the agent that actually serves (pinIfPending).
+		if !s.affTried && s.affCtx != nil && step.affinity != nil {
+			s.affTried = true
+			s.affCfg = step.affinity
+			pinned, res := s.affResolve(step.affinity, candidates, chosen)
+			s.affResult = res
+			if pinned != nil {
+				return pinned, nil
+			}
+		}
+
 		// Atomically claim a slot. If lost to a race, retry selection without counting
 		// a forward try — the agent is not "failed", just momentarily at capacity.
 		//
@@ -499,6 +543,8 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 		if !chosen.TryAcquireSlot() {
 			continue
 		}
+		// Miss/margin (or a slot-race fall-through): pin whoever actually serves.
+		s.pinIfPending(chosen)
 
 		return chosen, nil
 	}

@@ -217,6 +217,49 @@ func TestValidate_Errors(t *testing.T) {
 			"routing_policy:\n  strategy: least-loaded\nfallback_provider:\n  engine: openai\n",
 			"fallback_provider.model is required",
 		},
+		// agent_affinity validation. These run through LoadBytes, which is the
+		// same gate every reload path (SIGHUP / admin API) loads YAML through
+		// before it reaches the executor.
+		{
+			"agent_affinity unparseable ttl",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    ttl: banana\n",
+			"agent_affinity.ttl: invalid duration",
+		},
+		{
+			"agent_affinity non-positive ttl",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    ttl: 0s\n",
+			"agent_affinity.ttl: must be > 0",
+		},
+		{
+			"agent_affinity margin above 1",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    load_margin: 1.5\n",
+			"agent_affinity.load_margin must be in [0,1]",
+		},
+		{
+			"agent_affinity negative margin",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    load_margin: -0.1\n",
+			"agent_affinity.load_margin must be in [0,1]",
+		},
+		{
+			"agent_affinity unparseable max_age",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    max_age: soon\n",
+			"agent_affinity.max_age: invalid duration",
+		},
+		{
+			"agent_affinity zero max_pins",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    max_pins: 0\n",
+			"agent_affinity.max_pins must be > 0",
+		},
+		{
+			"agent_affinity negative max_pins_per_key",
+			"routing_policy:\n  strategy: least-loaded\n  agent_affinity:\n    max_pins_per_key: -1\n",
+			"agent_affinity.max_pins_per_key must be > 0",
+		},
+		{
+			"agent_affinity in a fallback step",
+			"routing_policy:\n  strategy: least-loaded\nfallback_chain:\n  - name: relaxed\n    strategy: least-loaded\n    agent_affinity:\n      ttl: -1m\n",
+			fallbackAffinityErr,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +270,10 @@ func TestValidate_Errors(t *testing.T) {
 		})
 	}
 }
+
+// fallbackAffinityErr is the error fragment a bad agent_affinity block in a
+// fallback step must carry: validation names the step, not just the field.
+const fallbackAffinityErr = `step "relaxed": agent_affinity.ttl`
 
 func TestLoadBytes_Valid(t *testing.T) {
 	y := `

@@ -186,6 +186,48 @@ func validateStep(name string, step PolicyStep) error {
 			return err
 		}
 	}
+	if err := validateAffinity(name, step.AgentAffinity); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAffinity checks the agent_affinity block of one step. An absent
+// block is valid (the feature is off). Durations use Go syntax; an empty
+// ttl means the default (30m), an empty max_age means no absolute cap;
+// load_margin must be within [0,1] and the store caps must be positive.
+func validateAffinity(name string, a *AgentAffinity) error {
+	if a == nil {
+		return nil
+	}
+	step := fmt.Sprintf("policy: step %q: agent_affinity", name)
+	if a.TTL != "" {
+		d, err := time.ParseDuration(a.TTL)
+		if err != nil {
+			return fmt.Errorf("%s.ttl: invalid duration %q", step, a.TTL)
+		}
+		if d <= 0 {
+			return fmt.Errorf("%s.ttl: must be > 0, got %q", step, a.TTL)
+		}
+	}
+	if a.LoadMargin != nil && (*a.LoadMargin < 0 || *a.LoadMargin > 1) {
+		return fmt.Errorf("%s.load_margin must be in [0,1], got %g", step, *a.LoadMargin)
+	}
+	if a.MaxAge != "" {
+		d, err := time.ParseDuration(a.MaxAge)
+		if err != nil {
+			return fmt.Errorf("%s.max_age: invalid duration %q", step, a.MaxAge)
+		}
+		if d < 0 {
+			return fmt.Errorf("%s.max_age: must be >= 0, got %q", step, a.MaxAge)
+		}
+	}
+	if a.MaxPins != nil && *a.MaxPins <= 0 {
+		return fmt.Errorf("%s.max_pins must be > 0, got %d", step, *a.MaxPins)
+	}
+	if a.MaxPinsPerKey != nil && *a.MaxPinsPerKey <= 0 {
+		return fmt.Errorf("%s.max_pins_per_key must be > 0, got %d", step, *a.MaxPinsPerKey)
+	}
 	return nil
 }
 

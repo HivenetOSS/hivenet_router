@@ -35,7 +35,7 @@ func TestExecutor_SelectHappyPath(t *testing.T) {
 
 	// Full pipeline (match → gates → strategy → acquire) must return the one agent.
 	exec := newExec(lister, &stubStorage{}, pol)
-	got, err := exec.NewSession("m", domain.CapabilityLLM).Select(context.Background())
+	got, err := exec.NewSession("m", domain.CapabilityLLM, nil).Select(context.Background())
 	if err != nil {
 		t.Fatalf("Select returned error on happy path: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestExecutor_SelectPicksLeastLoaded(t *testing.T) {
 		Match: policy.MatchFilter{Engine: "vllm"}, Strategy: "least-loaded", MaxTries: 3,
 	}}
 
-	got, err := newExec(lister, &stubStorage{}, pol).NewSession("m", domain.CapabilityLLM).Select(context.Background())
+	got, err := newExec(lister, &stubStorage{}, pol).NewSession("m", domain.CapabilityLLM, nil).Select(context.Background())
 	if err != nil {
 		t.Fatalf("Select error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestExecutor_RecordFailureExhausts(t *testing.T) {
 	pol := &policy.Policy{RoutingPolicy: policy.PolicyStep{
 		Match: policy.MatchFilter{Engine: "vllm"}, Strategy: "least-loaded", MaxTries: 2,
 	}}
-	sess := newExec(lister, &stubStorage{}, pol).NewSession("m", domain.CapabilityLLM)
+	sess := newExec(lister, &stubStorage{}, pol).NewSession("m", domain.CapabilityLLM, nil)
 
 	// First select succeeds, then we report failure and retry until exhausted.
 	// MaxTries=2 with only one agent → the 5-iteration loop must hit exhaustion

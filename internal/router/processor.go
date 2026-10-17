@@ -242,7 +242,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 	if capability == "" {
 		capability = domain.CapabilityLLM
 	}
-	session := p.executor.NewSession(pending.Request.Model, capability)
+	session := p.executor.NewSession(pending.Request.Model, capability, policy.NewAffinityContext(pending))
 
 	// Inherit the trace context from the inbound HTTP request so spans
 	// created here become children of the Gin middleware root span.
@@ -269,6 +269,11 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 	// reconnects tracks free, budget-exempt re-dials granted per agent within this
 	// request (see maxReconnectsPerAgent).
 	reconnects := make(map[peer.ID]int)
+
+	// affinityCounted latches the one-shot affinity metric: the decision is taken
+	// once per request (session one-shot), so it is counted once — a retry after a
+	// forward failure must not inflate the counter.
+	affinityCounted := false
 
 	for {
 		// Check deadline before each attempt so expired requests are never forwarded.
@@ -335,6 +340,16 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			return
 		}
 
+		// The affinity decision is final the moment an agent is selected, so the
+		// counter records selections (not forwards) — but only once per request,
+		// because the session's one-shot attempt never repeats.
+		if !affinityCounted {
+			if res := session.AffinityResult(); res != policy.AffinityNone {
+				p.metrics.AffinityRouted(pending.TenantID, res.String())
+				affinityCounted = true
+			}
+		}
+
 		// Stamp the deployment from the selected agent so all downstream metric calls
 		// use the real deployment ID rather than the request-time "unset" default.
 		pending.DeploymentID = agent.Metadata.DeploymentID
@@ -366,6 +381,13 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 				p.metrics.PolicyPrimaryRouted(pending.Request.Model)
 			} else {
 				p.metrics.PolicyFallbackRouted(pending.Request.Model)
+			}
+			// Carry the affinity decision to the handler so it can expose
+			// X-Hivenet-Agent-Source before the first flush (streaming included).
+			if resp != nil {
+				if res := session.AffinityResult(); res != policy.AffinityNone {
+					resp.AffinitySource = res.String()
+				}
 			}
 			pending.Response <- resp
 			return

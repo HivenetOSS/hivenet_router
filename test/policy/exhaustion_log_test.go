@@ -100,7 +100,7 @@ func TestExhaustionLog_MatchFail(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -130,7 +130,7 @@ func TestExhaustionLog_HealthFail(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -168,7 +168,7 @@ func TestExhaustionLog_ExcludeIfFail(t *testing.T) {
 	}
 
 	exec := newExec(lister, stor, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -228,7 +228,7 @@ func TestExhaustionLog_FallbackChain(t *testing.T) {
 	}
 
 	exec := newExec(lister, stor, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -252,7 +252,7 @@ func TestExhaustionLog_ModelNotFound(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -281,7 +281,7 @@ func TestExhaustionLog_CapabilityMismatch(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -312,7 +312,7 @@ func TestExhaustionLog_TagMismatch(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 	_, err := session.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected exhaustion error, got nil")
@@ -343,7 +343,7 @@ func TestExhaustionLog_MaxTries(t *testing.T) {
 	}
 
 	exec := newExec(lister, &stubStorage{}, pol)
-	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM)
+	session := exec.NewSession("Qwen-3.6-35B", domain.CapabilityLLM, nil)
 
 	// Simulate two forward failures to exhaust the MaxTries=2 budget.
 	a1, err := session.Select(context.Background())

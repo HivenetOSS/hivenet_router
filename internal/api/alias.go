@@ -43,6 +43,12 @@ const (
 	HeaderRoutedModel = "X-Hivenet-Routed-Model"
 	HeaderRoute       = "X-Hivenet-Route"
 	HeaderRouteSource = "X-Hivenet-Route-Source"
+	// HeaderAgentSource reports the agent-level prefix-affinity decision for
+	// this response (hit|miss|margin|ineligible). Distinct from
+	// HeaderRouteSource on purpose: the alias middleware owns that header, so
+	// affinity never overwrites a routing decision — and, as a safety net, this
+	// writer only sets HeaderAgentSource when it is not already present.
+	HeaderAgentSource = "X-Hivenet-Agent-Source"
 )
 
 // semanticPaths are the inference paths an alias can be used on.

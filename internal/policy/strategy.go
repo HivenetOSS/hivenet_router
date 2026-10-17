@@ -14,11 +14,17 @@ type Strategy interface {
 
 // registry maps strategy names to their implementations.
 // Validate checks names against this map at policy load time.
+//
+// "prefix-aware" stays reserved on purpose: prefix affinity (APC-aware pinning
+// of a conversation to one agent) is NOT a ranking strategy — it is the
+// agent_affinity step flag in types.go, resolved by the executor around this
+// stateless Select (see affinity.go), because it needs request context, a pin
+// store and slot acquisition that a Strategy never sees.
 var registry = map[string]Strategy{
 	"least-loaded": leastLoadedStrategy{},
 	// "lowest-srtt":  lowestSRTTStrategy{},   // add when implemented
 	// "round-robin":  roundRobinStrategy{},   // add when implemented
-	// "prefix-aware": prefixAwareStrategy{},  // add when implemented
+	// "prefix-aware": prefixAwareStrategy{},  // reserved: use step.agent_affinity
 }
 
 // Get returns the Strategy registered for name, or nil if not found.

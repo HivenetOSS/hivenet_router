@@ -40,6 +40,9 @@ routing_policy:
 
   strategy: least-loaded
   max_tries: 3
+  agent_affinity:
+    ttl: 30m
+    load_margin: 0.25
 
 fallback_chain:
   - name: any-vllm-region
@@ -161,6 +164,7 @@ routing_policy:
 | `exclude_if` | Object | No | No metric gates | Live operational thresholds |
 | `strategy` | String | Yes | None | Candidate-ranking strategy |
 | `max_tries` | Integer | No | Router-wide value | Failed forwards allowed in this step |
+| `agent_affinity` | Object | No | Disabled | Pin a conversation to one agent across turns; see [Agent affinity](#agent-affinity) |
 
 The router rejects a policy whose primary step has no `strategy`.
 
@@ -582,7 +586,70 @@ best-ttft
 best-itl
 ```
 
-A policy using one of these strategies is rejected.
+A policy using one of these strategies is rejected. `prefix-aware` stays reserved on purpose: prefix affinity is not a ranking strategy but the `agent_affinity` step flag described below.
+
+## Agent affinity
+
+`agent_affinity` pins a conversation to the agent that served it before, so the engine's automatic prefix caching (vLLM APC) keeps serving the shared prompt prefix from KV cache instead of recomputing it. It is an optional block on any policy step:
+
+```yaml
+routing_policy:
+  strategy: least-loaded
+  agent_affinity:
+    ttl: 30m
+    load_margin: 0.25
+    max_age: 4h
+    max_pins: 100000
+    max_pins_per_key: 10000
+```
+
+| Field | Type | Required | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| `ttl` | Duration string | No | `30m` | Sliding pin lifetime; every pin hit extends it. Must parse as a Go duration and be greater than `0` |
+| `load_margin` | Number in `[0, 1]` | No | `0.25` | How much more loaded the pinned agent may be than the strategy's best candidate and still win the request. `0` means the pin wins only when the best candidate is not strictly less loaded |
+| `max_age` | Duration string | No | No cap | Absolute lifetime of one pin. It restarts only when a pin is written again (a miss or margin re-pin), never on hits. `0` disables the cap explicitly |
+| `max_pins` | Integer | No | `100000` | Total pins kept in memory; at the cap the least recently used pin is evicted |
+| `max_pins_per_key` | Integer | No | `10000` | Pins owned by one API key; exceeding it evicts that key's least recently used pin |
+
+Validation runs at load time (startup, `SIGHUP` reload, admin policy writes): unparseable or non-positive durations, a negative `max_age`, a `load_margin` outside `[0, 1]`, and non-positive caps reject the policy — an invalid reload leaves the previous policy active. Unset fields take their defaults when the step is resolved, so code-built policies behave the same as YAML-loaded ones.
+
+### How a conversation is keyed
+
+The router derives one key per request, in this order:
+
+1. `X-Hivenet-Task-ID`, when it is at most 128 bytes. On the plain path a longer value is ignored (the alias path rejects it with `400` before routing).
+2. `x-litellm-session-id`, which litellm already forwards to the router (`forward_client_headers_to_llm_api`) and which pi and the PWA gateway already send.
+3. Otherwise a content fingerprint of the declared end user, the system prompt, and the first human turn, scoped by the resolved model and API key.
+
+Raw headers and prompt text are hashed (SHA-256 prefix, 34-byte key) and never stored. The header path is stable even when the system prompt changes every turn — relevant for harnesses such as pi that re-stamp a timestamp into the system prompt, which changes the content fingerprint on every request.
+
+### Selection outcomes
+
+After the strategy ranks the candidates, one affinity attempt runs per request:
+
+| Result | Meaning | Effect |
+| --- | --- | --- |
+| `hit` | The pinned agent is eligible and within `load_margin` | The request goes to the pinned agent; its pin lifetime is refreshed |
+| `miss` | No live pin exists | The agent that actually serves is pinned |
+| `margin` | The pinned agent is more than `load_margin` above the best candidate | The best candidate serves and becomes the new pin |
+| `ineligible` | The pinned agent cannot serve (unhealthy, at capacity, already failed this step, or it lost the capacity-slot race) | A fallback serves the request; when the agent was merely excluded the pin is kept, so the conversation snaps back once it recovers |
+
+An affinity attempt never repeats within one request: a forward retry does not re-pin mid-request, and a request whose steps are exhausted stores no pin. Because a session snapshot is taken at creation time, a policy reload affects new requests only.
+
+### Observability
+
+- Response header `X-Hivenet-Agent-Source: hit|miss|margin|ineligible` is set (only when absent) before the response is flushed, streaming included. It is distinct from `X-Hivenet-Route-Source`, which the alias middleware owns, so both can appear on one response.
+- Counter `hivenet_router_affinity_total{tenant,result}` increments once per request, at the moment its agent is selected. Requests with affinity disabled are not counted.
+
+### Scope and limitations
+
+- Affinity applies to LLM chat requests (`/v1/chat/completions`, `/v1/messages`). Embeddings, reranking, and `/v1/messages/count_tokens` never create pins.
+- The pin store is in-memory and per router process: a restart, or a conversation that lands on another router instance, costs one re-decision. Cross-router pin sharing is not implemented.
+- A pinned agent that goes permanently down holds its conversations on fallbacks until its `ttl` (or `max_age`, when set) expires — functionally the same as no pin. Set `max_age` in production to bound this.
+- `max_pins` and `max_pins_per_key` size the store on first use; changing them requires a router restart.
+- On the alias path the key is scoped by the resolved model, so alias routing and affinity compose: the alias decides the model, affinity pins the agent within it.
+
+Deleting the `agent_affinity` block and reloading the policy disables the feature: new requests take no affinity decision, and existing pins simply go unused until they expire or are evicted. No client change is required.
 
 ## Forward attempts
 
