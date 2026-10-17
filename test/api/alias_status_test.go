@@ -12,8 +12,8 @@ import (
 
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/pin"
 	"hivenet_router/internal/policy"
-	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/tokenizer"
 )
 
@@ -108,15 +108,15 @@ func TestAliasMiddleware_TaskHeaderCap(t *testing.T) {
 		header   string
 		wantCode int
 	}{
-		{"at the cap", strings.Repeat("t", semantic.MaxTaskIDLen), http.StatusOK},
-		{"over the cap", strings.Repeat("t", semantic.MaxTaskIDLen+1), http.StatusBadRequest},
+		{"at the cap", strings.Repeat("t", pin.MaxTaskIDLen), http.StatusOK},
+		{"over the cap", strings.Repeat("t", pin.MaxTaskIDLen+1), http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 				strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(semantic.TaskIDHeader, tc.header)
+			req.Header.Set(pin.TaskIDHeader, tc.header)
 			r.ServeHTTP(w, req)
 			if w.Code != tc.wantCode {
 				t.Errorf("status %d, want %d: %s", w.Code, tc.wantCode, w.Body.String())

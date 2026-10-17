@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"hivenet_router/internal/pin"
 	"hivenet_router/internal/policy"
 )
 
@@ -68,23 +69,23 @@ type Decision struct {
 // next request without coordination.
 type Resolver struct {
 	signals []Signal
-	pins    *PinStore
+	pins    *pin.PinStore
 }
 
 // NewResolver builds a resolver with the given pin store and signals
 // (default: Structural only).
-func NewResolver(pins *PinStore, signals ...Signal) *Resolver {
+func NewResolver(pins *pin.PinStore, signals ...Signal) *Resolver {
 	if len(signals) == 0 {
 		signals = []Signal{Structural{}}
 	}
 	if pins == nil {
-		pins = NewPinStore(0, 0)
+		pins = pin.NewPinStore(0, 0)
 	}
 	return &Resolver{signals: signals, pins: pins}
 }
 
 // Pins exposes the pin store (tests / diagnostics).
-func (r *Resolver) Pins() *PinStore { return r.pins }
+func (r *Resolver) Pins() *pin.PinStore { return r.pins }
 
 // Resolve picks the model for a request to alias. Order: a live pin for the
 // task (if the alias pins, the pin is still valid for the current config and
@@ -123,7 +124,10 @@ func (r *Resolver) Resolve(alias string, spec *policy.AliasSpec, profiles map[st
 	pinnable := !env.CountOnly && anyPinned(spec)
 	affinity := !env.CountOnly && spec.AffinityDuration() > 0
 	if pinnable || affinity {
-		d.TaskKey = TaskKey(alias, env.TaskHeader, env.KeyID, v)
+		d.TaskKey = pin.TaskKey(pin.TaskKeyInput{
+			Alias: alias, KeyID: env.KeyID, HeaderValue: env.TaskHeader,
+			EndUser: v.EndUser, System: v.System, FirstUserText: v.FirstUserText,
+		})
 	}
 	// keepEntry is set when a pin or affinity entry is still valid but its model
 	// cannot serve this one request (see keepsEntry): the request is served by a

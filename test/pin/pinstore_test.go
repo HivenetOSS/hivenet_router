@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-package semantic_test
+// Package pin_test covers the shared pin store and pin key: capacity and
+// per-owner eviction, sliding TTL vs absolute max age, concurrency, and the
+// bounded/scoped shape of TaskKey. The store backs both semantic model pins
+// and the executor's agent affinity pins.
+package pin_test
 
 import (
 	"fmt"
@@ -10,13 +14,17 @@ import (
 	"testing"
 	"time"
 
-	"hivenet_router/internal/semantic"
+	"hivenet_router/internal/pin"
 )
+
+// fp builds a fingerprint-keyed TaskKeyInput (no header).
+func fp(alias, keyID, endUser, system, first string) pin.TaskKeyInput {
+	return pin.TaskKeyInput{Alias: alias, KeyID: keyID, EndUser: endUser, System: system, FirstUserText: first}
+}
 
 // TestTaskKey_BoundedAndScoped: a pin key is a fixed-size hash whatever the
 // client sends, and differs per alias, per key and per end user.
 func TestTaskKey_BoundedAndScoped(t *testing.T) {
-	v := view(t, userMsg("hi"), semantic.DialectOpenAI)
 	huge := strings.Repeat("x", 64<<10)
 	tests := []struct {
 		name   string
@@ -24,10 +32,10 @@ func TestTaskKey_BoundedAndScoped(t *testing.T) {
 		differ bool
 	}{
 		// A 64 KB header must not become a 64 KB map key.
-		{"header is hashed", semantic.TaskKey("auto", huge, "k", v), "", false},
-		{"alias scopes header keys", semantic.TaskKey("auto", "t1", "k", v), semantic.TaskKey("auto-fast", "t1", "k", v), true},
-		{"alias scopes fingerprints", semantic.TaskKey("auto", "", "k", v), semantic.TaskKey("auto-fast", "", "k", v), true},
-		{"key id scopes headers", semantic.TaskKey("auto", "t1", "k1", v), semantic.TaskKey("auto", "t1", "k2", v), true},
+		{"header is hashed", pin.TaskKey(hdr(fp("auto", "k", "", "", ""), huge)), "", false},
+		{"alias scopes header keys", pin.TaskKey(hdr(fp("auto", "k", "", "", ""), "t1")), pin.TaskKey(hdr(fp("auto-fast", "k", "", "", ""), "t1")), true},
+		{"alias scopes fingerprints", pin.TaskKey(fp("auto", "k", "e", "s", "u")), pin.TaskKey(fp("auto-fast", "k", "e", "s", "u")), true},
+		{"key id scopes headers", pin.TaskKey(hdr(fp("auto", "k1", "", "", ""), "t1")), pin.TaskKey(hdr(fp("auto", "k2", "", "", ""), "t1")), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,36 +49,44 @@ func TestTaskKey_BoundedAndScoped(t *testing.T) {
 	}
 }
 
+// hdr returns in with HeaderValue set (test helper: TaskKeyInput is a plain
+// struct, so tests build it literally).
+func hdr(in pin.TaskKeyInput, h string) pin.TaskKeyInput {
+	in.HeaderValue = h
+	return in
+}
+
+// TestTaskKey_HeaderBeatsFingerprint: a non-empty header replaces the
+// fingerprint entirely, so a conversation stays keyed when its prompt churns.
+func TestTaskKey_HeaderBeatsFingerprint(t *testing.T) {
+	a := pin.TaskKey(fp("auto", "k", "e", "system v1", "hello"))
+	b := pin.TaskKey(fp("auto", "k", "e", "system v2 (stamp)", "hello"))
+	if a == b {
+		t.Error("fingerprint keys must differ when the system prompt changes")
+	}
+	ha := pin.TaskKey(hdr(fp("auto", "k", "e", "system v1", "hello"), "task-42"))
+	hb := pin.TaskKey(hdr(fp("auto", "k", "e", "system v2 (stamp)", "more text"), "task-42"))
+	if ha != hb {
+		t.Error("header key must be stable across prompt churn")
+	}
+	if !strings.HasPrefix(ha, "h:") || !strings.HasPrefix(a, "f:") {
+		t.Errorf("prefixes: header=%q fingerprint=%q", ha, a)
+	}
+}
+
 // TestTaskKey_EndUserSeparatesSharedKeys: one API key serving many users with
 // the same system prompt and opener must not share a fingerprint when the
 // request names its end user (OpenAI "user", Anthropic metadata.user_id).
 func TestTaskKey_EndUserSeparatesSharedKeys(t *testing.T) {
-	openai := func(user string) *semantic.RequestView {
-		return view(t, `{"user":"`+user+`","messages":[{"role":"system","content":"bot"},{"role":"user","content":"hi"}]}`, semantic.DialectOpenAI)
-	}
-	anthropic := func(user string) *semantic.RequestView {
-		return view(t, `{"metadata":{"user_id":"`+user+`"},"system":"bot","messages":[{"role":"user","content":"hi"}]}`, semantic.DialectAnthropic)
-	}
-	for name, mk := range map[string]func(string) *semantic.RequestView{"openai user": openai, "anthropic metadata.user_id": anthropic} {
-		t.Run(name, func(t *testing.T) {
-			if mk("alice").EndUser != "alice" {
-				t.Fatalf("EndUser = %q", mk("alice").EndUser)
-			}
-			if semantic.TaskKey("auto", "", "k", mk("alice")) == semantic.TaskKey("auto", "", "k", mk("bob")) {
-				t.Error("different end users must not share a fingerprint")
-			}
-		})
-	}
-	// A malformed user field degrades to "no end user", never to a 400.
-	if _, err := semantic.ParseView([]byte(`{"user":42,"metadata":"x","messages":[]}`), semantic.DialectOpenAI, nil); err != nil {
-		t.Errorf("odd user/metadata shapes must parse: %v", err)
+	if pin.TaskKey(fp("auto", "k", "alice", "bot", "hi")) == pin.TaskKey(fp("auto", "k", "bob", "bot", "hi")) {
+		t.Error("different end users must not share a fingerprint")
 	}
 }
 
 // TestPinStore_EvictsLeastRecentlyUsed: at capacity the least recently used pin
 // goes, so a task that keeps calling is never evicted by newer ones.
 func TestPinStore_EvictsLeastRecentlyUsed(t *testing.T) {
-	s := semantic.NewPinStore(3, 0)
+	s := pin.NewPinStore(3, 0)
 	for _, k := range []string{"a", "b", "c"} {
 		s.Put(k, "owner", "m-"+k, "r", time.Minute, 0)
 	}
@@ -94,7 +110,7 @@ func TestPinStore_EvictsLeastRecentlyUsed(t *testing.T) {
 // TestPinStore_PerKeyCap: one caller flooding new tasks evicts only its own
 // pins, never another key's.
 func TestPinStore_PerKeyCap(t *testing.T) {
-	s := semantic.NewPinStore(100, 2)
+	s := pin.NewPinStore(100, 2)
 	s.Put("victim-task", "victim", "m", "r", time.Minute, 0)
 	for i := range 50 {
 		s.Put(fmt.Sprintf("flood-%d", i), "flooder", "m", "r", time.Minute, 0)
@@ -112,7 +128,7 @@ func TestPinStore_PerKeyCap(t *testing.T) {
 
 // TestPinStore_MaxAge: hits slide the TTL, but never past the absolute max age.
 func TestPinStore_MaxAge(t *testing.T) {
-	s := semantic.NewPinStore(10, 0)
+	s := pin.NewPinStore(10, 0)
 	now := time.Unix(1_700_000_000, 0)
 	s.SetClock(func() time.Time { return now })
 	s.Put("task", "k", "m", "r", 30*time.Minute, time.Hour)
@@ -128,10 +144,21 @@ func TestPinStore_MaxAge(t *testing.T) {
 	}
 }
 
+// TestPinStore_Bounded: the store never exceeds its cap.
+func TestPinStore_Bounded(t *testing.T) {
+	s := pin.NewPinStore(3, 0)
+	for i := range 10 {
+		s.Put(string(rune('a'+i)), "owner", "m", "r", time.Minute, 0)
+	}
+	if s.Len() > 3 {
+		t.Errorf("len = %d, want <= 3", s.Len())
+	}
+}
+
 // TestPinStore_Concurrent exercises every operation from many goroutines; run
 // with -race.
 func TestPinStore_Concurrent(t *testing.T) {
-	s := semantic.NewPinStore(64, 8)
+	s := pin.NewPinStore(64, 8)
 	var wg sync.WaitGroup
 	for g := range 16 {
 		wg.Add(1)
@@ -158,7 +185,7 @@ func TestPinStore_Concurrent(t *testing.T) {
 func BenchmarkPinStorePutAtCapacity(b *testing.B) {
 	for _, size := range []int{1_000, 100_000} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {
-			s := semantic.NewPinStore(size, size)
+			s := pin.NewPinStore(size, size)
 			for i := range size {
 				s.Put(fmt.Sprint("fill-", i), "k", "m", "r", time.Hour, 0)
 			}

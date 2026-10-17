@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-package semantic
+package pin
 
 import (
 	"container/list"
-	"crypto/sha256"
-	"encoding/hex"
 	"hash/maphash"
 	"sync"
 	"sync/atomic"
@@ -14,40 +12,16 @@ import (
 )
 
 // TaskIDHeader lets a client name its task explicitly; it takes precedence over
-// the fingerprint.
+// the fingerprint. It is shared by the alias path (which rejects an over-long
+// value with 400) and the plain path (an over-long value is ignored when
+// keying agent affinity — see policy.AffinityContext).
 const TaskIDHeader = "X-Hivenet-Task-ID"
 
-// MaxTaskIDLen bounds the TaskIDHeader value. Longer values are rejected by the
-// API layer; the header is hashed either way, so a pin key is always 34 bytes.
+// MaxTaskIDLen bounds the TaskIDHeader value. The alias API layer rejects
+// longer values with 400; the plain path ignores an over-long header instead,
+// so a client that sends one still gets a deterministic key from the next
+// source. The header is hashed either way, so a pin key is always 34 bytes.
 const MaxTaskIDLen = 128
-
-// TaskKey returns the pinning key for a request to alias. It is a hash of the
-// alias and the caller's key id plus either the client's task header (when
-// present) or a fingerprint of (end user, system prompt, first human turn).
-// Agent harnesses keep the fingerprint inputs stable for a whole task, while two
-// tasks from the same key differ in their first user message. The alias is part
-// of the key so a pin never leaks from one alias to another; the end user
-// (OpenAI "user", Anthropic metadata.user_id) separates users that share one API
-// key and one system prompt. Raw client values never reach the pin store.
-func TaskKey(alias, headerValue, keyID string, v *RequestView) string {
-	h := sha256.New()
-	field := func(s string) {
-		h.Write([]byte(s))
-		h.Write([]byte{0})
-	}
-	field(alias)
-	field(keyID)
-	prefix := "f:"
-	if headerValue != "" {
-		prefix = "h:"
-		field(headerValue)
-	} else {
-		field(v.EndUser)
-		field(v.System)
-		field(v.FirstUserText)
-	}
-	return prefix + hex.EncodeToString(h.Sum(nil)[:16])
-}
 
 // Pin store defaults, used when the constructor gets a non-positive value.
 const (

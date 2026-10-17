@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"hivenet_router/internal/pin"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/semantic"
 )
@@ -343,7 +344,7 @@ func TestResolve_UnknownProfilePasses(t *testing.T) {
 // task header separates tasks that share a fingerprint.
 func TestResolve_Pinning(t *testing.T) {
 	spec := mustAlias(t, aliasYAML)
-	pins := semantic.NewPinStore(0, 0)
+	pins := pin.NewPinStore(0, 0)
 	now := time.Unix(1_700_000_000, 0)
 	pins.SetClock(func() time.Time { return now })
 	r := semantic.NewResolver(pins)
@@ -389,27 +390,23 @@ func TestResolve_Pinning(t *testing.T) {
 }
 
 // TestTaskKey_Stability: the fingerprint ignores later turns and differs
-// across tasks.
+// across tasks. The key itself lives in the pin package; the fingerprint
+// fields come from semantic's request view, which is what feeds it.
 func TestTaskKey_Stability(t *testing.T) {
+	keyOf := func(v *semantic.RequestView) string {
+		return pin.TaskKey(pin.TaskKeyInput{
+			Alias: "auto", KeyID: "k",
+			EndUser: v.EndUser, System: v.System, FirstUserText: v.FirstUserText,
+		})
+	}
 	a := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task A"}]}`, semantic.DialectOpenAI)
 	a2 := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task A"},{"role":"assistant","content":"x"},{"role":"user","content":"more"}]}`, semantic.DialectOpenAI)
 	b := view(t, `{"messages":[{"role":"system","content":"s"},{"role":"user","content":"task B"}]}`, semantic.DialectOpenAI)
-	if semantic.TaskKey("auto", "", "k", a) != semantic.TaskKey("auto", "", "k", a2) {
+	if keyOf(a) != keyOf(a2) {
 		t.Error("fingerprint must be stable across turns of one task")
 	}
-	if semantic.TaskKey("auto", "", "k", a) == semantic.TaskKey("auto", "", "k", b) {
+	if keyOf(a) == keyOf(b) {
 		t.Error("different tasks must not collide")
-	}
-}
-
-// TestPinStore_Bounded: the store never exceeds its cap.
-func TestPinStore_Bounded(t *testing.T) {
-	s := semantic.NewPinStore(3, 0)
-	for i := range 10 {
-		s.Put(string(rune('a'+i)), "owner", "m", "r", time.Minute, 0)
-	}
-	if s.Len() > 3 {
-		t.Errorf("len = %d, want <= 3", s.Len())
 	}
 }
 

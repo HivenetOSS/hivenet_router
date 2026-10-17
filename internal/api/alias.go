@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/pin"
 	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
@@ -117,10 +118,10 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 		abortWithRouterError(c, status, code, msg, domain.SourceRouter)
 		return false
 	}
-	taskHeader := c.GetHeader(semantic.TaskIDHeader)
-	if len(taskHeader) > semantic.MaxTaskIDLen {
+	taskHeader := c.GetHeader(pin.TaskIDHeader)
+	if len(taskHeader) > pin.MaxTaskIDLen {
 		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid,
-			fmt.Sprintf("%s must be at most %d bytes", semantic.TaskIDHeader, semantic.MaxTaskIDLen))
+			fmt.Sprintf("%s must be at most %d bytes", pin.TaskIDHeader, pin.MaxTaskIDLen))
 	}
 	body, ok := cachedBody(c)
 	if !ok {

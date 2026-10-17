@@ -22,6 +22,7 @@ import (
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/pin"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/semantic"
@@ -619,7 +620,7 @@ func (r *Router) startHTTPServer() {
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
 	)
-	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
+	handlers.SetResolver(semantic.NewResolver(pin.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
