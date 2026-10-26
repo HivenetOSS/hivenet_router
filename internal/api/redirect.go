@@ -4,8 +4,10 @@
 package api
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -29,15 +31,41 @@ const (
 // once during wiring, before the server starts. nil leaves them disabled.
 func (h *Handlers) SetRedirect(r *redirect.Redirector) { h.redirect = r }
 
+// RedirectBodyCheck refuses (401) a redirected request whose body differs
+// from the one its token was issued for, so a token leaked from a log cannot
+// carry another prompt. It must run before QuotaMiddleware — otherwise such
+// a request would still spend the key's per-minute quota — and after
+// BodyLimitMiddleware, which bounds the read. Requests without a redirect
+// token pass through untouched.
+func (h *Handlers) RedirectBodyCheck() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.redirect == nil || c.GetInt(ctxKeyRedirectHop) == 0 {
+			c.Next()
+			return
+		}
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+				"failed to read request body", domain.SourceRouter)
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		if c.GetString(ctxKeyRedirectBodySHA) != redirect.BodySHA(body) {
+			h.redirect.Reject("body")
+			abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
+				"the request body does not match the redirect token", domain.SourceRouter)
+			return
+		}
+		c.Next()
+	}
+}
+
 // redirectStep runs in Passthrough once the model is authorized for the key.
-// It returns true when it has written the response:
-//
-//   - a redirected request whose body differs from the one its token was
-//     issued for is refused (401), so a token leaked from a log cannot carry
-//     another prompt;
-//   - a request for a model with no healthy agent here, which the sibling map
-//     lists on another site, is answered 307 to that site, unless it has
-//     already been redirected redirect.MaxHops times.
+// It returns true when it has written the response: a request for a model
+// with no healthy agent here, which the sibling map lists on another site, is
+// answered 307 to that site, unless it has already been redirected
+// redirect.MaxHops times. (RedirectBodyCheck has already verified a
+// redirected request's body.)
 //
 // Otherwise the request is served here as before (including the existing
 // 404 when the model exists nowhere). A redirect takes precedence over a
@@ -49,12 +77,6 @@ func (h *Handlers) redirectStep(c *gin.Context, model string) bool {
 	}
 	body := clientBody(c)
 	hop := c.GetInt(ctxKeyRedirectHop)
-	if hop > 0 && c.GetString(ctxKeyRedirectBodySHA) != redirect.BodySHA(body) {
-		h.redirect.Reject("body")
-		writeRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
-			"the request body does not match the redirect token", domain.SourceRouter)
-		return true
-	}
 	if hop >= redirect.MaxHops || h.healthyAgentCount == nil || h.healthyAgentCount(model) > 0 {
 		return false
 	}

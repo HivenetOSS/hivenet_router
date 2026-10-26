@@ -24,6 +24,7 @@ import (
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
@@ -42,6 +43,18 @@ type testSite struct {
 	queue   chan *domain.PendingRequest
 	redirs  []string // "model→site@hop" per 307 written
 	rejects []string
+	charges *int // per-minute quota charges (QuotaMiddleware → AllowRequest)
+}
+
+// countingLimiter counts per-minute quota charges.
+type countingLimiter struct {
+	fakeLimiter
+	charges int
+}
+
+func (l *countingLimiter) AllowRequest(string, string, int) (bool, int, error) {
+	l.charges++
+	return true, -1, nil
 }
 
 // newSite builds one site. healthy is its healthy-agent count for every model;
@@ -59,19 +72,26 @@ func newSite(t *testing.T, id string, healthy int, keys *auth.DynamicKeyProvider
 		},
 		OnReject: func(reason string) { s.rejects = append(s.rejects, reason) },
 	}
+	lim := &countingLimiter{fakeLimiter: fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000}}
+	s.charges = &lim.charges
+	healthyCount := func(string) int { return healthy }
 	h := api.NewHandlers(
 		nil, nil, s.queue, 2*time.Second,
-		nil, nil, nil, &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000},
+		nil, nil, nil, lim,
 		nil, nil, nil, nil, keys, nil,
-		func(string) int { return healthy },
+		healthyCount,
 		nil, nil, nil, nil, nil, nil, nil,
 	)
 	h.SetRedirect(s.rd)
 	s.engine = gin.New()
 	s.engine.Use(api.RequestIDMiddleware())
 	v1 := s.engine.Group("/v1", api.AuthMiddleware(redirect.Wrap(s.rd, keys, keys)))
-	v1.POST("/chat/completions", h.Passthrough)
-	v1.POST("/embeddings", func(c *gin.Context) { c.Status(http.StatusOK) })
+	// The production order for inference routes (server.go): body limit, the
+	// redirect body check, then quota.
+	inference := v1.Group("", api.BodyLimitMiddleware(1<<20), h.RedirectBodyCheck(),
+		api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), healthyCount))
+	inference.POST("/chat/completions", h.Passthrough)
+	inference.POST("/embeddings", func(c *gin.Context) { c.Status(http.StatusOK) })
 	return s
 }
 
@@ -81,6 +101,7 @@ func testKeys(t *testing.T) *auth.DynamicKeyProvider {
 	keys := auth.NewDynamicKeyProvider()
 	if err := keys.Upsert("v1", auth.DynamicKeyEntry{
 		ID: "key-1", KeyHash: hex.EncodeToString(h[:]), Owner: "tenant-1", Name: "test", Enabled: true,
+		Quota: auth.QuotaLimits{RequestsPerMinute: 1000},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +296,9 @@ func TestRedirect_AtTheSibling(t *testing.T) {
 		w := send(b, chatPath+"?rt="+signed(claims), []byte(`{"model":"m","messages":[{"role":"user","content":"another prompt"}]}`), nil)
 		if w.Code != http.StatusUnauthorized || len(b.queue) != 0 {
 			t.Fatalf("status %d queued %d, want 401 and nothing queued", w.Code, len(b.queue))
+		}
+		if *b.charges != 0 {
+			t.Errorf("a refused body spent %d per-minute quota charge(s) of the key; want 0", *b.charges)
 		}
 		if len(b.rejects) != 1 || b.rejects[0] != "body" {
 			t.Errorf("reject reasons %v, want [body]", b.rejects)

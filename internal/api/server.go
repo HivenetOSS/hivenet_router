@@ -154,6 +154,9 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
+	// A cross-site redirected request must carry the exact body its token was
+	// issued for; refuse a mismatch before quota is spent. No-op otherwise.
+	inference.Use(s.handlers.RedirectBodyCheck())
 	// Resolve semantic aliases (model: "auto") to a concrete model before quota,
 	// so quota, authorization, admission and routing all see the resolved model.
 	// A no-op map lookup for concrete model names.
