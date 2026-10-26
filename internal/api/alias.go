@@ -170,6 +170,7 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 	if err != nil {
 		return fail(http.StatusBadRequest, domain.ErrCodeRequestInvalid, decisionOutcomeInvalid, "Invalid request: "+err.Error())
 	}
+	c.Set(ctxKeyClientBody, body) // the bytes the client sent: a redirect token hashes these
 	c.Set(gin.BodyBytesKey, patched)
 	c.Set(ctxKeyPeekedModel, d.Model)
 	c.Set(auditKeySemanticRoute, d.Route)

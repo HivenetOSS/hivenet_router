@@ -82,7 +82,22 @@ func (r *DynamicKeyProvider) Authenticate(req *http.Request) (*AuthResult, error
 	r.mu.RLock()
 	entry, ok := r.byHash[hash]
 	r.mu.RUnlock()
+	return resultFor(entry, ok)
+}
 
+// AuthenticateKeyID authenticates by key ID instead of by bearer token. It is
+// used for a request redirected from another site, whose key the client did
+// not re-send: a signed redirect token names the key ID instead. The same
+// enabled and expiry checks apply.
+func (r *DynamicKeyProvider) AuthenticateKeyID(keyID string) (*AuthResult, error) {
+	r.mu.RLock()
+	entry, ok := r.byID[keyID]
+	r.mu.RUnlock()
+	return resultFor(entry, ok)
+}
+
+// resultFor applies the enabled and expiry checks shared by both lookups.
+func resultFor(entry *DynamicKeyEntry, ok bool) (*AuthResult, error) {
 	if !ok {
 		return nil, ErrInvalidCredentials
 	}

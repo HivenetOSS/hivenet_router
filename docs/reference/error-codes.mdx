@@ -120,6 +120,7 @@ Clients should therefore handle:
 | `unauthorized` | `401` | `router` | Client or administrator credentials are missing or invalid |
 | `model_forbidden` | `403` | `router` | The client key’s explicit allowlist does not permit the model |
 | `model_not_found` | `404` | `router` | The model is not registered or is deliberately hidden from the caller |
+| `model_redirected` | `307` | `router` | Another site serves the model: repeat the request at the `Location` URL ([Cross-site redirect](/routing/cross-site-redirect)) |
 | Not guaranteed | `413` | Server | The request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `rate_limit_exceeded` | `429` | `router` | RPM, serverless per-key occupancy, ITPM, or OTPM limit exhausted, or strict per-model quota entry missing |
 | `token_limit_exceeded` | `429` | `router` | Daily token admission or output accounting rejected the request |
@@ -350,6 +351,27 @@ Retry only after:
 - registering an agent
 - restoring the agent
 - changing the key’s access
+
+### `model_redirected`
+
+```text
+HTTP 307
+Location: https://<sibling-site>/v1/chat/completions?rt=<redirect token>
+```
+
+Returned only when [cross-site redirect](/routing/cross-site-redirect) is enabled and no healthy agent on this site serves the model, while the sibling map lists another site that does. It is not a failure: the body explains the redirect to clients that do not follow redirects automatically.
+
+```json
+{
+  "error": {
+    "code": "model_redirected",
+    "message": "model llama-3-70b is served by site site-b: repeat this request at the Location URL (enable redirect following in your HTTP client)",
+    "source": "router"
+  }
+}
+```
+
+Enable redirect following in the client, for example `follow_redirects=True` with `httpx`.
 
 ## Request-size rejection
 

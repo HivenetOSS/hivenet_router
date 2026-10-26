@@ -198,6 +198,10 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set("key_preview", result.KeyPreview)
 		c.Set("allowed_models", result.AllowedModels)
 		c.Set("quota_limits", result.QuotaLimits)
+		if result.RedirectHop > 0 {
+			c.Set(ctxKeyRedirectHop, result.RedirectHop)
+			c.Set(ctxKeyRedirectBodySHA, result.RedirectBodySHA)
+		}
 		c.Next()
 	}
 }

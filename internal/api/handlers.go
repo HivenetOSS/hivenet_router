@@ -16,6 +16,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
@@ -261,6 +262,11 @@ type Handlers struct {
 	resolver         *semantic.Resolver
 	decisionLog      *semantic.DecisionLog
 	semanticObserver SemanticObserver // metrics hook, nil = off
+
+	// redirect answers 307 to a sibling site for a model with no healthy
+	// agent here; nil (the default) disables cross-site redirects. See
+	// redirectStep and SetRedirect.
+	redirect *redirect.Redirector
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -406,6 +412,11 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		return
 	}
 	if !h.authorizeModel(c, req.Model) {
+		return
+	}
+	// Before any admission work: a model served only by a sibling site is
+	// answered 307 here, and nothing is reserved or queued for it.
+	if h.redirectStep(c, req.Model) {
 		return
 	}
 	// Compute the input estimate once, so B1, the occupancy reservation, the

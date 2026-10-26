@@ -62,6 +62,19 @@ type Config struct {
 	// Must match between router and all agents. Required — startup fails if empty.
 	JWTSecret string
 
+	// Cross-site redirect (internal/redirect). SiteID is this router's site in
+	// the sibling map; empty (the default) disables redirects entirely.
+	// RedirectSecret is the HMAC key for redirect tokens, shared by every site
+	// (required, at least 32 bytes, when SiteID is set). RedirectTokenTTL is
+	// how long a token stays valid; 120s covers a client overloaded enough to
+	// take ~46s between the 307 and its follow-up.
+	// Env: HIVENET_ROUTER_SITE_ID, HIVENET_ROUTER_REDIRECT_SECRET,
+	// HIVENET_ROUTER_REDIRECT_TOKEN_TTL.
+	// Flag: --site-id, --redirect-secret-file, --redirect-token-ttl.
+	SiteID           string
+	RedirectSecret   string
+	RedirectTokenTTL time.Duration
+
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
 	// protecting the router from memory exhaustion by an oversized payload
 	// (bodies are buffered before parsing). Default 10 MB.
@@ -182,6 +195,7 @@ func DefaultConfig() *Config {
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
+		RedirectTokenTTL:       120 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -275,6 +289,17 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SITE_ID"); v != "" {
+		cfg.SiteID = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_REDIRECT_SECRET"); v != "" {
+		cfg.RedirectSecret = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.RedirectTokenTTL = d
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_REQUEST_BYTES"); v != "" {
 		// n == 0 is a valid value meaning "disabled"; only reject negatives.

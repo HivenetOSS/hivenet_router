@@ -506,6 +506,9 @@ Request-per-minute quota buckets remain in memory even when the Badger quota bac
 | --- | --- | --- | --- |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Read the shared agent secret from a file, or provide its raw value through the environment |
 | `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | Empty | Path to `auth.yaml` |
+| `--site-id` | `HIVENET_ROUTER_SITE_ID` | Empty (disabled) | This router’s site ID; enables [cross-site redirect](/routing/cross-site-redirect) |
+| `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRET` | Required when `--site-id` is set | Redirect-token HMAC secret, at least 32 bytes, identical on every site; the file wins over the environment |
+| `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `120s` | How long a redirect token stays valid |
 
 ### Agent JWT secret
 

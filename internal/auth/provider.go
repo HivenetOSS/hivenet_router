@@ -106,6 +106,12 @@ type AuthResult struct {
 	// QuotaLimits holds the rate/token limits for this tenant.
 	// Zero values mean unlimited. Enforcement is planned for Ticket 5.
 	QuotaLimits QuotaLimits
+
+	// RedirectHop and RedirectBodySHA are set only for a request authenticated
+	// by a cross-site redirect token (internal/redirect): how many redirects
+	// it has taken, and the body hash the handler must match before serving.
+	RedirectHop     int
+	RedirectBodySHA string
 }
 
 // Provider authenticates an incoming HTTP request and returns an AuthResult.
