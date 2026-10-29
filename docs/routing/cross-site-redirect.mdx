@@ -1,0 +1,123 @@
+---
+title: "Cross-site redirect"
+description: "Answer HTTP 307 to a sibling Hivenet Router site when no local agent serves the requested model, so clients that use one hostname still reach every model."
+sidebarTitle: "Cross-site redirect"
+---
+
+Cross-site redirect lets several Hivenet Router deployments, called **sites**, share one public hostname even when each site runs different models. When a request arrives at a site that has no healthy agent for the requested model, the router answers `307 Temporary Redirect` to a sibling site that serves it. The client repeats the request there.
+
+Cross-site redirect is off by default. With no site ID configured, the router behaves exactly as without the feature.
+
+<Info>
+  Hivenet Router does not discover sibling sites or build the sibling map. An external controller must push the map to every router through `POST /admin/sibling-map`, and push it again after a router restarts.
+</Info>
+
+## How a request is handled
+
+For `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens`, after the API key is authenticated and the model is checked against the key’s allowlist:
+
+1. If any healthy agent on this site serves the model, the request is served here. A redirect never replaces a working local agent.
+2. Otherwise, if the sibling map lists another site that serves the model, the router answers `307` to that site. Nothing is admitted, reserved or queued on this site.
+3. Otherwise, the request continues as before and normally ends in `model_not_found`.
+
+A redirect takes precedence over a policy’s `fallback_provider`: when a sibling site serves the model, the request goes to the sibling, not to OpenAI or Anthropic.
+
+`/v1/embeddings` and `/v1/rerank` are never redirected.
+
+### Choosing the sibling
+
+When several sites serve the model, the router picks one with a rendezvous hash of the caller’s API-key ID and the optional `X-Session-ID` request header. The same key and session always reach the same site, so that site’s prompt cache is reused. When a site leaves the map, only the sessions that were on it move.
+
+Send `X-Session-ID` with a stable value per conversation to spread one key’s conversations across sites. Without it, every request of a key goes to the same site.
+
+### The redirect token
+
+Clients remove the `Authorization` header when a redirect changes host. The `307` therefore carries a signed token in the `rt` query parameter, and the sibling authenticates the repeated request with it:
+
+```text
+HTTP/1.1 307 Temporary Redirect
+Location: https://site-b.example.com/v1/chat/completions?rt=v1.<claims>.<signature>
+Cache-Control: no-store
+```
+
+The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the target site, the request path, the hop count, a SHA-256 hash of the request body and an expiry time. The sibling accepts it only when:
+
+- the signature is valid and the token has not expired;
+- the token names this site and this request path;
+- the request body is byte-identical to the one the token was issued for;
+- the key it names is still enabled and unexpired;
+- any `Authorization` header the client sent belongs to that same key.
+
+A refused token gets `401 unauthorized`, like any other invalid credential.
+
+<Warning>
+  Until it expires, a token works for anyone who has the full URL **and** the same request body. Hivenet Router redacts the token from its own access log. Keep URLs out of other logs, and keep `--redirect-token-ttl` as short as your slowest clients allow.
+</Warning>
+
+### Loop guard
+
+The hop count travels inside the token. A request that has already been redirected twice is never redirected again: it is served locally or fails as usual. A stale or inconsistent map therefore costs at most one extra redirect, never a loop.
+
+## Requirements
+
+- Every site runs Hivenet Router with its own `--site-id`.
+- Every site shares the same redirect secret, at least 32 bytes long.
+- API keys are dynamic keys pushed through `/admin/api-keys`, or the auth mode is `none`. The router refuses to start with cross-site redirect and static `auth.yaml` keys, because static keys have no key ID that a sibling could resolve.
+- Every site URL in the map is an absolute `https://` origin. Clients follow a redirect from HTTPS to HTTP, and some send the API key in clear text on the second request, so the router rejects `http://` site URLs.
+- Clients follow `307` redirects. Most HTTP clients and the OpenAI and Anthropic SDKs do so by default. Plain `httpx` does not: set `follow_redirects=True`. A client that does not follow receives the `307` with a `model_redirected` error body.
+
+## Configuration
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--site-id` | `HIVENET_ROUTER_SITE_ID` | Empty (disabled) | This router’s site ID in the sibling map. Setting it enables cross-site redirect |
+| `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRET` | Required when `--site-id` is set | File containing the HMAC secret for redirect tokens, or its raw value through the environment. At least 32 bytes; identical on every site |
+| `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `120s` | How long a redirect token stays valid |
+
+When both `--redirect-secret-file` and `HIVENET_ROUTER_REDIRECT_SECRET` are set, the file wins.
+
+The default token lifetime leaves room for clients that are slow to repeat the request under heavy load, for example a process running many blocking request threads. A token that expires before the client follows is refused with `401`, and counted as `reason="expired"` in `hivenet_redirect_rejections_total`.
+
+## Pushing the sibling map
+
+Replace the whole map with an admin request:
+
+```bash
+curl -X POST https://site-a.example.com/admin/sibling-map \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "version": "2026-10-26T12:00:00Z",
+    "sites": [
+      {"id": "site-a", "url": "https://site-a.example.com", "models": ["llama-3-70b"]},
+      {"id": "site-b", "url": "https://site-b.example.com", "models": ["llama-3-70b", "qwen-2.5-32b"]}
+    ]
+  }'
+```
+
+| Field | Rule |
+| --- | --- |
+| `version` | Required. Compared as a string: a push with an older version is rejected with `409`, an equal version is accepted as a replay. Use monotonically increasing values such as ISO timestamps |
+| `sites[].id` | Required, unique. The site’s `--site-id` |
+| `sites[].url` | An absolute `https://` origin with no path, query or credentials. A trailing `/` is removed |
+| `sites[].models` | Models the site serves. A site may list none |
+
+Push the same map to every site. A site ignores its own entry when it picks a sibling. The map is held in memory only: a restarted router has an empty map and redirects nothing until the next push.
+
+Read the current map with `GET /admin/sibling-map`. Both endpoints return `501` when cross-site redirect is disabled.
+
+## Metrics
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `hivenet_redirects_total` | `model`, `site`, `hop` | `307` responses written. `hop="2"` means a site in the map no longer served the model |
+| `hivenet_redirect_rejections_total` | `reason` | Redirected requests refused: `malformed`, `signature`, `expired`, `site`, `path`, `key` or `body` |
+
+A rising `reason="expired"` count means clients take longer than the token lifetime to follow the redirect.
+
+## Limitations
+
+- A redirect happens only when no healthy agent on this site serves the model. Requests are not redirected when local agents are busy.
+- For an API key on the legacy flat quota shape, the per-minute request limit is charged on both sites. Keys with per-model quotas are charged only where the request is served.
+- A semantic alias such as `model: "auto"` is resolved again at the sibling site, which can choose a different model.
+- Only the `rt` query parameter is redacted from the access log; other query parameters are logged as before.

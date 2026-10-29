@@ -79,6 +79,9 @@ func main() {
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
+	siteID := flag.String("site-id", cfg.SiteID, "This router's site ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
+	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file containing the redirect-token HMAC secret shared by every site (env: HIVENET_ROUTER_REDIRECT_SECRET)")
+	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
 
 	flag.Parse()
 
@@ -137,6 +140,21 @@ func main() {
 		log.Fatal("JWT secret is required — set HIVENET_ROUTER_JWT_SECRET or use --jwt-secret-file")
 	}
 	cfg.AuthConfigFile = *authConfigFile
+	cfg.SiteID = strings.TrimSpace(*siteID)
+	if *redirectSecretFile != "" {
+		data, err := os.ReadFile(*redirectSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --redirect-secret-file %q: %v", *redirectSecretFile, err)
+		}
+		cfg.RedirectSecret = strings.TrimSpace(string(data))
+	}
+	if *redirectTokenTTL <= 0 {
+		log.Fatalf("--redirect-token-ttl must be > 0, got %v", *redirectTokenTTL)
+	}
+	cfg.RedirectTokenTTL = *redirectTokenTTL
+	if cfg.SiteID != "" && len(cfg.RedirectSecret) < 32 {
+		log.Fatal("cross-site redirect (--site-id) requires a redirect secret of at least 32 bytes — set HIVENET_ROUTER_REDIRECT_SECRET or use --redirect-secret-file")
+	}
 
 	// Log startup banner with resolved configuration for operator visibility.
 	log.Info("Hivenet Router")
@@ -201,6 +219,12 @@ func main() {
 		log.Info("  Auth config file:    (not configured — both /v1/* and /admin/* default to mode: none)")
 	}
 	log.Info("  Admin API keys:      set via HIVENET_ROUTER_ADMIN_API_KEYS env var")
+	log.Info("Cross-site redirect:")
+	if cfg.SiteID != "" {
+		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
+	} else {
+		log.Info("  Site ID:             (not configured — redirect disabled)")
+	}
 	log.Info("=================")
 
 	// Initialize OpenTelemetry tracing.

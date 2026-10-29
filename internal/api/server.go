@@ -84,18 +84,7 @@ func NewServer(handlers *Handlers, port string, apiAuth, adminAuth auth.Provider
 		TraceResponseMiddleware(),
 		RequestIDMiddleware(),
 		AuditMiddleware(),
-		gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-			// Standard gin format — Authorization header is deliberately excluded.
-			return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n%s",
-				param.TimeStamp.Format("2006/01/02 - 15:04:05"),
-				param.StatusCode,
-				param.Latency,
-				param.ClientIP,
-				param.Method,
-				param.Path,
-				param.ErrorMessage,
-			)
-		}),
+		gin.LoggerWithFormatter(AccessLogFormatter),
 		RecoveryMiddleware(),
 		CORSMiddleware(),
 	)
@@ -118,6 +107,22 @@ func NewServer(handlers *Handlers, port string, apiAuth, adminAuth auth.Provider
 
 	// Return the fully initialized server.
 	return s
+}
+
+// AccessLogFormatter is the standard gin access-log line. The Authorization
+// header is deliberately excluded, and a cross-site redirect token in the
+// query string is redacted: gin logs path?query, and a token in a log line is
+// a usable credential until it expires.
+func AccessLogFormatter(param gin.LogFormatterParams) string {
+	return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n%s",
+		param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+		param.StatusCode,
+		param.Latency,
+		param.ClientIP,
+		param.Method,
+		redactPath(param.Path),
+		param.ErrorMessage,
+	)
 }
 
 // registerRoutes defines all HTTP routes for the API.
@@ -149,6 +154,9 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
+	// A cross-site redirected request must carry the exact body its token was
+	// issued for; refuse a mismatch before quota is spent. No-op otherwise.
+	inference.Use(s.handlers.RedirectBodyCheck())
 	// Resolve semantic aliases (model: "auto") to a concrete model before quota,
 	// so quota, authorization, admission and routing all see the resolved model.
 	// A no-op map lookup for concrete model names.
@@ -226,6 +234,12 @@ func (s *Server) registerRoutes() {
 		admin.DELETE("/api-keys/:id", s.handlers.DeleteAPIKey)
 		admin.POST("/api-keys/replace", s.handlers.ReplaceAPIKeys)
 		admin.GET("/api-keys/version", s.handlers.GetAPIKeyVersion)
+
+		// GET  /admin/sibling-map — this site's ID and the current sibling map
+		// POST /admin/sibling-map — replace the sibling map (versioned; 409 if older)
+		// Both answer 501 unless cross-site redirect is enabled (HIVENET_ROUTER_SITE_ID).
+		admin.GET("/sibling-map", s.handlers.GetSiblingMap)
+		admin.POST("/sibling-map", s.handlers.ReplaceSiblingMap)
 	}
 }
 

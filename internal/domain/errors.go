@@ -26,6 +26,9 @@ const (
 	ErrCodeTokenLimitExceeded    ErrorCode = "token_limit_exceeded"
 	ErrCodeInputTooLong          ErrorCode = "input_too_long"
 	ErrCodeConcurrencyLimit      ErrorCode = "concurrency_limit_exceeded"
+	// ErrCodeModelRedirected is the body of a 307 to a sibling site
+	// (internal/redirect); clients that follow redirects never see it.
+	ErrCodeModelRedirected ErrorCode = "model_redirected"
 )
 
 // ErrorSource identifies which layer produced the error.
@@ -72,6 +75,8 @@ func NewRouterError(code ErrorCode, message string, source ErrorSource) *RouterE
 // Unknown codes return 500.
 func HTTPStatusFor(code ErrorCode) int {
 	switch code {
+	case ErrCodeModelRedirected:
+		return http.StatusTemporaryRedirect
 	case ErrCodeUnauthorized:
 		return http.StatusUnauthorized
 	case ErrCodeModelForbidden:

@@ -178,6 +178,19 @@ type RouterMetrics struct {
 	// Labels: reason, model.
 	admissionRejections *prometheus.CounterVec
 
+	// --- Cross-site redirect metrics (internal/redirect) ---
+
+	// redirects counts 307s written to a sibling site. hop is the redirect
+	// count after this one; hop="2" means the sibling map was stale.
+	// Labels: model, site, hop.
+	redirects *prometheus.CounterVec
+
+	// redirectRejections counts redirected requests refused, by reason ∈
+	// {malformed, signature, expired, site, path, key, body}. A rise in
+	// "expired" means clients take longer than the token TTL to follow.
+	// Labels: reason.
+	redirectRejections *prometheus.CounterVec
+
 	// admissionOccupancyTokens is the current weighted in-flight token sum (Σw)
 	// for a model — the numerator of the occupancy-vs-budget utilization.
 	admissionOccupancyTokens *prometheus.GaugeVec
@@ -488,6 +501,20 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
 			},
 			[]string{"reason", "model"},
+		),
+		redirects: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirects_total",
+				Help: "307 redirects to a sibling site, by model, target site and hop count (2 = the sibling map was stale).",
+			},
+			[]string{"model", "site", "hop"},
+		),
+		redirectRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirect_rejections_total",
+				Help: "Redirected requests refused, by reason (malformed, signature, expired, site, path, key, body).",
+			},
+			[]string{"reason"},
 		),
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -905,6 +932,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantLastRequestTimestamp,
 		m.quotaBackendErrors,
 		m.admissionRejections,
+		m.redirects,
+		m.redirectRejections,
 		m.admissionOccupancyTokens,
 		m.admissionBudgetTokens,
 		m.admissionInflightRequests,
@@ -1196,6 +1225,16 @@ func (m *RouterMetrics) TenantSetPerModelTPDLimit(tenantID, model string, tpd in
 // b4_otpm}. B3 shed rate is rate(...{reason="b3"}); "429 by reason" sums over all.
 func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 	m.admissionRejections.With(prometheus.Labels{"reason": reason, "model": model}).Inc()
+}
+
+// Redirect counts a 307 to a sibling site.
+func (m *RouterMetrics) Redirect(model, site string, hop int) {
+	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop)}).Inc()
+}
+
+// RedirectRejected counts a redirected request refused, by reason.
+func (m *RouterMetrics) RedirectRejected(reason string) {
+	m.redirectRejections.With(prometheus.Labels{"reason": reason}).Inc()
 }
 
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted

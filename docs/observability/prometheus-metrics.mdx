@@ -143,6 +143,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Queue | Requests waiting for agent capacity |
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
 | Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
+| Cross-site redirect | Redirects to sibling sites and refused redirect tokens |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -1354,6 +1355,17 @@ The `reason` label identifies the gate:
 The budget and backstop gauges can change as healthy replicas join or leave. Existing reservations remain visible in the occupancy gauges while the new denominators affect subsequent admissions.
 
 `POST /v1/messages/count_tokens`, embedding, and reranking requests do not enter B1 through B4, so they do not change these occupancy gauges. See [Admission control metrics](/observability/admission-control-metrics) for panel queries and alert interpretation.
+
+## Cross-site redirect metrics
+
+These series appear once [cross-site redirect](/routing/cross-site-redirect) is enabled with `--site-id` and the first redirect or refusal has happened:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_redirects_total` | Counter | `model`, `site`, `hop` | `307` responses to a sibling site; `hop="2"` means the sibling map was stale |
+| `hivenet_redirect_rejections_total` | Counter | `reason` | Redirected requests refused: `malformed`, `signature`, `expired`, `site`, `path`, `key`, `body` |
+
+A rising `reason="expired"` rate means clients take longer than `--redirect-token-ttl` to follow the redirect.
 
 ## Per-request duration by agent
 

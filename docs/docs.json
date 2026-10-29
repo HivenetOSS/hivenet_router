@@ -68,6 +68,7 @@
           "routing/policy-yaml-reference",
           "routing/fallback-chains",
           "routing/provider-fallback",
+          "routing/cross-site-redirect",
           "routing/policy-gates",
           "routing/admission-control",
             "routing/semantic-routing"

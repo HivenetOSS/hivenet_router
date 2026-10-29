@@ -36,6 +36,8 @@ Use these endpoints to inspect agents, models, storage, and routing state; updat
 | `DELETE` | `/admin/api-keys/{id}` | Revoke a dynamic key |
 | `POST` | `/admin/api-keys/replace` | Replace the dynamic key registry |
 | `GET` | `/admin/api-keys/version` | Read the registry version and key count |
+| `GET` | `/admin/sibling-map` | Read this site’s ID and the sibling map (cross-site redirect only; see [Cross-site redirect](/routing/cross-site-redirect)) |
+| `POST` | `/admin/sibling-map` | Replace the sibling map (cross-site redirect only) |
 
 The dynamic key endpoints return HTTP `501` unless the router is using dynamic API authentication.
 
