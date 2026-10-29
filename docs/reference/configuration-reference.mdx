@@ -764,7 +764,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
-| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference). The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
 
 ### Supported engines
 
