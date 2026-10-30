@@ -136,6 +136,25 @@ type Config struct {
 	// Env: HIVENET_ROUTER_QUOTA_BACKEND
 	QuotaBackend string
 
+	// KeyStoreBackend selects the persistence backend for the dynamic API key
+	// registry (dynamic auth mode only; static keys live in auth.yaml).
+	//   "memory" (default) — the registry is RAM-only; state is lost on
+	//                        restart and rebuilt by the machines-service
+	//                        keysync (the production model: the router is a
+	//                        cache, never the source of truth for keys).
+	//   "badger"           — the registry is persisted to the diskDB (BadgerDB
+	//                        at DiskDBPath) on every mutation and loaded on
+	//                        startup, so minted keys survive router restarts.
+	//                        For deployments without a machines-service keysync
+	//                        (PoCs, local dev).
+	// Env: HIVENET_ROUTER_KEY_STORE
+	KeyStoreBackend string
+
+	// ResetKeyStore wipes the persisted dynamic key registry on startup
+	// (use to recover from a corrupt snapshot; only meaningful when
+	// KeyStoreBackend is "badger").
+	ResetKeyStore bool
+
 	// Closed-source provider configuration.
 	// Credentials for providers that may be used as fallbacks when local routing steps are exhausted.
 	// The routing policy (e.g., fallback_provider.engine) selects which provider to use; the order
@@ -170,6 +189,7 @@ func DefaultConfig() *Config {
 		QueueSize:              100,
 		MaxConcurrentForwards:  50,
 		DiskDBPath:             "./badger_disk",
+		KeyStoreBackend:        "memory",
 		FlushPeriod:            5 * time.Second,
 		DiskDBTTLDays:          30,
 		UniversalFlushInterval: 30 * time.Second,
@@ -290,6 +310,9 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_QUOTA_BACKEND"); v != "" {
 		cfg.QuotaBackend = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {
+		cfg.KeyStoreBackend = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})

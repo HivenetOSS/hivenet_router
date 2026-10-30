@@ -163,6 +163,53 @@ type Router struct {
 	keyRegistry *auth.DynamicKeyProvider
 }
 
+// wireKeyStore wires the optional persistent dynamic key registry
+// (KeyStoreBackend "badger") and validates the backend configuration. It
+// returns an error when the backend value is invalid, when "badger" is
+// selected without a dynamic key registry, when the reset cannot be applied,
+// or when the persisted snapshot cannot be read — a silently empty persistent
+// store would break every consumer key, so an unreadable one is worse than
+// no router: the caller must abort startup (fail closed).
+func wireKeyStore(cfg *config.Config, store *storage.BadgerStorage, keyRegistry *auth.DynamicKeyProvider) error {
+	switch cfg.KeyStoreBackend {
+	case "memory", "":
+		// default — RAM-only registry, state rebuilt by the machines service
+		// after restarts.
+		if cfg.ResetKeyStore {
+			log.Warnf("--reset-key-store ignored: KeyStoreBackend is %q (only 'badger' persists a registry to wipe)", cfg.KeyStoreBackend)
+		}
+		return nil
+	case "badger":
+		if keyRegistry == nil {
+			return fmt.Errorf("key store: KeyStoreBackend=badger requires dynamic auth mode (HIVENET_ROUTER_AUTH_MODE=dynamic)")
+		}
+		ks := auth.NewBadgerKeyStore(store)
+		if cfg.ResetKeyStore {
+			log.Warnf("--reset-key-store: wiping persisted dynamic API key registry")
+			if err := ks.Reset(); err != nil {
+				return fmt.Errorf("key store reset: %w", err)
+			}
+		}
+		keyRegistry.SetKeyStore(ks)
+		keyRegistry.SetOnPersistError(func(err error) {
+			log.Errorf("key store: %v — registry changes are not durable until the next successful save", err)
+		})
+		if err := keyRegistry.LoadKeyStore(); err != nil {
+			// Fail closed: a persistent registry that cannot be read is worse
+			// than no router (a silently empty store breaks every consumer key).
+			// The error already carries the "key store:" prefix — return it
+			// as-is so operators don't see it doubled.
+			return err
+		}
+		if ver, entries := keyRegistry.Snapshot(); len(entries) > 0 {
+			log.Infof("Key store: restored %d dynamic API key(s) from %s (registry version %q)", len(entries), cfg.DiskDBPath, ver)
+		}
+		return nil
+	default:
+		return fmt.Errorf("key store: invalid KeyStoreBackend %q (valid: memory, badger)", cfg.KeyStoreBackend)
+	}
+}
+
 // New creates a new Router instance with initialized components.
 func New(cfg *config.Config) (*Router, error) {
 	if cfg.JWTSecret == "" {
@@ -252,6 +299,18 @@ func New(cfg *config.Config) (*Router, error) {
 	if err != nil {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
+	}
+
+	// Persistent dynamic key registry (KeyStoreBackend "badger", env
+	// HIVENET_ROUTER_KEY_STORE): wire the registry to the diskDB so minted
+	// keys survive restarts. Deployments that run a machines-service keysync
+	// keep the default ("memory") and are unaffected — the production model
+	// (router = cache, machines service = source of truth for keys) is
+	// preserved; opt-in deployments (PoCs, local dev) get durability.
+	// On error the router aborts startup (fail closed — see wireKeyStore).
+	if err := wireKeyStore(cfg, store, keyRegistry); err != nil {
+		store.Close()   //nolint:errcheck
+		return nil, err // wireKeyStore's errors already carry the "key store:" prefix
 	}
 
 	// Admission invariants that span the policy and auth configs (e.g. a
