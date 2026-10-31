@@ -30,6 +30,7 @@ const (
 	PrefixEngPunctual      = "enginePunctual:"    // engine real-time snapshots    — Ticket 3
 	PrefixHardwareSnapshot = "hardwareSnapshot:"  // latest GPU/CPU/memory reading — HAI-65 (memDB)
 	PrefixQuotaTPD         = "quotaTPD:"          // per-tenant daily token counter — HAI-109 (diskDB)
+	PrefixKeyStore         = "keyStore:"          // dynamic API key registry snapshot — HAI-key-store (diskDB)
 )
 
 // BadgerStorage implements RoutingStorage using two BadgerDB instances:
@@ -103,6 +104,48 @@ func (s *BadgerStorage) SetDiskEntry(key, val []byte) error {
 			return txn.SetEntry(badger.NewEntry(key, val).WithTTL(s.diskTTL))
 		}
 		return txn.Set(key, val)
+	})
+}
+
+// SetDiskEntryNoTTL writes a key-value pair to diskDB with NO expiry, ignoring
+// the configured diskTTL. Use for state that must persist indefinitely
+// regardless of the history TTL (e.g. the dynamic key registry snapshot — a
+// TTL'd registry entry would silently expire and resurrect an empty store on
+// the next router restart). SetDiskEntry applies diskTTL when non-zero.
+func (s *BadgerStorage) SetDiskEntryNoTTL(key, val []byte) error {
+	return s.diskDB.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, val)
+	})
+}
+
+// GetDiskEntry reads a key-value pair written by SetDiskEntry. A missing key
+// (fresh store, entry never written) is not an error — it returns (nil, nil).
+func (s *BadgerStorage) GetDiskEntry(key []byte) ([]byte, error) {
+	var val []byte
+	err := s.diskDB.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			val = append([]byte(nil), v...)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return val, nil
+}
+
+// DeleteDiskEntry removes a key written by SetDiskEntry. Idempotent —
+// deleting a missing key is a no-op, not an error.
+func (s *BadgerStorage) DeleteDiskEntry(key []byte) error {
+	return s.diskDB.Update(func(txn *badger.Txn) error {
+		return txn.Delete(key)
 	})
 }
 

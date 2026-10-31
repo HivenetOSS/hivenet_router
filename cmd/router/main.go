@@ -62,8 +62,9 @@ func main() {
 	unhealthyAfter := flag.Duration("unhealthy-after", cfg.UnhealthyAfter, "Mark agent unhealthy after this long without a heartbeat (must be > heartbeat-interval)")
 	removeAfter := flag.Duration("remove-after", cfg.RemoveAfter, "Remove agent after this long without a heartbeat (must be > unhealthy-after)")
 	heartbeatInterval := flag.Duration("heartbeat-interval", cfg.HeartbeatInterval, "Heartbeat interval")
-	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engineHistory)")
-	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup (use for testing or schema migrations)")
+	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engine history, quota counters, and the persisted key registry when KeyStoreBackend=badger)")
+	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup — engine history, quota counters AND the persisted key registry (use for testing or schema migrations)")
+	resetKeyStore := flag.Bool("reset-key-store", false, "Wipe the persisted dynamic API key registry on startup (use to recover from a corrupt snapshot; requires KeyStoreBackend=badger)")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
 	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")
@@ -98,6 +99,7 @@ func main() {
 	cfg.HeartbeatInterval = *heartbeatInterval
 	cfg.DiskDBPath = *diskDBPath
 	cfg.ResetDiskDB = *resetDiskDB
+	cfg.ResetKeyStore = *resetKeyStore
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
