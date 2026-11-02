@@ -135,7 +135,10 @@ func (r *DynamicKeyProvider) LoadKeyStore() error {
 }
 
 // Snapshot returns a copy of the current entries (deterministic ID order)
-// plus the registry version.
+// plus the registry version. Slices and the per-model map are deep-copied so
+// a persisted (or inspected) snapshot cannot alias live registry state; the
+// ExpiresAt pointer is shared on purpose (time values are immutable once
+// minted).
 func (r *DynamicKeyProvider) Snapshot() (string, []DynamicKeyEntry) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -143,6 +146,12 @@ func (r *DynamicKeyProvider) Snapshot() (string, []DynamicKeyEntry) {
 	for _, e := range r.byID {
 		cp := *e
 		cp.AllowedModels = append([]string(nil), e.AllowedModels...)
+		if e.Quota.PerModel != nil {
+			cp.Quota.PerModel = make(map[string]PerModelQuotaLimits, len(e.Quota.PerModel))
+			for model, lim := range e.Quota.PerModel {
+				cp.Quota.PerModel[model] = lim
+			}
+		}
 		entries = append(entries, cp)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })

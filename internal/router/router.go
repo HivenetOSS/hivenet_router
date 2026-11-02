@@ -187,12 +187,12 @@ func wireKeyStore(cfg *config.Config, store *storage.BadgerStorage, keyRegistry 
 		if cfg.ResetKeyStore {
 			log.Warnf("--reset-key-store: wiping persisted dynamic API key registry")
 			if err := ks.Reset(); err != nil {
-				return fmt.Errorf("key store reset: %w", err)
+				return err // Reset's error already carries the "key store: reset:" prefix
 			}
 		}
 		keyRegistry.SetKeyStore(ks)
 		keyRegistry.SetOnPersistError(func(err error) {
-			log.Errorf("key store: %v — registry changes are not durable until the next successful save", err)
+			log.Errorf("%v — registry changes are not durable until the next successful save", err)
 		})
 		if err := keyRegistry.LoadKeyStore(); err != nil {
 			// Fail closed: a persistent registry that cannot be read is worse
@@ -377,6 +377,11 @@ func New(cfg *config.Config) (*Router, error) {
 	// waiting for the first request from each tenant.
 	if r.keyRegistry != nil {
 		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
+		// Seed the gauges once for keys restored from the key store: wireKeyStore
+		// ran before this wiring existed, so the restore's onChange fired nil.
+		if _, entries := r.keyRegistry.Snapshot(); len(entries) > 0 {
+			r.publishTenantQuotas()
+		}
 	}
 	// Open the semantic decision log here, before Start launches any goroutine,
 	// so the field is written once and only read afterwards (no data race with

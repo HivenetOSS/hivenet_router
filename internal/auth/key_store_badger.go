@@ -153,10 +153,7 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 	if len(q.PerModel) > 0 {
 		wq.PerModel = make(map[string]keyStorePerModel, len(q.PerModel))
 		for model, pm := range q.PerModel {
-			wq.PerModel[model] = keyStorePerModel{
-				RequestsPerMinutePerReplica: pm.RequestsPerMinutePerReplica,
-				TokensPerDay:                pm.TokensPerDay,
-			}
+			wq.PerModel[model] = keyStorePerModel(pm)
 		}
 	}
 	return keyStoreEntry{
@@ -184,10 +181,7 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 	if len(w.Quota.PerModel) > 0 {
 		q.PerModel = make(map[string]PerModelQuotaLimits, len(w.Quota.PerModel))
 		for model, pm := range w.Quota.PerModel {
-			q.PerModel[model] = PerModelQuotaLimits{
-				RequestsPerMinutePerReplica: pm.RequestsPerMinutePerReplica,
-				TokensPerDay:                pm.TokensPerDay,
-			}
+			q.PerModel[model] = PerModelQuotaLimits(pm)
 		}
 	}
 	return DynamicKeyEntry{
