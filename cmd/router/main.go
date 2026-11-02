@@ -64,7 +64,7 @@ func main() {
 	heartbeatInterval := flag.Duration("heartbeat-interval", cfg.HeartbeatInterval, "Heartbeat interval")
 	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engine history, quota counters, and the persisted key registry when KeyStoreBackend=badger)")
 	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup — engine history, quota counters AND the persisted key registry (use for testing or schema migrations)")
-	resetKeyStore := flag.Bool("reset-key-store", false, "Wipe the persisted dynamic API key registry on startup (use to recover from a corrupt snapshot; requires KeyStoreBackend=badger)")
+	resetKeyStore := flag.Bool("reset-key-store", false, "Wipe the persisted dynamic API key registry on startup (use to recover from a corrupt snapshot; requires KeyStoreBackend=badger). One-shot: remove the flag from the Deployment args afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
 	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")

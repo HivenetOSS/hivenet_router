@@ -146,6 +146,21 @@ func TestKeyStore_MemoryModePersistsNothing(t *testing.T) {
 	}
 }
 
+// TestKeyStore_EmptyPerModelRejected: an empty non-nil per_model block is
+// rejected at the registry (defense in depth — the admin DTO's shared
+// QuotaConfig.Validate already rejects it at the door; this guard protects
+// the persistence invariant that a restored key cannot flip from per-model
+// to flat mode across a restart). Applies in memory mode too, matching the
+// admin API's existing rejection of the same input.
+func TestKeyStore_EmptyPerModelRejected(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	e := persistEntry("k1", "org-x")
+	e.Quota.PerModel = map[string]auth.PerModelQuotaLimits{}
+	if err := p.Upsert("1", e); err == nil {
+		t.Fatal("empty non-nil per_model must be rejected (per-model -> flat mode flip across restart)")
+	}
+}
+
 func TestKeyStore_PersistFailureDoesNotFailMutation(t *testing.T) {
 	p := auth.NewDynamicKeyProvider()
 	fs := &fakeKeyStore{failSave: errors.New("disk full")}
@@ -265,6 +280,9 @@ func TestBadgerKeyStore_FullFieldRoundTrip(t *testing.T) {
 	if n := reflect.TypeOf(auth.QuotaLimits{}).NumField(); n != 6 {
 		t.Fatalf("QuotaLimits has %d fields (was 6) — update entryToWire/wireToEntry/keyStoreQuota", n)
 	}
+	if n := reflect.TypeOf(auth.PerModelQuotaLimits{}).NumField(); n != 2 {
+		t.Fatalf("PerModelQuotaLimits has %d fields (was 2) — update entryToWire/wireToEntry/keyStorePerModel", n)
+	}
 
 	expiry := time.Date(2026, 12, 1, 9, 30, 0, 0, time.UTC)
 	want := auth.DynamicKeyEntry{
@@ -380,8 +398,11 @@ func TestKeyStore_ConcurrentMutationsSerializePersists(t *testing.T) {
 		return len(entries) == 2
 	})
 
-	// Release k1's (possibly stale) save — it must be the LAST persisted
-	// snapshot, so with persistMu k2's two-entry save lands after it.
+	// Release k1's gated (one-entry) save. With persistMu, k2's save waited
+	// for persistMu and can only complete AFTER k1's — so the last persisted
+	// snapshot is k2's two-entry one. Without persistMu, k1's stale one-entry
+	// save can land after k2's two-entry save (the lost-update regression —
+	// a race, so this test catches it with some probability, not certainty).
 	close(gate)
 	wg.Wait()
 
