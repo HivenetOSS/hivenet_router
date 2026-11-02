@@ -67,7 +67,7 @@ type keyStorePerModel struct {
 // BadgerKeyStore is the KeyStore backend that persists the dynamic key
 // registry into the router's diskDB (BadgerDB at --disk-db-path). It is
 // wired when config KeyStoreBackend = "badger" (HIVENET_ROUTER_KEY_STORE),
-// letting deployments without a machines-service keysync (PoCs, local dev)
+// letting deployments without an upstream key-sync (PoCs, local dev)
 // keep minted keys across router restarts.
 //
 // Only key hashes (SHA-256 of the raw bearer) plus metadata are written to

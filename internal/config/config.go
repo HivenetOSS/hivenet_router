@@ -139,13 +139,13 @@ type Config struct {
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
 	// registry (dynamic auth mode only; static keys live in auth.yaml).
 	//   "memory" (default) — the registry is RAM-only; state is lost on
-	//                        restart and rebuilt by the machines-service
+	//                        restart and rebuilt by the upstream key-sync
 	//                        keysync (the production model: the router is a
 	//                        cache, never the source of truth for keys).
 	//   "badger"           — the registry is persisted to the diskDB (BadgerDB
 	//                        at DiskDBPath) on every mutation and loaded on
 	//                        startup, so minted keys survive router restarts.
-	//                        For deployments without a machines-service keysync
+	//                        For deployments without an upstream key-sync
 	//                        (PoCs, local dev).
 	// Env: HIVENET_ROUTER_KEY_STORE
 	KeyStoreBackend string

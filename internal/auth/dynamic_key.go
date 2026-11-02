@@ -19,13 +19,13 @@ import (
 // is not newer than the registry's current version. Callers should fetch the
 // current version separately via Version() if they need to report it.
 //
-// Version comparison is lexicographic. The machines service must generate
+// Version comparison is lexicographic. The upstream key-sync service must generate
 // monotonically increasing strings — e.g. zero-padded sequences ("rev_00000001")
 // or ISO timestamps ("2026-05-06T14:30:00Z"). The initial empty version "" is
 // less than any non-empty string, so the first operation always succeeds.
 var ErrStaleVersion = errors.New("auth: stale version")
 
-// DynamicKeyEntry is one API key managed by the machines service.
+// DynamicKeyEntry is one API key managed by the upstream key-sync service.
 // KeyHash is the SHA-256 hex of the raw bearer token — the raw key is never stored.
 type DynamicKeyEntry struct {
 	ID            string
@@ -54,15 +54,15 @@ type KeyStore interface {
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
-// Keys are pushed by the machines service at runtime via admin endpoints.
-// All state is lost on restart and rebuilt from the machines service —
+// Keys are pushed by the upstream key-sync service at runtime via admin endpoints.
+// All state is lost on restart and rebuilt from the upstream key-sync service —
 // unless a KeyStore is wired (SetKeyStore), in which case every mutation is
 // persisted and the registry is restored on startup instead.
 type DynamicKeyProvider struct {
 	mu       sync.RWMutex
 	byHash   map[string]*DynamicKeyEntry // SHA-256 hex → entry (for Authenticate)
 	byID     map[string]*DynamicKeyEntry // key ID → entry (for Upsert/Delete)
-	version  string                      // opaque version string, from machines service
+	version  string                      // opaque version string, from the upstream key-sync service
 	onChange func()                      // optional, fires after a successful registry mutation
 
 	// store is the persistence backend (nil = memory-only, the default).

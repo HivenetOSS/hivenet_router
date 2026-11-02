@@ -173,7 +173,7 @@ type Router struct {
 func wireKeyStore(cfg *config.Config, store *storage.BadgerStorage, keyRegistry *auth.DynamicKeyProvider) error {
 	switch cfg.KeyStoreBackend {
 	case "memory", "":
-		// default — RAM-only registry, state rebuilt by the machines service
+		// default — RAM-only registry, state rebuilt by the upstream key-sync service
 		// after restarts.
 		if cfg.ResetKeyStore {
 			log.Warnf("--reset-key-store ignored: KeyStoreBackend is %q (only 'badger' persists a registry to wipe)", cfg.KeyStoreBackend)
@@ -303,9 +303,9 @@ func New(cfg *config.Config) (*Router, error) {
 
 	// Persistent dynamic key registry (KeyStoreBackend "badger", env
 	// HIVENET_ROUTER_KEY_STORE): wire the registry to the diskDB so minted
-	// keys survive restarts. Deployments that run a machines-service keysync
+	// keys survive restarts. Deployments that run an upstream key-sync
 	// keep the default ("memory") and are unaffected — the production model
-	// (router = cache, machines service = source of truth for keys) is
+	// (router = cache, upstream key-sync service = source of truth for keys) is
 	// preserved; opt-in deployments (PoCs, local dev) get durability.
 	// On error the router aborts startup (fail closed — see wireKeyStore).
 	if err := wireKeyStore(cfg, store, keyRegistry); err != nil {

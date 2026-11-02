@@ -329,7 +329,7 @@ func ProvidersFromConfig(cfg *config.Config) (Provider, Provider, *DynamicKeyPro
 	case "dynamic":
 		dynProv = NewDynamicKeyProvider()
 		apiProvider = dynProv
-		log.Warn("Auth: dynamic key registry is empty, awaiting bootstrap from machines service")
+		log.Warn("Auth: dynamic key registry is empty, awaiting bootstrap from the upstream key-sync service")
 	default:
 		return nil, nil, nil, fmt.Errorf("auth: unknown API auth mode %q — supported: none, api-key, dynamic", apiMode)
 	}
