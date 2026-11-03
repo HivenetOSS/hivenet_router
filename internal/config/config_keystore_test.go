@@ -25,6 +25,15 @@ func TestLoadFromEnv_NegativeMaxAgeReported(t *testing.T) {
 	}
 }
 
+// The env secret is trimmed like --key-store-secret-file: a trailing newline
+// (common when a Secret is created from a file) must not change the MAC key.
+func TestLoadFromEnv_KeyStoreSecretTrimmed(t *testing.T) {
+	t.Setenv("HIVENET_ROUTER_KEY_STORE_SECRET", "  s3cret\n")
+	if cfg := LoadFromEnv(); cfg.KeyStoreSecret != "s3cret" {
+		t.Fatalf("KeyStoreSecret = %q, want %q", cfg.KeyStoreSecret, "s3cret")
+	}
+}
+
 func TestLoadFromEnv_ValidKeyStoreValues(t *testing.T) {
 	t.Setenv("HIVENET_ROUTER_KEY_STORE_MAX_AGE", "0")
 	t.Setenv("HIVENET_ROUTER_RESET_KEY_STORE", "true")

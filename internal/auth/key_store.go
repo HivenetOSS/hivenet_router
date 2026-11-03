@@ -53,6 +53,11 @@ type KeyStore interface {
 	// Touch rewrites only the registry version and timestamps (a full
 	// replace whose key set is already stored). Zero confirmedAt keeps it.
 	Touch(version string, savedAt, confirmedAt time.Time) error
+	// Reset durably replaces the store with an empty registry (version "")
+	// and clears the confirmation time. Used when a snapshot is discarded, so
+	// the discarded snapshot's confirmation cannot carry over to keys written
+	// afterwards.
+	Reset(savedAt time.Time) error
 	// DeleteRecords removes individual records (entries skipped at load)
 	// without touching the version.
 	DeleteRecords(ids []string) error
@@ -263,7 +268,7 @@ func (r *DynamicKeyProvider) LoadKeyStore(opts KeyStoreLoadOptions) (KeyStoreLoa
 	}
 	discard := func(reason string) (KeyStoreLoadReport, error) {
 		rep.Discarded = reason
-		if err := r.store.ReplaceAll("", nil, now, time.Time{}); err != nil {
+		if err := r.store.Reset(now); err != nil {
 			return rep, fmt.Errorf("key store: snapshot discarded (%s) but resetting it failed: %w", reason, err)
 		}
 		r.ks.lastPersistOK.Store(now.UnixNano())

@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ const testSecret = "0123456789abcdef0123456789abcdef-test-jwt-secret"
 // ── fake store ──────────────────────────────────────────────────────────────
 
 type storeOp struct {
-	kind    string // upsert | delete | replace | touch
+	kind    string // upsert | delete | replace | touch | reset
 	version string
 	id      string
 	n       int // entries (replace)
@@ -87,6 +88,9 @@ func (f *fakeKeyStore) ReplaceAll(version string, entries []auth.DynamicKeyEntry
 	f.lastFull = entries
 	f.mu.Unlock()
 	return nil
+}
+func (f *fakeKeyStore) Reset(_ time.Time) error {
+	return f.write(storeOp{kind: "reset"})
 }
 func (f *fakeKeyStore) DeleteRecords(ids []string) error {
 	f.mu.Lock()
@@ -492,6 +496,33 @@ func TestBadgerKeyStore_MaxAgeMeasuredFromLastConfirmation(t *testing.T) {
 	fresh, rep := restart(t, p, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
 	if rep.Discarded == "" || authenticates(fresh, "stale") {
 		t.Fatalf("a snapshot last confirmed 31m ago must be discarded at max age 15m, report = %+v", rep)
+	}
+}
+
+// A discard must clear the confirmation time: keys pushed one by one after an
+// over-age discard were never confirmed by a full replace, so a later restart
+// must report them as never confirmed, not inherit the discarded snapshot's
+// confirmation.
+func TestBadgerKeyStore_DiscardClearsConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	opts := auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute}
+	p := newPersistent(t, dir, clock)
+	if err := p.ReplaceAll("rev_01", []auth.DynamicKeyEntry{persistEntry("old", "o")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	clock.Add(20 * time.Minute)
+	p2, rep := restart(t, p, dir, clock, opts)
+	if rep.Discarded == "" {
+		t.Fatalf("a snapshot confirmed 20m ago must be discarded at max age 15m, report = %+v", rep)
+	}
+	if err := p2.Upsert("rev_02", persistEntry("new", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	clock.Add(time.Minute)
+	fresh, rep := restart(t, p2, dir, clock, opts)
+	if !strings.Contains(rep.Discarded, "never confirmed") || authenticates(fresh, "new") {
+		t.Fatalf("keys written after a discard must count as never confirmed, report = %+v", rep)
 	}
 }
 

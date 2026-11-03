@@ -829,6 +829,8 @@ The max age bounds how long a key revoked upstream while the router was down can
 
 A full replace whose key set equals the stored one rewrites only the meta record, so key-sync's periodic full re-push stays cheap.
 
+Because the max age is measured from the last full replace, `--key-store-max-age` must be comfortably larger than the upstream key-sync service's full-replace interval (at least twice as large). If key-sync sends a full replace less often than that, or stops sending one when versions already match, every restart discards the snapshot and the warm start never takes effect.
+
 ### Write failures
 
 Every admin mutation is applied in memory first, so a revocation takes effect immediately. If the write to the key store then fails, the endpoint answers `503` with `"applied": true`. The upstream key-sync service treats `5xx` as retryable and replays the same version, which the registry accepts and persists again. The router also marks the store dirty and rewrites the full registry in the background until a write succeeds.

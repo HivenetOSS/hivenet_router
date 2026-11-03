@@ -368,7 +368,9 @@ func LoadFromEnv() *Config {
 			cfg.ResetKeyStore = b
 		}
 	}
-	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET"); v != "" {
+	// Trimmed like --key-store-secret-file, so the same secret yields the same
+	// MAC key whichever source provides it.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
 		cfg.KeyStoreSecret = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {

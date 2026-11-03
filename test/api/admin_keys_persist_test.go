@@ -46,6 +46,7 @@ func (s *failingStore) ReplaceAll(string, []auth.DynamicKeyEntry, time.Time, tim
 	return s.err()
 }
 func (s *failingStore) Touch(string, time.Time, time.Time) error { return s.err() }
+func (s *failingStore) Reset(time.Time) error                    { return s.err() }
 func (s *failingStore) DeleteRecords([]string) error             { return nil }
 func (s *failingStore) Close() error                             { return nil }
 

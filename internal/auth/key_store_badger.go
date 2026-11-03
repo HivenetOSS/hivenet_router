@@ -384,6 +384,21 @@ func (b *BadgerKeyStore) ReplaceAll(version string, entries []DynamicKeyEntry, s
 	return b.writeGenerationLocked(version, entries, savedAt, confirmedAt)
 }
 
+// Reset implements KeyStore: write an empty generation with version "" and
+// no confirmation time. Unlike ReplaceAll with a zero confirmedAt, it does not
+// keep the stored confirmation time.
+func (b *BadgerKeyStore) Reset(savedAt time.Time) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	prev := b.confirmedAt
+	b.confirmedAt = time.Time{}
+	if err := b.writeGenerationLocked("", nil, savedAt, time.Time{}); err != nil {
+		b.confirmedAt = prev
+		return err
+	}
+	return nil
+}
+
 // Touch implements KeyStore: rewrite only the meta record (version, saved_at
 // and, when non-zero, confirmed_at). Used for a full replace whose key set
 // equals what is already stored.
