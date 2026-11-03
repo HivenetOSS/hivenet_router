@@ -468,7 +468,12 @@ Agents normally:
 | `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` | Persistent BadgerDB directory |
 | `--disk-db-ttl` | — | `30` | Entry lifetime in days; `0` disables expiry |
 | `--universal-flush-interval` | — | `30s` | Frequency for flushing per-agent history and persistent quota changes |
-| `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup |
+| `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup (the key store is separate and not touched) |
+| `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` | Dynamic key registry persistence: `memory` or `badger` |
+| `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` | Key-store BadgerDB directory (mode `0700`); must not overlap `--disk-db-path` |
+| `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | — | Router-only secret for the key store's record MACs; required with `badger`, at least 32 bytes, different from the JWT secret |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` | Discard a persisted key registry whose last write or last key-sync confirmation is older than this; `0` disables the bound; invalid values stop startup |
+| `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` | Delete the key-store directory before startup |
 
 The persistent database can contain:
 
@@ -490,6 +495,8 @@ deletes the configured database directory before the router opens it.
 
   It removes persisted agent history and Badger-backed daily quota state from that directory.
 </Danger>
+
+See [Persistent key store](/security/api-keys#persistent-key-store-warm-start) for the dynamic key store's restore rules and runbook.
 
 ### Universal flush interval
 
@@ -739,6 +746,11 @@ The complete current router flag set is:
 | `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` |
 | `--reset-disk-db` | — | `false` |
 | `--disk-db-ttl` | — | `30` days |
+| `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` |
+| `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` |
+| `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | Empty (required with `badger`) |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` |
+| `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` |
 | `--universal-flush-interval` | — | `30s` |
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |
@@ -767,7 +779,7 @@ The complete current router flag set is:
 | `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
-| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference), The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
+| `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference). The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
 
 ### Supported engines
 

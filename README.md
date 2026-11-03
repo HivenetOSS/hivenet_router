@@ -114,7 +114,11 @@ curl -X POST http://localhost:8080/v1/rerank \
 
 ## Documentation
 
-The complete documentation is available at **[routerdocs.hivenet.com](https://routerdocs.hivenet.com)**. Its source lives in [`docs/`](docs/).
+The complete documentation is available at **[routerdocs.hivenet.com](https://routerdocs.hivenet.com)**. Its source lives in [`docs/`](docs/). 
+
+### Hivenet services
+
+Hivenet Router is free to self-host and doesn't require Hivenet infrastructure. If you need GPU capacity for your inference backends, or prefer a managed inference endpoint, [explore the available Hivenet options](https://www.hivenet.com/hivenet-router).
 
 **Get started**
 

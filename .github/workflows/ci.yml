@@ -83,7 +83,8 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           # Pinned for reproducible CI; bump intentionally (v2 matches .golangci.yml).
-          version: v2.12.2
+          # v2.15.0: first version that decodes Go 1.27.3 export data.
+          version: v2.15.0
 
   govulncheck:
     name: govulncheck

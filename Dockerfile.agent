@@ -1,8 +1,8 @@
 # ── Stage 1: Build ──────────────────────────────────────────────────────────
-FROM golang:1.25 AS builder
+FROM golang:1.27 AS builder
 
 # go-nvml uses RTLD_DEEPBIND (glibc-only) — requires a glibc-based image.
-# golang:1.25 is Debian-based and includes gcc + glibc out of the box.
+# golang:1.27 is Debian-based and includes gcc + glibc out of the box.
 
 WORKDIR /app
 
