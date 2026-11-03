@@ -6,8 +6,6 @@ module hivenet_router
 go 1.27.3
 
 // ── Direct dependencies ─────────────────────────────────────────────────────
-//
-// ── Indirect (transitive) dependencies ──────────────────────────────────────
 require (
 	github.com/NVIDIA/go-nvml v0.13.3-1
 	github.com/dgraph-io/badger/v4 v4.9.5
@@ -48,6 +46,7 @@ require (
 	google.golang.org/protobuf v1.36.11
 )
 
+// ── Indirect (transitive) dependencies ──────────────────────────────────────
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
