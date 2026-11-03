@@ -7,9 +7,12 @@
 package redirect_test
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -334,7 +337,7 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	const key, session = "key-1", "s"
 	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
 	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
-	build := func(placedHere bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
+	build := func(hereKind string, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
 			Schema: 2, Version: u64(1), Region: "eu",
 			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
@@ -344,8 +347,8 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 			},
 			HintsExpireAt: expire.UTC().Format(time.RFC3339),
 		}
-		if placedHere {
-			d.Placements = append(d.Placements, place("m", redirect.KindChat, "self", yes, cold))
+		if hereKind != "" {
+			d.Placements = append(d.Placements, place("m", hereKind, "self", yes, cold))
 		}
 		m := redirect.NewMap(domains)
 		if err := m.Replace(d); err != nil {
@@ -354,21 +357,22 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 		return m
 	}
 	cases := []struct {
-		name       string
-		placedHere bool
-		ha, hb     *redirect.Hint
-		expire     time.Time
-		redirect   bool
+		name     string
+		hereKind string // kind of the model's placement here ("" = none)
+		ha, hb   *redirect.Hint
+		expire   time.Time
+		redirect bool
 	}{
-		{"all cold, placed here: wake here", true, cold, cold, fresh, false},
-		{"all cold, not placed here: cold sibling", false, cold, cold, fresh, true},
-		{"one warm sibling: redirect", true, cold, warm, fresh, true},
-		{"no hint means warm: redirect", true, cold, nil, fresh, true},
-		{"hints expired: redirect", true, cold, cold, stale, true},
+		{"all cold, placed here: wake here", redirect.KindChat, cold, cold, fresh, false},
+		{"all cold, not placed here: cold sibling", "", cold, cold, fresh, true},
+		{"all cold, placed here as another kind: cold sibling", redirect.KindEmbedding, cold, cold, fresh, true},
+		{"one warm sibling: redirect", redirect.KindChat, cold, warm, fresh, true},
+		{"no hint means warm: redirect", redirect.KindChat, cold, nil, fresh, true},
+		{"hints expired: redirect", redirect.KindChat, cold, cold, stale, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := target(t, build(tc.placedHere, tc.ha, tc.hb, tc.expire),
+			got := target(t, build(tc.hereKind, tc.ha, tc.hb, tc.expire),
 				redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "self", From: "self", KeyID: key, Session: session})
 			if (got != "") != tc.redirect {
 				t.Fatalf("target %q, want a redirect: %v", got, tc.redirect)
@@ -429,6 +433,16 @@ var (
 	secretB = redirect.Secret{ID: "k2", Key: []byte("fedcba9876543210fedcba9876543210")}
 )
 
+// rawToken signs claims exactly as the contract writes it, outside the
+// package, so a test can build a token Sign never would (no jti).
+func rawToken(secret redirect.Secret, claims any) string {
+	body, _ := json.Marshal(claims)
+	payload := "v2." + secret.ID + "." + base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, secret.Key)
+	mac.Write([]byte(payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
 func signer(t *testing.T, ttl time.Duration, secrets ...redirect.Secret) *redirect.Signer {
 	t.Helper()
 	s, err := redirect.NewSigner(secrets, ttl)
@@ -456,9 +470,17 @@ func TestSigner(t *testing.T) {
 	if _, err := s.Verify(tok, now.Add(-5*time.Second)); err != nil { // iat - 5 s skew: still valid
 		t.Fatalf("token issued 5 s ahead of this clock: %v", err)
 	}
-	claims.IssuedAt, claims.Exp = now.Unix(), now.Add(60*time.Second).Unix()
+	if !redirect.ValidJTI(got.JTI) {
+		t.Fatalf("jti %q is not 16 base64url bytes", got.JTI)
+	}
+	claims.IssuedAt, claims.Exp, claims.JTI = now.Unix(), now.Add(60*time.Second).Unix(), got.JTI
 	if got != claims {
 		t.Fatalf("claims round trip: got %+v, want %+v", got, claims)
+	}
+
+	again, _ := s.Verify(s.Sign(claims, now), now) // claims now carries a jti: Sign replaces it
+	if again.JTI == got.JTI || !redirect.ValidJTI(again.JTI) {
+		t.Fatalf("every token needs a fresh jti: %q then %q", got.JTI, again.JTI)
 	}
 
 	parts := strings.Split(tok, ".")
@@ -551,13 +573,13 @@ func TestReplayGuard(t *testing.T) {
 	g := redirect.NewReplayGuard()
 	now := time.Now()
 	until := now.Add(time.Minute)
-	if !g.First("r-1", until, now) || g.First("r-1", until, now.Add(30*time.Second)) {
-		t.Fatal("a request ID must be accepted once")
+	if !g.First("j-1", until, now) || g.First("j-1", until, now.Add(30*time.Second)) {
+		t.Fatal("a token ID must be accepted once")
 	}
-	if !g.First("r-2", until, now) {
-		t.Fatal("another request ID is independent")
+	if !g.First("j-2", until, now) {
+		t.Fatal("another token ID is independent")
 	}
-	if !g.First("r-1", until, now.Add(2*time.Minute)) {
+	if !g.First("j-1", until, now.Add(2*time.Minute)) {
 		t.Fatal("once its token can no longer verify, the entry is gone")
 	}
 }
@@ -640,6 +662,10 @@ func TestTokenAuth(t *testing.T) {
 	}
 	keyResult := &auth.AuthResult{TenantID: "tenant-1", KeyID: "key-1"}
 	other := &auth.AuthResult{TenantID: "t2", KeyID: "key-2"}
+	noJTI := valid
+	noJTI.IssuedAt, noJTI.Exp = now.Unix(), now.Add(time.Minute).Unix()
+	shortJTI := noJTI
+	shortJTI.JTI = base64.RawURLEncoding.EncodeToString([]byte("too short"))
 
 	cases := []struct {
 		name         string
@@ -669,7 +695,9 @@ func TestTokenAuth(t *testing.T) {
 		{"scope that excludes this policloud (DE)", request(sign(func(c *redirect.Claims) { c.Scope = "country:FR" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
 		{"EU scope at an EU policloud", request(sign(func(c *redirect.Claims) { c.Scope = "EU" }), ""), registry(t, true, nil), &recorder{}, false, true, "key-1", ""},
 		{"malformed scope", request(sign(func(c *redirect.Claims) { c.Scope = "world" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
-		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "replay"},
+		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"no jti", request(rawToken(secretA, noJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"short jti", request(rawToken(secretA, shortJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"expired token", request(signer(t, time.Second, secretA).Sign(valid, now.Add(-time.Minute)), ""), registry(t, true, nil), &recorder{}, true, false, "", "expired"},
 		{"expired token + valid key: fallback", request(signer(t, time.Second, secretA).Sign(valid, now.Add(-time.Minute)), rawKey), registry(t, true, nil),
 			&recorder{res: keyResult}, false, false, "key-1", "expired"},
@@ -703,8 +731,9 @@ func TestTokenAuth(t *testing.T) {
 				t.Fatalf("redirect info %+v, want present=%v", res.Redirect, tc.wantRedirect)
 			}
 			if res.Redirect != nil {
-				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "rid-1", Model: "m", Scope: res.Redirect.Scope, From: "fr-1"}
-				if *res.Redirect != want {
+				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "rid-1", Model: "m", Scope: res.Redirect.Scope, From: "fr-1",
+					TokenID: res.Redirect.TokenID, Exp: now.Add(time.Minute).Unix()}
+				if *res.Redirect != want || !redirect.ValidJTI(want.TokenID) {
 					t.Errorf("redirect info %+v, want %+v", *res.Redirect, want)
 				}
 			}
@@ -712,27 +741,35 @@ func TestTokenAuth(t *testing.T) {
 	}
 }
 
-// TestTokenAuth_SingleUse: the same token is accepted once; the second use is
-// refused as a replay, and with a valid key it falls back to a fresh request.
-func TestTokenAuth_SingleUse(t *testing.T) {
+// TestTokenAuth_SingleUseIsLast: authentication never marks a token used
+// (single use is the last check, after the body, in the API layer); Use marks
+// it by its jti, so two tokens with the same request ID are independent.
+func TestTokenAuth_SingleUseIsLast(t *testing.T) {
 	var rejects []string
 	rd := newRedirector(t, &rejects)
 	keys := registry(t, true, nil)
 	p := redirect.Wrap(rd, keys, keys)
-	tok := rd.Signer.Sign(redirect.Claims{KeyID: "key-1", RequestID: "rid-9", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}, time.Now())
+	claims := redirect.Claims{KeyID: "key-1", RequestID: "rid-9", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
+	now := time.Now()
+	tok, sameRID := rd.Signer.Sign(claims, now), rd.Signer.Sign(claims, now)
 
-	if res, err := p.Authenticate(request(tok, "")); err != nil || res.Redirect == nil {
-		t.Fatalf("first use: %v %+v", err, res)
+	var first *auth.RedirectInfo
+	for i := 0; i < 2; i++ {
+		res, err := p.Authenticate(request(tok, ""))
+		if err != nil || res.Redirect == nil {
+			t.Fatalf("authentication %d: %v %+v", i+1, err, res)
+		}
+		first = res.Redirect
 	}
-	if _, err := p.Authenticate(request(tok, "")); !errors.Is(err, auth.ErrInvalidCredentials) {
-		t.Fatalf("second use: got %v, want 401", err)
+	if !rd.Use(first.TokenID, first.Exp, now) || rd.Use(first.TokenID, first.Exp, now) {
+		t.Fatal("a token is used once")
 	}
-	res, err := p.Authenticate(request(tok, rawKey))
-	if err != nil || res.Redirect != nil || res.KeyID != "key-1" {
-		t.Fatalf("replay with a valid key: got %+v %v, want a fresh request on the key", res, err)
+	res, err := p.Authenticate(request(sameRID, ""))
+	if err != nil || !rd.Use(res.Redirect.TokenID, res.Redirect.Exp, now) {
+		t.Fatalf("another token with the same request ID must be usable: %v", err)
 	}
-	if got := strings.Join(rejects, ","); got != "replay,replay" {
-		t.Fatalf("reasons %q, want replay,replay", got)
+	if len(rejects) != 0 {
+		t.Fatalf("reasons %v, want none", rejects)
 	}
 }
 

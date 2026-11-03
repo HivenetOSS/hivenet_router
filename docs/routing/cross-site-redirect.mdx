@@ -59,16 +59,18 @@ Location: https://pc-de-1.example.com/v1/chat/completions?rt=v2.<secret id>.<cla
 Cache-Control: no-store
 ```
 
-The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin policloud, the target policloud, the request path, the hop count, a SHA-256 hash of the request body, and its issue and expiry times. The target checks, in order:
+The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin policloud, the target policloud, the request path, the hop count, a SHA-256 hash of the request body, its issue and expiry times, and a random token ID that is new for every token. The target checks, in order:
 
 1. the token is well formed and its signature is valid;
 2. it has not expired, with 5 seconds of grace for clock drift between routers;
 3. it was not issued more than 5 seconds in the future. Such a token means this router’s clock is behind, and it would otherwise stay valid longer than its lifetime;
 4. it names this policloud and this request path;
 5. this policloud is inside the token’s scope;
-6. its request ID has not been used before: a token works once;
-7. the key it names is still enabled and unexpired, and any `Authorization` header the client sent belongs to that same key;
-8. the request body is byte-identical to the one the token was issued for. This is checked before any quota is spent.
+6. the key it names is still enabled and unexpired, and any `Authorization` header the client sent belongs to that same key;
+7. the request body is byte-identical to the one the token was issued for. This is checked before any quota is spent;
+8. the token has not been used before: a token works once.
+
+A token is marked used only when it passes every check, so a request refused on any check, such as a leaked URL sent with another body, never uses up the client’s token. Single use is tracked by the token ID, not the request ID: a client that sets its own `X-Request-ID` and retries gets a new token each time, and another key cannot use up its token by sending the same ID.
 
 When a check fails and the request carries an `Authorization` header that authenticates, the token is ignored and the request is served on that key as a new request. Otherwise a refused token gets `401 unauthorized`, like any other invalid credential.
 
@@ -167,8 +169,8 @@ A rising `reason="expired"` count means clients take longer than the token lifet
 ## Limitations
 
 - A redirect happens only when no healthy agent on this policloud serves the model. Requests are not redirected when local agents are busy.
-- A token works once on each router, not once per policloud: each router remembers used request IDs in its own memory.
-- A client that repeats a followed request at the same URL without its API key, for example after a network error, is refused with `401`, because the token was already used. A client that also sends its API key is served on it as a new request.
+- A token works once on each router, not once per policloud: each router remembers used token IDs in its own memory.
+- A client that repeats an already served request at the same redirect URL without its API key is refused with `401`, because that token was used. Repeating the request at the original URL gets a new token, and a client that also sends its API key is served on it as a new request.
 - API keys have no home country or maximum scope yet: the default scope is the country of the policloud the request landed in, and any request may ask for `EU` or `all`.
 - The map push is protected by the admin key only. Treat that key as a map-writer secret: the map decides where clients and their API keys are sent.
 - Only the `rt` query parameter is redacted from the access log; other query parameters are logged as before.

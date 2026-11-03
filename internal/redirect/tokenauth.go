@@ -33,6 +33,13 @@ type Redirector struct {
 	OnReject func(reason string)
 }
 
+// Use marks the token jti, valid until exp, as used and reports whether this
+// was its first use. It is the last token check (contract 3 v2 §4), made only
+// once the key and the body have passed.
+func (r *Redirector) Use(jti string, exp int64, now time.Time) bool {
+	return r.Replay.First(jti, time.Unix(exp, 0).Add(ClockSkew), now)
+}
+
 // Reject reports a refused redirect token.
 func (r *Redirector) Reject(reason string) {
 	log.Debugf("redirect token rejected: %s", reason)
@@ -78,10 +85,11 @@ type tokenAuth struct {
 	keys *auth.DynamicKeyProvider
 }
 
-// Authenticate accepts a redirected request when its token passes every check
-// of contract 3 v2 §4, in order. The body hash cannot be checked here (the
-// body is not read yet); the API layer checks it against
-// AuthResult.Redirect.BodySHA before quota, with the same fallback.
+// Authenticate accepts a redirected request when its token passes the checks
+// of contract 3 v2 §4 up to the key, in order. The last two, the body hash
+// and single use, cannot run here (the body is not read yet): the API layer
+// (RedirectTarget) runs them from AuthResult.Redirect before quota, with the
+// same fallback, and only then marks the token used.
 //
 // Fallback: when the token fails any check but the request carries an
 // Authorization header, the token is ignored and the request is served on
@@ -102,6 +110,7 @@ func (t *tokenAuth) Authenticate(req *http.Request) (*auth.AuthResult, error) {
 			res.Redirect = &auth.RedirectInfo{
 				Hop: c.Hop, BodySHA: c.BodySHA, RequestID: c.RequestID,
 				Model: c.Model, Scope: string(c.Scope), From: c.From,
+				TokenID: c.JTI, Exp: c.Exp,
 			}
 			return res, nil
 		}
@@ -115,10 +124,9 @@ func (t *tokenAuth) Authenticate(req *http.Request) (*auth.AuthResult, error) {
 }
 
 // check runs the token checks that need no key lookup, in the contract's
-// order, and returns the claims or the rejection reason. The single-use
-// record is taken only after the format, signature, expiry, site, path and
-// scope checks pass; a token then refused on its key (the next check) stays
-// consumed, as in the contract's order.
+// order, and returns the claims or the rejection reason. It does not mark the
+// token used: that is the last check (Redirector.Use), once the key and the
+// body have passed too, so a refused request never uses up a token.
 func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims, string) {
 	c, err := t.r.Signer.Verify(tok, now)
 	switch {
@@ -128,7 +136,7 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 		return c, "clock"
 	case errors.Is(err, ErrTokenSignature):
 		return c, "signature"
-	case err != nil:
+	case err != nil, c.RequestID == "", !ValidJTI(c.JTI):
 		return c, "malformed"
 	case c.Site != t.r.Self:
 		return c, "site"
@@ -136,8 +144,6 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 		return c, "path"
 	case !t.inScope(c.Scope):
 		return c, "scope"
-	case c.RequestID == "" || !t.r.Replay.First(c.RequestID, time.Unix(c.Exp, 0).Add(ClockSkew), now):
-		return c, "replay"
 	}
 	return c, ""
 }

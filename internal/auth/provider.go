@@ -121,6 +121,8 @@ type RedirectInfo struct {
 	Model     string // the concrete model the first router routed on, used as is
 	Scope     string // the effective scope at the first router
 	From      string // the first router's policloud ID, never redirected back to
+	TokenID   string // the token's jti, marked used once the body check passes
+	Exp       int64  // the token's expiry (Unix seconds), how long its jti is remembered
 }
 
 // Provider authenticates an incoming HTTP request and returns an AuthResult.

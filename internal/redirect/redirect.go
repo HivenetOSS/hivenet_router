@@ -21,6 +21,7 @@ package redirect
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -404,7 +405,7 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	if !req.Now.Before(m.hintsExpire) {
 		return cands[0].pc, true // no fresh hints: the session order alone
 	}
-	if m.placed(req.Model, req.Self) && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
+	if m.placed(req.Model, req.Kind, req.Self) && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
 		return Policloud{}, false // every sibling is cold and the model is placed here: wake it here
 	}
 	firstEligible := -1
@@ -425,9 +426,9 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	return cands[0].pc, true // every target skipped: a stale hint must not block service
 }
 
-// placed reports whether the map places model on policloud.
-func (m *Map) placed(model, policloud string) bool {
-	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool { return pl.Policloud == policloud })
+// placed reports whether the map places model, as kind, on policloud.
+func (m *Map) placed(model, kind, policloud string) bool {
+	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool { return pl.Kind == kind && pl.Policloud == policloud })
 }
 
 // score is H(a, model, policloud): the first 8 bytes, big-endian, of
@@ -504,6 +505,16 @@ type Claims struct {
 	BodySHA   string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
 	IssuedAt  int64  `json:"iat"`   // Unix seconds
 	Exp       int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
+	JTI       string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
+}
+
+// jtiLen is the length of a token ID, in random bytes.
+const jtiLen = 16
+
+// ValidJTI reports whether jti is a token ID as Sign makes it.
+func ValidJTI(jti string) bool {
+	b, err := base64.RawURLEncoding.DecodeString(jti)
+	return err == nil && len(b) == jtiLen
 }
 
 // Secret is one signing secret and its ID (the token's kid).
@@ -569,10 +580,14 @@ func NewSigner(secrets []Secret, ttl time.Duration) (*Signer, error) {
 	return s, nil
 }
 
-// Sign stamps c with iat = now and exp = now + ttl and returns the token:
+// Sign stamps c with iat = now, exp = now + ttl and a fresh random jti, and
+// returns the token:
 // "v2." + kid + "." + base64url(JSON claims) + "." + base64url(HMAC-SHA256).
 func (s *Signer) Sign(c Claims, now time.Time) string {
 	c.IssuedAt, c.Exp = now.Unix(), now.Add(s.ttl).Unix()
+	id := make([]byte, jtiLen)
+	_, _ = rand.Read(id) // crypto/rand.Read never fails (it crashes the program instead)
+	c.JTI = base64.RawURLEncoding.EncodeToString(id)
 	body, _ := json.Marshal(c) // Claims holds only strings and ints: cannot fail
 	payload := tokenPrefix + s.sign.ID + "." + base64.RawURLEncoding.EncodeToString(body)
 	return payload + "." + base64.RawURLEncoding.EncodeToString(mac(s.sign.Key, payload))
@@ -621,8 +636,9 @@ func BodySHA(body []byte) string {
 
 // ---- single use ---------------------------------------------------------------
 
-// ReplayGuard makes tokens single-use: a request ID is accepted once until its
-// token can no longer verify (exp + ClockSkew).
+// ReplayGuard makes tokens single-use: a token ID (jti) is accepted once until
+// its token can no longer verify (exp + ClockSkew). It is keyed on the jti,
+// never on the request ID, which the client can choose through X-Request-ID.
 //
 // ponytail: in memory, so a token can be used once per router of the target
 // policloud, not once per policloud. Contract 3 v2 moves this to the
@@ -636,9 +652,9 @@ type ReplayGuard struct {
 // NewReplayGuard returns an empty guard.
 func NewReplayGuard() *ReplayGuard { return &ReplayGuard{seen: map[string]time.Time{}} }
 
-// First records rid until the given time and reports whether this is its
+// First records id until the given time and reports whether this is its
 // first use. Expired entries are swept at most every 10 seconds.
-func (g *ReplayGuard) First(rid string, until, now time.Time) bool {
+func (g *ReplayGuard) First(id string, until, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if now.Sub(g.lastSweep) > 10*time.Second {
@@ -649,9 +665,9 @@ func (g *ReplayGuard) First(rid string, until, now time.Time) bool {
 		}
 		g.lastSweep = now
 	}
-	if t, ok := g.seen[rid]; ok && !now.After(t) {
+	if t, ok := g.seen[id]; ok && !now.After(t) {
 		return false
 	}
-	g.seen[rid] = until
+	g.seen[id] = until
 	return true
 }

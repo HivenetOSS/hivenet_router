@@ -34,7 +34,8 @@ import (
 )
 
 const (
-	redirectKey = "sk-redirect-test"
+	redirectKey = "sk-redirect-test"  // key-1, tenant-1
+	otherKey    = "sk-redirect-other" // key-2, tenant-2
 	chatPath    = "/v1/chat/completions"
 )
 
@@ -125,6 +126,13 @@ func testKeys(t *testing.T, allowed ...string) *auth.DynamicKeyProvider {
 	if err := keys.Upsert("v1", auth.DynamicKeyEntry{
 		ID: "key-1", KeyHash: hex.EncodeToString(h[:]), Owner: "tenant-1", Name: "test", Enabled: true,
 		AllowedModels: allowed, Quota: auth.QuotaLimits{RequestsPerMinute: 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h2 := sha256.Sum256([]byte(otherKey))
+	if err := keys.Upsert("v2", auth.DynamicKeyEntry{
+		ID: "key-2", KeyHash: hex.EncodeToString(h2[:]), Owner: "tenant-2", Name: "other", Enabled: true,
+		Quota: auth.QuotaLimits{RequestsPerMinute: 1000},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,9 +250,9 @@ func TestRedirect_MissWrites307(t *testing.T) {
 	want := redirect.Claims{
 		KeyID: "key-1", RequestID: w.Header().Get("X-Request-ID"), Model: "m", Scope: "country:FR",
 		From: "a", Site: "b", Path: chatPath, Hop: 1,
-		BodySHA: redirect.BodySHA(chatBody), IssuedAt: c.IssuedAt, Exp: c.IssuedAt + 60,
+		BodySHA: redirect.BodySHA(chatBody), IssuedAt: c.IssuedAt, Exp: c.IssuedAt + 60, JTI: c.JTI,
 	}
-	if c != want || c.RequestID == "" {
+	if c != want || c.RequestID == "" || !redirect.ValidJTI(c.JTI) {
 		t.Errorf("claims %+v, want %+v", c, want)
 	}
 	if got := w.Header().Get("Cache-Control"); got != "no-store" {
@@ -511,8 +519,8 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 				t.Fatalf("Location %s, want c (never a, the origin)", loc)
 			}
 			want := c
-			want.Site, want.Hop, want.IssuedAt, want.Exp = "c", 2, next.IssuedAt, next.Exp
-			if next != want {
+			want.Site, want.Hop, want.IssuedAt, want.Exp, want.JTI = "c", 2, next.IssuedAt, next.Exp, next.JTI
+			if next != want || !redirect.ValidJTI(next.JTI) {
 				t.Fatalf("second token %+v, want %+v", next, want)
 			}
 		}
@@ -549,6 +557,12 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		if strings.Join(b.rejects, ",") != "replay" {
 			t.Errorf("reject reasons %v, want [replay]", b.rejects)
 		}
+		// With its key, the replayed request is served fresh on it.
+		done = sendAsync(b, chatPath+"?rt="+tok, chatBody, bearer())
+		p := serveOne(t, b)
+		if w := <-done; w.Code != http.StatusOK || p.KeyID != "key-1" || w.Header().Get("X-Request-ID") == rid {
+			t.Fatalf("replay + key: status %d key %q, want 200 as a fresh request on key-1", w.Code, p.KeyID)
+		}
 	})
 
 	t.Run("broken token + valid key: served fresh on the key", func(t *testing.T) {
@@ -566,6 +580,73 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		}
 		if strings.Join(b.rejects, ",") != "expired" {
 			t.Errorf("reject reasons %v, want [expired]", b.rejects)
+		}
+	})
+}
+
+// TestRedirect_SingleUseCannotBeStolen: single use is per token (jti), and a
+// token is marked used only once every check passed. Each case ends with the
+// right client served (200).
+func TestRedirect_SingleUseCannotBeStolen(t *testing.T) {
+	const clientRID = "6f1d3a52-0c4b-4d2e-9a8f-2b7c5e1d9a00" // a client-chosen X-Request-ID
+	entryAndTarget := func(t *testing.T) (a, b *testSite) {
+		keys := testKeys(t)
+		a, b = newSite(t, "a", nil, keys), newSite(t, "b", map[string]int{"m": 1}, keys)
+		push(t, fleetDoc(1), a, b)
+		return a, b
+	}
+	// follow repeats a 307 at its target without the key, as clients do.
+	follow := func(t *testing.T, b *testSite, w *httptest.ResponseRecorder, body []byte) (*httptest.ResponseRecorder, *domain.PendingRequest) {
+		t.Helper()
+		loc, _ := locationToken(t, w)
+		done := sendAsync(b, loc.RequestURI(), body, nil)
+		p := serveOne(t, b)
+		return <-done, p
+	}
+	withRID := func(key string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + key, "X-Request-ID": clientRID}
+	}
+
+	t.Run("a leaked link sent with another body does not use up the token", func(t *testing.T) {
+		a, b := entryAndTarget(t)
+		w := send(a, chatPath, chatBody, bearer())
+		loc, _ := locationToken(t, w)
+		if leak := send(b, loc.RequestURI(), []byte(`{"model":"m","messages":[{"role":"user","content":"stolen"}]}`), nil); leak.Code != http.StatusUnauthorized {
+			t.Fatalf("leaked link with another body: status %d, want 401", leak.Code)
+		}
+		if got, p := follow(t, b, w, chatBody); got.Code != http.StatusOK || p.KeyID != "key-1" {
+			t.Fatalf("the real client: status %d key %q, want 200 on key-1", got.Code, p.KeyID)
+		}
+		if strings.Join(b.rejects, ",") != "body" {
+			t.Errorf("reject reasons %v, want [body]", b.rejects)
+		}
+	})
+
+	t.Run("another key with the victim's X-Request-ID does not use up the victim's token", func(t *testing.T) {
+		a, b := entryAndTarget(t)
+		victim := send(a, chatPath, chatBody, withRID(redirectKey))
+		attacker := send(a, chatPath, chatBody, withRID(otherKey))
+		if got, p := follow(t, b, attacker, chatBody); got.Code != http.StatusOK || p.KeyID != "key-2" {
+			t.Fatalf("the other key: status %d key %q, want 200 on its own key-2", got.Code, p.KeyID)
+		}
+		got, p := follow(t, b, victim, chatBody)
+		if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
+			t.Fatalf("the victim: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
+				got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+		}
+	})
+
+	t.Run("a same-key retry with its own X-Request-ID is served", func(t *testing.T) {
+		a, b := entryAndTarget(t)
+		for try := 1; try <= 2; try++ {
+			got, p := follow(t, b, send(a, chatPath, chatBody, withRID(redirectKey)), chatBody)
+			if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
+				t.Fatalf("try %d: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
+					try, got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+			}
+		}
+		if len(b.rejects) != 0 {
+			t.Errorf("reject reasons %v, want none", b.rejects)
 		}
 	})
 }

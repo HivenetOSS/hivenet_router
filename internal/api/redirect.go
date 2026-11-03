@@ -59,9 +59,10 @@ func redirectInfo(c *gin.Context) *auth.RedirectInfo {
 //
 //   - the body must be the one the token was issued for, checked before any
 //     quota is spent, so a leaked token cannot carry another prompt or drain
-//     the key's quota. On a mismatch the token is refused: a request that also
-//     carries its key (already verified as the token's key) is served as a
-//     fresh request on it, as for any refused token; otherwise 401;
+//     the key's quota; then the token is marked used (single use by its jti).
+//     On either failure the token is refused: a request that also carries its
+//     key (already verified as the token's key) is served as a fresh request
+//     on it, as for any refused token; otherwise 401;
 //   - an accepted request adopts the first router's request ID (logs, audit,
 //     X-Request-ID), so billing deduplicates it across the hops;
 //   - it uses the token's model, the concrete model the first router
@@ -82,11 +83,20 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 				"failed to read request body", domain.SourceRouter)
 			return
 		}
-		if info.BodySHA != redirect.BodySHA(body) {
-			h.redirect.Reject("body")
+		// The last two token checks (contract 3 v2 §4): the body, then single
+		// use. The token is marked used only here, once every check passed, so
+		// a request refused on any check never uses up the client's token.
+		reason, msg := "", ""
+		switch {
+		case info.BodySHA != redirect.BodySHA(body):
+			reason, msg = "body", "the request body does not match the redirect token"
+		case !h.redirect.Use(info.TokenID, info.Exp, time.Now()):
+			reason, msg = "replay", "the redirect token was already used"
+		}
+		if reason != "" {
+			h.redirect.Reject(reason)
 			if c.GetHeader("Authorization") == "" {
-				abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
-					"the request body does not match the redirect token", domain.SourceRouter)
+				abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized, msg, domain.SourceRouter)
 				return
 			}
 			c.Set(ctxKeyRedirect, (*auth.RedirectInfo)(nil)) // fresh request: hop 0, own ID, own model
