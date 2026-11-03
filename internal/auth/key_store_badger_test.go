@@ -76,7 +76,7 @@ func TestBadgerKeyStore_SyncWritesEnabled(t *testing.T) {
 func TestBadgerKeyStore_InterruptedReplaceKeepsPreviousGeneration(t *testing.T) {
 	ks := openTestStore(t, t.TempDir())
 	now := time.Now()
-	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a"), ksEntry("b")}, now); err != nil {
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a"), ksEntry("b")}, now, now); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
 	// Simulate a crash mid-replace: generation 2 partially written, meta not flipped.
@@ -98,7 +98,7 @@ func TestBadgerKeyStore_InterruptedReplaceKeepsPreviousGeneration(t *testing.T) 
 		t.Fatalf("orphaned generation must be removed on Load, %d record(s) left", n)
 	}
 	// The next replace still works and does not pick up stale records.
-	if err := ks.ReplaceAll("v2", []DynamicKeyEntry{ksEntry("d")}, now); err != nil {
+	if err := ks.ReplaceAll("v2", []DynamicKeyEntry{ksEntry("d")}, now, now); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
 	snap, _ = ks.Load()
@@ -115,7 +115,7 @@ func TestBadgerKeyStore_InterruptedReplaceKeepsPreviousGeneration(t *testing.T) 
 func TestBadgerKeyStore_IntegrityPerRecord(t *testing.T) {
 	ks := openTestStore(t, t.TempDir())
 	now := time.Now()
-	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a"), ksEntry("b")}, now); err != nil {
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a"), ksEntry("b")}, now, now); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
 	gen := ks.gen
@@ -149,34 +149,63 @@ func TestBadgerKeyStore_IntegrityPerRecord(t *testing.T) {
 	}
 }
 
-func TestBadgerKeyStore_TamperedMetaIsUntrusted(t *testing.T) {
+func TestBadgerKeyStore_TamperedMetaIsUnusable(t *testing.T) {
 	ks := openTestStore(t, t.TempDir())
-	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a")}, time.Now()); err != nil {
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a")}, time.Now(), time.Now()); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
 	// Push saved_at forward to dodge the max-age check, without a valid MAC.
 	meta, _ := json.Marshal(keyStoreMeta{Schema: keyStoreSchema, Gen: ks.gen, Version: "v9", SavedAt: time.Now().Add(time.Hour)})
 	rawSet(t, ks, []byte(keyStoreMetaKey), append(make([]byte, sha256.Size), meta...))
 	snap, err := ks.Load()
-	if err != nil || snap == nil || !snap.Untrusted {
-		t.Fatalf("tampered meta must load as Untrusted, got %+v err=%v", snap, err)
+	if err != nil || snap == nil || snap.Unusable == "" {
+		t.Fatalf("tampered meta must load as Unusable, got %+v err=%v", snap, err)
 	}
 }
 
-func TestBadgerKeyStore_UnreadableMetaFailsLoad(t *testing.T) {
+// A corrupt meta record or another schema version — including a NEWER one
+// after a release rollback — is reported as unusable, never as an error that
+// would stop the router.
+func TestBadgerKeyStore_UnusableMetaIsNotAnError(t *testing.T) {
 	cases := map[string][]byte{
-		"corrupt json":   []byte("{not-json"),
-		"unknown schema": []byte(`{"schema":999,"gen":1,"version":"1"}`),
-		"older schema":   []byte(`{"schema":1,"gen":1,"version":"1"}`),
+		"corrupt json":            []byte("{not-json"),
+		"newer schema (rollback)": []byte(`{"schema":999,"gen":1,"version":"1"}`),
+		"older schema":            []byte(`{"schema":1,"gen":1,"version":"1"}`),
 	}
 	for name, payload := range cases {
 		t.Run(name, func(t *testing.T) {
 			ks := openTestStore(t, t.TempDir())
 			rawSet(t, ks, []byte(keyStoreMetaKey), ks.seal([]byte(keyStoreMetaKey), payload))
-			if _, err := ks.Load(); err == nil {
-				t.Fatal("unreadable meta must fail Load (startup fails closed)")
+			snap, err := ks.Load()
+			if err != nil || snap == nil || snap.Unusable == "" {
+				t.Fatalf("want an Unusable snapshot and no error, got %+v err=%v", snap, err)
 			}
 		})
+	}
+}
+
+// Touch rewrites only the meta record; confirmed_at survives incremental writes.
+func TestBadgerKeyStore_TouchAndConfirmedAt(t *testing.T) {
+	ks := openTestStore(t, t.TempDir())
+	t0 := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{ksEntry("a")}, t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ks.Upsert("v2", ksEntry("b"), t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := ks.Load()
+	if !snap.ConfirmedAt.Equal(t0) || !snap.SavedAt.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("incremental write must keep confirmed_at: %+v", snap)
+	}
+	gen := ks.gen
+	t1 := t0.Add(5 * time.Minute)
+	if err := ks.Touch("v3", t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = ks.Load()
+	if ks.gen != gen || snap.Version != "v3" || !snap.ConfirmedAt.Equal(t1) || len(snap.Keys) != 2 {
+		t.Fatalf("Touch must update meta only: gen %d→%d, %+v", gen, ks.gen, snap)
 	}
 }
 
@@ -193,10 +222,10 @@ func TestBadgerKeyStore_LargeReplaceAll(t *testing.T) {
 		entries[i].AllowedModels = []string{"org/model-a", "org/model-b"}
 		entries[i].KeyPreview = "sk-...abc"
 	}
-	if err := ks.ReplaceAll("v1", entries, time.Now()); err != nil {
+	if err := ks.ReplaceAll("v1", entries, time.Now(), time.Now()); err != nil {
 		t.Fatalf("50k ReplaceAll: %v", err)
 	}
-	if err := ks.ReplaceAll("v2", entries, time.Now()); err != nil {
+	if err := ks.ReplaceAll("v2", entries, time.Now(), time.Now()); err != nil {
 		t.Fatalf("second 50k ReplaceAll: %v", err)
 	}
 	snap, err := ks.Load()
@@ -221,7 +250,7 @@ func BenchmarkBadgerKeyStore_Upsert(b *testing.B) {
 			for i := range entries {
 				entries[i] = ksEntry(fmt.Sprintf("key-%06d", i))
 			}
-			if err := ks.ReplaceAll("v0", entries, time.Now()); err != nil {
+			if err := ks.ReplaceAll("v0", entries, time.Now(), time.Now()); err != nil {
 				b.Fatalf("seed: %v", err)
 			}
 			b.ResetTimer()
@@ -239,10 +268,10 @@ func BenchmarkBadgerKeyStore_Upsert(b *testing.B) {
 // key record: Load must never panic, and a key record that is not sealed by
 // the store must never come back as a valid entry.
 func FuzzBadgerKeyStoreLoad(f *testing.F) {
-	f.Add([]byte(`{"schema":2,"gen":1,"version":"v1","saved_at":"2026-01-01T00:00:00Z"}`), []byte(`{"id":"x"}`), true)
+	f.Add([]byte(`{"schema":3,"gen":1,"version":"v1","saved_at":"2026-01-01T00:00:00Z","confirmed_at":"2026-01-01T00:00:00Z"}`), []byte(`{"id":"x"}`), true)
 	f.Add([]byte("{not-json"), []byte{}, true)
 	f.Add([]byte{}, []byte("garbage"), false)
-	f.Add([]byte(`{"schema":2,"gen":18446744073709551615}`), []byte(`null`), true)
+	f.Add([]byte(`{"schema":3,"gen":18446744073709551615}`), []byte(`null`), true)
 
 	ks := openTestStore(f, f.TempDir())
 	f.Fuzz(func(t *testing.T, metaPayload, recordVal []byte, sealMeta bool) {
@@ -261,7 +290,7 @@ func FuzzBadgerKeyStoreLoad(f *testing.F) {
 		rawSet(t, ks, recordKey(gen, "x"), recordVal) // unsealed: must never verify
 
 		snap, err := ks.Load()
-		if err != nil || snap == nil || snap.Untrusted {
+		if err != nil || snap == nil || snap.Unusable != "" {
 			return
 		}
 		for _, k := range snap.Keys {

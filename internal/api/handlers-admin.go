@@ -409,7 +409,8 @@ func (h *Handlers) DeleteAPIKey(c *gin.Context) {
 }
 
 // ReplaceAPIKeys handles POST /admin/api-keys/replace.
-// Atomically replaces the entire key registry. Always accepted (no version check).
+// Atomically replaces the entire key registry. A version below the current
+// one is rejected with 409 (stale), like the single-key endpoints.
 // Body is capped at 16 MB to allow fleet-wide snapshots (~50k keys at 300 B each).
 func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	if h.keyRegistry == nil {
@@ -440,11 +441,7 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 		entries = append(entries, entry)
 	}
 	if err := h.keyRegistry.ReplaceAll(req.Version, entries); err != nil {
-		if errors.Is(err, auth.ErrNotDurable) {
-			writeNotDurable(c, err)
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.writeRegistryError(c, err) // 503 not durable, 409 stale, 400 otherwise
 		return
 	}
 	log.Infof("API key registry replaced via POST /admin/api-keys/replace (%d keys)", len(entries))
@@ -499,6 +496,7 @@ func (h *Handlers) GetAPIKeyVersion(c *gin.Context) {
 		"version":    ver,
 		"count":      count,
 		"persistent": st.Persistent,
+		"degraded":   st.Degraded,
 		"restored":   st.Restored,
 		"confirmed":  st.Confirmed,
 		"dirty":      st.Dirty,

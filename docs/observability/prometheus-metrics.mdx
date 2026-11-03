@@ -532,6 +532,7 @@ Exported only with `--key-store=badger`.
 | --- | --- | --- |
 | `hivenet_keystore_persist_errors_total` | counter | Failed key-store writes (mutations answered `503`, plus background retries) |
 | `hivenet_keystore_last_persist_success_timestamp_seconds` | gauge | Unix time of the last successful write |
+| `hivenet_keystore_degraded` | gauge | `1` when the store could not be opened or read and the registry runs memory-only |
 | `hivenet_keystore_dirty` | gauge | `1` while the store lags the in-memory registry |
 | `hivenet_keystore_restored` | gauge | `1` when the registry was warm-started at startup |
 | `hivenet_keystore_restored_keys` | gauge | Keys installed by that restore |
@@ -542,6 +543,9 @@ Exported only with `--key-store=badger`.
 Suggested alerts:
 
 ```yaml
+- alert: HivenetKeyStoreDegraded
+  expr: hivenet_keystore_degraded == 1
+  labels: {severity: critical}
 - alert: HivenetKeyStorePersistErrors
   expr: increase(hivenet_keystore_persist_errors_total[5m]) > 0
   labels: {severity: warning}

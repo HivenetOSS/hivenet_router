@@ -471,7 +471,8 @@ Agents normally:
 | `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup (the key store is separate and not touched) |
 | `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` | Dynamic key registry persistence: `memory` or `badger` |
 | `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` | Key-store BadgerDB directory (mode `0700`); must not overlap `--disk-db-path` |
-| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` | Discard a persisted key registry older than this at startup; `0` disables the bound |
+| `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | — | Router-only secret for the key store's record MACs; required with `badger`, at least 32 bytes, different from the JWT secret |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` | Discard a persisted key registry whose last write or last key-sync confirmation is older than this; `0` disables the bound; invalid values stop startup |
 | `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` | Delete the key-store directory before startup |
 
 The persistent database can contain:
@@ -744,6 +745,7 @@ The complete current router flag set is:
 | `--disk-db-ttl` | — | `30` days |
 | `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` |
 | `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` |
+| `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | Empty (required with `badger`) |
 | `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` |
 | `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` |
 | `--universal-flush-interval` | — | `30s` |

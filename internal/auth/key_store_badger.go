@@ -43,15 +43,18 @@ const (
 	keyStoreGenPrefix = keyStoreKeyPrefix + "g"
 )
 
-// keyStoreSchema is the on-disk schema version (meta.schema). Load refuses
-// any other version rather than guessing (fail closed). Bump it on any shape
-// change AND add a migration case in Load. Note the persisted registry is a
-// warm-start cache of the upstream key-sync service, so the cost of an
-// unmigrated bump is one cold start after --reset-key-store, not data loss.
-const keyStoreSchema = 2
+// keyStoreSchema is the on-disk schema version (meta.schema). Load reports any
+// other version as unusable and the provider discards and rewrites the store:
+// the persisted registry is a warm-start cache of the upstream key-sync
+// service, so an older snapshot (after an upgrade) or a newer one (after a
+// release rollback) costs one cold start, never an outage. Bump it on any
+// shape change.
+const keyStoreSchema = 3
 
-// keyStoreHMACSalt / Info domain-separate the record MAC key from every other
-// key derived from the JWT secret (JWT signing, gRPC TLS — see tlscreds.go).
+// keyStoreHMACSalt / Info domain-separate the record MAC key derived from the
+// router-only key-store secret (--key-store-secret-file /
+// HIVENET_ROUTER_KEY_STORE_SECRET). It is deliberately NOT the JWT secret:
+// that one is also held by every agent.
 const (
 	keyStoreHMACSalt = "hivenet-router-keystore-hmac-v1"
 	keyStoreHMACInfo = "hmac-sha256"
@@ -63,6 +66,10 @@ type keyStoreMeta struct {
 	Gen     uint64    `json:"gen"`      // generation holding the live key records
 	Version string    `json:"version"`  // registry version (from upstream key-sync)
 	SavedAt time.Time `json:"saved_at"` // time of the last successful write
+	// ConfirmedAt is the time of the last full replace from the upstream
+	// key-sync service (zero = never). Incremental writes keep it, so the
+	// max age can be applied to the older of SavedAt and ConfirmedAt.
+	ConfirmedAt time.Time `json:"confirmed_at"`
 }
 
 // keyStoreEntry is the explicit on-disk shape of a registry entry. The wire
@@ -113,12 +120,13 @@ type BadgerKeyStore struct {
 	db     *badger.DB
 	macKey []byte
 
-	mu  sync.Mutex // guards gen; callers are already serialized, this is belt-and-braces
-	gen uint64     // live generation (0 = nothing written yet)
+	mu          sync.Mutex // guards gen/confirmedAt; callers are already serialized, this is belt-and-braces
+	gen         uint64     // live generation (0 = nothing written yet)
+	confirmedAt time.Time  // meta.ConfirmedAt of the live generation
 }
 
-// DeriveKeyStoreMACKey derives the record-MAC key from the router's JWT
-// secret via HKDF-SHA256 (same pattern as DeriveGRPCCredentials).
+// DeriveKeyStoreMACKey derives the record-MAC key from the router-only
+// key-store secret via HKDF-SHA256 (same pattern as DeriveGRPCCredentials).
 func DeriveKeyStoreMACKey(secret []byte) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("key store: empty MAC secret")
@@ -132,8 +140,8 @@ func DeriveKeyStoreMACKey(secret []byte) ([]byte, error) {
 
 // OpenBadgerKeyStore opens (creating if needed) the key-store DB at path.
 // The directory is created with mode 0700 and tightened to 0700 if it
-// already exists. secret is the router's JWT secret (the MAC key is derived
-// from it; see DeriveKeyStoreMACKey).
+// already exists. secret is the router-only key-store secret (the MAC key is
+// derived from it; see DeriveKeyStoreMACKey).
 func OpenBadgerKeyStore(path string, secret []byte) (*BadgerKeyStore, error) {
 	macKey, err := DeriveKeyStoreMACKey(secret)
 	if err != nil {
@@ -184,6 +192,10 @@ func (b *BadgerKeyStore) open(key, val []byte) ([]byte, error) {
 	return payload, nil
 }
 
+func (b *BadgerKeyStore) metaFor(gen uint64, version string, savedAt, confirmedAt time.Time) keyStoreMeta {
+	return keyStoreMeta{Schema: keyStoreSchema, Gen: gen, Version: version, SavedAt: savedAt.UTC(), ConfirmedAt: confirmedAt.UTC()}
+}
+
 func (b *BadgerKeyStore) sealMeta(meta keyStoreMeta) ([]byte, error) {
 	raw, err := json.Marshal(meta)
 	if err != nil {
@@ -201,14 +213,14 @@ func (b *BadgerKeyStore) sealEntry(gen uint64, e DynamicKeyEntry) ([]byte, []byt
 	return k, b.seal(k, raw), nil
 }
 
-// Load implements KeyStore. A fresh store returns (nil, nil). The meta
-// record is all-or-nothing: unreadable meta (I/O error, corrupt JSON,
-// unknown schema) is an error so the caller fails startup closed; a meta
-// record whose MAC does not verify is reported as Untrusted (the caller
-// discards the snapshot). Individual key records are decoded independently:
-// one that fails its MAC or JSON decode is returned with Err set rather than
-// failing the whole load. Generations other than the live one (left behind
-// by an interrupted ReplaceAll) are deleted.
+// Load implements KeyStore. A fresh store returns (nil, nil). Only a read
+// error from the DB itself is returned as an error. A meta record that fails
+// its MAC, does not decode, or carries another schema version is reported in
+// Unusable (the caller discards and rewrites the store). Individual key
+// records are decoded independently: one that fails its MAC or JSON decode
+// is returned with Err set. Generations other than the live one (left behind
+// by an interrupted ReplaceAll) are deleted; a failure there is reported in
+// CleanupErr, not as an error (leftovers are harmless and retried next time).
 func (b *BadgerKeyStore) Load() (*PersistedRegistry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -231,29 +243,32 @@ func (b *BadgerKeyStore) Load() (*PersistedRegistry, error) {
 		if err != nil {
 			return fmt.Errorf("key store: read meta: %w", err)
 		}
+		// Nothing in an unusable meta record is trusted, its generation
+		// included. Restart the counter: the next write clears the
+		// generation it targets, and records in any other generation can
+		// never become live without a validly sealed meta pointing at them
+		// (the next usable Load deletes them as orphans).
+		unusable := func(reason string) error {
+			b.gen, b.confirmedAt = 0, time.Time{}
+			out = &PersistedRegistry{Unusable: reason}
+			return nil
+		}
 		payload, macErr := b.open([]byte(keyStoreMetaKey), val)
 		if macErr != nil {
-			// Nothing in an unverified meta record is trusted, its generation
-			// included. Restart the counter: the next write clears the
-			// generation it targets, and records in any other generation can
-			// never become live without a validly sealed meta pointing at
-			// them (the next trusted Load deletes them as orphans).
-			b.gen = 0
-			out = &PersistedRegistry{Untrusted: true}
-			return nil
+			return unusable("integrity check on the meta record failed (key-store secret changed, or the store was modified outside the router)")
 		}
 		var meta keyStoreMeta
 		if err := json.Unmarshal(payload, &meta); err != nil {
-			return fmt.Errorf("key store: corrupt meta: %w", err)
+			return unusable(fmt.Sprintf("corrupt meta record: %v", err))
 		}
 		if meta.Schema != keyStoreSchema {
-			if meta.Schema < keyStoreSchema {
-				return fmt.Errorf("key store: unsupported schema %d (this router supports %d): the snapshot is from an OLDER router — no migration is available, wipe with --reset-key-store", meta.Schema, keyStoreSchema)
+			if meta.Schema > keyStoreSchema {
+				return unusable(fmt.Sprintf("snapshot schema %d is newer than this router's %d (release rollback?)", meta.Schema, keyStoreSchema))
 			}
-			return fmt.Errorf("key store: unsupported schema %d (this router supports %d): the snapshot is from a NEWER router — upgrade the router (or wipe with --reset-key-store)", meta.Schema, keyStoreSchema)
+			return unusable(fmt.Sprintf("snapshot schema %d is older than this router's %d", meta.Schema, keyStoreSchema))
 		}
-		b.gen = meta.Gen
-		out = &PersistedRegistry{Version: meta.Version, SavedAt: meta.SavedAt}
+		b.gen, b.confirmedAt = meta.Gen, meta.ConfirmedAt
+		out = &PersistedRegistry{Version: meta.Version, SavedAt: meta.SavedAt, ConfirmedAt: meta.ConfirmedAt}
 
 		live := []byte(genPrefix(meta.Gen))
 		it := txn.NewIterator(badger.IteratorOptions{PrefetchValues: true, PrefetchSize: 256, Prefix: []byte(keyStoreGenPrefix)})
@@ -298,12 +313,12 @@ func (b *BadgerKeyStore) Load() (*PersistedRegistry, error) {
 	if !metaRead {
 		return nil, nil
 	}
-	if out.Untrusted {
+	if out.Unusable != "" {
 		return out, nil
 	}
 	if len(orphans) > 0 {
 		if err := b.deleteKeys(orphans); err != nil {
-			return nil, fmt.Errorf("key store: remove orphaned generation records: %w", err)
+			out.CleanupErr = fmt.Errorf("key store: remove %d orphaned generation record(s): %w", len(orphans), err)
 		}
 	}
 	return out, nil
@@ -317,13 +332,13 @@ func (b *BadgerKeyStore) Upsert(version string, e DynamicKeyEntry, savedAt time.
 	if b.gen == 0 {
 		// Nothing written yet: start generation 1 the same way ReplaceAll does
 		// so the meta record exists from the first write on.
-		return b.writeGenerationLocked(version, []DynamicKeyEntry{e}, savedAt)
+		return b.writeGenerationLocked(version, []DynamicKeyEntry{e}, savedAt, time.Time{})
 	}
 	k, v, err := b.sealEntry(b.gen, e)
 	if err != nil {
 		return err
 	}
-	mv, err := b.sealMeta(keyStoreMeta{Schema: keyStoreSchema, Gen: b.gen, Version: version, SavedAt: savedAt.UTC()})
+	mv, err := b.sealMeta(b.metaFor(b.gen, version, savedAt, b.confirmedAt))
 	if err != nil {
 		return err
 	}
@@ -344,9 +359,9 @@ func (b *BadgerKeyStore) Delete(version, id string, savedAt time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.gen == 0 {
-		return b.writeGenerationLocked(version, nil, savedAt)
+		return b.writeGenerationLocked(version, nil, savedAt, time.Time{})
 	}
-	mv, err := b.sealMeta(keyStoreMeta{Schema: keyStoreSchema, Gen: b.gen, Version: version, SavedAt: savedAt.UTC()})
+	mv, err := b.sealMeta(b.metaFor(b.gen, version, savedAt, b.confirmedAt))
 	if err != nil {
 		return err
 	}
@@ -362,15 +377,43 @@ func (b *BadgerKeyStore) Delete(version, id string, savedAt time.Time) error {
 }
 
 // ReplaceAll implements KeyStore: write a new generation, flip meta to it,
-// then delete the previous generation.
-func (b *BadgerKeyStore) ReplaceAll(version string, entries []DynamicKeyEntry, savedAt time.Time) error {
+// then delete the previous generation. A zero confirmedAt keeps the stored one.
+func (b *BadgerKeyStore) ReplaceAll(version string, entries []DynamicKeyEntry, savedAt, confirmedAt time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.writeGenerationLocked(version, entries, savedAt)
+	return b.writeGenerationLocked(version, entries, savedAt, confirmedAt)
 }
 
-func (b *BadgerKeyStore) writeGenerationLocked(version string, entries []DynamicKeyEntry, savedAt time.Time) error {
+// Touch implements KeyStore: rewrite only the meta record (version, saved_at
+// and, when non-zero, confirmed_at). Used for a full replace whose key set
+// equals what is already stored.
+func (b *BadgerKeyStore) Touch(version string, savedAt, confirmedAt time.Time) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gen == 0 {
+		return b.writeGenerationLocked(version, nil, savedAt, confirmedAt)
+	}
+	conf := b.confirmedAt
+	if !confirmedAt.IsZero() {
+		conf = confirmedAt
+	}
+	mv, err := b.sealMeta(b.metaFor(b.gen, version, savedAt, conf))
+	if err != nil {
+		return err
+	}
+	if err := b.db.Update(func(txn *badger.Txn) error { return txn.Set([]byte(keyStoreMetaKey), mv) }); err != nil {
+		return fmt.Errorf("key store: write meta: %w", err)
+	}
+	b.confirmedAt = conf
+	return nil
+}
+
+func (b *BadgerKeyStore) writeGenerationLocked(version string, entries []DynamicKeyEntry, savedAt, confirmedAt time.Time) error {
 	oldGen, newGen := b.gen, b.gen+1
+	conf := b.confirmedAt
+	if !confirmedAt.IsZero() {
+		conf = confirmedAt
+	}
 
 	// 0. The target generation must start empty. It normally is, but after an
 	//    untrusted meta record (whose generation could not be read) b.gen may
@@ -399,7 +442,7 @@ func (b *BadgerKeyStore) writeGenerationLocked(version string, entries []Dynamic
 	}
 
 	// 2. Flip meta to the new generation — the single atomic commit point.
-	mv, err := b.sealMeta(keyStoreMeta{Schema: keyStoreSchema, Gen: newGen, Version: version, SavedAt: savedAt.UTC()})
+	mv, err := b.sealMeta(b.metaFor(newGen, version, savedAt, conf))
 	if err != nil {
 		return err
 	}
@@ -408,7 +451,7 @@ func (b *BadgerKeyStore) writeGenerationLocked(version string, entries []Dynamic
 	}); err != nil {
 		return fmt.Errorf("key store: commit generation %d: %w", newGen, err)
 	}
-	b.gen = newGen
+	b.gen, b.confirmedAt = newGen, conf
 
 	// 3. Drop the previous generation. A failure here is not a durability
 	//    problem (meta already points at newGen); Load removes leftovers.

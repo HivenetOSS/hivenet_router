@@ -67,6 +67,7 @@ func main() {
 	keyStoreBackend := flag.String("key-store", cfg.KeyStoreBackend, "Dynamic API key registry persistence: memory (default) or badger (warm-start cache at --key-store-path)")
 	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
 	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
+	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
@@ -143,6 +144,19 @@ func main() {
 	}
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT secret is required — set HIVENET_ROUTER_JWT_SECRET or use --jwt-secret-file")
+	}
+	if *keyStoreSecretFile != "" {
+		data, err := os.ReadFile(*keyStoreSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --key-store-secret-file %q: %v", *keyStoreSecretFile, err)
+		}
+		cfg.KeyStoreSecret = strings.TrimSpace(string(data))
+	}
+	for _, err := range cfg.EnvErrors {
+		log.Errorf("invalid environment value: %v", err)
+	}
+	if len(cfg.EnvErrors) > 0 {
+		log.Fatalf("%d invalid environment value(s) — refusing to start", len(cfg.EnvErrors))
 	}
 	cfg.AuthConfigFile = *authConfigFile
 

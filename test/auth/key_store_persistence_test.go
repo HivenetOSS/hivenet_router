@@ -35,7 +35,7 @@ const testSecret = "0123456789abcdef0123456789abcdef-test-jwt-secret"
 // ── fake store ──────────────────────────────────────────────────────────────
 
 type storeOp struct {
-	kind    string // upsert | delete | replace
+	kind    string // upsert | delete | replace | touch
 	version string
 	id      string
 	n       int // entries (replace)
@@ -76,7 +76,10 @@ func (f *fakeKeyStore) Upsert(version string, e auth.DynamicKeyEntry, _ time.Tim
 func (f *fakeKeyStore) Delete(version, id string, _ time.Time) error {
 	return f.write(storeOp{kind: "delete", version: version, id: id})
 }
-func (f *fakeKeyStore) ReplaceAll(version string, entries []auth.DynamicKeyEntry, _ time.Time) error {
+func (f *fakeKeyStore) Touch(version string, _, _ time.Time) error {
+	return f.write(storeOp{kind: "touch", version: version})
+}
+func (f *fakeKeyStore) ReplaceAll(version string, entries []auth.DynamicKeyEntry, _, _ time.Time) error {
 	if err := f.write(storeOp{kind: "replace", version: version, n: len(entries)}); err != nil {
 		return err
 	}
@@ -332,8 +335,9 @@ func TestKeyStore_LoadSkipsBadEntries(t *testing.T) {
 	noAdmit := persistEntry("no-admit", "o")
 
 	fs := &fakeKeyStore{loadSnap: &auth.PersistedRegistry{
-		Version: "rev_7",
-		SavedAt: time.Now(),
+		Version:     "rev_7",
+		SavedAt:     time.Now(),
+		ConfirmedAt: time.Now(),
 		Keys: []auth.PersistedKey{
 			{ID: "good", Entry: persistEntry("good", "o")},
 			{ID: "tampered", Err: errors.New("integrity check failed")},
@@ -390,7 +394,7 @@ func TestKeyStore_LoadErrorFailsClosed(t *testing.T) {
 
 func TestKeyStore_EmptySnapshotRestoresVersion(t *testing.T) {
 	p := auth.NewDynamicKeyProvider()
-	p.SetKeyStore(&fakeKeyStore{loadSnap: &auth.PersistedRegistry{Version: "5", SavedAt: time.Now()}})
+	p.SetKeyStore(&fakeKeyStore{loadSnap: &auth.PersistedRegistry{Version: "5", SavedAt: time.Now(), ConfirmedAt: time.Now()}})
 	if _, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: time.Minute}); err != nil {
 		t.Fatalf("LoadKeyStore: %v", err)
 	}
@@ -404,8 +408,13 @@ func TestKeyStore_EmptySnapshotRestoresVersion(t *testing.T) {
 func TestBadgerKeyStore_RestartRestoresAndReplaceAllConfirms(t *testing.T) {
 	dir := t.TempDir()
 	p := newPersistent(t, dir, nil)
-	for i, id := range []string{"k1", "k2", "k3"} {
-		if err := p.Upsert(fmt.Sprintf("rev_%02d", i+1), persistEntry(id, "org-x")); err != nil {
+	// key-sync bootstraps with a full replace (this confirms the snapshot),
+	// then pushes single-key changes.
+	if err := p.ReplaceAll("rev_01", []auth.DynamicKeyEntry{persistEntry("k1", "org-x")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	for i, id := range []string{"k2", "k3"} {
+		if err := p.Upsert(fmt.Sprintf("rev_%02d", i+2), persistEntry(id, "org-x")); err != nil {
 			t.Fatalf("Upsert %s: %v", id, err)
 		}
 	}
@@ -437,8 +446,8 @@ func TestBadgerKeyStore_OverAgeSnapshotIgnored(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{t: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
 	p := newPersistent(t, dir, clock)
-	if err := p.Upsert("rev_1", persistEntry("revoked-upstream", "o")); err != nil {
-		t.Fatalf("Upsert: %v", err)
+	if err := p.ReplaceAll("rev_1", []auth.DynamicKeyEntry{persistEntry("revoked-upstream", "o")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
 	}
 
 	clock.Add(20 * time.Minute) // router was down longer than the max age
@@ -453,13 +462,100 @@ func TestBadgerKeyStore_OverAgeSnapshotIgnored(t *testing.T) {
 		t.Fatalf("over-age discard must start empty like memory mode: ver=%q n=%d", ver, n)
 	}
 
-	// The discarded keys must not come back through a later incremental write.
-	if err := fresh.Upsert("rev_2", persistEntry("new", "o")); err != nil {
-		t.Fatalf("Upsert: %v", err)
+	// The discarded keys must not come back through a later write.
+	if err := fresh.ReplaceAll("rev_2", []auth.DynamicKeyEntry{persistEntry("new", "o")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
 	}
 	again, _ := restart(t, fresh, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
 	if authenticates(again, "revoked-upstream") || !authenticates(again, "new") {
 		t.Fatal("after a discard only post-discard keys may be restored")
+	}
+}
+
+// saved_at moves forward on every incremental write, so single-key pushes
+// must not keep a restored set "young": the max age also applies from the
+// last full replace (confirmation).
+func TestBadgerKeyStore_MaxAgeMeasuredFromLastConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	p := newPersistent(t, dir, clock)
+	if err := p.ReplaceAll("rev_00", []auth.DynamicKeyEntry{persistEntry("stale", "o")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	for i := 1; i <= 3; i++ { // a single-key push every 10 minutes, no full replace
+		clock.Add(10 * time.Minute)
+		if err := p.Upsert(fmt.Sprintf("rev_%02d", i), persistEntry(fmt.Sprintf("k%d", i), "o")); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+	clock.Add(time.Minute) // last write 1m ago, last confirmation 31m ago
+	fresh, rep := restart(t, p, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
+	if rep.Discarded == "" || authenticates(fresh, "stale") {
+		t.Fatalf("a snapshot last confirmed 31m ago must be discarded at max age 15m, report = %+v", rep)
+	}
+}
+
+func TestBadgerKeyStore_NeverConfirmedSnapshotDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	p := newPersistent(t, dir, nil)
+	if err := p.Upsert("1", persistEntry("k1", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	fresh, rep := restart(t, p, dir, nil, auth.KeyStoreLoadOptions{MaxAge: time.Hour})
+	if rep.Discarded == "" || authenticates(fresh, "k1") {
+		t.Fatalf("a never-confirmed snapshot must be discarded when a max age is set, report = %+v", rep)
+	}
+}
+
+// key-sync re-sends the full set every sweep: an unchanged replace on a clean
+// store rewrites only meta; a changed one (or a dirty store) rewrites all.
+func TestKeyStore_UnchangedReplaceTouchesMetaOnly(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	p.SetPersistRetryBackoff(time.Hour, time.Hour)
+	fs := &fakeKeyStore{}
+	p.SetKeyStore(fs)
+	set := []auth.DynamicKeyEntry{persistEntry("a", "o"), persistEntry("b", "o")}
+	for _, v := range []string{"v1", "v2"} {
+		if err := p.ReplaceAll(v, append([]auth.DynamicKeyEntry(nil), set...)); err != nil {
+			t.Fatalf("ReplaceAll %s: %v", v, err)
+		}
+	}
+	if err := p.ReplaceAll("v3", []auth.DynamicKeyEntry{persistEntry("a", "o")}); err != nil {
+		t.Fatalf("ReplaceAll v3: %v", err)
+	}
+	fs.mu.Lock()
+	fs.failNext, fs.failErr = 1, errors.New("io")
+	fs.mu.Unlock()
+	if err := p.Upsert("v4", persistEntry("a", "o")); !errors.Is(err, auth.ErrNotDurable) {
+		t.Fatalf("want ErrNotDurable, got %v", err)
+	}
+	if err := p.ReplaceAll("v5", []auth.DynamicKeyEntry{persistEntry("a", "o")}); err != nil {
+		t.Fatalf("ReplaceAll v5: %v", err)
+	}
+	var kinds []string
+	for _, op := range fs.opsCopy() {
+		kinds = append(kinds, op.kind+":"+op.version)
+	}
+	want := []string{"replace:v1", "touch:v2", "replace:v3", "replace:v5"}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("ops = %v, want %v (unchanged → touch; changed or dirty → full replace)", kinds, want)
+	}
+}
+
+func TestKeyStore_DegradeRunsMemoryOnly(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	fs := &fakeKeyStore{}
+	p.SetKeyStore(fs)
+	p.DegradeKeyStore("open: permission denied")
+	st := p.KeyStoreStatus()
+	if !st.Degraded || st.Persistent || st.DegradedReason == "" || fs.closeCall != 1 {
+		t.Fatalf("status = %+v closeCalls=%d", st, fs.closeCall)
+	}
+	if err := p.Upsert("1", persistEntry("k1", "o")); err != nil || !authenticates(p, "k1") {
+		t.Fatalf("degraded registry must keep working in memory: %v", err)
+	}
+	if len(fs.opsCopy()) != 0 {
+		t.Fatal("degraded registry must not write to the store")
 	}
 }
 
@@ -477,8 +573,8 @@ func TestBadgerKeyStore_MaxAgeZeroDisablesBound(t *testing.T) {
 	}
 }
 
-// Rotating the JWT secret invalidates every MAC: the snapshot is discarded
-// (start empty) rather than failing startup.
+// Changing the key-store secret invalidates every MAC: the snapshot is
+// discarded (start empty) rather than failing startup.
 func TestBadgerKeyStore_SecretRotationDiscardsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	p := newPersistent(t, dir, nil)

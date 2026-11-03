@@ -20,7 +20,11 @@ import (
 //     key-sync, and that state is observable (version endpoint + metric);
 //   - a mutation that could not be persisted is reported to the caller
 //     (ErrNotDurable → HTTP 503) so key-sync retries it, instead of
-//     acknowledging a revocation that would come back after a restart.
+//     acknowledging a revocation that would come back after a restart;
+//   - a broken cache never takes the router down: when the store cannot be
+//     opened or read, the registry runs memory-only ("degraded") and starts
+//     empty, which denies every key until key-sync pushes — exactly memory
+//     mode. Only configuration errors stop startup.
 
 // ErrNotDurable is returned (wrapped) by Upsert/Delete/ReplaceAll when the
 // change was applied in memory — and is already in effect — but could not be
@@ -34,15 +38,21 @@ var ErrNotDurable = errors.New("auth: key registry change applied in memory but 
 // safe for concurrent use.
 type KeyStore interface {
 	// Load returns the persisted registry, or (nil, nil) for a fresh store.
-	// An error means the snapshot as a whole is unreadable (the caller fails
-	// startup closed). Per-record problems are reported in PersistedKey.Err.
+	// An error means the backend could not be read (the caller degrades to
+	// memory-only). An unusable snapshot is reported in
+	// PersistedRegistry.Unusable, per-record problems in PersistedKey.Err.
 	Load() (*PersistedRegistry, error)
 	// Upsert durably writes one key and the registry version.
 	Upsert(version string, e DynamicKeyEntry, savedAt time.Time) error
 	// Delete durably removes one key and writes the registry version.
 	Delete(version, id string, savedAt time.Time) error
-	// ReplaceAll durably and atomically replaces the whole registry.
-	ReplaceAll(version string, entries []DynamicKeyEntry, savedAt time.Time) error
+	// ReplaceAll durably and atomically replaces the whole registry. A
+	// non-zero confirmedAt records a full replace from upstream key-sync; zero
+	// keeps the stored confirmation time (internal rewrites, resets).
+	ReplaceAll(version string, entries []DynamicKeyEntry, savedAt, confirmedAt time.Time) error
+	// Touch rewrites only the registry version and timestamps (a full
+	// replace whose key set is already stored). Zero confirmedAt keeps it.
+	Touch(version string, savedAt, confirmedAt time.Time) error
 	// DeleteRecords removes individual records (entries skipped at load)
 	// without touching the version.
 	DeleteRecords(ids []string) error
@@ -52,13 +62,16 @@ type KeyStore interface {
 
 // PersistedRegistry is what KeyStore.Load returns.
 type PersistedRegistry struct {
-	Version string
-	SavedAt time.Time
-	Keys    []PersistedKey
-	// Untrusted is set when the meta record's integrity check failed (e.g.
-	// the JWT secret was rotated, or the files were tampered with). The
-	// snapshot is then discarded as a whole.
-	Untrusted bool
+	Version     string
+	SavedAt     time.Time // last write
+	ConfirmedAt time.Time // last full replace from upstream key-sync (zero = never)
+	Keys        []PersistedKey
+	// Unusable, when non-empty, says why the snapshot as a whole cannot be
+	// used (meta integrity failure, corrupt meta, another schema version).
+	// The provider discards it and rewrites the store.
+	Unusable string
+	// CleanupErr reports a failed removal of leftover records (non-fatal).
+	CleanupErr error
 }
 
 // PersistedKey is one persisted record. Err is non-nil when the record could
@@ -71,9 +84,13 @@ type PersistedKey struct {
 
 // KeyStoreLoadOptions controls how LoadKeyStore restores a snapshot.
 type KeyStoreLoadOptions struct {
-	// MaxAge discards a snapshot whose last write is older than this (start
-	// empty, exactly like memory mode). 0 disables the check — only for
-	// deployments with no upstream key-sync, where the snapshot IS the data.
+	// MaxAge discards a snapshot whose last write OR last confirmation by
+	// upstream key-sync (whichever is older) is older than this, and one that
+	// was never confirmed (start empty, exactly like memory mode). Measuring
+	// from the confirmation too stops single-key pushes from keeping a
+	// never-confirmed restored set "young" across restarts. 0 disables the
+	// check — only for deployments with no upstream key-sync, where the
+	// snapshot IS the data.
 	MaxAge time.Duration
 	// Admit runs the same cross-config admission check the admin handlers run
 	// on writes (validateKeyAdmission), against the policies in force now. A
@@ -86,7 +103,7 @@ type KeyStoreLoadReport struct {
 	Restored    int           // keys installed into the registry
 	Skipped     int           // records dropped (see SkippedReasons)
 	Discarded   string        // non-empty when the whole snapshot was ignored, with the reason
-	SnapshotAge time.Duration // age of the restored snapshot
+	SnapshotAge time.Duration // age of the restored snapshot (from the older of last write / last confirmation)
 	Version     string        // restored registry version
 	// SkippedReasons maps record ID → why it was skipped.
 	SkippedReasons map[string]string
@@ -95,7 +112,9 @@ type KeyStoreLoadReport struct {
 // KeyStoreStatus is a point-in-time view of persistence and restore state,
 // exported as metrics and on GET /admin/api-keys/version.
 type KeyStoreStatus struct {
-	Persistent          bool      // a KeyStore is wired
+	Persistent          bool // a KeyStore is wired
+	Degraded            bool // badger was configured but the store is unusable; running memory-only
+	DegradedReason      string
 	Dirty               bool      // the last write failed; the store lags memory
 	PersistErrors       uint64    // total failed writes
 	LastPersistSuccess  time.Time // zero = never
@@ -117,6 +136,8 @@ type keyStoreState struct {
 	restoredKeys   atomic.Int64
 	restoredAgeNs  atomic.Int64
 	confirmed      atomic.Bool
+	degraded       atomic.Bool
+	degradedReason atomic.Value // string
 	retrying       bool
 	closed         bool
 	stop           chan struct{}
@@ -162,10 +183,35 @@ func (r *DynamicKeyProvider) CloseKeyStore() error {
 	return r.store.Close()
 }
 
+// DegradeKeyStore switches the registry to memory-only after the configured
+// key store turned out to be unusable at startup (cannot be opened, read, or
+// reset). It closes the store if one is wired, empties the registry, and
+// records reason for the version endpoint and the degraded metric. Must be
+// called before the registry serves traffic.
+func (r *DynamicKeyProvider) DegradeKeyStore(reason string) {
+	if r.store != nil {
+		r.CloseKeyStore() //nolint:errcheck // already unusable
+		r.store = nil
+	}
+	r.mu.Lock()
+	r.byHash = make(map[string]*DynamicKeyEntry)
+	r.byID = make(map[string]*DynamicKeyEntry)
+	r.version = ""
+	r.mu.Unlock()
+	r.ks.restored.Store(false)
+	r.ks.restoredKeys.Store(0)
+	r.ks.restoredAgeNs.Store(0)
+	r.ks.degradedReason.Store(reason)
+	r.ks.degraded.Store(true)
+}
+
 // KeyStoreStatus returns the current persistence/restore state.
 func (r *DynamicKeyProvider) KeyStoreStatus() KeyStoreStatus {
+	reason, _ := r.ks.degradedReason.Load().(string)
 	st := KeyStoreStatus{
 		Persistent:          r.store != nil,
+		Degraded:            r.ks.degraded.Load(),
+		DegradedReason:      reason,
 		Dirty:               r.ks.dirty.Load(),
 		PersistErrors:       r.ks.persistErrors.Load(),
 		Restored:            r.ks.restored.Load(),
@@ -183,12 +229,13 @@ func (r *DynamicKeyProvider) KeyStoreStatus() KeyStoreStatus {
 // LoadKeyStore restores the persisted registry into this (empty) provider.
 // No store wired or nothing persisted → zero report, nil error.
 //
-// Errors (backend failure, unreadable meta, unknown schema) are returned so
-// the caller can fail startup closed. Everything below that level degrades
-// instead of bricking startup:
-//   - an untrusted (MAC-failed) or over-age snapshot is discarded as a whole
-//     and the store is reset to an empty generation, so a later incremental
-//     write cannot resurrect it;
+// An error means the store cannot be read, or an unusable snapshot could not
+// be reset; the caller degrades to memory-only (DegradeKeyStore) and keeps
+// serving. Everything below that level is handled here:
+//   - an unusable snapshot (meta MAC failure, corrupt meta, older or newer
+//     schema — e.g. after a release rollback), an over-age one, or one never
+//     confirmed by key-sync is discarded as a whole and the store is reset to
+//     an empty generation, so a later incremental write cannot resurrect it;
 //   - an individual record that fails its MAC, does not decode, fails field
 //     validation, is expired, fails the admission check, or duplicates an
 //     earlier key's hash is skipped, counted, and deleted from the store.
@@ -211,24 +258,36 @@ func (r *DynamicKeyProvider) LoadKeyStore(opts KeyStoreLoadOptions) (KeyStoreLoa
 	}
 	now := r.now()
 
+	if snap.CleanupErr != nil && r.onPersistError != nil {
+		r.onPersistError(snap.CleanupErr)
+	}
 	discard := func(reason string) (KeyStoreLoadReport, error) {
 		rep.Discarded = reason
-		if err := r.store.ReplaceAll("", nil, now); err != nil {
+		if err := r.store.ReplaceAll("", nil, now, time.Time{}); err != nil {
 			return rep, fmt.Errorf("key store: snapshot discarded (%s) but resetting it failed: %w", reason, err)
 		}
 		r.ks.lastPersistOK.Store(now.UnixNano())
 		return rep, nil
 	}
-	if snap.Untrusted {
-		return discard("integrity check on the meta record failed (JWT secret rotated, or the store was modified outside the router)")
+	if snap.Unusable != "" {
+		return discard(snap.Unusable)
 	}
-	age := now.Sub(snap.SavedAt)
+	ref := snap.SavedAt
+	if !snap.ConfirmedAt.IsZero() && snap.ConfirmedAt.Before(ref) {
+		ref = snap.ConfirmedAt
+	}
+	age := now.Sub(ref)
 	if age < 0 {
 		age = 0
 	}
 	rep.SnapshotAge = age
-	if opts.MaxAge > 0 && age > opts.MaxAge {
-		return discard(fmt.Sprintf("snapshot is %s old, older than the configured max age %s", age.Round(time.Second), opts.MaxAge))
+	if opts.MaxAge > 0 {
+		if snap.ConfirmedAt.IsZero() {
+			return discard("snapshot was never confirmed by a full replace from the upstream key-sync service")
+		}
+		if age > opts.MaxAge {
+			return discard(fmt.Sprintf("snapshot is %s old (older of last write and last key-sync confirmation), older than the configured max age %s", age.Round(time.Second), opts.MaxAge))
+		}
 	}
 
 	byHash := make(map[string]*DynamicKeyEntry, len(snap.Keys))
@@ -315,8 +374,9 @@ func (r *DynamicKeyProvider) lockPersist() func() {
 // persistLocked runs one store write for a mutation already applied in
 // memory. Caller holds persistMu. When the store is dirty (an earlier write
 // failed) the incremental write is replaced by a full rewrite of the current
-// registry, which also repairs everything the failed writes missed.
-func (r *DynamicKeyProvider) persistLocked(write func(s KeyStore, now time.Time) error) error {
+// registry, which also repairs everything the failed writes missed; confirm
+// marks that rewrite as a key-sync confirmation (the mutation is a ReplaceAll).
+func (r *DynamicKeyProvider) persistLocked(confirm bool, write func(s KeyStore, now time.Time) error) error {
 	if r.store == nil {
 		return nil
 	}
@@ -326,7 +386,11 @@ func (r *DynamicKeyProvider) persistLocked(write func(s KeyStore, now time.Time)
 	case r.ks.closed:
 		err = errors.New("key store closed")
 	case r.ks.dirty.Load():
-		err = r.rewriteLocked(now)
+		var confirmedAt time.Time
+		if confirm {
+			confirmedAt = now
+		}
+		err = r.rewriteLocked(now, confirmedAt)
 	default:
 		err = write(r.store, now)
 	}
@@ -339,9 +403,9 @@ func (r *DynamicKeyProvider) persistLocked(write func(s KeyStore, now time.Time)
 	return nil
 }
 
-func (r *DynamicKeyProvider) rewriteLocked(now time.Time) error {
+func (r *DynamicKeyProvider) rewriteLocked(now, confirmedAt time.Time) error {
 	ver, entries := r.Snapshot()
-	return r.store.ReplaceAll(ver, entries, now)
+	return r.store.ReplaceAll(ver, entries, now, confirmedAt)
 }
 
 func (r *DynamicKeyProvider) markDirtyLocked(err error) {
@@ -377,7 +441,7 @@ func (r *DynamicKeyProvider) retryLoop() {
 			return
 		}
 		now := r.now()
-		if err := r.rewriteLocked(now); err != nil {
+		if err := r.rewriteLocked(now, time.Time{}); err != nil {
 			r.ks.persistErrors.Add(1)
 			if r.onPersistError != nil {
 				r.onPersistError(fmt.Errorf("background retry: %w", err))

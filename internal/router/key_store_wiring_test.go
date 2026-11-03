@@ -20,7 +20,10 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-const wiringSecret = "router-wiring-test-jwt-secret-0123456789"
+const (
+	wiringSecret   = "router-wiring-test-jwt-secret-0123456789"
+	keyStoreSecret = "router-only-key-store-secret-0123456789ab"
+)
 
 func newKeyStoreCfg(t *testing.T) *config.Config {
 	t.Helper()
@@ -31,6 +34,7 @@ func newKeyStoreCfg(t *testing.T) *config.Config {
 		KeyStoreMaxAge:  15 * time.Minute,
 		DiskDBPath:      filepath.Join(root, "disk"),
 		JWTSecret:       wiringSecret,
+		KeyStoreSecret:  keyStoreSecret,
 	}
 }
 
@@ -89,11 +93,12 @@ func TestWireKeyStore_PathMustNotOverlapDiskDB(t *testing.T) {
 	}
 }
 
-// Writes a meta record sealed with the router's MAC key but with an
-// unparseable payload: the snapshot is unreadable as a whole.
-func TestWireKeyStore_UnreadableSnapshotFailsClosed(t *testing.T) {
-	cfg := newKeyStoreCfg(t)
-	macKey, err := auth.DeriveKeyStoreMACKey([]byte(cfg.JWTSecret))
+// sealMeta writes a meta record sealed with the configured key-store secret
+// but carrying the given payload, the way another router version (or a
+// corruption) would leave it.
+func sealMeta(t *testing.T, cfg *config.Config, payload []byte) {
+	t.Helper()
+	macKey, err := auth.DeriveKeyStoreMACKey([]byte(cfg.KeyStoreSecret))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +106,8 @@ func TestWireKeyStore_UnreadableSnapshotFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, payload := []byte("keyStore:v1:meta"), []byte("{not-json")
+	defer db.Close() //nolint:errcheck
+	key := []byte("keyStore:v1:meta")
 	m := hmac.New(sha256.New, macKey)
 	m.Write(key)
 	m.Write([]byte{0})
@@ -109,10 +115,81 @@ func TestWireKeyStore_UnreadableSnapshotFailsClosed(t *testing.T) {
 	if err := db.Update(func(txn *badger.Txn) error { return txn.Set(key, append(m.Sum(nil), payload...)) }); err != nil {
 		t.Fatal(err)
 	}
-	db.Close() //nolint:errcheck
+}
 
-	if _, err := wire(t, cfg, nil); err == nil || !strings.Contains(err.Error(), "corrupt") {
-		t.Fatalf("unreadable snapshot must abort startup (fail closed), got: %v", err)
+// A broken cache must never take the router down: a newer schema (release
+// rollback), an older one, or a corrupt meta record is discarded and the
+// store rewritten in the current schema; the router starts empty.
+func TestWireKeyStore_UnusableSnapshotDiscardedNotFatal(t *testing.T) {
+	for name, payload := range map[string]string{
+		"rollback: newer schema": `{"schema":999,"gen":7,"version":"rev_9"}`,
+		"older schema":           `{"schema":1,"gen":1,"version":"rev_1"}`,
+		"corrupt meta":           `{not-json`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := newKeyStoreCfg(t)
+			sealMeta(t, cfg, []byte(payload))
+			reg, err := wire(t, cfg, nil)
+			if err != nil {
+				t.Fatalf("an unusable snapshot must not stop the router: %v", err)
+			}
+			if ver, n := reg.Version(); ver != "" || n != 0 {
+				t.Fatalf("must start empty, got ver=%q n=%d", ver, n)
+			}
+			if st := reg.KeyStoreStatus(); st.Degraded || !st.Persistent {
+				t.Fatalf("the store is usable after the rewrite, status = %+v", st)
+			}
+			// The rewritten store loads cleanly on the next start.
+			reg.CloseKeyStore() //nolint:errcheck
+			ks, err := auth.OpenBadgerKeyStore(cfg.KeyStorePath, []byte(cfg.KeyStoreSecret))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ks.Close() //nolint:errcheck
+			if snap, err := ks.Load(); err != nil || snap == nil || snap.Unusable != "" {
+				t.Fatalf("store must be rewritten in the current schema, got %+v err=%v", snap, err)
+			}
+		})
+	}
+}
+
+// When the store cannot even be opened, the router keeps serving
+// memory-only (degraded) instead of crash-looping.
+func TestWireKeyStore_UnopenableStoreDegrades(t *testing.T) {
+	cfg := newKeyStoreCfg(t)
+	if err := os.WriteFile(cfg.KeyStorePath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := wire(t, cfg, nil)
+	if err != nil {
+		t.Fatalf("an unopenable store must not stop the router: %v", err)
+	}
+	st := reg.KeyStoreStatus()
+	if !st.Degraded || st.Persistent || st.DegradedReason == "" {
+		t.Fatalf("status = %+v, want degraded memory-only", st)
+	}
+	if err := reg.ReplaceAll("rev_1", []auth.DynamicKeyEntry{testKey("k1")}); err != nil {
+		t.Fatalf("degraded registry must accept key-sync pushes: %v", err)
+	}
+}
+
+func TestWireKeyStore_ConfigErrorsStopStartup(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mut  func(*config.Config)
+		want string
+	}{
+		"missing secret":   {func(c *config.Config) { c.KeyStoreSecret = "" }, "router-only secret is required"},
+		"short secret":     {func(c *config.Config) { c.KeyStoreSecret = "short" }, "too short"},
+		"secret == JWT":    {func(c *config.Config) { c.KeyStoreSecret = c.JWTSecret }, "must differ from the JWT secret"},
+		"negative max age": {func(c *config.Config) { c.KeyStoreMaxAge = -time.Minute }, "max-age must be >= 0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := newKeyStoreCfg(t)
+			tc.mut(cfg)
+			if _, err := wire(t, cfg, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 
@@ -122,10 +199,8 @@ func TestWireKeyStore_RestoresAndAppliesAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"k1", "k2"} {
-		if err := reg.Upsert("1", testKey(id)); err != nil {
-			t.Fatalf("Upsert: %v", err)
-		}
+	if err := reg.ReplaceAll("1", []auth.DynamicKeyEntry{testKey("k1"), testKey("k2")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
 	}
 	reg.CloseKeyStore() //nolint:errcheck
 

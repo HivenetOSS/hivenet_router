@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -157,17 +158,29 @@ type Config struct {
 	KeyStorePath string
 
 	// KeyStoreMaxAge bounds the staleness of a restored snapshot: one whose
-	// last write is older than this is discarded at startup (the router starts
+	// last write or last key-sync confirmation (whichever is older) is older
+	// than this, or that was never confirmed, is discarded at startup (the router starts
 	// empty, as in memory mode). 0 disables the bound — only for deployments
 	// with no upstream key-sync service, where the snapshot is the only copy.
 	// Flag: --key-store-max-age   Env: HIVENET_ROUTER_KEY_STORE_MAX_AGE
 	KeyStoreMaxAge time.Duration
+
+	// KeyStoreSecret is the router-only secret the key-store record MAC key is
+	// derived from (HKDF). Required when KeyStoreBackend is "badger", at least
+	// 32 bytes, and must differ from JWTSecret (which every agent also holds).
+	// Changing it discards the persisted registry (one cold start).
+	// Flag: --key-store-secret-file   Env: HIVENET_ROUTER_KEY_STORE_SECRET
+	KeyStoreSecret string
 
 	// ResetKeyStore wipes the key-store directory on startup (use to recover
 	// from an unreadable snapshot; only meaningful when KeyStoreBackend is
 	// "badger"). One-shot: remove it after use.
 	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
+
+	// EnvErrors collects invalid environment values that LoadFromEnv could
+	// not apply and that must stop startup (see the key-store settings).
+	EnvErrors []error
 
 	// Closed-source provider configuration.
 	// Credentials for providers that may be used as fallbacks when local routing steps are exhausted.
@@ -333,15 +346,30 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_PATH"); v != "" {
 		cfg.KeyStorePath = v
 	}
+	// Key-store values are validated strictly: the max age is a security
+	// bound, so a typo ("15min") must stop startup rather than silently fall
+	// back to the default. Errors are collected in EnvErrors.
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_MAX_AGE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_KEY_STORE_MAX_AGE=%q: %w", v, err))
+		case d < 0:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_KEY_STORE_MAX_AGE=%q: must be >= 0", v))
+		default:
 			cfg.KeyStoreMaxAge = d
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_RESET_KEY_STORE"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_RESET_KEY_STORE=%q: %w", v, err))
+		} else {
 			cfg.ResetKeyStore = b
 		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET"); v != "" {
+		cfg.KeyStoreSecret = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})

@@ -1613,11 +1613,13 @@ type KeyStoreSample struct {
 	Restored            bool
 	Confirmed           bool
 	SkippedEntries      uint64
+	Degraded            bool
 }
 
 // RegisterKeyStore exports the persistent key registry's health. Call once,
 // when the key store is wired (--key-store=badger); sample is read on every
-// scrape. Suggested alerts: increase(hivenet_keystore_persist_errors_total[5m]) > 0,
+// scrape. Suggested alerts: hivenet_keystore_degraded == 1,
+// increase(hivenet_keystore_persist_errors_total[5m]) > 0,
 // hivenet_keystore_dirty == 1 for 5m, and hivenet_keystore_restored == 1 and
 // hivenet_keystore_confirmed == 0 for 10m (key-sync has not re-pushed).
 func (m *RouterMetrics) RegisterKeyStore(sample func() KeyStoreSample) {
@@ -1642,6 +1644,10 @@ func (m *RouterMetrics) RegisterKeyStore(sample func() KeyStoreSample) {
 			}
 			return float64(t.UnixNano()) / 1e9
 		}),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_degraded",
+			Help: "1 when the key store could not be opened or read at startup and the registry runs memory-only.",
+		}, func() float64 { return b(sample().Degraded) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "hivenet_keystore_dirty",
 			Help: "1 while the key store lags the in-memory registry (a write failed; background retry pending).",

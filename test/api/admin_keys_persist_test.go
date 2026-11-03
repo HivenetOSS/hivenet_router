@@ -42,11 +42,12 @@ func (s *failingStore) Upsert(string, auth.DynamicKeyEntry, time.Time) error {
 	return s.err()
 }
 func (s *failingStore) Delete(string, string, time.Time) error { return s.err() }
-func (s *failingStore) ReplaceAll(string, []auth.DynamicKeyEntry, time.Time) error {
+func (s *failingStore) ReplaceAll(string, []auth.DynamicKeyEntry, time.Time, time.Time) error {
 	return s.err()
 }
-func (s *failingStore) DeleteRecords([]string) error { return nil }
-func (s *failingStore) Close() error                 { return nil }
+func (s *failingStore) Touch(string, time.Time, time.Time) error { return s.err() }
+func (s *failingStore) DeleteRecords([]string) error             { return nil }
+func (s *failingStore) Close() error                             { return nil }
 
 func TestAdminKeys_PersistFailureAnswers503(t *testing.T) {
 	h, reg := newAdminKeyHandlers(&policy.Policy{})
@@ -92,7 +93,22 @@ func TestAdminKeys_PersistFailureAnswers503(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["version"] != "v3" || body["persistent"] != true || body["dirty"] != true || body["confirmed"] != true || body["restored"] != false {
+	if body["version"] != "v3" || body["persistent"] != true || body["dirty"] != true || body["confirmed"] != true || body["restored"] != false || body["degraded"] != false {
 		t.Fatalf("version endpoint = %v", body)
+	}
+}
+
+func TestAdminKeys_StaleReplaceAnswers409(t *testing.T) {
+	h, reg := newAdminKeyHandlers(&policy.Policy{})
+	if err := reg.ReplaceAll("v5", nil); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/admin/api-keys/replace", strings.NewReader(`{"version":"v4","keys":[]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ReplaceAPIKeys(c)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "current_version") {
+		t.Fatalf("a stale replace must answer 409 with current_version, got %d %s", w.Code, w.Body.String())
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -252,7 +253,7 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		r.onChange()
 	}
 	persisted := *entry // entries are replaced, never mutated in place
-	return r.persistLocked(func(s KeyStore, now time.Time) error {
+	return r.persistLocked(false, func(s KeyStore, now time.Time) error {
 		return s.Upsert(version, persisted, now)
 	})
 }
@@ -290,7 +291,7 @@ func (r *DynamicKeyProvider) Delete(version string, keyID string) error {
 	if r.onChange != nil {
 		r.onChange()
 	}
-	return r.persistLocked(func(s KeyStore, now time.Time) error {
+	return r.persistLocked(false, func(s KeyStore, now time.Time) error {
 		return s.Delete(version, keyID, now)
 	})
 }
@@ -356,6 +357,7 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 		r.mu.Unlock()
 		return ErrStaleVersion
 	}
+	unchanged := r.store != nil && sameEntries(r.byID, byID)
 	r.byHash = byHash
 	r.byID = byID
 	r.version = version
@@ -365,9 +367,29 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 	if r.onChange != nil {
 		r.onChange()
 	}
-	return r.persistLocked(func(_ KeyStore, now time.Time) error {
-		return r.rewriteLocked(now)
+	return r.persistLocked(true, func(s KeyStore, now time.Time) error {
+		if unchanged {
+			// The periodic full re-push from key-sync usually carries the set
+			// already stored: rewrite only the meta record instead of fsyncing
+			// N records + N tombstones under persistMu.
+			return s.Touch(version, now, now)
+		}
+		return r.rewriteLocked(now, now)
 	})
+}
+
+// sameEntries reports whether two registries hold identical entries.
+func sameEntries(a, b map[string]*DynamicKeyEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id, x := range a {
+		y, ok := b[id]
+		if !ok || !reflect.DeepEqual(*x, *y) {
+			return false
+		}
+	}
+	return true
 }
 
 // Version returns the current registry version string and key count.
