@@ -468,7 +468,11 @@ Agents normally:
 | `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` | Persistent BadgerDB directory |
 | `--disk-db-ttl` | — | `30` | Entry lifetime in days; `0` disables expiry |
 | `--universal-flush-interval` | — | `30s` | Frequency for flushing per-agent history and persistent quota changes |
-| `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup |
+| `--reset-disk-db` | — | `false` | Delete the complete persistent database before startup (the key store is separate and not touched) |
+| `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` | Dynamic key registry persistence: `memory` or `badger` |
+| `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` | Key-store BadgerDB directory (mode `0700`); must not overlap `--disk-db-path` |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` | Discard a persisted key registry older than this at startup; `0` disables the bound |
+| `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` | Delete the key-store directory before startup |
 
 The persistent database can contain:
 
@@ -490,6 +494,8 @@ deletes the configured database directory before the router opens it.
 
   It removes persisted agent history and Badger-backed daily quota state from that directory.
 </Danger>
+
+See [Persistent key store](/security/api-keys#persistent-key-store-warm-start) for the dynamic key store's restore rules and runbook.
 
 ### Universal flush interval
 
@@ -736,6 +742,10 @@ The complete current router flag set is:
 | `--disk-db-path` | `HIVENET_ROUTER_DISK_DB_PATH` | `./badger_disk` |
 | `--reset-disk-db` | — | `false` |
 | `--disk-db-ttl` | — | `30` days |
+| `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` |
+| `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` |
+| `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` |
 | `--universal-flush-interval` | — | `30s` |
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |

@@ -1602,6 +1602,73 @@ func (m *RouterMetrics) RegisterSemanticDecisionLog(dropped, writeErrors func() 
 	)
 }
 
+// KeyStoreSample is a point-in-time view of the persistent dynamic key
+// registry, read on every scrape (see RegisterKeyStore).
+type KeyStoreSample struct {
+	PersistErrors       uint64
+	LastPersistSuccess  time.Time // zero = never
+	Dirty               bool
+	RestoredKeys        int64
+	RestoredSnapshotAge time.Duration
+	Restored            bool
+	Confirmed           bool
+	SkippedEntries      uint64
+}
+
+// RegisterKeyStore exports the persistent key registry's health. Call once,
+// when the key store is wired (--key-store=badger); sample is read on every
+// scrape. Suggested alerts: increase(hivenet_keystore_persist_errors_total[5m]) > 0,
+// hivenet_keystore_dirty == 1 for 5m, and hivenet_keystore_restored == 1 and
+// hivenet_keystore_confirmed == 0 for 10m (key-sync has not re-pushed).
+func (m *RouterMetrics) RegisterKeyStore(sample func() KeyStoreSample) {
+	b := func(v bool) float64 {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	m.registry.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_keystore_persist_errors_total",
+			Help: "Failed writes to the dynamic key store (mutations and background retries). Each failed mutation was answered 503.",
+		}, func() float64 { return float64(sample().PersistErrors) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_last_persist_success_timestamp_seconds",
+			Help: "Unix time of the last successful key store write (0 = never).",
+		}, func() float64 {
+			t := sample().LastPersistSuccess
+			if t.IsZero() {
+				return 0
+			}
+			return float64(t.UnixNano()) / 1e9
+		}),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_dirty",
+			Help: "1 while the key store lags the in-memory registry (a write failed; background retry pending).",
+		}, func() float64 { return b(sample().Dirty) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored",
+			Help: "1 when the registry was warm-started from the key store at startup.",
+		}, func() float64 { return b(sample().Restored) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored_keys",
+			Help: "Keys installed from the key store at startup.",
+		}, func() float64 { return float64(sample().RestoredKeys) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored_snapshot_age_seconds",
+			Help: "Age of the restored key store snapshot at startup.",
+		}, func() float64 { return sample().RestoredSnapshotAge.Seconds() }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_confirmed",
+			Help: "1 once the upstream key-sync service has sent a full replace since startup.",
+		}, func() float64 { return b(sample().Confirmed) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_keystore_skipped_entries_total",
+			Help: "Persisted keys skipped at startup (integrity failure, invalid, expired, admission check, duplicate hash).",
+		}, func() float64 { return float64(sample().SkippedEntries) }),
+	)
+}
+
 // ObserveHTTPRequest records the duration and status of an HTTP request for RED metrics.
 func (m *RouterMetrics) ObserveHTTPRequest(method, route string, statusCode int, durationSeconds float64) {
 	code := strconv.Itoa(statusCode)

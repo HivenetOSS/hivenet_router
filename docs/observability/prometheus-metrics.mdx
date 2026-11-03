@@ -524,6 +524,37 @@ curl -X POST \
   It does not reset tenant quota counters or every router-level metric.
 </Danger>
 
+## Dynamic key store metrics
+
+Exported only with `--key-store=badger`.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `hivenet_keystore_persist_errors_total` | counter | Failed key-store writes (mutations answered `503`, plus background retries) |
+| `hivenet_keystore_last_persist_success_timestamp_seconds` | gauge | Unix time of the last successful write |
+| `hivenet_keystore_dirty` | gauge | `1` while the store lags the in-memory registry |
+| `hivenet_keystore_restored` | gauge | `1` when the registry was warm-started at startup |
+| `hivenet_keystore_restored_keys` | gauge | Keys installed by that restore |
+| `hivenet_keystore_restored_snapshot_age_seconds` | gauge | Age of the restored snapshot |
+| `hivenet_keystore_confirmed` | gauge | `1` once the upstream key-sync service has sent a full replace |
+| `hivenet_keystore_skipped_entries_total` | counter | Persisted keys skipped at startup |
+
+Suggested alerts:
+
+```yaml
+- alert: HivenetKeyStorePersistErrors
+  expr: increase(hivenet_keystore_persist_errors_total[5m]) > 0
+  labels: {severity: warning}
+- alert: HivenetKeyStoreDirty
+  expr: hivenet_keystore_dirty == 1
+  for: 5m
+  labels: {severity: critical}
+- alert: HivenetKeyStoreUnconfirmed
+  expr: hivenet_keystore_restored == 1 and hivenet_keystore_confirmed == 0
+  for: 10m
+  labels: {severity: warning}
+```
+
 ## Engine metrics
 
 Engine metrics use:

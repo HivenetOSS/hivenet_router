@@ -62,9 +62,12 @@ func main() {
 	unhealthyAfter := flag.Duration("unhealthy-after", cfg.UnhealthyAfter, "Mark agent unhealthy after this long without a heartbeat (must be > heartbeat-interval)")
 	removeAfter := flag.Duration("remove-after", cfg.RemoveAfter, "Remove agent after this long without a heartbeat (must be > unhealthy-after)")
 	heartbeatInterval := flag.Duration("heartbeat-interval", cfg.HeartbeatInterval, "Heartbeat interval")
-	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engine history, quota counters, and the persisted key registry when KeyStoreBackend=badger)")
-	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup — engine history, quota counters AND the persisted key registry (use for testing or schema migrations)")
-	resetKeyStore := flag.Bool("reset-key-store", false, "Wipe the persisted dynamic API key registry on startup (use to recover from a corrupt snapshot; requires KeyStoreBackend=badger). One-shot: remove the flag from the Deployment args afterwards — a restart with it still set wipes the registry again")
+	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engine history, quota counters)")
+	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup — engine history and quota counters; the key store (--key-store-path) is not touched (use for testing or schema migrations)")
+	keyStoreBackend := flag.String("key-store", cfg.KeyStoreBackend, "Dynamic API key registry persistence: memory (default) or badger (warm-start cache at --key-store-path)")
+	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
+	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
+	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
 	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")
@@ -99,6 +102,9 @@ func main() {
 	cfg.HeartbeatInterval = *heartbeatInterval
 	cfg.DiskDBPath = *diskDBPath
 	cfg.ResetDiskDB = *resetDiskDB
+	cfg.KeyStoreBackend = *keyStoreBackend
+	cfg.KeyStorePath = *keyStorePath
+	cfg.KeyStoreMaxAge = *keyStoreMaxAge
 	cfg.ResetKeyStore = *resetKeyStore
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
@@ -172,6 +178,16 @@ func main() {
 	log.Infof("  GC flush period:     %v", cfg.FlushPeriod)
 	log.Infof("  Universal flush:     %v", cfg.UniversalFlushInterval)
 	log.Infof("  Reset disk DB:       %v", cfg.ResetDiskDB)
+	log.Infof("  Key store:           %s", cfg.KeyStoreBackend)
+	if cfg.KeyStoreBackend == "badger" {
+		log.Infof("  Key store path:      %s", cfg.KeyStorePath)
+		if cfg.KeyStoreMaxAge == 0 {
+			log.Info("  Key store max age:   unlimited")
+		} else {
+			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
+		}
+		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
 	log.Info("Security:")
 	log.Info("  JWT secret:          configured")
 	log.Info("Session:")

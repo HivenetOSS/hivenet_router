@@ -2,76 +2,124 @@
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
 // Tests the opt-in persistence backend for the dynamic key registry
-// (KeyStoreBackend "badger", env HIVENET_ROUTER_KEY_STORE):
-//   - provider wiring: every mutation persists, memory mode persists nothing,
-//     persist failures are reported without failing the mutation;
-//   - BadgerKeyStore: Save/Load round-trip, fresh store, Reset;
-//   - restart simulation: a second provider instance restores the registry
-//     from the same diskDB and the key still authenticates.
+// (--key-store=badger). The persisted registry is a warm-start cache of the
+// upstream key-sync service:
+//   - provider wiring: mutations persist incrementally; a failed write is
+//     reported as ErrNotDurable (→ 503) while the change stays in effect in
+//     memory; the store is marked dirty and repaired by a full rewrite
+//     (next mutation or background retry);
+//   - restore: max-age bound, restored/confirmed state, per-entry skipping,
+//     no rewrite on a clean load;
+//   - BadgerKeyStore: restart round-trips, secret rotation, ordering under
+//     concurrency, directory permissions.
 package auth_test
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"hivenet_router/internal/auth"
-	"hivenet_router/internal/storage"
 )
 
-// fakeKeyStore is an in-memory KeyStore for wiring tests (no badger).
+const testSecret = "0123456789abcdef0123456789abcdef-test-jwt-secret"
+
+// ── fake store ──────────────────────────────────────────────────────────────
+
+type storeOp struct {
+	kind    string // upsert | delete | replace
+	version string
+	id      string
+	n       int // entries (replace)
+}
+
 type fakeKeyStore struct {
-	mu sync.Mutex // -race safety; production saves are serialized by the provider's persistMu
-
-	saves       int
-	lastVer     string
-	lastEntries []auth.DynamicKeyEntry
-	failSave    error
-	loaded      string
-	loadEntries []auth.DynamicKeyEntry
-	loadErr     error
-	resetCalls  int
-
-	// saveGate, when non-nil, blocks the FIRST Save until the channel is
-	// closed by the test (used to deterministically order concurrent saves).
-	saveGate chan struct{}
+	mu        sync.Mutex
+	ops       []storeOp
+	failNext  int // number of upcoming writes to fail
+	failErr   error
+	loadSnap  *auth.PersistedRegistry
+	loadErr   error
+	deleted   []string
+	lastFull  []auth.DynamicKeyEntry
+	closeCall int
 }
 
-func (f *fakeKeyStore) Load() (string, []auth.DynamicKeyEntry, error) {
+func (f *fakeKeyStore) Load() (*auth.PersistedRegistry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.loaded, f.loadEntries, f.loadErr
+	return f.loadSnap, f.loadErr
 }
-func (f *fakeKeyStore) Save(version string, entries []auth.DynamicKeyEntry) error {
+
+func (f *fakeKeyStore) write(op storeOp) error {
 	f.mu.Lock()
-	f.saves++
-	n := f.saves
-	f.mu.Unlock()
-	if f.saveGate != nil && n == 1 {
-		<-f.saveGate // first Save blocks until the test releases it
+	defer f.mu.Unlock()
+	if f.failNext > 0 {
+		f.failNext--
+		return f.failErr
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastVer = version
-	f.lastEntries = entries
-	return f.failSave
-}
-func (f *fakeKeyStore) Reset() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.resetCalls++
+	f.ops = append(f.ops, op)
 	return nil
 }
 
-func (f *fakeKeyStore) saveCount() int {
+func (f *fakeKeyStore) Upsert(version string, e auth.DynamicKeyEntry, _ time.Time) error {
+	return f.write(storeOp{kind: "upsert", version: version, id: e.ID})
+}
+func (f *fakeKeyStore) Delete(version, id string, _ time.Time) error {
+	return f.write(storeOp{kind: "delete", version: version, id: id})
+}
+func (f *fakeKeyStore) ReplaceAll(version string, entries []auth.DynamicKeyEntry, _ time.Time) error {
+	if err := f.write(storeOp{kind: "replace", version: version, n: len(entries)}); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.lastFull = entries
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeKeyStore) DeleteRecords(ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.saves
+	f.deleted = append(f.deleted, ids...)
+	return nil
+}
+func (f *fakeKeyStore) Close() error { f.closeCall++; return nil }
+
+func (f *fakeKeyStore) opsCopy() []storeOp {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]storeOp(nil), f.ops...)
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+func rawKey(id string) string { return "sk-" + id }
+
+func persistEntry(id, owner string) auth.DynamicKeyEntry {
+	h := sha256.Sum256([]byte(rawKey(id)))
+	return auth.DynamicKeyEntry{
+		ID:            id,
+		KeyHash:       hex.EncodeToString(h[:]),
+		Owner:         owner,
+		Name:          id,
+		Enabled:       true,
+		AllowedModels: []string{"org/model"},
+	}
+}
+
+func authenticates(p *auth.DynamicKeyProvider, id string) bool {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey(id))
+	_, err := p.Authenticate(req)
+	return err == nil
 }
 
 func waitUntil(t *testing.T, what string, ok func() bool) {
@@ -86,22 +134,53 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func persistEntry(id, owner string) auth.DynamicKeyEntry {
-	// Raw key derived from the ID so each entry gets a distinct hash — the
-	// registry rejects two IDs sharing a key_hash (byHash desync guard).
-	raw := "sk-" + id
-	h := sha256.Sum256([]byte(raw))
-	return auth.DynamicKeyEntry{
-		ID:            id,
-		KeyHash:       hex.EncodeToString(h[:]),
-		Owner:         owner,
-		Name:          id,
-		Enabled:       true,
-		AllowedModels: []string{"org/model"},
-	}
+// fakeClock is a settable clock for max-age tests.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
 }
 
-func TestKeyStore_MutationsPersist(t *testing.T) {
+func (c *fakeClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *fakeClock) Add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+func openStore(t *testing.T, dir, secret string) *auth.BadgerKeyStore {
+	t.Helper()
+	ks, err := auth.OpenBadgerKeyStore(dir, []byte(secret))
+	if err != nil {
+		t.Fatalf("OpenBadgerKeyStore: %v", err)
+	}
+	return ks
+}
+
+// newPersistent returns a provider wired to a badger store at dir.
+func newPersistent(t *testing.T, dir string, clock *fakeClock) *auth.DynamicKeyProvider {
+	t.Helper()
+	p := auth.NewDynamicKeyProvider()
+	if clock != nil {
+		p.SetClock(clock.Now)
+	}
+	p.SetKeyStore(openStore(t, dir, testSecret))
+	return p
+}
+
+// restart closes p's store and returns a fresh provider loaded from dir.
+func restart(t *testing.T, p *auth.DynamicKeyProvider, dir string, clock *fakeClock, opts auth.KeyStoreLoadOptions) (*auth.DynamicKeyProvider, auth.KeyStoreLoadReport) {
+	t.Helper()
+	if err := p.CloseKeyStore(); err != nil {
+		t.Fatalf("CloseKeyStore: %v", err)
+	}
+	fresh := newPersistent(t, dir, clock)
+	t.Cleanup(func() { fresh.CloseKeyStore() }) //nolint:errcheck
+	rep, err := fresh.LoadKeyStore(opts)
+	if err != nil {
+		t.Fatalf("LoadKeyStore: %v", err)
+	}
+	return fresh, rep
+}
+
+// ── provider wiring (fake store) ────────────────────────────────────────────
+
+func TestKeyStore_MutationsPersistIncrementally(t *testing.T) {
 	p := auth.NewDynamicKeyProvider()
 	fs := &fakeKeyStore{}
 	p.SetKeyStore(fs)
@@ -109,340 +188,402 @@ func TestKeyStore_MutationsPersist(t *testing.T) {
 	if err := p.Upsert("1", persistEntry("k1", "org-x")); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if fs.saves != 1 || fs.lastVer != "1" || len(fs.lastEntries) != 1 || fs.lastEntries[0].ID != "k1" {
-		t.Fatalf("after Upsert: saves=%d ver=%q entries=%d (want 1, \"1\", 1 x k1)", fs.saves, fs.lastVer, len(fs.lastEntries))
-	}
-
 	if err := p.Delete("2", "k1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if fs.saves != 2 || fs.lastVer != "2" || len(fs.lastEntries) != 0 {
-		t.Fatalf("after Delete: saves=%d ver=%q entries=%d (want 2, \"2\", 0)", fs.saves, fs.lastVer, len(fs.lastEntries))
-	}
-
-	entries := []auth.DynamicKeyEntry{persistEntry("k1", "org-x"), persistEntry("k2", "org-x")}
-	if err := p.ReplaceAll("3", entries); err != nil {
+	if err := p.ReplaceAll("3", []auth.DynamicKeyEntry{persistEntry("a", "o"), persistEntry("b", "o")}); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
-	if fs.saves != 3 || fs.lastVer != "3" || len(fs.lastEntries) != 2 {
-		t.Fatalf("after ReplaceAll: saves=%d ver=%q entries=%d (want 3, \"3\", 2)", fs.saves, fs.lastVer, len(fs.lastEntries))
+	want := []storeOp{
+		{kind: "upsert", version: "1", id: "k1"},
+		{kind: "delete", version: "2", id: "k1"},
+		{kind: "replace", version: "3", n: 2},
 	}
-	// Deterministic ID order in the persisted snapshot.
-	if fs.lastEntries[0].ID != "k1" || fs.lastEntries[1].ID != "k2" {
-		t.Fatalf("snapshot order = [%s %s], want [k1 k2]", fs.lastEntries[0].ID, fs.lastEntries[1].ID)
+	if got := fs.opsCopy(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("store ops = %+v, want %+v", got, want)
 	}
 }
 
 func TestKeyStore_MemoryModePersistsNothing(t *testing.T) {
-	p := auth.NewDynamicKeyProvider() // no store wired — default
+	p := auth.NewDynamicKeyProvider()
 	if err := p.Upsert("1", persistEntry("k1", "org-x")); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if ver, entries := p.Snapshot(); ver != "1" || len(entries) != 1 {
-		t.Fatalf("Snapshot = (%q, %d entries), want (\"1\", 1)", ver, len(entries))
+	if rep, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{}); err != nil || rep.Restored != 0 {
+		t.Fatalf("LoadKeyStore without a store must be a no-op: %+v %v", rep, err)
 	}
-	if err := p.LoadKeyStore(); err != nil { // must be a no-op without a store
-		t.Fatalf("LoadKeyStore (unwired): %v", err)
+	if st := p.KeyStoreStatus(); st.Persistent || st.Dirty {
+		t.Fatalf("memory mode status = %+v", st)
+	}
+	if err := p.CloseKeyStore(); err != nil {
+		t.Fatalf("CloseKeyStore without a store: %v", err)
 	}
 }
 
-// TestKeyStore_EmptyPerModelRejected: an empty non-nil per_model block is
-// rejected at the registry (defense in depth — the admin DTO's shared
-// QuotaConfig.Validate already rejects it at the door; this guard protects
-// the persistence invariant that a restored key cannot flip from per-model
-// to flat mode across a restart). Applies in memory mode too, matching the
-// admin API's existing rejection of the same input.
 func TestKeyStore_EmptyPerModelRejected(t *testing.T) {
 	p := auth.NewDynamicKeyProvider()
 	e := persistEntry("k1", "org-x")
 	e.Quota.PerModel = map[string]auth.PerModelQuotaLimits{}
 	if err := p.Upsert("1", e); err == nil {
-		t.Fatal("empty non-nil per_model must be rejected (per-model -> flat mode flip across restart)")
+		t.Fatal("an empty per_model block must be rejected")
 	}
 }
 
-func TestKeyStore_PersistFailureDoesNotFailMutation(t *testing.T) {
+// A failed write must surface to the caller (→ 503) instead of being
+// swallowed, while the change — here a revocation — is already in effect.
+func TestKeyStore_PersistFailureReturnsNotDurable(t *testing.T) {
 	p := auth.NewDynamicKeyProvider()
-	fs := &fakeKeyStore{failSave: errors.New("disk full")}
-	var reported error
+	p.SetPersistRetryBackoff(time.Hour, time.Hour) // keep the background retry out of the way
+	fs := &fakeKeyStore{}
 	p.SetKeyStore(fs)
-	p.SetOnPersistError(func(err error) { reported = err })
+	var reported []error
+	p.SetOnPersistError(func(err error) { reported = append(reported, err) })
 
 	if err := p.Upsert("1", persistEntry("k1", "org-x")); err != nil {
-		t.Fatalf("Upsert must not fail when persist fails: %v", err)
+		t.Fatalf("Upsert: %v", err)
 	}
-	if e, ok := p.GetKey("k1"); !ok || e.ID != "k1" {
-		t.Fatalf("in-memory mutation lost: ok=%v", ok)
+	fs.mu.Lock()
+	fs.failNext, fs.failErr = 1, errors.New("disk full")
+	fs.mu.Unlock()
+
+	err := p.Delete("2", "k1")
+	if !errors.Is(err, auth.ErrNotDurable) {
+		t.Fatalf("Delete with a failing store: err = %v, want ErrNotDurable", err)
 	}
-	if reported == nil {
-		t.Fatal("persist failure not reported via OnPersistError")
+	if authenticates(p, "k1") {
+		t.Fatal("the revocation must take effect in memory even though it was not persisted")
+	}
+	st := p.KeyStoreStatus()
+	if !st.Dirty || st.PersistErrors != 1 || len(reported) != 1 {
+		t.Fatalf("after failure: status=%+v reported=%d, want dirty, 1 error", st, len(reported))
 	}
 }
 
-func TestKeyStore_LoadRestoresIntoEmptyProvider(t *testing.T) {
-	snap := persistEntry("k1", "org-x")
-	// Build a real Badger-backed store in a temp dir.
-	bs, err := storage.NewBadgerStorage(t.TempDir(), 0)
-	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
-	}
-	t.Cleanup(func() { bs.Close() })
-	bks := auth.NewBadgerKeyStore(bs)
+// While dirty, the next mutation (e.g. key-sync's equal-version replay)
+// rewrites the full registry instead of writing incrementally on top of a
+// store that missed earlier changes.
+func TestKeyStore_DirtyStoreRepairedByNextMutation(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	p.SetPersistRetryBackoff(time.Hour, time.Hour)
+	fs := &fakeKeyStore{}
+	p.SetKeyStore(fs)
 
-	src := auth.NewDynamicKeyProvider()
-	src.SetKeyStore(bks) // the source provider persists through the same diskDB
-	if err := src.Upsert("1", snap); err != nil {
+	fs.failNext, fs.failErr = 1, errors.New("io error")
+	if err := p.Upsert("1", persistEntry("k1", "o")); !errors.Is(err, auth.ErrNotDurable) {
+		t.Fatalf("want ErrNotDurable, got %v", err)
+	}
+	// Replay of the same version (key-sync retry after the 503).
+	if err := p.Upsert("1", persistEntry("k1", "o")); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	ops := fs.opsCopy()
+	if len(ops) != 1 || ops[0].kind != "replace" || ops[0].n != 1 || ops[0].version != "1" {
+		t.Fatalf("dirty store must be repaired by a full rewrite, ops = %+v", ops)
+	}
+	if p.KeyStoreStatus().Dirty {
+		t.Fatal("a successful rewrite must clear dirty")
+	}
+	// Back to incremental writes.
+	if err := p.Upsert("2", persistEntry("k2", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if ops := fs.opsCopy(); ops[len(ops)-1].kind != "upsert" {
+		t.Fatalf("clean store must write incrementally, last op = %+v", ops[len(ops)-1])
+	}
+}
+
+func TestKeyStore_BackgroundRetryRepairsDirtyStore(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	p.SetPersistRetryBackoff(time.Millisecond, 5*time.Millisecond)
+	fs := &fakeKeyStore{}
+	p.SetKeyStore(fs)
+	t.Cleanup(func() { p.CloseKeyStore() }) //nolint:errcheck
+
+	fs.failNext, fs.failErr = 3, errors.New("transient") // the mutation + 2 retries fail
+	if err := p.Upsert("1", persistEntry("k1", "o")); !errors.Is(err, auth.ErrNotDurable) {
+		t.Fatalf("want ErrNotDurable, got %v", err)
+	}
+	waitUntil(t, "background retry to clear dirty", func() bool { return !p.KeyStoreStatus().Dirty })
+
+	st := p.KeyStoreStatus()
+	if st.PersistErrors != 3 || st.LastPersistSuccess.IsZero() {
+		t.Fatalf("status after retry = %+v, want 3 errors and a success timestamp", st)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.lastFull) != 1 || fs.lastFull[0].ID != "k1" {
+		t.Fatalf("retry must rewrite the current registry, got %+v", fs.lastFull)
+	}
+}
+
+// ── restore policy (fake store) ─────────────────────────────────────────────
+
+// One bad entry must not brick startup: integrity failures, invalid,
+// expired, admission-failing and duplicate-hash records are skipped,
+// counted, and deleted; the rest is restored without rewriting the store.
+func TestKeyStore_LoadSkipsBadEntries(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	invalid := persistEntry("invalid", "o")
+	invalid.Quota.PerModel = map[string]auth.PerModelQuotaLimits{} // rule tightened in a later release
+	expired := persistEntry("expired", "o")
+	expired.ExpiresAt = &past
+	dup := persistEntry("dup", "o")
+	dup.KeyHash = persistEntry("good", "o").KeyHash
+	noAdmit := persistEntry("no-admit", "o")
+
+	fs := &fakeKeyStore{loadSnap: &auth.PersistedRegistry{
+		Version: "rev_7",
+		SavedAt: time.Now(),
+		Keys: []auth.PersistedKey{
+			{ID: "good", Entry: persistEntry("good", "o")},
+			{ID: "tampered", Err: errors.New("integrity check failed")},
+			{ID: "invalid", Entry: invalid},
+			{ID: "expired", Entry: expired},
+			{ID: "dup", Entry: dup},
+			{ID: "no-admit", Entry: noAdmit},
+		},
+	}}
+	p := auth.NewDynamicKeyProvider()
+	p.SetKeyStore(fs)
+	rep, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{
+		MaxAge: 15 * time.Minute,
+		Admit: func(e auth.DynamicKeyEntry) error {
+			if e.ID == "no-admit" {
+				return errors.New("ITPM below max input")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("bad entries must not fail startup: %v", err)
+	}
+	if rep.Restored != 1 || rep.Skipped != 5 || len(rep.SkippedReasons) != 5 {
+		t.Fatalf("report = %+v, want 1 restored / 5 skipped", rep)
+	}
+	if !authenticates(p, "good") {
+		t.Fatal("the valid key must be restored")
+	}
+	if ver, _ := p.Version(); ver != "rev_7" {
+		t.Fatalf("version = %q, want rev_7", ver)
+	}
+	if st := p.KeyStoreStatus(); st.SkippedEntries != 5 || !st.Restored || st.Confirmed {
+		t.Fatalf("status = %+v", st)
+	}
+	if len(fs.deleted) != 5 {
+		t.Fatalf("skipped records must be deleted from the store, deleted = %v", fs.deleted)
+	}
+	if ops := fs.opsCopy(); len(ops) != 0 {
+		t.Fatalf("a clean load must not rewrite the store, ops = %+v", ops)
+	}
+}
+
+func TestKeyStore_LoadErrorFailsClosed(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	p.SetKeyStore(&fakeKeyStore{loadErr: errors.New("key store: corrupt meta")})
+	if _, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{}); err == nil {
+		t.Fatal("an unreadable snapshot must be returned so startup fails closed")
+	}
+	if _, n := p.Version(); n != 0 {
+		t.Fatalf("registry must stay empty on load error, got %d keys", n)
+	}
+}
+
+func TestKeyStore_EmptySnapshotRestoresVersion(t *testing.T) {
+	p := auth.NewDynamicKeyProvider()
+	p.SetKeyStore(&fakeKeyStore{loadSnap: &auth.PersistedRegistry{Version: "5", SavedAt: time.Now()}})
+	if _, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: time.Minute}); err != nil {
+		t.Fatalf("LoadKeyStore: %v", err)
+	}
+	if err := p.Upsert("4", persistEntry("k1", "o")); !errors.Is(err, auth.ErrStaleVersion) {
+		t.Fatalf("a push below the persisted version must be stale after restart, got %v", err)
+	}
+}
+
+// ── restart behaviour (real badger) ─────────────────────────────────────────
+
+func TestBadgerKeyStore_RestartRestoresAndReplaceAllConfirms(t *testing.T) {
+	dir := t.TempDir()
+	p := newPersistent(t, dir, nil)
+	for i, id := range []string{"k1", "k2", "k3"} {
+		if err := p.Upsert(fmt.Sprintf("rev_%02d", i+1), persistEntry(id, "org-x")); err != nil {
+			t.Fatalf("Upsert %s: %v", id, err)
+		}
+	}
+	if err := p.Delete("rev_04", "k2"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	fresh, rep := restart(t, p, dir, nil, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
+	if rep.Restored != 2 || rep.Version != "rev_04" || rep.Discarded != "" {
+		t.Fatalf("report = %+v", rep)
+	}
+	if !authenticates(fresh, "k1") || authenticates(fresh, "k2") || !authenticates(fresh, "k3") {
+		t.Fatal("restart must restore k1,k3 and keep k2 revoked")
+	}
+	if st := fresh.KeyStoreStatus(); !st.Restored || st.Confirmed || st.RestoredKeys != 2 {
+		t.Fatalf("restored state = %+v, want restored+unconfirmed", st)
+	}
+
+	// key-sync's full push confirms the restored state (equal version accepted).
+	if err := fresh.ReplaceAll("rev_04", []auth.DynamicKeyEntry{persistEntry("k1", "org-x"), persistEntry("k3", "org-x")}); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	if !fresh.KeyStoreStatus().Confirmed {
+		t.Fatal("ReplaceAll must confirm the restored registry")
+	}
+}
+
+func TestBadgerKeyStore_OverAgeSnapshotIgnored(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	p := newPersistent(t, dir, clock)
+	if err := p.Upsert("rev_1", persistEntry("revoked-upstream", "o")); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Simulate a restart: a fresh provider loads the same diskDB.
-	restored := auth.NewDynamicKeyProvider()
-	restored.SetKeyStore(bks)
-	if err := restored.LoadKeyStore(); err != nil {
-		t.Fatalf("LoadKeyStore: %v", err)
+	clock.Add(20 * time.Minute) // router was down longer than the max age
+	fresh, rep := restart(t, p, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
+	if rep.Discarded == "" || rep.Restored != 0 {
+		t.Fatalf("over-age snapshot must be discarded, report = %+v", rep)
 	}
-	ver, entries := restored.Snapshot()
-	if ver != "1" || len(entries) != 1 || entries[0].ID != snap.ID || entries[0].KeyHash != snap.KeyHash {
-		t.Fatalf("restore mismatch: ver=%q entries=%+v", ver, entries)
+	if authenticates(fresh, "revoked-upstream") {
+		t.Fatal("a key from an over-age snapshot must not authenticate")
+	}
+	if ver, n := fresh.Version(); ver != "" || n != 0 {
+		t.Fatalf("over-age discard must start empty like memory mode: ver=%q n=%d", ver, n)
+	}
+
+	// The discarded keys must not come back through a later incremental write.
+	if err := fresh.Upsert("rev_2", persistEntry("new", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	again, _ := restart(t, fresh, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 15 * time.Minute})
+	if authenticates(again, "revoked-upstream") || !authenticates(again, "new") {
+		t.Fatal("after a discard only post-discard keys may be restored")
 	}
 }
 
-func TestBadgerKeyStore_RoundTrip(t *testing.T) {
-	bs, err := storage.NewBadgerStorage(t.TempDir(), 0)
+func TestBadgerKeyStore_MaxAgeZeroDisablesBound(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}
+	p := newPersistent(t, dir, clock)
+	if err := p.Upsert("1", persistEntry("k1", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	clock.Add(30 * 24 * time.Hour)
+	fresh, rep := restart(t, p, dir, clock, auth.KeyStoreLoadOptions{MaxAge: 0})
+	if rep.Restored != 1 || !authenticates(fresh, "k1") {
+		t.Fatalf("MaxAge 0 must restore regardless of age, report = %+v", rep)
+	}
+}
+
+// Rotating the JWT secret invalidates every MAC: the snapshot is discarded
+// (start empty) rather than failing startup.
+func TestBadgerKeyStore_SecretRotationDiscardsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	p := newPersistent(t, dir, nil)
+	if err := p.Upsert("1", persistEntry("k1", "o")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := p.CloseKeyStore(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	rotated := auth.NewDynamicKeyProvider()
+	rotated.SetKeyStore(openStore(t, dir, testSecret+"-rotated"))
+	t.Cleanup(func() { rotated.CloseKeyStore() }) //nolint:errcheck
+	rep, err := rotated.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: time.Hour})
 	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
+		t.Fatalf("secret rotation must not fail startup: %v", err)
 	}
-	t.Cleanup(func() { bs.Close() })
-	ks := auth.NewBadgerKeyStore(bs)
-
-	// Fresh store: Load is a non-error empty snapshot.
-	ver, entries, err := ks.Load()
-	if err != nil || ver != "" || entries != nil {
-		t.Fatalf("fresh Load = (%q, %v, %v), want (\"\", nil, nil)", ver, entries, err)
-	}
-
-	snap := []auth.DynamicKeyEntry{persistEntry("k1", "org-x"), persistEntry("k2", "org-y")}
-	if err := ks.Save("7", snap); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	ver, entries, err = ks.Load()
-	if err != nil || ver != "7" || len(entries) != 2 || entries[0].Owner != "org-x" || entries[1].Owner != "org-y" {
-		t.Fatalf("round-trip mismatch: ver=%q entries=%+v err=%v", ver, entries, err)
-	}
-
-	// Reset drops the snapshot; a fresh load is empty again.
-	if err := ks.Reset(); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	if _, entries, err := ks.Load(); err != nil || entries != nil {
-		t.Fatalf("post-Reset Load = (%v, %v), want empty", entries, err)
+	if rep.Discarded == "" || authenticates(rotated, "k1") {
+		t.Fatalf("snapshot sealed with the old secret must be discarded, report = %+v", rep)
 	}
 }
 
-func TestBadgerKeyStore_CorruptSnapshotFailsLoad(t *testing.T) {
-	bs, err := storage.NewBadgerStorage(t.TempDir(), 0)
-	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
-	}
-	t.Cleanup(func() { bs.Close() })
-	ks := auth.NewBadgerKeyStore(bs)
-
-	// Poison the snapshot entry directly (simulates corruption).
-	if err := bs.SetDiskEntry([]byte("keyStore:registry"), []byte("{not-json")); err != nil {
-		t.Fatalf("SetDiskEntry: %v", err)
-	}
-	p := auth.NewDynamicKeyProvider()
-	p.SetKeyStore(ks)
-	if err := p.LoadKeyStore(); err == nil || !strings.Contains(err.Error(), "corrupt") {
-		t.Fatalf("corrupt snapshot must fail LoadKeyStore (fail closed), got: %v", err)
-	}
-}
-
-// TestBadgerKeyStore_FullFieldRoundTrip: every field of a registry entry
-// must survive Save→Load unchanged. If a field is dropped from the mapping
-// — or a new field is added to DynamicKeyEntry/QuotaLimits without a DTO
-// update — a restored key would come back with weaker limits; this test
-// fails instead.
 func TestBadgerKeyStore_FullFieldRoundTrip(t *testing.T) {
-	bs, err := storage.NewBadgerStorage(t.TempDir(), 0)
-	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
-	}
-	t.Cleanup(func() { bs.Close() })
-	ks := auth.NewBadgerKeyStore(bs)
-
-	// Drift guards: if the source types gain fields, the DTO mapping must be
-	// updated in the same change — fail loudly instead of silently zeroing
-	// the new field on load.
-	if n := reflect.TypeOf(auth.DynamicKeyEntry{}).NumField(); n != 9 {
-		t.Fatalf("DynamicKeyEntry has %d fields (was 9) — update entryToWire/wireToEntry/keyStoreEntry", n)
-	}
-	if n := reflect.TypeOf(auth.QuotaLimits{}).NumField(); n != 6 {
-		t.Fatalf("QuotaLimits has %d fields (was 6) — update entryToWire/wireToEntry/keyStoreQuota", n)
-	}
-	if n := reflect.TypeOf(auth.PerModelQuotaLimits{}).NumField(); n != 2 {
-		t.Fatalf("PerModelQuotaLimits has %d fields (was 2) — update entryToWire/wireToEntry/keyStorePerModel", n)
-	}
-
-	expiry := time.Date(2026, 12, 1, 9, 30, 0, 0, time.UTC)
-	want := auth.DynamicKeyEntry{
-		ID:            "k1",
-		KeyHash:       strings.Repeat("ab", 32),
-		KeyPreview:    "sk-...XYZ",
-		Owner:         "org-x",
-		Name:          "label",
+	dir := t.TempDir()
+	exp := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	e := auth.DynamicKeyEntry{
+		ID:            "full",
+		KeyHash:       persistEntry("full", "o").KeyHash,
+		KeyPreview:    "sk-...ull",
+		Owner:         "org-full",
+		Name:          "Full key",
 		Enabled:       true,
-		ExpiresAt:     &expiry,
-		AllowedModels: []string{"m1", "m2"},
+		ExpiresAt:     &exp,
+		AllowedModels: []string{"a/b", "c/d"},
 		Quota: auth.QuotaLimits{
-			RequestsPerMinute:     11,
-			TokensPerDay:          22,
-			InputTokensPerMinute:  33,
-			OutputTokensPerMinute: 44,
+			RequestsPerMinute:     10,
+			TokensPerDay:          1000,
+			InputTokensPerMinute:  300,
+			OutputTokensPerMinute: 400,
 			MaxOccupancyShare:     0.25,
 			PerModel: map[string]auth.PerModelQuotaLimits{
-				"m1": {RequestsPerMinutePerReplica: 5, TokensPerDay: 6},
-				"m2": {RequestsPerMinutePerReplica: 7, TokensPerDay: 8},
+				"a/b": {RequestsPerMinutePerReplica: 3, TokensPerDay: 50},
 			},
 		},
 	}
-
-	if err := ks.Save("v1", []auth.DynamicKeyEntry{want}); err != nil {
-		t.Fatalf("Save: %v", err)
+	p := newPersistent(t, dir, nil)
+	if err := p.Upsert("1", e); err != nil {
+		t.Fatalf("Upsert: %v", err)
 	}
-	_, got, err := ks.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
-		t.Fatalf("round-trip mismatch:\n got: %+v\nwant: %+v", got, want)
+	fresh, _ := restart(t, p, dir, nil, auth.KeyStoreLoadOptions{})
+	_, got := fresh.Snapshot()
+	if len(got) != 1 || !reflect.DeepEqual(got[0], e) {
+		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, e)
 	}
 }
 
-// TestBadgerKeyStore_UnknownSchemaRejected: a snapshot written by a newer
-// (or other) router version must be refused, not half-parsed.
-func TestBadgerKeyStore_UnknownSchemaRejected(t *testing.T) {
-	bs, err := storage.NewBadgerStorage(t.TempDir(), 0)
-	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
-	}
-	t.Cleanup(func() { bs.Close() })
-
-	if err := bs.SetDiskEntryNoTTL([]byte("keyStore:registry"), []byte(`{"schema":999,"version":"1","entries":[]}`)); err != nil {
-		t.Fatalf("SetDiskEntryNoTTL: %v", err)
-	}
-	ks := auth.NewBadgerKeyStore(bs)
-	if _, _, err := ks.Load(); err == nil || !strings.Contains(err.Error(), "unsupported snapshot schema") {
-		t.Fatalf("unknown schema must be refused (fail closed), got: %v", err)
-	}
-}
-
-// TestKeyStore_EmptySnapshotRestoresVersion: a persisted {version, []} (all
-// keys deleted) must restore the version, or a stale push below that version
-// would be accepted after a restart (monotonic-version weakening).
-func TestKeyStore_EmptySnapshotRestoresVersion(t *testing.T) {
-	fs := &fakeKeyStore{loaded: "9"} // persisted empty registry at version 9
-	p := auth.NewDynamicKeyProvider()
-	p.SetKeyStore(fs)
-	if err := p.LoadKeyStore(); err != nil {
-		t.Fatalf("LoadKeyStore: %v", err)
-	}
-	ver, _ := p.Version()
-	if ver != "9" {
-		t.Fatalf("version after empty-snapshot load = %q, want \"9\"", ver)
-	}
-	// A push replayed from before the last sync must now be rejected.
-	if err := p.Upsert("8", persistEntry("k1", "org-x")); err != auth.ErrStaleVersion {
-		t.Fatalf("stale push must be rejected, got: %v", err)
-	}
-}
-
-// TestKeyStore_ConcurrentMutationsSerializePersists: the persisted snapshot
-// must never end up older than the in-memory registry (lost update).
-//
-// Deterministic with persistMu: k2's save can only complete after k1's
-// (gated) save — Snapshot+Save is serialized — so the last persisted
-// snapshot contains both keys. Without persistMu, k1's stale one-entry save
-// lands after k2's two-entry save and overwrites it (caught with some
-// probability — the regression is a race, so no test can catch it with
-// certainty).
-func TestKeyStore_ConcurrentMutationsSerializePersists(t *testing.T) {
-	p := auth.NewDynamicKeyProvider()
-	gate := make(chan struct{})
-	fs := &fakeKeyStore{saveGate: gate}
-	p.SetKeyStore(fs)
-
+// Concurrent mutations must reach the store in the order they were applied
+// in memory: after a restart the store equals the last in-memory state.
+func TestBadgerKeyStore_ConcurrentMutationsStayOrdered(t *testing.T) {
+	dir := t.TempDir()
+	p := newPersistent(t, dir, nil)
 	var wg sync.WaitGroup
-
-	// k1's Upsert: its Save (the first one) blocks on the gate.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := p.Upsert("1", persistEntry("k1", "org-x")); err != nil {
-			t.Errorf("Upsert k1: %v", err)
-		}
-	}()
-	waitUntil(t, "first Save in flight", func() bool { return fs.saveCount() >= 1 })
-
-	// k2's Upsert runs concurrently. With persistMu its save waits for k1's
-	// (gated) save to finish; without it, k2's save can land first.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := p.Upsert("1", persistEntry("k2", "org-x")); err != nil {
-			t.Errorf("Upsert k2: %v", err)
-		}
-	}()
-	waitUntil(t, "k2 in memory", func() bool {
-		_, entries := p.Snapshot()
-		return len(entries) == 2
-	})
-
-	// Release k1's gated (one-entry) save. With persistMu, k2's save waited
-	// for persistMu and can only complete AFTER k1's — so the last persisted
-	// snapshot is k2's two-entry one. Without persistMu, k1's stale one-entry
-	// save can land after k2's two-entry save (the lost-update regression —
-	// a race, so this test catches it with some probability, not certainty).
-	close(gate)
+	var verMu sync.Mutex
+	seq := 0
+	next := func() string { verMu.Lock(); defer verMu.Unlock(); seq++; return fmt.Sprintf("rev_%06d", seq) }
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				id := fmt.Sprintf("k%d", (w*25+i)%40)
+				if i%3 == 2 {
+					_ = p.Delete(next(), id) // may be stale under contention — fine
+				} else {
+					_ = p.Upsert(next(), persistEntry(id, "o"))
+				}
+			}
+		}(w)
+	}
 	wg.Wait()
-
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if len(fs.lastEntries) != 2 {
-		t.Fatalf("last persisted snapshot has %d entries, want 2 — an older save overwrote a newer one (lost update)", len(fs.lastEntries))
+	wantVer, want := p.Snapshot()
+	fresh, _ := restart(t, p, dir, nil, auth.KeyStoreLoadOptions{})
+	gotVer, got := fresh.Snapshot()
+	if gotVer != wantVer || !reflect.DeepEqual(got, want) {
+		t.Fatalf("restored state diverges from the last in-memory state: ver %q vs %q, %d vs %d keys", gotVer, wantVer, len(got), len(want))
 	}
 }
 
-// TestBadgerKeyStore_SnapshotSurvivesDiskTTL guards the TTL footgun: the
-// default DiskDBTTLDays=30 means every SetDiskEntry write (which applies the
-// configured TTL) would silently expire the registry snapshot, resurrecting
-// an EMPTY store on the next router restart — defeating the persistence the
-// backend exists to provide. BadgerKeyStore.Save therefore uses
-// SetDiskEntryNoTTL; this test proves the snapshot outlives the TTL that a
-// regular diskDB entry does not.
-func TestBadgerKeyStore_SnapshotSurvivesDiskTTL(t *testing.T) {
-	bs, err := storage.NewBadgerStorage(t.TempDir(), time.Second) // 1s diskTTL
+func TestBadgerKeyStore_DirectoryIsPrivate(t *testing.T) {
+	dir := t.TempDir() + "/ks"
+	ks := openStore(t, dir, testSecret)
+	defer ks.Close() //nolint:errcheck
+	fi, err := os.Stat(dir)
 	if err != nil {
-		t.Fatalf("NewBadgerStorage: %v", err)
+		t.Fatalf("stat: %v", err)
 	}
-	t.Cleanup(func() { bs.Close() })
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("key store dir mode = %o, want 700", perm)
+	}
+}
 
-	// Control: a TTL'd entry (the SetDiskEntry path) must expire.
-	if err := bs.SetDiskEntry([]byte("control"), []byte("x")); err != nil {
-		t.Fatalf("SetDiskEntry: %v", err)
-	}
-	// The key-store snapshot path must NOT carry the TTL.
-	ks := auth.NewBadgerKeyStore(bs)
-	if err := ks.Save("1", []auth.DynamicKeyEntry{persistEntry("k1", "org-x")}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	time.Sleep(1100 * time.Millisecond) // let the 1s TTL elapse
-
-	if v, err := bs.GetDiskEntry([]byte("control")); err != nil || v != nil {
-		t.Fatalf("control entry should have expired with diskTTL=1s (test premise): v=%q err=%v", v, err)
-	}
-	if v, err := bs.GetDiskEntry([]byte("keyStore:registry")); err != nil || v == nil {
-		t.Fatalf("key store snapshot must survive the diskTTL (no-TTL write): v=%q err=%v", v, err)
+func TestBadgerKeyStore_FreshStoreLoadsNothing(t *testing.T) {
+	p := newPersistent(t, t.TempDir(), nil)
+	t.Cleanup(func() { p.CloseKeyStore() }) //nolint:errcheck
+	rep, err := p.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: time.Minute})
+	if err != nil || rep.Restored != 0 || rep.Discarded != "" || p.KeyStoreStatus().Restored {
+		t.Fatalf("fresh store: rep=%+v err=%v", rep, err)
 	}
 }

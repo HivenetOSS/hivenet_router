@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -164,17 +165,19 @@ type Router struct {
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
-// (KeyStoreBackend "badger") and validates the backend configuration. It
-// returns an error when the backend value is invalid, when "badger" is
-// selected without a dynamic key registry, when the reset cannot be applied,
-// or when the persisted snapshot cannot be read — a silently empty persistent
-// store would break every consumer key, so an unreadable one is worse than
-// no router: the caller must abort startup (fail closed).
-func wireKeyStore(cfg *config.Config, store *storage.BadgerStorage, keyRegistry *auth.DynamicKeyProvider) error {
+// (KeyStoreBackend "badger") and validates the backend configuration.
+//
+// The persisted registry is a warm-start cache of the upstream key-sync
+// service, so only a snapshot that is unreadable as a whole (I/O error,
+// corrupt meta, unknown schema) aborts startup (fail closed). An over-age or
+// untrusted snapshot is discarded, and individual bad records are skipped —
+// see auth.DynamicKeyProvider.LoadKeyStore. admit is the admission check the
+// admin handlers run on writes, applied to every restored key.
+func wireKeyStore(cfg *config.Config, keyRegistry *auth.DynamicKeyProvider, admit func(auth.DynamicKeyEntry) error) error {
 	switch cfg.KeyStoreBackend {
 	case "memory", "":
-		// default — RAM-only registry, state rebuilt by the upstream key-sync service
-		// after restarts.
+		// default — RAM-only registry, state rebuilt by the upstream key-sync
+		// service after restarts.
 		if cfg.ResetKeyStore {
 			log.Warnf("--reset-key-store ignored: KeyStoreBackend is %q (only 'badger' persists a registry to wipe)", cfg.KeyStoreBackend)
 		}
@@ -183,31 +186,62 @@ func wireKeyStore(cfg *config.Config, store *storage.BadgerStorage, keyRegistry 
 		if keyRegistry == nil {
 			return fmt.Errorf("key store: KeyStoreBackend=badger requires dynamic auth mode (HIVENET_ROUTER_AUTH_MODE=dynamic)")
 		}
-		ks := auth.NewBadgerKeyStore(store)
+		if cfg.KeyStorePath == "" {
+			return fmt.Errorf("key store: --key-store-path must not be empty")
+		}
+		if pathsOverlap(cfg.KeyStorePath, cfg.DiskDBPath) {
+			return fmt.Errorf("key store: --key-store-path %q overlaps --disk-db-path %q — the key store needs its own directory so each reset flag wipes only its own data", cfg.KeyStorePath, cfg.DiskDBPath)
+		}
 		if cfg.ResetKeyStore {
-			log.Warnf("--reset-key-store: wiping persisted dynamic API key registry")
-			if err := ks.Reset(); err != nil {
-				return err // Reset's error already carries the "key store: reset:" prefix
+			log.Warnf("--reset-key-store: wiping persisted dynamic API key registry at %s", cfg.KeyStorePath)
+			if err := os.RemoveAll(cfg.KeyStorePath); err != nil {
+				return fmt.Errorf("key store: reset: %w", err)
 			}
+		}
+		ks, err := auth.OpenBadgerKeyStore(cfg.KeyStorePath, []byte(cfg.JWTSecret))
+		if err != nil {
+			return err
 		}
 		keyRegistry.SetKeyStore(ks)
 		keyRegistry.SetOnPersistError(func(err error) {
-			log.Errorf("%v — registry changes are not durable until the next successful save", err)
+			log.Errorf("%v — registry changes are not durable until the next successful save (retrying in the background)", err)
 		})
-		if err := keyRegistry.LoadKeyStore(); err != nil {
-			// Fail closed: a persistent registry that cannot be read is worse
-			// than no router (a silently empty store breaks every consumer key).
-			// The error already carries the "key store:" prefix — return it
-			// as-is so operators don't see it doubled.
-			return err
+		rep, err := keyRegistry.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: cfg.KeyStoreMaxAge, Admit: admit})
+		if err != nil {
+			keyRegistry.CloseKeyStore() //nolint:errcheck
+			return err                  // already carries the "key store:" prefix
 		}
-		if ver, entries := keyRegistry.Snapshot(); len(entries) > 0 {
-			log.Infof("Key store: restored %d dynamic API key(s) from %s (registry version %q)", len(entries), cfg.DiskDBPath, ver)
+		for id, reason := range rep.SkippedReasons {
+			log.Warnf("Key store: skipped persisted key %q: %s", id, reason)
+		}
+		switch {
+		case rep.Discarded != "":
+			log.Warnf("Key store: persisted registry at %s discarded (%s) — starting empty, awaiting bootstrap from the upstream key-sync service", cfg.KeyStorePath, rep.Discarded)
+		case rep.Version != "" || rep.Restored > 0:
+			log.Infof("Key store: restored %d dynamic API key(s) from %s (registry version %q, snapshot age %s, %d skipped) — unconfirmed until the upstream key-sync service sends a full replace",
+				rep.Restored, cfg.KeyStorePath, rep.Version, rep.SnapshotAge.Round(time.Second), rep.Skipped)
 		}
 		return nil
 	default:
 		return fmt.Errorf("key store: invalid KeyStoreBackend %q (valid: memory, badger)", cfg.KeyStoreBackend)
 	}
+}
+
+// pathsOverlap reports whether a and b are the same directory or one
+// contains the other (after cleaning; relative paths are made absolute).
+func pathsOverlap(a, b string) bool {
+	abs := func(p string) string {
+		if ap, err := filepath.Abs(p); err == nil {
+			return ap
+		}
+		return filepath.Clean(p)
+	}
+	a, b = abs(a), abs(b)
+	within := func(child, parent string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
+	}
+	return within(a, b) || within(b, a)
 }
 
 // New creates a new Router instance with initialized components.
@@ -301,16 +335,33 @@ func New(cfg *config.Config) (*Router, error) {
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
 
-	// Persistent dynamic key registry (KeyStoreBackend "badger", env
-	// HIVENET_ROUTER_KEY_STORE): wire the registry to the diskDB so minted
-	// keys survive restarts. Deployments that run an upstream key-sync
-	// keep the default ("memory") and are unaffected — the production model
-	// (router = cache, upstream key-sync service = source of truth for keys) is
-	// preserved; opt-in deployments (PoCs, local dev) get durability.
-	// On error the router aborts startup (fail closed — see wireKeyStore).
-	if err := wireKeyStore(cfg, store, keyRegistry); err != nil {
+	// Persistent dynamic key registry (--key-store=badger): a warm-start
+	// cache of the upstream key-sync service in its own BadgerDB, so a
+	// restarted router serves keys before key-sync re-pushes. Restored keys
+	// get the same admission check the admin handlers apply on writes,
+	// against the policies in force now. On an unreadable snapshot the
+	// router aborts startup (fail closed — see wireKeyStore).
+	admitRestored := func(e auth.DynamicKeyEntry) error {
+		return ValidateAdmissionInvariants(gatherPolicies(effectiveGlobal, namedPolicies), []auth.APIKeyEntry{dynamicEntryAsAPIKey(e)})
+	}
+	if err := wireKeyStore(cfg, keyRegistry, admitRestored); err != nil {
 		store.Close()   //nolint:errcheck
 		return nil, err // wireKeyStore's errors already carry the "key store:" prefix
+	}
+	if keyRegistry != nil && cfg.KeyStoreBackend == "badger" {
+		routerMetrics.RegisterKeyStore(func() metrics.KeyStoreSample {
+			st := keyRegistry.KeyStoreStatus()
+			return metrics.KeyStoreSample{
+				PersistErrors:       st.PersistErrors,
+				LastPersistSuccess:  st.LastPersistSuccess,
+				Dirty:               st.Dirty,
+				RestoredKeys:        st.RestoredKeys,
+				RestoredSnapshotAge: st.RestoredSnapshotAge,
+				Restored:            st.Restored,
+				Confirmed:           st.Confirmed,
+				SkippedEntries:      st.SkippedEntries,
+			}
+		})
 	}
 
 	// Admission invariants that span the policy and auth configs (e.g. a
@@ -624,7 +675,15 @@ func (r *Router) Close() error {
 		log.Warnf("closing semantic decision log: %v", err)
 	}
 
-	// 6. Close storage (safe — no goroutine can write to it now).
+	// 6. Close the dynamic key store (nil-safe; stops its background retry).
+	//    Admin mutations still arriving are applied in memory and answered 503.
+	if r.keyRegistry != nil {
+		if err := r.keyRegistry.CloseKeyStore(); err != nil {
+			log.Warnf("closing key store: %v", err)
+		}
+	}
+
+	// 7. Close storage (safe — no goroutine can write to it now).
 	return r.storage.Close()
 }
 

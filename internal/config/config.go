@@ -140,19 +140,33 @@ type Config struct {
 	// registry (dynamic auth mode only; static keys live in auth.yaml).
 	//   "memory" (default) — the registry is RAM-only; state is lost on
 	//                        restart and rebuilt by the upstream key-sync
-	//                        keysync (the production model: the router is a
-	//                        cache, never the source of truth for keys).
-	//   "badger"           — the registry is persisted to the diskDB (BadgerDB
-	//                        at DiskDBPath) on every mutation and loaded on
-	//                        startup, so minted keys survive router restarts.
-	//                        For deployments without an upstream key-sync
-	//                        (PoCs, local dev).
-	// Env: HIVENET_ROUTER_KEY_STORE
+	//                        service (the router is a cache, never the source
+	//                        of truth for keys).
+	//   "badger"           — the registry is persisted to a dedicated BadgerDB
+	//                        at KeyStorePath on every mutation and used as a
+	//                        warm-start cache on startup (bounded by
+	//                        KeyStoreMaxAge), so a restarted router serves keys
+	//                        before the upstream key-sync service re-pushes.
+	// Flag: --key-store   Env: HIVENET_ROUTER_KEY_STORE
 	KeyStoreBackend string
 
-	// ResetKeyStore wipes the persisted dynamic key registry on startup
-	// (use to recover from a corrupt snapshot; only meaningful when
-	// KeyStoreBackend is "badger").
+	// KeyStorePath is the directory of the key-store BadgerDB. It is separate
+	// from DiskDBPath so --reset-disk-db and --reset-key-store each wipe only
+	// their own data. Created with mode 0700.
+	// Flag: --key-store-path   Env: HIVENET_ROUTER_KEY_STORE_PATH
+	KeyStorePath string
+
+	// KeyStoreMaxAge bounds the staleness of a restored snapshot: one whose
+	// last write is older than this is discarded at startup (the router starts
+	// empty, as in memory mode). 0 disables the bound — only for deployments
+	// with no upstream key-sync service, where the snapshot is the only copy.
+	// Flag: --key-store-max-age   Env: HIVENET_ROUTER_KEY_STORE_MAX_AGE
+	KeyStoreMaxAge time.Duration
+
+	// ResetKeyStore wipes the key-store directory on startup (use to recover
+	// from an unreadable snapshot; only meaningful when KeyStoreBackend is
+	// "badger"). One-shot: remove it after use.
+	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
 
 	// Closed-source provider configuration.
@@ -190,6 +204,8 @@ func DefaultConfig() *Config {
 		MaxConcurrentForwards:  50,
 		DiskDBPath:             "./badger_disk",
 		KeyStoreBackend:        "memory",
+		KeyStorePath:           "./badger_keystore",
+		KeyStoreMaxAge:         15 * time.Minute,
 		FlushPeriod:            5 * time.Second,
 		DiskDBTTLDays:          30,
 		UniversalFlushInterval: 30 * time.Second,
@@ -313,6 +329,19 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {
 		cfg.KeyStoreBackend = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_PATH"); v != "" {
+		cfg.KeyStorePath = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_MAX_AGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.KeyStoreMaxAge = d
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_RESET_KEY_STORE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ResetKeyStore = b
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})

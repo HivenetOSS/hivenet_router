@@ -39,25 +39,11 @@ type DynamicKeyEntry struct {
 	Quota         QuotaLimits
 }
 
-// KeyStore is a persistence backend for the dynamic key registry.
-// Implementations must be safe for concurrent use. The registry is
-// persisted on every mutation (Upsert, Delete, ReplaceAll) and restored on
-// startup; a missing snapshot (fresh store) is not an error.
-type KeyStore interface {
-	// Load returns the persisted registry snapshot (version + entries).
-	// A fresh store (entry never written) returns ("", nil, nil).
-	Load() (version string, entries []DynamicKeyEntry, err error)
-	// Save atomically replaces the persisted registry snapshot.
-	Save(version string, entries []DynamicKeyEntry) error
-	// Reset removes the persisted snapshot entirely (fresh-start escape hatch).
-	Reset() error
-}
-
 // DynamicKeyProvider is a mutable in-memory API key registry.
 // Keys are pushed by the upstream key-sync service at runtime via admin endpoints.
 // All state is lost on restart and rebuilt from the upstream key-sync service —
 // unless a KeyStore is wired (SetKeyStore), in which case every mutation is
-// persisted and the registry is restored on startup instead.
+// persisted and the registry is warm-started from it (see key_store.go).
 type DynamicKeyProvider struct {
 	mu       sync.RWMutex
 	byHash   map[string]*DynamicKeyEntry // SHA-256 hex → entry (for Authenticate)
@@ -69,17 +55,19 @@ type DynamicKeyProvider struct {
 	// Wired once before the registry serves traffic; see SetKeyStore.
 	store KeyStore
 
-	// onPersistError reports persistence failures (nil = ignored). A persist
-	// failure never fails the in-memory mutation — see persist.
+	// onPersistError reports persistence failures (nil = ignored).
 	onPersistError func(error)
 
-	// persistMu serializes Snapshot+Save in persist(). Without it two
-	// concurrent mutations can interleave (A snapshots S1, B mutates and
-	// saves S2, A saves S1) and the disk ends up holding the OLDER snapshot
-	// — a revoked key would resurrect and a minted key would be lost after a
-	// restart. Holding it across both steps guarantees the last-completed
-	// save reflects the latest state at its snapshot time.
+	// persistMu serializes whole mutations (memory change + store write) when
+	// a store is wired, so the store sees writes in the order they were
+	// applied in memory — see lockPersist. Lock order: persistMu before mu.
 	persistMu sync.Mutex
+
+	// ks is the persistence/restore bookkeeping (see key_store.go).
+	ks keyStoreState
+
+	// now is the clock (overridable in tests).
+	now func() time.Time
 }
 
 // NewDynamicKeyProvider creates an empty key registry.
@@ -87,52 +75,12 @@ func NewDynamicKeyProvider() *DynamicKeyProvider {
 	return &DynamicKeyProvider{
 		byHash: make(map[string]*DynamicKeyEntry),
 		byID:   make(map[string]*DynamicKeyEntry),
+		now:    time.Now,
 	}
 }
 
-// SetKeyStore wires a persistence backend into the registry. Must be called
-// once before the registry serves traffic (i.e. before the admin endpoints
-// are exposed); wiring a second store later is a programming error. A nil
-// store (the default) keeps the registry memory-only.
-func (r *DynamicKeyProvider) SetKeyStore(s KeyStore) { r.store = s }
-
-// SetOnPersistError registers the sink for persistence failures. Persistence
-// failures never fail an in-memory mutation (the registry remains the
-// serving source of truth); they are only reported through this hook, e.g.
-// to a log line.
-func (r *DynamicKeyProvider) SetOnPersistError(fn func(error)) { r.onPersistError = fn }
-
-// LoadKeyStore restores the persisted registry into this provider. Returns
-// nil when no store is wired or nothing is persisted. Errors (backend
-// failure, corrupt snapshot) are returned so the caller can fail startup
-// closed — a persistent registry that cannot be read is worse than no
-// router; on error the provider is left in its previous (empty) state.
-func (r *DynamicKeyProvider) LoadKeyStore() error {
-	if r.store == nil {
-		return nil
-	}
-	ver, entries, err := r.store.Load()
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		// Restore the version even when the persisted registry is empty (all
-		// keys deleted): without this a stale push with any version below the
-		// persisted one would be accepted after a restart, weakening the
-		// monotonic-version guarantee across restarts.
-		if ver != "" {
-			r.mu.Lock()
-			if ver > r.version {
-				r.version = ver
-			}
-			r.mu.Unlock()
-		}
-		return nil
-	}
-	// Re-validate through the normal mutation path (field rules, duplicate
-	// checks); the snapshot was produced by Snapshot, so this is a formality.
-	return r.ReplaceAll(ver, entries)
-}
+// SetClock overrides the provider clock (tests).
+func (r *DynamicKeyProvider) SetClock(now func() time.Time) { r.now = now }
 
 // Snapshot returns a copy of the current entries (deterministic ID order)
 // plus the registry version. Slices and the per-model map are deep-copied so
@@ -156,22 +104,6 @@ func (r *DynamicKeyProvider) Snapshot() (string, []DynamicKeyEntry) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	return r.version, entries
-}
-
-// persist writes the current registry state to the wired key store. No-op in
-// memory mode. A failure is reported via onPersistError (if set) and does not
-// affect the in-memory state: the last good snapshot stays on disk, and the
-// next mutation retries.
-func (r *DynamicKeyProvider) persist() {
-	if r.store == nil {
-		return
-	}
-	r.persistMu.Lock()
-	defer r.persistMu.Unlock()
-	ver, entries := r.Snapshot()
-	if err := r.store.Save(ver, entries); err != nil && r.onPersistError != nil {
-		r.onPersistError(err)
-	}
 }
 
 // SetOnChange registers a callback fired after every successful registry
@@ -268,10 +200,14 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 // Upsert adds or updates a key entry. Rejects if version < current version.
 // Equal version is accepted as a no-op replay (idempotent at-least-once delivery).
 // Validates required fields and KeyHash format (same rules as StaticKeyProvider).
+// With a key store wired, a failed write returns an error wrapping
+// ErrNotDurable; the change is nevertheless in effect in memory.
 func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 	if err := normalizeAndValidateKeyEntry(&e); err != nil {
 		return err
 	}
+	unlock := r.lockPersist()
+	defer unlock()
 	r.mu.Lock()
 	if version < r.version {
 		r.mu.Unlock()
@@ -315,17 +251,23 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 	if r.onChange != nil {
 		r.onChange()
 	}
-	r.persist()
-	return nil
+	persisted := *entry // entries are replaced, never mutated in place
+	return r.persistLocked(func(s KeyStore, now time.Time) error {
+		return s.Upsert(version, persisted, now)
+	})
 }
 
 // Delete removes a key by ID. Rejects if version < current version.
 // Equal version is accepted as a no-op replay (idempotent at-least-once delivery).
-// Idempotent — returns nil even if the key does not exist.
+// Idempotent — returns nil even if the key does not exist. With a key store
+// wired, a failed write returns an error wrapping ErrNotDurable; the
+// revocation is nevertheless in effect in memory.
 func (r *DynamicKeyProvider) Delete(version string, keyID string) error {
 	if keyID == "" {
 		return fmt.Errorf("auth: delete: keyID must not be empty")
 	}
+	unlock := r.lockPersist()
+	defer unlock()
 	r.mu.Lock()
 	if version < r.version {
 		r.mu.Unlock()
@@ -348,8 +290,9 @@ func (r *DynamicKeyProvider) Delete(version string, keyID string) error {
 	if r.onChange != nil {
 		r.onChange()
 	}
-	r.persist()
-	return nil
+	return r.persistLocked(func(s KeyStore, now time.Time) error {
+		return s.Delete(version, keyID, now)
+	})
 }
 
 // checkDuplicates returns an error if any two entries share the same ID or hash.
@@ -376,6 +319,9 @@ func checkDuplicates(entries []DynamicKeyEntry) error {
 // Validates all entries and rejects duplicates before replacing; partial
 // updates are not applied. Each entry is copied into a fresh struct so the
 // registry is independent of the caller's slice.
+// A successful in-memory replace marks a restored registry as confirmed by
+// the upstream key-sync service. With a key store wired, a failed write
+// returns an error wrapping ErrNotDurable (the replace is still in effect).
 func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntry) error {
 	for i := range entries {
 		if err := normalizeAndValidateKeyEntry(&entries[i]); err != nil {
@@ -403,6 +349,8 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 		byID[entry.ID] = entry
 	}
 
+	unlock := r.lockPersist()
+	defer unlock()
 	r.mu.Lock()
 	if version < r.version {
 		r.mu.Unlock()
@@ -412,12 +360,14 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 	r.byID = byID
 	r.version = version
 	r.mu.Unlock()
+	r.ks.confirmed.Store(true)
 
 	if r.onChange != nil {
 		r.onChange()
 	}
-	r.persist()
-	return nil
+	return r.persistLocked(func(_ KeyStore, now time.Time) error {
+		return r.rewriteLocked(now)
+	})
 }
 
 // Version returns the current registry version string and key count.
