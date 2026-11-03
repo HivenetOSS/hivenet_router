@@ -1398,11 +1398,11 @@ These series exist only when [cross-site redirect](/routing/cross-site-redirect)
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `hivenet_redirects_total` | Counter | `model`, `site`, `hop` | `307` responses to a sibling policloud; `hop="2"` means the sibling map was stale |
-| `hivenet_redirect_rejections_total` | Counter | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `site`, `path`, `scope`, `replay`, `key`, `body` |
+| `hivenet_redirect_rejections_total` | Counter | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key`, `body` |
 | `hivenet_sibling_map_version` | Gauge | None | Version of the sibling map this router holds; `0` before the first push |
 | `hivenet_sibling_map_hints_expired` | Gauge | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
 
-A rising `reason="expired"` rate means clients take longer than `--redirect-token-ttl` to follow the redirect; `reason="replay"` means a token was presented twice. A router whose `hivenet_sibling_map_version` lags the others missed a map push.
+A rising `reason="expired"` rate means clients take longer than `--redirect-token-ttl` to follow the redirect; `reason="clock"` means this router’s clock is behind the router that signed the token; `reason="replay"` means a token was presented twice. A router whose `hivenet_sibling_map_version` lags the others missed a map push.
 
 ## Per-request duration by agent
 

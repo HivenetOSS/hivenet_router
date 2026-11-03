@@ -371,7 +371,7 @@ Returned only when [cross-site redirect](/routing/cross-site-redirect) is enable
 }
 ```
 
-Enable redirect following in the client, for example `follow_redirects=True` with `httpx`.
+Enable redirect following in the client, for example `follow_redirects=True` with `httpx`. An invalid `X-Hivenet-Scope` request header is refused with `400 request_invalid` instead.
 
 ## Request-size rejection
 

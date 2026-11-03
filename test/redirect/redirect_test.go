@@ -30,6 +30,9 @@ var (
 	no  = func() *bool { b := false; return &b }()
 )
 
+// domains is the allowed-domain list of every test map.
+var domains = []string{".example.com"}
+
 func u64(v uint64) *uint64 { return &v }
 
 func pc(id, country string, eu *bool) redirect.Policloud {
@@ -74,6 +77,9 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 		{"url with path", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com/v1" }},
 		{"url with query", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com?x=1" }},
 		{"url with credentials", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://u:p@fr-1.example.com" }},
+		{"host outside the allowed domains", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.attacker.net" }},
+		{"allowed domain only as a prefix", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com.attacker.net" }},
+		{"allowed domain without a label boundary", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://evilexample.com" }},
 		{"lowercase country", func(d *redirect.MapDoc) { d.Policlouds[0].Country = "fr" }},
 		{"3-letter country", func(d *redirect.MapDoc) { d.Policlouds[0].Country = "FRA" }},
 		{"missing eu", func(d *redirect.MapDoc) { d.Policlouds[0].EU = nil }},
@@ -90,7 +96,7 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := redirect.NewMap()
+			m := redirect.NewMap(domains)
 			if err := m.Replace(doc(1)); err != nil {
 				t.Fatal(err)
 			}
@@ -106,10 +112,35 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 	}
 }
 
+// TestMapReplace_AllowedDomains: hosts match the allowed suffixes ignoring
+// case and port; a map with no allowed domain refuses every push.
+func TestMapReplace_AllowedDomains(t *testing.T) {
+	d := doc(1)
+	d.Policlouds[1].URL = "https://FR-2.Example.COM:8443"
+	if err := redirect.NewMap(domains).Replace(d); err != nil {
+		t.Fatalf("upper-case host with a port: %v", err)
+	}
+	if err := redirect.NewMap(nil).Replace(doc(1)); err == nil {
+		t.Fatal("a map with no allowed domain must refuse every push")
+	}
+}
+
+func TestParseDomains(t *testing.T) {
+	got, err := redirect.ParseDomains(" .Inference.HiveCompute.ai , .example.com,")
+	if err != nil || !reflect.DeepEqual(got, []string{".inference.hivecompute.ai", ".example.com"}) {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	for _, bad := range []string{"", " , ", "hivecompute.ai", ".", "..example.com", ".example.com/", ".exa mple.com", "*.example.com", ".example.com."} {
+		if _, err := redirect.ParseDomains(bad); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+}
+
 // TestMapReplace_NumericVersions: versions compare as numbers ("10" > "9"),
 // a lower version is ErrStaleVersion (409), an equal one is a replay.
 func TestMapReplace_NumericVersions(t *testing.T) {
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	for _, v := range []uint64{9, 10, 10} {
 		if err := m.Replace(doc(v)); err != nil {
 			t.Fatalf("version %d: %v", v, err)
@@ -128,7 +159,7 @@ func TestMapReplace_NumericVersions(t *testing.T) {
 func TestMapReplace_TrimsTrailingSlash(t *testing.T) {
 	d := doc(1)
 	d.Policlouds[1].URL = "https://fr-2.example.com/"
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if err := m.Replace(d); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +205,7 @@ func target(t *testing.T, m *redirect.Map, req redirect.TargetRequest) string {
 // TestTarget_FollowsTheContractFormula: across many keys and sessions the
 // pick is the session's first choice inside the key's top-2 home set.
 func TestTarget_FollowsTheContractFormula(t *testing.T) {
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +225,7 @@ func TestTarget_FollowsTheContractFormula(t *testing.T) {
 // TestTarget_HomeSetIsTwo: one key + model only ever reaches two sibling
 // policlouds, however many sessions it uses (its rate limits stay meaningful).
 func TestTarget_HomeSetIsTwo(t *testing.T) {
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +240,7 @@ func TestTarget_HomeSetIsTwo(t *testing.T) {
 
 // TestTarget_Filters: kind, this policloud, the origin and the scope.
 func TestTarget_Filters(t *testing.T) {
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +293,7 @@ func TestTarget_Hints(t *testing.T) {
 			},
 			HintsExpireAt: expire.UTC().Format(time.RFC3339),
 		}
-		m := redirect.NewMap()
+		m := redirect.NewMap(domains)
 		if err := m.Replace(d); err != nil {
 			t.Fatal(err)
 		}
@@ -296,9 +327,59 @@ func TestTarget_Hints(t *testing.T) {
 	}
 }
 
+// TestTarget_WakeHereBeforeColdSibling: while the hints are fresh, no
+// redirect when every candidate is cold and the model is placed here (it is
+// woken here instead); otherwise the cold sibling is still used.
+func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
+	const key, session = "key-1", "s"
+	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
+	build := func(placedHere bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
+		d := redirect.MapDoc{
+			Schema: 2, Version: u64(1), Region: "eu",
+			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
+			Placements: []redirect.Placement{
+				place("m", redirect.KindChat, "a", yes, ha),
+				place("m", redirect.KindChat, "b", yes, hb),
+			},
+			HintsExpireAt: expire.UTC().Format(time.RFC3339),
+		}
+		if placedHere {
+			d.Placements = append(d.Placements, place("m", redirect.KindChat, "self", yes, cold))
+		}
+		m := redirect.NewMap(domains)
+		if err := m.Replace(d); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	cases := []struct {
+		name       string
+		placedHere bool
+		ha, hb     *redirect.Hint
+		expire     time.Time
+		redirect   bool
+	}{
+		{"all cold, placed here: wake here", true, cold, cold, fresh, false},
+		{"all cold, not placed here: cold sibling", false, cold, cold, fresh, true},
+		{"one warm sibling: redirect", true, cold, warm, fresh, true},
+		{"no hint means warm: redirect", true, cold, nil, fresh, true},
+		{"hints expired: redirect", true, cold, cold, stale, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := target(t, build(tc.placedHere, tc.ha, tc.hb, tc.expire),
+				redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "self", From: "self", KeyID: key, Session: session})
+			if (got != "") != tc.redirect {
+				t.Fatalf("target %q, want a redirect: %v", got, tc.redirect)
+			}
+		})
+	}
+}
+
 // TestHintsExpired backs hivenet_sibling_map_hints_expired.
 func TestHintsExpired(t *testing.T) {
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if !m.HintsExpired(time.Now()) {
 		t.Fatal("no map: hints count as expired")
 	}
@@ -372,6 +453,9 @@ func TestSigner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid token: %v", err)
 	}
+	if _, err := s.Verify(tok, now.Add(-5*time.Second)); err != nil { // iat - 5 s skew: still valid
+		t.Fatalf("token issued 5 s ahead of this clock: %v", err)
+	}
 	claims.IssuedAt, claims.Exp = now.Unix(), now.Add(60*time.Second).Unix()
 	if got != claims {
 		t.Fatalf("claims round trip: got %+v, want %+v", got, claims)
@@ -390,6 +474,8 @@ func TestSigner(t *testing.T) {
 		want  error
 	}{
 		{"expired past the skew", tok, now.Add(66 * time.Second), redirect.ErrTokenExpired},
+		{"issued in the future past the skew", tok, now.Add(-6 * time.Second), redirect.ErrTokenFromFuture},
+		{"forged and expired: signature first", signer(t, time.Minute, redirect.Secret{ID: "k1", Key: secretB.Key}).Sign(claims, now.Add(-time.Hour)), now, redirect.ErrTokenSignature},
 		{"claims tampered", strings.Join([]string{parts[0], parts[1], flip(parts[2], 3), parts[3]}, "."), now, redirect.ErrTokenSignature},
 		{"signature tampered", strings.Join([]string{parts[0], parts[1], parts[2], flip(parts[3], 3)}, "."), now, redirect.ErrTokenSignature},
 		{"same kid, another secret", signer(t, time.Minute, redirect.Secret{ID: "k1", Key: secretB.Key}).Sign(claims, now), now, redirect.ErrTokenSignature},
@@ -516,7 +602,7 @@ func registry(t *testing.T, enabled bool, expires *time.Time) *auth.DynamicKeyPr
 // newRedirector is policloud de-1 (DE, EU) of the map doc(1).
 func newRedirector(t *testing.T, rejects *[]string) *redirect.Redirector {
 	t.Helper()
-	m := redirect.NewMap()
+	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -589,6 +675,7 @@ func TestTokenAuth(t *testing.T) {
 			&recorder{res: keyResult}, false, false, "key-1", "expired"},
 		{"forged token", request(signer(t, time.Minute, redirect.Secret{ID: "k1", Key: secretB.Key}).Sign(valid, now), ""), registry(t, true, nil), &recorder{}, true, false, "", "signature"},
 		{"garbage token", request("v2.garbage", ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"token from the future", request(signer(t, time.Minute, secretA).Sign(valid, now.Add(time.Minute)), ""), registry(t, true, nil), &recorder{}, true, false, "", "clock"},
 		{"auth mode none", request(sign(func(c *redirect.Claims) { c.KeyID = "" }), ""), nil,
 			&recorder{res: &auth.AuthResult{TenantID: "default"}}, false, true, "", ""},
 	}

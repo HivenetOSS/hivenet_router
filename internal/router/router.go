@@ -1018,7 +1018,8 @@ func (r *Router) reloadAuthProviders() {
 }
 
 // newRedirector builds the cross-site redirect state, or returns nil when
-// cfg.SiteID is empty (redirect disabled). cmd/router validates the secret.
+// cfg.SiteID is empty (redirect disabled). cmd/router validates the secrets
+// and allowed domains first, so a bad value stops startup there.
 func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterMetrics) (*redirect.Redirector, error) {
 	if cfg.SiteID == "" {
 		return nil, nil
@@ -1034,9 +1035,13 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 	if err != nil {
 		return nil, fmt.Errorf("cross-site redirect: %w", err)
 	}
+	domains, err := redirect.ParseDomains(cfg.RedirectAllowedDomains)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
 	rd := &redirect.Redirector{
 		Self:       cfg.SiteID,
-		Map:        redirect.NewMap(),
+		Map:        redirect.NewMap(domains),
 		Signer:     signer,
 		Replay:     redirect.NewReplayGuard(),
 		OnRedirect: m.Redirect,

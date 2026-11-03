@@ -37,7 +37,7 @@ Use these endpoints to inspect agents, models, storage, and routing state; updat
 | `POST` | `/admin/api-keys/replace` | Replace the dynamic key registry |
 | `GET` | `/admin/api-keys/version` | Read the registry version and key count |
 | `GET` | `/admin/sibling-map` | Read this router’s policloud ID and the sibling map (cross-site redirect only; see [Cross-site redirect](/routing/cross-site-redirect)) |
-| `POST` | `/admin/sibling-map` | Replace the sibling map: `409` for a lower version, `400` for an invalid map (cross-site redirect only) |
+| `POST` | `/admin/sibling-map` | Replace the sibling map: `409` for a lower version, `400` for an invalid map or a policloud URL outside `--redirect-allowed-domains` (cross-site redirect only) |
 
 The dynamic key endpoints return HTTP `501` unless the router is using dynamic API authentication.
 

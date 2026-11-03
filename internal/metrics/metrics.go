@@ -186,7 +186,8 @@ type RouterMetrics struct {
 	redirects *prometheus.CounterVec
 
 	// redirectRejections counts refused redirect tokens, by reason ∈
-	// {malformed, signature, expired, site, path, scope, replay, key, body}.
+	// {malformed, signature, expired, clock, site, path, scope, replay, key,
+	// body}.
 	// A rise in "expired" means clients take longer than the token TTL to
 	// follow; "replay" means a token was presented twice.
 	// Labels: reason.
@@ -513,7 +514,7 @@ func NewRouterMetrics() *RouterMetrics {
 		redirectRejections: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_redirect_rejections_total",
-				Help: "Refused redirect tokens, by reason (malformed, signature, expired, site, path, scope, replay, key, body).",
+				Help: "Refused redirect tokens, by reason (malformed, signature, expired, clock, site, path, scope, replay, key, body).",
 			},
 			[]string{"reason"},
 		),

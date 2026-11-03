@@ -69,14 +69,19 @@ type Config struct {
 	// "id:secret" lines (parsed by redirect.ParseSecrets: the first signs,
 	// every line verifies; required when SiteID is set). RedirectTokenTTL is
 	// how long a token stays valid (60s: an overloaded client took up to ~46s
-	// between the 307 and its follow-up). Invalid values stop startup.
+	// between the 307 and its follow-up). RedirectAllowedDomains lists the
+	// host suffixes a sibling-map URL must end with (parsed by
+	// redirect.ParseDomains; required when SiteID is set). Invalid values stop
+	// startup.
 	// Env: HIVENET_ROUTER_SITE_ID, HIVENET_ROUTER_REDIRECT_SECRETS
-	// (comma-separated id:secret), HIVENET_ROUTER_REDIRECT_TOKEN_TTL.
+	// (comma-separated id:secret), HIVENET_ROUTER_REDIRECT_TOKEN_TTL,
+	// HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS (comma-separated).
 	// Flag: --site-id, --redirect-secret-file (one id:secret per line),
-	// --redirect-token-ttl.
-	SiteID           string
-	RedirectSecrets  string
-	RedirectTokenTTL time.Duration
+	// --redirect-token-ttl, --redirect-allowed-domains.
+	SiteID                 string
+	RedirectSecrets        string
+	RedirectTokenTTL       time.Duration
+	RedirectAllowedDomains string
 
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
 	// protecting the router from memory exhaustion by an oversized payload
@@ -360,6 +365,9 @@ func LoadFromEnv() *Config {
 		default:
 			cfg.RedirectTokenTTL = d
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS")); v != "" {
+		cfg.RedirectAllowedDomains = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_REQUEST_BYTES"); v != "" {
 		// n == 0 is a valid value meaning "disabled"; only reject negatives.

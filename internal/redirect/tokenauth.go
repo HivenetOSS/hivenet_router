@@ -28,8 +28,8 @@ type Redirector struct {
 	// OnRedirect, if set, is called for every 307 written.
 	OnRedirect func(model, site string, hop int)
 	// OnReject, if set, is called when a redirect token is refused, with
-	// reason ∈ {malformed, signature, expired, site, path, scope, replay,
-	// key, body}.
+	// reason ∈ {malformed, signature, expired, clock, site, path, scope,
+	// replay, key, body}.
 	OnReject func(reason string)
 }
 
@@ -81,7 +81,7 @@ type tokenAuth struct {
 // Authenticate accepts a redirected request when its token passes every check
 // of contract 3 v2 §4, in order. The body hash cannot be checked here (the
 // body is not read yet); the API layer checks it against
-// AuthResult.Redirect.BodySHA before quota.
+// AuthResult.Redirect.BodySHA before quota, with the same fallback.
 //
 // Fallback: when the token fails any check but the request carries an
 // Authorization header, the token is ignored and the request is served on
@@ -124,6 +124,8 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 	switch {
 	case errors.Is(err, ErrTokenExpired):
 		return c, "expired"
+	case errors.Is(err, ErrTokenFromFuture):
+		return c, "clock"
 	case errors.Is(err, ErrTokenSignature):
 		return c, "signature"
 	case err != nil:

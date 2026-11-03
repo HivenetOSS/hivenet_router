@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,10 @@ const (
 )
 
 var redirectSecret = redirect.Secret{ID: "k1", Key: []byte("0123456789abcdef0123456789abcdef")}
+
+// testDomains: the fleet's hosts, and 127.0.0.1 where the round-trip test's
+// httptest servers listen.
+var testDomains = []string{".example.com", ".0.0.1"}
 
 type testSite struct {
 	engine  *gin.Engine
@@ -78,7 +83,7 @@ func newSite(t *testing.T, id string, healthy map[string]int, keys *auth.Dynamic
 	t.Helper()
 	s := &testSite{queue: make(chan *domain.PendingRequest, 4)}
 	s.rd = &redirect.Redirector{
-		Self: id, Map: redirect.NewMap(), Signer: testSigner(t), Replay: redirect.NewReplayGuard(),
+		Self: id, Map: redirect.NewMap(testDomains), Signer: testSigner(t), Replay: redirect.NewReplayGuard(),
 		OnRedirect: func(model, site string, hop int) {
 			s.redirs = append(s.redirs, fmt.Sprintf("%s→%s@%d", model, site, hop))
 		},
@@ -191,6 +196,13 @@ func serveOne(t *testing.T, s *testSite) *domain.PendingRequest {
 
 func bearer() map[string]string { return map[string]string{"Authorization": "Bearer " + redirectKey} }
 
+// scoped is bearer() plus an X-Hivenet-Scope header.
+func scoped(scope string) map[string]string {
+	h := bearer()
+	h["X-Hivenet-Scope"] = scope
+	return h
+}
+
 var chatBody = []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":5}`)
 
 // locationToken parses the Location of a 307 and verifies its token.
@@ -212,7 +224,8 @@ func locationToken(t *testing.T, w *httptest.ResponseRecorder) (*url.URL, redire
 
 // TestRedirect_MissWrites307: the entry policloud has no agent for the model,
 // so it answers 307 to a sibling with a v2 token, and spends nothing: no
-// queueing and no quota charge.
+// queueing and no quota charge. Without X-Hivenet-Scope the request stays in
+// the entry's country: b (FR), never c (DE).
 func TestRedirect_MissWrites307(t *testing.T) {
 	a := newSite(t, "a", nil, testKeys(t))
 	push(t, fleetDoc(1), a)
@@ -220,15 +233,15 @@ func TestRedirect_MissWrites307(t *testing.T) {
 	w := send(a, chatPath+"?api-version=2024", chatBody, bearer())
 
 	loc, c := locationToken(t, w)
-	if loc.Scheme != "https" || (loc.Host != "b.example.com" && loc.Host != "c.example.com") || loc.Path != chatPath {
-		t.Fatalf("Location %s: want https://{b,c}.example.com%s", loc, chatPath)
+	if loc.Scheme != "https" || loc.Host != "b.example.com" || loc.Path != chatPath {
+		t.Fatalf("Location %s: want https://b.example.com%s", loc, chatPath)
 	}
 	if loc.Query().Get("api-version") != "2024" {
 		t.Errorf("request query not kept: %s", loc.RawQuery)
 	}
 	want := redirect.Claims{
-		KeyID: "key-1", RequestID: w.Header().Get("X-Request-ID"), Model: "m", Scope: redirect.ScopeAll,
-		From: "a", Site: strings.TrimSuffix(loc.Host, ".example.com"), Path: chatPath, Hop: 1,
+		KeyID: "key-1", RequestID: w.Header().Get("X-Request-ID"), Model: "m", Scope: "country:FR",
+		From: "a", Site: "b", Path: chatPath, Hop: 1,
 		BodySHA: redirect.BodySHA(chatBody), IssuedAt: c.IssuedAt, Exp: c.IssuedAt + 60,
 	}
 	if c != want || c.RequestID == "" {
@@ -247,13 +260,14 @@ func TestRedirect_MissWrites307(t *testing.T) {
 	if *a.charges != 0 {
 		t.Errorf("the redirecting policloud charged %d quota unit(s); it must charge none", *a.charges)
 	}
-	if len(a.redirs) != 1 || a.redirs[0] != "m→"+c.Site+"@1" {
+	if len(a.redirs) != 1 || a.redirs[0] != "m→b@1" {
 		t.Errorf("redirect metric %v", a.redirs)
 	}
 }
 
 // TestRedirect_EmbeddingsAndRerank: every inference endpoint redirects, by
-// the placement kind that matches it — and only by that kind.
+// the placement kind that matches it — and only by that kind. (Scope EU:
+// rerank model r runs only in c, in DE.)
 func TestRedirect_EmbeddingsAndRerank(t *testing.T) {
 	a := newSite(t, "a", nil, testKeys(t))
 	push(t, fleetDoc(1), a)
@@ -264,7 +278,7 @@ func TestRedirect_EmbeddingsAndRerank(t *testing.T) {
 		{"/v1/rerank", `{"model":"r","query":"q","documents":["d"]}`, "c.example.com"},
 		{"/v1/messages", `{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, ""},
 	} {
-		loc, c := locationToken(t, send(a, tc.path, []byte(tc.body), bearer()))
+		loc, c := locationToken(t, send(a, tc.path, []byte(tc.body), scoped("EU")))
 		if (tc.wantHost != "" && loc.Host != tc.wantHost) || loc.Path != tc.path || c.Path != tc.path {
 			t.Errorf("%s: Location %s, path claim %q", tc.path, loc, c.Path)
 		}
@@ -272,7 +286,7 @@ func TestRedirect_EmbeddingsAndRerank(t *testing.T) {
 
 	// m is placed only as a chat model: an embeddings request for it is not
 	// redirected but handled here as before.
-	done := sendAsync(a, "/v1/embeddings", []byte(`{"model":"m","input":"x"}`), bearer())
+	done := sendAsync(a, "/v1/embeddings", []byte(`{"model":"m","input":"x"}`), scoped("EU"))
 	serveOne(t, a)
 	if w := <-done; w.Header().Get("Location") != "" {
 		t.Error("an embeddings request for a chat-only model must not be redirected")
@@ -329,12 +343,74 @@ func disable(t *testing.T, s *testSite) {
 	s.engine = inferenceEngine(h, redirect.Wrap(nil, keys, keys), lim, none)
 }
 
+// TestRedirect_Scope: X-Hivenet-Scope bounds where a first hop may go; no
+// header = this policloud's country; an invalid value is a 400, never
+// widened; a redirected request keeps its token's scope (see AtTheTarget).
+func TestRedirect_Scope(t *testing.T) {
+	a := newSite(t, "a", nil, testKeys(t))
+	push(t, fleetDoc(1), a)
+	seen := func(hdr map[string]string) map[string]redirect.Scope {
+		out := map[string]redirect.Scope{}
+		for i := 0; i < 50; i++ {
+			hdr["X-Session-ID"] = fmt.Sprint(i)
+			loc, c := locationToken(t, send(a, chatPath, chatBody, hdr))
+			out[loc.Host] = c.Scope
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		scope string
+		want  map[string]redirect.Scope
+	}{
+		{"", map[string]redirect.Scope{"b.example.com": "country:FR"}},
+		{"country:DE", map[string]redirect.Scope{"c.example.com": "country:DE"}},
+		{"EU", map[string]redirect.Scope{"b.example.com": "EU", "c.example.com": "EU"}},
+		{"all", map[string]redirect.Scope{"b.example.com": "all", "c.example.com": "all"}},
+	} {
+		hdr := bearer()
+		if tc.scope != "" {
+			hdr = scoped(tc.scope)
+		}
+		if got := seen(hdr); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("scope %q: targets and token scopes %v, want %v", tc.scope, got, tc.want)
+		}
+	}
+
+	t.Run("no policloud in the scope: served here", func(t *testing.T) {
+		done := sendAsync(a, chatPath, chatBody, scoped("country:US"))
+		serveOne(t, a)
+		if w := <-done; w.Header().Get("Location") != "" {
+			t.Fatal("no redirect expected")
+		}
+	})
+	for _, bad := range []string{"mars", "country:fr", "country:FRA", "eu"} {
+		t.Run("invalid "+bad+": 400", func(t *testing.T) {
+			charges, redirs := *a.charges, len(a.redirs)
+			w := send(a, chatPath, chatBody, scoped(bad))
+			if w.Code != http.StatusBadRequest || w.Header().Get("Location") != "" || len(a.redirs) != redirs || len(a.queue) != 0 || *a.charges != charges {
+				t.Fatalf("status %d Location %q redirects %d queued %d, want 400 and nothing redirected, queued or charged",
+					w.Code, w.Header().Get("Location"), len(a.redirs)-redirs, len(a.queue))
+			}
+		})
+	}
+	t.Run("this policloud not in the map: no default scope, served here", func(t *testing.T) {
+		x := newSite(t, "x", nil, testKeys(t))
+		push(t, fleetDoc(1), x)
+		done := sendAsync(x, chatPath, chatBody, bearer())
+		serveOne(t, x)
+		if w := <-done; w.Header().Get("Location") != "" {
+			t.Fatal("no redirect expected without a home country")
+		}
+	})
+}
+
 // TestRedirect_SessionAffinity: the same key and X-Session-ID always get the
-// same policloud.
+// same policloud (scope all, so both b and c are candidates).
 func TestRedirect_SessionAffinity(t *testing.T) {
 	a := newSite(t, "a", nil, testKeys(t))
 	push(t, fleetDoc(1), a)
-	hdr := map[string]string{"Authorization": "Bearer " + redirectKey, "X-Session-ID": "conversation-42"}
+	hdr := scoped("all")
+	hdr["X-Session-ID"] = "conversation-42"
 	first, _ := locationToken(t, send(a, chatPath, chatBody, hdr))
 	for i := 0; i < 20; i++ {
 		if got, _ := locationToken(t, send(a, chatPath, chatBody, hdr)); got.Host != first.Host {
@@ -394,6 +470,33 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		}
 		if strings.Join(b.rejects, ",") != "body" {
 			t.Errorf("reject reasons %v, want [body]", b.rejects)
+		}
+	})
+
+	t.Run("different body + valid key: served fresh on the key", func(t *testing.T) {
+		b := newSite(t, "b", map[string]int{"m": 1}, testKeys(t))
+		push(t, fleetDoc(1), b)
+		other := []byte(`{"model":"m","messages":[{"role":"user","content":"another prompt"}],"max_tokens":5}`)
+		done := sendAsync(b, chatPath+"?rt="+sign(t, claims(nil)), other, bearer())
+		p := serveOne(t, b)
+		w := <-done
+		if w.Code != http.StatusOK || p.KeyID != "key-1" || *b.charges != 1 {
+			t.Fatalf("status %d key %q charged %d, want 200 on key-1, charged once", w.Code, p.KeyID, *b.charges)
+		}
+		if w.Header().Get("X-Request-ID") == rid {
+			t.Error("a fresh request must not adopt the refused token's request ID")
+		}
+		if strings.Join(b.rejects, ",") != "body" {
+			t.Errorf("reject reasons %v, want [body]", b.rejects)
+		}
+
+		// Without a local agent the fresh request is redirected as a first hop
+		// from b, not as the refused token's second hop from a.
+		b = newSite(t, "b", nil, testKeys(t))
+		push(t, fleetDoc(1), b)
+		_, next := locationToken(t, send(b, chatPath+"?rt="+sign(t, claims(nil)), other, scoped("all")))
+		if next.Hop != 1 || next.From != "b" || next.Scope != redirect.ScopeAll || next.RequestID == rid || next.KeyID != "key-1" || next.BodySHA != redirect.BodySHA(other) {
+			t.Errorf("fresh redirect token %+v, want hop 1 from b on key-1 with its own request ID and body", next)
 		}
 	})
 
@@ -575,6 +678,8 @@ func TestSiblingMapAdmin(t *testing.T) {
 	schema1.Schema = 1
 	httpURL := fleetDoc(11)
 	httpURL.Policlouds[0].URL = "http://a.example.com"
+	foreign := fleetDoc(11)
+	foreign.Policlouds[2].URL = "https://c.attacker.net"
 	for name, tc := range map[string]struct {
 		body any
 		want int
@@ -582,6 +687,7 @@ func TestSiblingMapAdmin(t *testing.T) {
 		"lower version":  {fleetDoc(9), http.StatusConflict},
 		"unknown schema": {schema1, http.StatusBadRequest},
 		"http url":       {httpURL, http.StatusBadRequest},
+		"foreign host":   {foreign, http.StatusBadRequest},
 		"no version":     {`{"schema":2,"region":"eu","policlouds":[],"placements":[]}`, http.StatusBadRequest},
 		"not json":       {"{", http.StatusBadRequest},
 	} {

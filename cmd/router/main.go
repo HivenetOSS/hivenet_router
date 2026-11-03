@@ -88,6 +88,7 @@ func main() {
 	siteID := flag.String("site-id", cfg.SiteID, "This router's policloud ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
 	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
 	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
+	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
 
 	flag.Parse()
 
@@ -175,6 +176,7 @@ func main() {
 		log.Fatalf("--redirect-token-ttl must be > 0, got %v", *redirectTokenTTL)
 	}
 	cfg.RedirectTokenTTL = *redirectTokenTTL
+	cfg.RedirectAllowedDomains = strings.TrimSpace(*redirectAllowedDomains)
 	// Any invalid redirect setting stops startup rather than silently
 	// disabling or weakening cross-site redirect.
 	switch {
@@ -183,6 +185,9 @@ func main() {
 	case cfg.SiteID != "":
 		if _, err := redirect.ParseSecrets(cfg.RedirectSecrets); err != nil {
 			log.Fatalf("cross-site redirect (--site-id) needs valid signing secrets (HIVENET_ROUTER_REDIRECT_SECRETS or --redirect-secret-file): %v", err)
+		}
+		if _, err := redirect.ParseDomains(cfg.RedirectAllowedDomains); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid allowed domains (HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS or --redirect-allowed-domains): %v", err)
 		}
 	}
 
@@ -262,6 +267,7 @@ func main() {
 	log.Info("Cross-site redirect:")
 	if cfg.SiteID != "" {
 		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
+		log.Infof("  Allowed domains:     %s", cfg.RedirectAllowedDomains)
 	} else {
 		log.Info("  Site ID:             (not configured — redirect disabled)")
 	}

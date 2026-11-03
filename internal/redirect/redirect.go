@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -77,9 +78,10 @@ var (
 	// the current one. Versions compare numerically.
 	ErrStaleVersion = errors.New("redirect: stale sibling map version")
 
-	ErrTokenMalformed = errors.New("redirect: malformed token")
-	ErrTokenSignature = errors.New("redirect: bad token signature")
-	ErrTokenExpired   = errors.New("redirect: token expired")
+	ErrTokenMalformed  = errors.New("redirect: malformed token")
+	ErrTokenSignature  = errors.New("redirect: bad token signature")
+	ErrTokenExpired    = errors.New("redirect: token expired")
+	ErrTokenFromFuture = errors.New("redirect: token issued in the future")
 )
 
 // ---- sibling map ------------------------------------------------------------
@@ -136,8 +138,10 @@ func (h *Hint) load() string {
 
 // Map is the in-memory sibling map, replaced whole by each push and safe for
 // concurrent use. It is also the redirect allowlist: a Location header only
-// ever points at a policloud URL taken from it.
+// ever points at a policloud URL taken from it, and every such URL's host
+// lies under one of the allowed domains.
 type Map struct {
+	domains     []string // allowed host suffixes, from ParseDomains
 	mu          sync.RWMutex
 	doc         MapDoc
 	set         bool
@@ -146,8 +150,35 @@ type Map struct {
 	hintsExpire time.Time
 }
 
-// NewMap returns an empty map; nothing is redirected until the first push.
-func NewMap() *Map { return &Map{} }
+// NewMap returns an empty map that accepts policloud URLs only under
+// domains (from ParseDomains; none = every push is refused). Nothing is
+// redirected until the first push.
+func NewMap(domains []string) *Map { return &Map{domains: domains} }
+
+// ParseDomains parses the allowed host suffixes of policloud URLs: a
+// comma-separated list such as ".inference.hivecompute.ai". Each suffix must
+// start with "." so that it can only match whole DNS labels
+// ("evilhivecompute.ai" never matches "hivecompute.ai"). At least one is
+// required. Matching ignores case.
+func ParseDomains(s string) ([]string, error) {
+	var out []string
+	for _, d := range strings.Split(s, ",") {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		if !allowedDomain.MatchString(d) {
+			return nil, fmt.Errorf("redirect: allowed domain %q must be a host suffix starting with \".\", such as .inference.hivecompute.ai", d)
+		}
+		out = append(out, d)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("redirect: at least one allowed domain is required")
+	}
+	return out, nil
+}
+
+var allowedDomain = regexp.MustCompile(`^(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 
 var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
 
@@ -168,7 +199,7 @@ func (m *Map) Replace(doc MapDoc) error {
 	policlouds := make(map[string]Policloud, len(doc.Policlouds))
 	clean := make([]Policloud, 0, len(doc.Policlouds))
 	for i, p := range doc.Policlouds {
-		u, err := validatePolicloud(p)
+		u, err := m.validatePolicloud(p)
 		if err != nil {
 			return fmt.Errorf("redirect: policlouds[%d]: %w", i, err)
 		}
@@ -223,7 +254,7 @@ func (m *Map) Replace(doc MapDoc) error {
 // slash. Only absolute https origins are accepted: clients follow a redirect
 // from https down to http and then send the token (and some the API key) in
 // clear text.
-func validatePolicloud(p Policloud) (string, error) {
+func (m *Map) validatePolicloud(p Policloud) (string, error) {
 	if p.ID == "" {
 		return "", errors.New("id must not be empty")
 	}
@@ -234,6 +265,9 @@ func validatePolicloud(p Policloud) (string, error) {
 	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		strings.Trim(u.Path, "/") != "" {
 		return "", fmt.Errorf("policloud %q: url must be an absolute https:// origin with no path, query or credentials, got %q", p.ID, p.URL)
+	}
+	if !m.allowedHost(u.Hostname()) {
+		return "", fmt.Errorf("policloud %q: host %q is not under the allowed domains %v", p.ID, u.Hostname(), m.domains)
 	}
 	if !countryCode.MatchString(p.Country) {
 		return "", fmt.Errorf("policloud %q: country must be an ISO 3166-1 alpha-2 code, got %q", p.ID, p.Country)
@@ -267,6 +301,17 @@ func validatePlacement(pl Placement, policlouds map[string]Policloud) error {
 		}
 	}
 	return nil
+}
+
+// allowedHost reports whether host ends with one of the allowed domains.
+func (m *Map) allowedHost(host string) bool {
+	host = strings.ToLower(host)
+	for _, d := range m.domains {
+		if strings.HasSuffix(host, d) {
+			return true
+		}
+	}
+	return false
 }
 
 // Snapshot returns the current map (zero MapDoc before the first push).
@@ -316,10 +361,12 @@ type TargetRequest struct {
 }
 
 // Target picks the sibling policloud for a request (contract 3 v2 §3 steps
-// 3–6): placements of the model and kind, inside the scope, minus this
+// 3–7): placements of the model and kind, inside the scope, minus this
 // policloud and the origin; the key's home set (top 2 by H(keyID, model,
-// policloud)); ranked by the session; then skipping full or non-wakeable cold
-// targets while the hints are fresh. ok is false when no candidate is left.
+// policloud)); ranked by the session; then, while the hints are fresh, no
+// redirect when every candidate is cold and the model is placed here (wake
+// it here instead), else skipping full or non-wakeable cold targets. ok is
+// false when there is no target.
 func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -357,6 +404,9 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	if !req.Now.Before(m.hintsExpire) {
 		return cands[0].pc, true // no fresh hints: the session order alone
 	}
+	if m.placed(req.Model, req.Self) && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
+		return Policloud{}, false // every sibling is cold and the model is placed here: wake it here
+	}
 	firstEligible := -1
 	for i, c := range cands {
 		if c.pl.Hint.load() == LoadFull || (!c.pl.Hint.warm() && !*c.pl.ScaleFromZero) {
@@ -373,6 +423,11 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 		return cands[firstEligible].pc, true // only cold, wakeable targets
 	}
 	return cands[0].pc, true // every target skipped: a stale hint must not block service
+}
+
+// placed reports whether the map places model on policloud.
+func (m *Map) placed(model, policloud string) bool {
+	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool { return pl.Policloud == policloud })
 }
 
 // score is H(a, model, policloud): the first 8 bytes, big-endian, of
@@ -523,8 +578,8 @@ func (s *Signer) Sign(c Claims, now time.Time) string {
 	return payload + "." + base64.RawURLEncoding.EncodeToString(mac(s.sign.Key, payload))
 }
 
-// Verify checks token's format, signature (before decoding the claims) and
-// expiry (with ClockSkew) and returns its claims.
+// Verify checks token's format, signature (before decoding the claims),
+// expiry and issue time (both with ClockSkew) and returns its claims.
 func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
 	var c Claims
 	parts := strings.Split(strings.TrimPrefix(token, tokenPrefix), ".")
@@ -545,6 +600,9 @@ func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
 	}
 	if now.After(time.Unix(c.Exp, 0).Add(ClockSkew)) {
 		return c, ErrTokenExpired
+	}
+	if time.Unix(c.IssuedAt, 0).After(now.Add(ClockSkew)) {
+		return c, ErrTokenFromFuture // this clock is behind: the token would outlive its TTL
 	}
 	return c, nil
 }

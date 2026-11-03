@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"hivenet_router/internal/auth"
@@ -21,7 +22,8 @@ import (
 )
 
 // Context keys for cross-site redirects. AuthMiddleware sets ctxKeyRedirect
-// only for a request authenticated by a redirect token; ctxKeyClientBody holds
+// only for a request authenticated by a redirect token (RedirectTarget clears
+// it again when the body check refuses the token); ctxKeyClientBody holds
 // the body exactly as the client sent it whenever a middleware rewrites the
 // cached body (AliasMiddleware, RedirectTarget).
 const (
@@ -51,16 +53,20 @@ func redirectInfo(c *gin.Context) *auth.RedirectInfo {
 	return info
 }
 
-// RedirectTarget prepares a request that arrived with a redirect token. It
-// runs after BodyLimitMiddleware (which bounds the read) and before
-// AliasMiddleware and QuotaMiddleware:
+// RedirectTarget completes the checks of a request that arrived with a
+// redirect token. It runs after BodyLimitMiddleware (which bounds the read)
+// and before AliasMiddleware and QuotaMiddleware:
 //
-//   - the body must be the one the token was issued for, else 401 — before any
+//   - the body must be the one the token was issued for, checked before any
 //     quota is spent, so a leaked token cannot carry another prompt or drain
-//     the key's quota;
-//   - the request then uses the token's model, the concrete model the first
-//     router resolved, so an alias such as "auto" is not resolved again here.
-//     The body is still hashed as sent (ctxKeyClientBody keeps those bytes).
+//     the key's quota. On a mismatch the token is refused: a request that also
+//     carries its key (already verified as the token's key) is served as a
+//     fresh request on it, as for any refused token; otherwise 401;
+//   - an accepted request adopts the first router's request ID (logs, audit,
+//     X-Request-ID), so billing deduplicates it across the hops;
+//   - it uses the token's model, the concrete model the first router
+//     resolved, so an alias such as "auto" is not resolved again here. The
+//     body is still hashed as sent (ctxKeyClientBody keeps those bytes).
 //
 // Requests without a redirect token pass through untouched.
 func (h *Handlers) RedirectTarget() gin.HandlerFunc {
@@ -78,10 +84,18 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 		}
 		if info.BodySHA != redirect.BodySHA(body) {
 			h.redirect.Reject("body")
-			abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
-				"the request body does not match the redirect token", domain.SourceRouter)
+			if c.GetHeader("Authorization") == "" {
+				abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
+					"the request body does not match the redirect token", domain.SourceRouter)
+				return
+			}
+			c.Set(ctxKeyRedirect, (*auth.RedirectInfo)(nil)) // fresh request: hop 0, own ID, own model
+			c.Set(gin.BodyBytesKey, body)
+			c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			c.Next()
 			return
 		}
+		setRequestID(c, info.RequestID)
 		routed := body
 		var peek struct {
 			Model string `json:"model"`
@@ -108,11 +122,18 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 // charges no quota. It covers every inference endpoint, by the placement kind
 // that matches the path.
 //
+// The scope of a first hop comes from the X-Hivenet-Scope header
+// ("country:XX", "EU" or "all"; an invalid value is a 400, never widened).
+// Without the header it is this policloud's country, so by default a request
+// stays in the country it landed in. A redirected request keeps the scope of
+// its token.
+//
 // A request is served here as before when: redirect is disabled, the key may
 // not use the model (the handler answers 403), a healthy agent here serves
-// it, it has already been redirected redirect.MaxHops times, or no sibling is
-// left after the scope filter (the normal handling then applies, usually
-// 404). A redirect takes precedence over a policy's fallback_provider.
+// it, it has already been redirected redirect.MaxHops times, or the map
+// gives no target (none inside the scope, or every one cold while the model
+// is placed here); the normal handling then applies (hold-at-zero or 404).
+// A redirect takes precedence over a policy's fallback_provider.
 func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := endpointKinds[c.Request.URL.Path]
@@ -125,13 +146,23 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		hop, from, scope := 0, h.redirect.Self, redirect.ScopeAll // scope_max on keys is W5.5: until then "all"
-		if info := redirectInfo(c); info != nil {
-			hop, from, scope = info.Hop, info.From, redirect.Scope(info.Scope)
+		info := redirectInfo(c)
+		hop, from := 0, h.redirect.Self
+		if info != nil {
+			hop, from = info.Hop, info.From
 		}
 		if hop >= redirect.MaxHops || h.healthyAgentCount(model) > 0 {
 			c.Next()
 			return
+		}
+		var scope redirect.Scope
+		if info != nil {
+			scope = redirect.Scope(info.Scope)
+		} else {
+			var ok bool
+			if scope, ok = h.requestedScope(c); !ok {
+				return // 400 written
+			}
 		}
 		now := time.Now()
 		keyID := c.GetString("key_id")
@@ -166,6 +197,32 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 		h.redirect.Redirected(model, target.ID, hop+1)
 	}
 }
+
+// requestedScope returns the scope a first hop may be redirected within:
+// min(requested, key scope_max), where scope_max is "all" until keys carry
+// it (W5.5). The request asks with X-Hivenet-Scope; without it the scope is
+// this policloud's country (the caller's home country until keys carry one),
+// or empty — matching no policlouds — while this policloud is not in the map.
+// On an invalid header it writes 400 and returns false.
+func (h *Handlers) requestedScope(c *gin.Context) (redirect.Scope, bool) {
+	v := strings.TrimSpace(c.GetHeader(scopeHeader))
+	if v == "" {
+		if self, ok := h.redirect.Map.Policloud(h.redirect.Self); ok {
+			return redirect.Scope("country:" + self.Country), true
+		}
+		return "", true
+	}
+	scope, err := redirect.ParseScope(v)
+	if err != nil {
+		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+			fmt.Sprintf("invalid %s header %q: use country:XX (ISO 3166-1 alpha-2), EU or all", scopeHeader, v), domain.SourceRouter)
+		return "", false
+	}
+	return scope, true
+}
+
+// scopeHeader is the request header that asks for a redirect scope.
+const scopeHeader = "X-Hivenet-Scope"
 
 // modelAllowed reports whether the authenticated key may use model.
 func modelAllowed(c *gin.Context, model string) bool {
