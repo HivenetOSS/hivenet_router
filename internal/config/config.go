@@ -63,17 +63,19 @@ type Config struct {
 	// Must match between router and all agents. Required — startup fails if empty.
 	JWTSecret string
 
-	// Cross-site redirect (internal/redirect). SiteID is this router's site in
-	// the sibling map; empty (the default) disables redirects entirely.
-	// RedirectSecret is the HMAC key for redirect tokens, shared by every site
-	// (required, at least 32 bytes, when SiteID is set). RedirectTokenTTL is
-	// how long a token stays valid; 120s covers a client overloaded enough to
-	// take ~46s between the 307 and its follow-up.
-	// Env: HIVENET_ROUTER_SITE_ID, HIVENET_ROUTER_REDIRECT_SECRET,
-	// HIVENET_ROUTER_REDIRECT_TOKEN_TTL.
-	// Flag: --site-id, --redirect-secret-file, --redirect-token-ttl.
+	// Cross-site redirect (internal/redirect, contract 3 v2). SiteID is this
+	// router's policloud ID in the sibling map; empty (the default) disables
+	// redirects entirely. RedirectSecrets holds the token signing secrets as
+	// "id:secret" lines (parsed by redirect.ParseSecrets: the first signs,
+	// every line verifies; required when SiteID is set). RedirectTokenTTL is
+	// how long a token stays valid (60s: an overloaded client took up to ~46s
+	// between the 307 and its follow-up). Invalid values stop startup.
+	// Env: HIVENET_ROUTER_SITE_ID, HIVENET_ROUTER_REDIRECT_SECRETS
+	// (comma-separated id:secret), HIVENET_ROUTER_REDIRECT_TOKEN_TTL.
+	// Flag: --site-id, --redirect-secret-file (one id:secret per line),
+	// --redirect-token-ttl.
 	SiteID           string
-	RedirectSecret   string
+	RedirectSecrets  string
 	RedirectTokenTTL time.Duration
 
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
@@ -244,7 +246,7 @@ func DefaultConfig() *Config {
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
-		RedirectTokenTTL:       120 * time.Second,
+		RedirectTokenTTL:       60 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -339,14 +341,23 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
-	if v := os.Getenv("HIVENET_ROUTER_SITE_ID"); v != "" {
+	// Cross-site redirect values are validated strictly (like the key store):
+	// a typo must stop startup, not silently disable or weaken redirects.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_SITE_ID")); v != "" {
 		cfg.SiteID = v
 	}
-	if v := os.Getenv("HIVENET_ROUTER_REDIRECT_SECRET"); v != "" {
-		cfg.RedirectSecret = v
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_SECRETS")); v != "" {
+		// One id:secret per comma here; redirect.ParseSecrets reads lines.
+		cfg.RedirectSecrets = strings.ReplaceAll(v, ",", "\n")
 	}
-	if v := os.Getenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL")); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_REDIRECT_TOKEN_TTL=%q: %w", v, err))
+		case d <= 0:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_REDIRECT_TOKEN_TTL=%q: must be > 0", v))
+		default:
 			cfg.RedirectTokenTTL = d
 		}
 	}

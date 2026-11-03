@@ -198,9 +198,16 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set("key_preview", result.KeyPreview)
 		c.Set("allowed_models", result.AllowedModels)
 		c.Set("quota_limits", result.QuotaLimits)
-		if result.RedirectHop > 0 {
-			c.Set(ctxKeyRedirectHop, result.RedirectHop)
-			c.Set(ctxKeyRedirectBodySHA, result.RedirectBodySHA)
+		if result.Redirect != nil {
+			// A request repeated at a sibling policloud keeps the first
+			// router's request ID (logs, audit, X-Request-ID), so billing
+			// deduplicates it across the hops.
+			c.Set(ctxKeyRedirect, result.Redirect)
+			c.Set("request_id", result.Redirect.RequestID)
+			c.Header("X-Request-ID", result.Redirect.RequestID)
+			if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
+				span.SetAttributes(attribute.String("request.id", result.Redirect.RequestID))
+			}
 		}
 		c.Next()
 	}

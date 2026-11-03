@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,34 +13,60 @@ import (
 	"net/url"
 	"time"
 
+	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Context keys for cross-site redirects. AuthMiddleware sets the first two
-// only for a request authenticated by a redirect token; AliasMiddleware sets
-// the third when it rewrites the cached body, keeping the client's bytes.
+// Context keys for cross-site redirects. AuthMiddleware sets ctxKeyRedirect
+// only for a request authenticated by a redirect token; ctxKeyClientBody holds
+// the body exactly as the client sent it whenever a middleware rewrites the
+// cached body (AliasMiddleware, RedirectTarget).
 const (
-	ctxKeyRedirectHop     = "redirect_hop"
-	ctxKeyRedirectBodySHA = "redirect_body_sha"
-	ctxKeyClientBody      = "client_body"
+	ctxKeyRedirect   = "redirect"
+	ctxKeyClientBody = "client_body"
 )
+
+// endpointKinds maps each redirectable inference path to the placement kind
+// that may serve it (contract 3 v2 §3).
+var endpointKinds = map[string]string{
+	"/v1/chat/completions":      redirect.KindChat,
+	"/v1/messages":              redirect.KindChat,
+	"/v1/messages/count_tokens": redirect.KindChat,
+	"/v1/embeddings":            redirect.KindEmbedding,
+	"/v1/rerank":                redirect.KindRerank,
+}
 
 // SetRedirect enables cross-site redirects (see internal/redirect). Call
 // once during wiring, before the server starts. nil leaves them disabled.
 func (h *Handlers) SetRedirect(r *redirect.Redirector) { h.redirect = r }
 
-// RedirectBodyCheck refuses (401) a redirected request whose body differs
-// from the one its token was issued for, so a token leaked from a log cannot
-// carry another prompt. It must run before QuotaMiddleware — otherwise such
-// a request would still spend the key's per-minute quota — and after
-// BodyLimitMiddleware, which bounds the read. Requests without a redirect
-// token pass through untouched.
-func (h *Handlers) RedirectBodyCheck() gin.HandlerFunc {
+// redirectInfo returns the verified redirect token's claims, or nil when the
+// request did not arrive with one.
+func redirectInfo(c *gin.Context) *auth.RedirectInfo {
+	v, _ := c.Get(ctxKeyRedirect)
+	info, _ := v.(*auth.RedirectInfo)
+	return info
+}
+
+// RedirectTarget prepares a request that arrived with a redirect token. It
+// runs after BodyLimitMiddleware (which bounds the read) and before
+// AliasMiddleware and QuotaMiddleware:
+//
+//   - the body must be the one the token was issued for, else 401 — before any
+//     quota is spent, so a leaked token cannot carry another prompt or drain
+//     the key's quota;
+//   - the request then uses the token's model, the concrete model the first
+//     router resolved, so an alias such as "auto" is not resolved again here.
+//     The body is still hashed as sent (ctxKeyClientBody keeps those bytes).
+//
+// Requests without a redirect token pass through untouched.
+func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if h.redirect == nil || c.GetInt(ctxKeyRedirectHop) == 0 {
+		info := redirectInfo(c)
+		if h.redirect == nil || info == nil {
 			c.Next()
 			return
 		}
@@ -49,74 +76,109 @@ func (h *Handlers) RedirectBodyCheck() gin.HandlerFunc {
 				"failed to read request body", domain.SourceRouter)
 			return
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(body))
-		if c.GetString(ctxKeyRedirectBodySHA) != redirect.BodySHA(body) {
+		if info.BodySHA != redirect.BodySHA(body) {
 			h.redirect.Reject("body")
 			abortWithRouterError(c, http.StatusUnauthorized, domain.ErrCodeUnauthorized,
 				"the request body does not match the redirect token", domain.SourceRouter)
 			return
 		}
+		routed := body
+		var peek struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(body, &peek) == nil && peek.Model != info.Model {
+			if routed, err = replaceTopLevelModel(body, info.Model); err != nil {
+				abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+					"Invalid request: "+err.Error(), domain.SourceRouter)
+				return
+			}
+		}
+		c.Set(ctxKeyClientBody, body)
+		c.Set(gin.BodyBytesKey, routed)
+		c.Request.Body = io.NopCloser(bytes.NewReader(routed))
+		c.Set(ctxKeyPeekedModel, info.Model)
 		c.Next()
 	}
 }
 
-// redirectStep runs in Passthrough once the model is authorized for the key.
-// It returns true when it has written the response: a request for a model
-// with no healthy agent here, which the sibling map lists on another site, is
-// answered 307 to that site, unless it has already been redirected
-// redirect.MaxHops times. (RedirectBodyCheck has already verified a
-// redirected request's body.)
+// RedirectDecision answers 307 to a sibling policloud when no healthy agent
+// here serves the model and the sibling map lists one that does (contract 3
+// v2 §3). It runs after AliasMiddleware (so it routes on the concrete model)
+// and before QuotaMiddleware: the redirecting router does no inference and
+// charges no quota. It covers every inference endpoint, by the placement kind
+// that matches the path.
 //
-// Otherwise the request is served here as before (including the existing
-// 404 when the model exists nowhere). A redirect takes precedence over a
-// policy's fallback_provider: the model is served by a sibling rather than
-// by an external provider.
-func (h *Handlers) redirectStep(c *gin.Context, model string) bool {
-	if h.redirect == nil {
-		return false
+// A request is served here as before when: redirect is disabled, the key may
+// not use the model (the handler answers 403), a healthy agent here serves
+// it, it has already been redirected redirect.MaxHops times, or no sibling is
+// left after the scope filter (the normal handling then applies, usually
+// 404). A redirect takes precedence over a policy's fallback_provider.
+func (h *Handlers) RedirectDecision() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		kind := endpointKinds[c.Request.URL.Path]
+		if h.redirect == nil || h.healthyAgentCount == nil || kind == "" {
+			c.Next()
+			return
+		}
+		model := peekModel(c)
+		if model == "" || !modelAllowed(c, model) {
+			c.Next()
+			return
+		}
+		hop, from, scope := 0, h.redirect.Self, redirect.ScopeAll // scope_max on keys is W5.5: until then "all"
+		if info := redirectInfo(c); info != nil {
+			hop, from, scope = info.Hop, info.From, redirect.Scope(info.Scope)
+		}
+		if hop >= redirect.MaxHops || h.healthyAgentCount(model) > 0 {
+			c.Next()
+			return
+		}
+		now := time.Now()
+		keyID := c.GetString("key_id")
+		target, ok := h.redirect.Map.Target(redirect.TargetRequest{
+			Model: model, Kind: kind, Self: h.redirect.Self, From: from,
+			KeyID: keyID, Session: c.GetHeader("X-Session-ID"), Scope: scope, Now: now,
+		})
+		if !ok {
+			c.Next()
+			return
+		}
+		token := h.redirect.Signer.Sign(redirect.Claims{
+			KeyID:     keyID,
+			RequestID: c.GetString("request_id"),
+			Model:     model,
+			Scope:     scope,
+			From:      from,
+			Site:      target.ID,
+			Path:      c.Request.URL.Path,
+			Hop:       hop + 1,
+			BodySHA:   redirect.BodySHA(clientBody(c)),
+		}, now)
+		c.Header("Location", redirect.Location(target.URL, c.Request.URL, token))
+		c.Header("Cache-Control", "no-store")
+		// Not abortWithRouterError: a redirect is normal routing, not a failure
+		// for the audit log or the trace. The body explains it to clients that
+		// do not follow redirects (for example plain httpx).
+		c.AbortWithStatusJSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
+			domain.ErrCodeModelRedirected,
+			fmt.Sprintf("model %s is served by policloud %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID),
+			domain.SourceRouter)})
+		h.redirect.Redirected(model, target.ID, hop+1)
 	}
-	body := clientBody(c)
-	hop := c.GetInt(ctxKeyRedirectHop)
-	if hop >= redirect.MaxHops || h.healthyAgentCount == nil || h.healthyAgentCount(model) > 0 {
-		return false
-	}
-	keyID := c.GetString("key_id")
-	// The affinity key keeps one caller's session on one site, so its KV
-	// cache is reused there. X-Session-ID is optional; without it every
-	// request of a key goes to the same site.
-	site, ok := h.redirect.Map.Target(model, h.redirect.Self, keyID+"\x00"+c.GetHeader("X-Session-ID"))
-	if !ok {
-		return false
-	}
-
-	// ponytail: a key on the legacy flat quota shape is charged RPM here and
-	// again at the sibling; per-model keys are not charged here (no healthy
-	// agent → QuotaMiddleware skips). Exempt redirected requests here if it
-	// matters.
-	token := h.redirect.Signer.Sign(redirect.Claims{
-		KeyID:     keyID,
-		RequestID: c.GetString("request_id"),
-		Model:     model,
-		Site:      site.ID,
-		Path:      c.Request.URL.Path,
-		Hop:       hop + 1,
-		BodySHA:   redirect.BodySHA(body),
-	}, time.Now())
-	c.Header("Location", redirect.Location(site.URL, c.Request.URL, token))
-	c.Header("Cache-Control", "no-store")
-	// Not writeRouterError: a redirect is normal routing, not a failure for the
-	// audit log or the trace. The body explains it to clients that do not
-	// follow redirects (for example plain httpx, which defaults to not following).
-	c.JSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
-		domain.ErrCodeModelRedirected,
-		fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, site.ID),
-		domain.SourceRouter)})
-	h.redirect.Redirected(model, site.ID, hop+1)
-	return true
 }
 
-// clientBody returns the request body as the client sent it: the copy
-// AliasMiddleware kept before rewriting the model, else the cached body.
+// modelAllowed reports whether the authenticated key may use model.
+func modelAllowed(c *gin.Context, model string) bool {
+	allowSet, unrestricted := effectiveAllowedModels(c)
+	if unrestricted {
+		return true
+	}
+	_, ok := allowSet[model]
+	return ok
+}
+
+// clientBody returns the request body as the client sent it: the copy kept
+// before a middleware rewrote the model, else the cached body.
 func clientBody(c *gin.Context) []byte {
 	if b, ok := c.Get(ctxKeyClientBody); ok {
 		if body, ok := b.([]byte); ok {
@@ -127,41 +189,52 @@ func clientBody(c *gin.Context) []byte {
 	return body
 }
 
-// siblingMapRequest is the body of POST /admin/sibling-map.
-type siblingMapRequest struct {
-	Version string          `json:"version"`
-	Sites   []redirect.Site `json:"sites"`
-}
-
 const errRedirectNotActive = "cross-site redirect is not enabled on this router (set HIVENET_ROUTER_SITE_ID)"
 
-// GetSiblingMap handles GET /admin/sibling-map: this site's ID, the current
-// map version and its sites.
+// GetSiblingMap handles GET /admin/sibling-map: this router's site ID and the
+// current map (version 0 and no policlouds before the first push). The map
+// writer compares the version to detect drift.
 func (h *Handlers) GetSiblingMap(c *gin.Context) {
 	if h.redirect == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": errRedirectNotActive})
 		return
 	}
-	version, sites := h.redirect.Map.Snapshot()
-	c.JSON(http.StatusOK, gin.H{"site_id": h.redirect.Self, "version": version, "sites": sites})
+	doc := h.redirect.Map.Snapshot()
+	c.JSON(http.StatusOK, gin.H{
+		"site_id":         h.redirect.Self,
+		"schema":          redirect.Schema,
+		"version":         h.redirect.Map.Version(),
+		"region":          doc.Region,
+		"policlouds":      orEmpty(doc.Policlouds),
+		"placements":      orEmpty(doc.Placements),
+		"hints_expire_at": doc.HintsExpireAt,
+	})
+}
+
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 // ReplaceSiblingMap handles POST /admin/sibling-map: replace the whole map.
-// An older version is rejected with 409 so a delayed push cannot roll the map
-// back; an equal version is accepted as a replay. The map is kilobytes, so
-// the body is capped at 1 MB.
+// A lower version is rejected with 409 so a delayed push cannot roll the map
+// back; an equal version is accepted as a replay; an unknown schema or any
+// invalid entry is a 400 and the current map is kept. The map is kilobytes,
+// so the body is capped at 1 MB.
 func (h *Handlers) ReplaceSiblingMap(c *gin.Context) {
 	if h.redirect == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": errRedirectNotActive})
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
-	var req siblingMapRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var doc redirect.MapDoc
+	if err := c.ShouldBindJSON(&doc); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
 		return
 	}
-	if err := h.redirect.Map.Replace(req.Version, req.Sites); err != nil {
+	if err := h.redirect.Map.Replace(doc); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, redirect.ErrStaleVersion) {
 			status = http.StatusConflict
@@ -169,8 +242,9 @@ func (h *Handlers) ReplaceSiblingMap(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	log.Infof("sibling map replaced via POST /admin/sibling-map (version %s, %d sites)", req.Version, len(req.Sites))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "version": req.Version, "count": len(req.Sites)})
+	log.Infof("sibling map replaced via POST /admin/sibling-map (version %d, %d policlouds, %d placements)",
+		*doc.Version, len(doc.Policlouds), len(doc.Placements))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": *doc.Version, "policlouds": len(doc.Policlouds), "placements": len(doc.Placements)})
 }
 
 // redactPath removes the redirect token from a logged request path: the

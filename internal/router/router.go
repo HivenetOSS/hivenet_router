@@ -1026,13 +1026,32 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 	if err := redirect.CheckAuthMode(cfg.SiteID, apiProv); err != nil {
 		return nil, err
 	}
-	return &redirect.Redirector{
+	secrets, err := redirect.ParseSecrets(cfg.RedirectSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	signer, err := redirect.NewSigner(secrets, cfg.RedirectTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	rd := &redirect.Redirector{
 		Self:       cfg.SiteID,
 		Map:        redirect.NewMap(),
-		Signer:     redirect.NewSigner([]byte(cfg.RedirectSecret), cfg.RedirectTokenTTL),
+		Signer:     signer,
+		Replay:     redirect.NewReplayGuard(),
 		OnRedirect: m.Redirect,
 		OnReject:   m.RedirectRejected,
-	}, nil
+	}
+	m.RegisterSiblingMap(
+		func() float64 { return float64(rd.Map.Version()) },
+		func() float64 {
+			if rd.Map.HintsExpired(time.Now()) {
+				return 1
+			}
+			return 0
+		},
+	)
+	return rd, nil
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.

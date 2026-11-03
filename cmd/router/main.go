@@ -29,6 +29,7 @@ import (
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/logger"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/router"
 	"hivenet_router/internal/tracing"
 )
@@ -84,8 +85,8 @@ func main() {
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
-	siteID := flag.String("site-id", cfg.SiteID, "This router's site ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
-	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file containing the redirect-token HMAC secret shared by every site (env: HIVENET_ROUTER_REDIRECT_SECRET)")
+	siteID := flag.String("site-id", cfg.SiteID, "This router's policloud ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
+	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
 	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
 
 	flag.Parse()
@@ -168,14 +169,21 @@ func main() {
 		if err != nil {
 			log.Fatalf("cannot read --redirect-secret-file %q: %v", *redirectSecretFile, err)
 		}
-		cfg.RedirectSecret = strings.TrimSpace(string(data))
+		cfg.RedirectSecrets = string(data) // redirect.ParseSecrets trims every line
 	}
 	if *redirectTokenTTL <= 0 {
 		log.Fatalf("--redirect-token-ttl must be > 0, got %v", *redirectTokenTTL)
 	}
 	cfg.RedirectTokenTTL = *redirectTokenTTL
-	if cfg.SiteID != "" && len(cfg.RedirectSecret) < 32 {
-		log.Fatal("cross-site redirect (--site-id) requires a redirect secret of at least 32 bytes — set HIVENET_ROUTER_REDIRECT_SECRET or use --redirect-secret-file")
+	// Any invalid redirect setting stops startup rather than silently
+	// disabling or weakening cross-site redirect.
+	switch {
+	case cfg.SiteID == "" && strings.TrimSpace(cfg.RedirectSecrets) != "":
+		log.Fatal("redirect secrets are set but --site-id is empty — set HIVENET_ROUTER_SITE_ID or remove the secrets")
+	case cfg.SiteID != "":
+		if _, err := redirect.ParseSecrets(cfg.RedirectSecrets); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid signing secrets (HIVENET_ROUTER_REDIRECT_SECRETS or --redirect-secret-file): %v", err)
+		}
 	}
 
 	// Log startup banner with resolved configuration for operator visibility.

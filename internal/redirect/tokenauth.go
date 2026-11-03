@@ -16,23 +16,26 @@ import (
 
 var log = logging.Logger("redirect")
 
-// Redirector is one site's redirect state: who this site is, the sibling
-// map, the token signer and optional metric hooks.
+// Redirector is one policloud's redirect state: who this policloud is, the
+// sibling map, the token signer, the single-use guard and optional metric
+// hooks.
 type Redirector struct {
-	Self   string // this site's ID, as it appears in the sibling map
+	Self   string // this policloud's ID (the routers' --site-id)
 	Map    *Map
 	Signer *Signer
+	Replay *ReplayGuard
 
 	// OnRedirect, if set, is called for every 307 written.
 	OnRedirect func(model, site string, hop int)
-	// OnReject, if set, is called when a redirected request is refused, with
-	// reason ∈ {malformed, signature, expired, site, path, key, body}.
+	// OnReject, if set, is called when a redirect token is refused, with
+	// reason ∈ {malformed, signature, expired, site, path, scope, replay,
+	// key, body}.
 	OnReject func(reason string)
 }
 
-// Reject reports a refused redirected request.
+// Reject reports a refused redirect token.
 func (r *Redirector) Reject(reason string) {
-	log.Debugf("redirected request rejected: %s", reason)
+	log.Debugf("redirect token rejected: %s", reason)
 	if r.OnReject != nil {
 		r.OnReject(reason)
 	}
@@ -60,8 +63,8 @@ func Wrap(rd *Redirector, next auth.Provider, keys *auth.DynamicKeyProvider) aut
 }
 
 // CheckAuthMode rejects cross-site redirect (a non-empty siteID) with static
-// auth.yaml keys: they carry no key ID, so a sibling site could not resolve a
-// token to its key. Dynamic keys and auth mode none both work.
+// auth.yaml keys: they carry no key ID, so a sibling policloud could not
+// resolve a token to its key. Dynamic keys and auth mode none both work.
 func CheckAuthMode(siteID string, apiProv auth.Provider) error {
 	if _, static := apiProv.(*auth.StaticKeyProvider); static && siteID != "" {
 		return fmt.Errorf("cross-site redirect (site ID %q) requires dynamic API keys or auth mode none; static auth.yaml keys have no key ID", siteID)
@@ -75,47 +78,101 @@ type tokenAuth struct {
 	keys *auth.DynamicKeyProvider
 }
 
-// Authenticate accepts a redirected request when its token is validly signed,
-// unexpired, issued for this site and for this request path. The key comes
-// from the token's key ID. If the client also sent an Authorization header
-// (curl re-sends it when a chain returns to the original host), that key must
-// authenticate and must be the key the token names.
+// Authenticate accepts a redirected request when its token passes every check
+// of contract 3 v2 §4, in order. The body hash cannot be checked here (the
+// body is not read yet); the API layer checks it against
+// AuthResult.Redirect.BodySHA before quota.
 //
-// The body hash cannot be checked here (the body is not read yet); the
-// handler checks it against AuthResult.RedirectBodySHA.
+// Fallback: when the token fails any check but the request carries an
+// Authorization header, the token is ignored and the request is served on
+// that key as a fresh request (hop 0) — including a valid token whose key is
+// not the presented one. Without a usable key a refused token is a 401.
 func (t *tokenAuth) Authenticate(req *http.Request) (*auth.AuthResult, error) {
 	tok := req.URL.Query().Get(QueryParam)
 	if tok == "" {
 		return t.next.Authenticate(req)
 	}
-	c, err := t.r.Signer.Verify(tok, time.Now())
-	switch {
-	case errors.Is(err, ErrTokenExpired):
-		return t.refuse("expired")
-	case errors.Is(err, ErrTokenSignature):
-		return t.refuse("signature")
-	case err != nil:
-		return t.refuse("malformed")
-	case c.Site != t.r.Self:
-		return t.refuse("site")
-	case c.Path != req.URL.Path:
-		return t.refuse("path")
-	}
-
-	var res *auth.AuthResult
-	if req.Header.Get("Authorization") != "" || t.keys == nil {
-		res, err = t.next.Authenticate(req)
+	c, reason := t.check(req, tok, time.Now())
+	if reason == "" {
+		res, keyReason, err := t.resolveKey(req, c)
 		if err != nil {
 			return nil, err
 		}
-		if res.KeyID != c.KeyID {
-			return t.refuse("key")
+		if keyReason == "" {
+			res.Redirect = &auth.RedirectInfo{
+				Hop: c.Hop, BodySHA: c.BodySHA, RequestID: c.RequestID,
+				Model: c.Model, Scope: string(c.Scope), From: c.From,
+			}
+			return res, nil
 		}
-	} else if res, err = t.keys.AuthenticateKeyID(c.KeyID); err != nil {
-		return t.refuse("key")
+		reason = keyReason
 	}
-	res.RedirectHop, res.RedirectBodySHA = c.Hop, c.BodySHA
-	return res, nil
+	t.r.Reject(reason)
+	if req.Header.Get("Authorization") != "" {
+		return t.next.Authenticate(req) // fresh request on the presented key
+	}
+	return nil, auth.ErrInvalidCredentials
+}
+
+// check runs the token checks that need no key lookup, in the contract's
+// order, and returns the claims or the rejection reason. The single-use
+// record is taken only after the format, signature, expiry, site, path and
+// scope checks pass; a token then refused on its key (the next check) stays
+// consumed, as in the contract's order.
+func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims, string) {
+	c, err := t.r.Signer.Verify(tok, now)
+	switch {
+	case errors.Is(err, ErrTokenExpired):
+		return c, "expired"
+	case errors.Is(err, ErrTokenSignature):
+		return c, "signature"
+	case err != nil:
+		return c, "malformed"
+	case c.Site != t.r.Self:
+		return c, "site"
+	case c.Path != req.URL.Path:
+		return c, "path"
+	case !t.inScope(c.Scope):
+		return c, "scope"
+	case c.RequestID == "" || !t.r.Replay.First(c.RequestID, time.Unix(c.Exp, 0).Add(ClockSkew), now):
+		return c, "replay"
+	}
+	return c, ""
+}
+
+// inScope reports whether this policloud lies inside scope. Anything but
+// "all" needs this policloud's country from the map: fail-closed without it.
+func (t *tokenAuth) inScope(scope Scope) bool {
+	if scope == ScopeAll {
+		return true
+	}
+	if _, err := ParseScope(string(scope)); err != nil {
+		return false
+	}
+	self, ok := t.r.Map.Policloud(t.r.Self)
+	return ok && scope.Contains(self)
+}
+
+// resolveKey authenticates the key the token names. A request that also sent
+// Authorization must authenticate as that same key (keyReason "key"
+// otherwise); an Authorization that does not authenticate at all is returned
+// as err. Without Authorization the key is looked up by ID.
+func (t *tokenAuth) resolveKey(req *http.Request, c Claims) (res *auth.AuthResult, keyReason string, err error) {
+	if req.Header.Get("Authorization") != "" || t.keys == nil {
+		res, err = t.next.Authenticate(req)
+		if err != nil {
+			t.r.Reject("key")
+			return nil, "", err
+		}
+		if res.KeyID != c.KeyID {
+			return nil, "key", nil
+		}
+		return res, "", nil
+	}
+	if res, err = t.keys.AuthenticateKeyID(c.KeyID); err != nil {
+		return nil, "key", nil
+	}
+	return res, "", nil
 }
 
 // Tenants passes through the wrapped provider's per-tenant quota listing,
@@ -128,9 +185,4 @@ func (t *tokenAuth) Tenants() map[string]auth.QuotaLimits {
 		return l.Tenants()
 	}
 	return nil
-}
-
-func (t *tokenAuth) refuse(reason string) (*auth.AuthResult, error) {
-	t.r.Reject(reason)
-	return nil, auth.ErrInvalidCredentials
 }

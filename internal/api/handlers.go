@@ -263,9 +263,9 @@ type Handlers struct {
 	decisionLog      *semantic.DecisionLog
 	semanticObserver SemanticObserver // metrics hook, nil = off
 
-	// redirect answers 307 to a sibling site for a model with no healthy
+	// redirect answers 307 to a sibling policloud for a model with no healthy
 	// agent here; nil (the default) disables cross-site redirects. See
-	// redirectStep and SetRedirect.
+	// RedirectTarget, RedirectDecision and SetRedirect.
 	redirect *redirect.Redirector
 }
 
@@ -412,11 +412,6 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		return
 	}
 	if !h.authorizeModel(c, req.Model) {
-		return
-	}
-	// Before any admission work: a model served only by a sibling site is
-	// answered 307 here, and nothing is reserved or queued for it.
-	if h.redirectStep(c, req.Model) {
 		return
 	}
 	// Compute the input estimate once, so B1, the occupancy reservation, the

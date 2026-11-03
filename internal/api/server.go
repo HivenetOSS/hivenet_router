@@ -154,13 +154,18 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
-	// A cross-site redirected request must carry the exact body its token was
-	// issued for; refuse a mismatch before quota is spent. No-op otherwise.
-	inference.Use(s.handlers.RedirectBodyCheck())
+	// A request that arrived with a cross-site redirect token must carry the
+	// exact body the token was issued for (refused before quota is spent), and
+	// is routed on the token's model. No-op for other requests.
+	inference.Use(s.handlers.RedirectTarget())
 	// Resolve semantic aliases (model: "auto") to a concrete model before quota,
 	// so quota, authorization, admission and routing all see the resolved model.
 	// A no-op map lookup for concrete model names.
 	inference.Use(s.handlers.AliasMiddleware())
+	// Cross-site redirect: a model with no healthy agent here, served by a
+	// sibling policloud, gets a 307 now — on the concrete model, before quota,
+	// so the redirecting router charges nothing. No-op when disabled.
+	inference.Use(s.handlers.RedirectDecision())
 	inference.Use(QuotaMiddleware(s.rateLimiter, s.routerMetrics, s.healthyAgentCount))
 	{
 		// Generic allowlisted passthrough: routed by top-level "model" and

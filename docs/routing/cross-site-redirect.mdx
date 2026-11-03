@@ -1,108 +1,140 @@
 ---
 title: "Cross-site redirect"
-description: "Answer HTTP 307 to a sibling Hivenet Router site when no local agent serves the requested model, so clients that use one hostname still reach every model."
+description: "Answer HTTP 307 to a sibling policloud when no local agent serves the requested model, so clients that use one hostname still reach every model."
 sidebarTitle: "Cross-site redirect"
 ---
 
-Cross-site redirect lets several Hivenet Router deployments, called **sites**, share one public hostname even when each site runs different models. When a request arrives at a site that has no healthy agent for the requested model, the router answers `307 Temporary Redirect` to a sibling site that serves it. The client repeats the request there.
+Cross-site redirect lets several Hivenet Router deployments share one public hostname even when each runs different models. Each deployment is a **policloud**. When a request arrives at a policloud that has no healthy agent for the requested model, the router answers `307 Temporary Redirect` to a sibling policloud that serves it. The client repeats the request there.
 
 Cross-site redirect is off by default. With no site ID configured, the router behaves exactly as without the feature.
 
 <Info>
-  Hivenet Router does not discover sibling sites or build the sibling map. An external controller must push the map to every router through `POST /admin/sibling-map`, and push it again after a router restarts.
+  Hivenet Router does not discover sibling policlouds or build the sibling map. An external map writer must push the map to every router through `POST /admin/sibling-map`, and push it again after a router restarts.
 </Info>
 
 ## How a request is handled
 
-For `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens`, after the API key is authenticated and the model is checked against the key’s allowlist:
+Every inference endpoint can redirect: `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens` by the map’s `chat` placements, `POST /v1/embeddings` by its `embedding` placements and `POST /v1/rerank` by its `rerank` placements. After the API key is authenticated, the model alias is resolved and the model is checked against the key’s allowlist:
 
-1. If any healthy agent on this site serves the model, the request is served here. A redirect never replaces a working local agent.
-2. Otherwise, if the sibling map lists another site that serves the model, the router answers `307` to that site. Nothing is admitted, reserved or queued on this site.
-3. Otherwise, the request continues as before and normally ends in `model_not_found`.
+1. If any healthy agent on this policloud serves the model, the request is served here. A redirect never replaces a working local agent.
+2. If the request has already been redirected twice, it is served here as before.
+3. Otherwise, if the sibling map lists another policloud that serves the model with the endpoint’s kind, the router answers `307` to it. Nothing is admitted, queued or charged to the key’s quota on this policloud.
+4. Otherwise, the request continues as before and normally ends in `model_not_found`.
 
-A redirect takes precedence over a policy’s `fallback_provider`: when a sibling site serves the model, the request goes to the sibling, not to OpenAI or Anthropic.
+A request whose key may not use the model is never redirected: it gets `403 model_forbidden` here. A redirect takes precedence over a policy’s `fallback_provider`: when a sibling serves the model, the request goes to the sibling, not to OpenAI or Anthropic.
 
-`/v1/embeddings` and `/v1/rerank` are never redirected.
+### Choosing the policloud
 
-### Choosing the sibling
+Every router computes the same choice from the map, in this order:
 
-When several sites serve the model, the router picks one with a rendezvous hash of the caller’s API-key ID and the optional `X-Session-ID` request header. The same key and session always reach the same site, so that site’s prompt cache is reused. When a site leaves the map, only the sessions that were on it move.
+1. **Candidates.** The policlouds with a placement of the model and the endpoint’s kind, inside the request’s scope, except this policloud and the policloud where the request first arrived.
+2. **Home set.** The two candidates that rank highest by a hash of the caller’s API-key ID, the model and the policloud ID. One key spreads one model over at most two policlouds, so its rate limits stay meaningful.
+3. **Session order.** The home set is ordered by a hash of the key ID and the optional `X-Session-ID` request header. The same key and session always reach the same policloud, so its prompt cache is reused. When a policloud leaves the map, only the sessions that were on it move.
+4. **Hints.** While the map’s hints are fresh, a target whose hint says `load: full`, or that is cold and cannot scale from zero, is skipped, and a warm target is preferred over a cold one. When every target would be skipped, the first one is used anyway. After `hints_expire_at`, hints are ignored and the session order alone decides.
 
-Send `X-Session-ID` with a stable value per conversation to spread one key’s conversations across sites. Without it, every request of a key goes to the same site.
+Send `X-Session-ID` with a stable value per conversation to spread one key’s conversations over its two home policlouds. Without it, every request of a key for one model goes to the same policloud.
+
+The request’s scope is `all` for now: every policloud in the map is a candidate. Per-key scopes are planned.
 
 ### The redirect token
 
-Clients remove the `Authorization` header when a redirect changes host. The `307` therefore carries a signed token in the `rt` query parameter, and the sibling authenticates the repeated request with it:
+Clients remove the `Authorization` header when a redirect changes host. The `307` therefore carries a signed token in the `rt` query parameter, and the target authenticates the repeated request with it:
 
 ```text
 HTTP/1.1 307 Temporary Redirect
-Location: https://site-b.example.com/v1/chat/completions?rt=v1.<claims>.<signature>
+Location: https://pc-de-1.example.com/v1/chat/completions?rt=v2.<secret id>.<claims>.<signature>
 Cache-Control: no-store
 ```
 
-The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the target site, the request path, the hop count, a SHA-256 hash of the request body and an expiry time. The sibling accepts it only when:
+The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin policloud, the target policloud, the request path, the hop count, a SHA-256 hash of the request body, and its issue and expiry times. The target checks, in order:
 
-- the signature is valid and the token has not expired;
-- the token names this site and this request path;
-- the request body is byte-identical to the one the token was issued for;
-- the key it names is still enabled and unexpired;
-- any `Authorization` header the client sent belongs to that same key.
+1. the token is well formed and its signature is valid;
+2. it has not expired, with 5 seconds of grace for clock drift between routers;
+3. it names this policloud and this request path;
+4. this policloud is inside the token’s scope;
+5. its request ID has not been used before: a token works once;
+6. the key it names is still enabled and unexpired, and any `Authorization` header the client sent belongs to that same key;
+7. the request body is byte-identical to the one the token was issued for. This is checked before any quota is spent.
 
-A refused token gets `401 unauthorized`, like any other invalid credential.
+When a check fails and the request carries an `Authorization` header that authenticates, the token is ignored and the request is served on that key as a new request. Otherwise a refused token gets `401 unauthorized`, like any other invalid credential.
+
+An accepted request is served on the token’s key. It keeps the first router’s request ID, returned in `X-Request-ID`, so one request can be followed across both policlouds’ logs. It is routed on the token’s model, the concrete model the first router resolved, so an alias such as `model: "auto"` is not resolved again. The key’s quota is charged only here.
 
 <Warning>
-  Until it expires, a token works for anyone who has the full URL **and** the same request body. Hivenet Router redacts the token from its own access log. Keep URLs out of other logs, and keep `--redirect-token-ttl` as short as your slowest clients allow.
+  Until it is used or expires, a token works for anyone who has the full URL **and** the same request body. Hivenet Router redacts the token from its own access log. Keep URLs out of other logs, and keep `--redirect-token-ttl` as short as your slowest clients allow.
 </Warning>
 
 ### Loop guard
 
-The hop count travels inside the token. A request that has already been redirected twice is never redirected again: it is served locally or fails as usual. A stale or inconsistent map therefore costs at most one extra redirect, never a loop.
+The hop count travels inside the token. A request that has already been redirected twice is never redirected again: it is served where it is or fails as usual. A second redirect never goes back to the policloud where the request first arrived. A stale or inconsistent map therefore costs at most one extra redirect, never a loop.
 
 ## Requirements
 
-- Every site runs Hivenet Router with its own `--site-id`.
-- Every site shares the same redirect secret, at least 32 bytes long.
+- Every router runs with the `--site-id` of its policloud, as the map names it.
+- Every policloud shares the same redirect signing secrets, each at least 32 bytes long.
 - API keys are dynamic keys pushed through `/admin/api-keys`, or the auth mode is `none`. The router refuses to start with cross-site redirect and static `auth.yaml` keys, because static keys have no key ID that a sibling could resolve.
-- Every site URL in the map is an absolute `https://` origin. Clients follow a redirect from HTTPS to HTTP, and some send the API key in clear text on the second request, so the router rejects `http://` site URLs.
+- Every policloud URL in the map is an absolute `https://` origin. Clients follow a redirect from HTTPS to HTTP, and some send the API key in clear text on the second request, so the router rejects `http://` URLs.
 - Clients follow `307` redirects. Most HTTP clients and the OpenAI and Anthropic SDKs do so by default. Plain `httpx` does not: set `follow_redirects=True`. A client that does not follow receives the `307` with a `model_redirected` error body.
 
 ## Configuration
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--site-id` | `HIVENET_ROUTER_SITE_ID` | Empty (disabled) | This router’s site ID in the sibling map. Setting it enables cross-site redirect |
-| `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRET` | Required when `--site-id` is set | File containing the HMAC secret for redirect tokens, or its raw value through the environment. At least 32 bytes; identical on every site |
-| `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `120s` | How long a redirect token stays valid |
+| `--site-id` | `HIVENET_ROUTER_SITE_ID` | Empty (disabled) | This router’s policloud ID in the sibling map. Setting it enables cross-site redirect |
+| `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRETS` | Required when `--site-id` is set | Token signing secrets as `id:secret`: one per line in the file, comma-separated in the environment. The first signs new tokens; every one verifies. IDs are 1 to 16 letters, digits, `_` or `-`; secrets are at least 32 bytes |
+| `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `60s` | How long a redirect token stays valid |
 
-When both `--redirect-secret-file` and `HIVENET_ROUTER_REDIRECT_SECRET` are set, the file wins.
+When both `--redirect-secret-file` and `HIVENET_ROUTER_REDIRECT_SECRETS` are set, the file wins. The router refuses to start when any of these settings is invalid, or when secrets are set without a site ID.
 
-The default token lifetime leaves room for clients that are slow to repeat the request under heavy load, for example a process running many blocking request threads. A token that expires before the client follows is refused with `401`, and counted as `reason="expired"` in `hivenet_redirect_rejections_total`.
+To rotate the secret without refusing tokens in flight, add the new secret as a second line on every policloud, then move it to the first line on every policloud, then remove the old one once the token lifetime has passed.
+
+A token that expires before the client follows is refused with `401`, and counted as `reason="expired"` in `hivenet_redirect_rejections_total`.
 
 ## Pushing the sibling map
 
 Replace the whole map with an admin request:
 
 ```bash
-curl -X POST https://site-a.example.com/admin/sibling-map \
+curl -X POST https://pc-fr-1.example.com/admin/sibling-map \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "version": "2026-10-26T12:00:00Z",
-    "sites": [
-      {"id": "site-a", "url": "https://site-a.example.com", "models": ["llama-3-70b"]},
-      {"id": "site-b", "url": "https://site-b.example.com", "models": ["llama-3-70b", "qwen-2.5-32b"]}
-    ]
+    "schema": 2,
+    "version": 1762171200,
+    "region": "eu",
+    "generated_at": "2026-11-03T12:00:00Z",
+    "policlouds": [
+      {"id": "pc-fr-1", "url": "https://pc-fr-1.example.com", "country": "FR", "eu": true},
+      {"id": "pc-de-1", "url": "https://pc-de-1.example.com", "country": "DE", "eu": true}
+    ],
+    "placements": [
+      {"model": "llama-3-70b", "kind": "chat", "policloud": "pc-fr-1", "scale_from_zero": false},
+      {"model": "llama-3-70b", "kind": "chat", "policloud": "pc-de-1", "scale_from_zero": true,
+       "hint": {"warm": false, "load": "ok"}},
+      {"model": "bge-m3", "kind": "embedding", "policloud": "pc-de-1", "scale_from_zero": true}
+    ],
+    "hints_expire_at": "2026-11-03T12:01:00Z"
   }'
 ```
 
 | Field | Rule |
 | --- | --- |
-| `version` | Required. Compared as a string: a push with an older version is rejected with `409`, an equal version is accepted as a replay. Use monotonically increasing values such as ISO timestamps |
-| `sites[].id` | Required, unique. The site’s `--site-id` |
-| `sites[].url` | An absolute `https://` origin with no path, query or credentials. A trailing `/` is removed |
-| `sites[].models` | Models the site serves. A site may list none |
+| `schema` | Required, `2`. Any other schema is rejected with `400` |
+| `version` | Required, an unsigned integer. A push with a lower version is rejected with `409`; an equal version is accepted as a replay |
+| `region` | Required. The map’s region |
+| `generated_at` | Optional. When the map writer built the map |
+| `policlouds[].id` | Required, unique. The policloud’s `--site-id` |
+| `policlouds[].url` | Required. An absolute `https://` origin with no path, query or credentials. A trailing `/` is removed |
+| `policlouds[].country` | Required. ISO 3166-1 alpha-2 code, such as `FR` |
+| `policlouds[].eu` | Required. Whether the policloud is in the EU |
+| `placements[].model` | Required. A model the policloud serves; one placement per model and policloud |
+| `placements[].kind` | Required: `chat`, `embedding` or `rerank` |
+| `placements[].policloud` | Required. The ID of a policloud in `policlouds` |
+| `placements[].scale_from_zero` | Required. Whether the policloud starts the model when a request arrives while it is cold |
+| `placements[].hint` | Optional. `warm` (default `true`) and `load`: `ok`, `busy` or `full` |
+| `hints_expire_at` | RFC 3339 time after which every hint is ignored. Required when any placement has a hint |
 
-Push the same map to every site. A site ignores its own entry when it picks a sibling. The map is held in memory only: a restarted router has an empty map and redirects nothing until the next push.
+Push the same map to every policloud. A router ignores its own policloud when it picks a target. Any invalid field rejects the whole push with `400`, and the current map is kept. The map is held in memory only: a restarted router has an empty map and redirects nothing until the next push.
 
 Read the current map with `GET /admin/sibling-map`. Both endpoints return `501` when cross-site redirect is disabled.
 
@@ -110,14 +142,17 @@ Read the current map with `GET /admin/sibling-map`. Both endpoints return `501` 
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `hivenet_redirects_total` | `model`, `site`, `hop` | `307` responses written. `hop="2"` means a site in the map no longer served the model |
-| `hivenet_redirect_rejections_total` | `reason` | Redirected requests refused: `malformed`, `signature`, `expired`, `site`, `path`, `key` or `body` |
+| `hivenet_redirects_total` | `model`, `site`, `hop` | `307` responses written. `hop="2"` means a policloud in the map no longer served the model |
+| `hivenet_redirect_rejections_total` | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `site`, `path`, `scope`, `replay`, `key` or `body` |
+| `hivenet_sibling_map_version` | None | Version of the map this router holds, `0` before the first push |
+| `hivenet_sibling_map_hints_expired` | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
 
-A rising `reason="expired"` count means clients take longer than the token lifetime to follow the redirect.
+A rising `reason="expired"` count means clients take longer than the token lifetime to follow the redirect. `reason="replay"` means a token was presented twice. Compare `hivenet_sibling_map_version` across routers to find one that missed a push.
 
 ## Limitations
 
-- A redirect happens only when no healthy agent on this site serves the model. Requests are not redirected when local agents are busy.
-- For an API key on the legacy flat quota shape, the per-minute request limit is charged on both sites. Keys with per-model quotas are charged only where the request is served.
-- A semantic alias such as `model: "auto"` is resolved again at the sibling site, which can choose a different model.
+- A redirect happens only when no healthy agent on this policloud serves the model. Requests are not redirected when local agents are busy.
+- A token works once on each router, not once per policloud: each router remembers used request IDs in its own memory.
+- A client that repeats a followed request at the same URL without its API key, for example after a network error, is refused with `401`, because the token was already used. A client that also sends its API key is served on it as a new request.
+- Per-key scopes are not available yet: every request may be redirected to any policloud in the map.
 - Only the `rt` query parameter is redacted from the access log; other query parameters are logged as before.

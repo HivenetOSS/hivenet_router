@@ -185,9 +185,10 @@ type RouterMetrics struct {
 	// Labels: model, site, hop.
 	redirects *prometheus.CounterVec
 
-	// redirectRejections counts redirected requests refused, by reason ∈
-	// {malformed, signature, expired, site, path, key, body}. A rise in
-	// "expired" means clients take longer than the token TTL to follow.
+	// redirectRejections counts refused redirect tokens, by reason ∈
+	// {malformed, signature, expired, site, path, scope, replay, key, body}.
+	// A rise in "expired" means clients take longer than the token TTL to
+	// follow; "replay" means a token was presented twice.
 	// Labels: reason.
 	redirectRejections *prometheus.CounterVec
 
@@ -512,7 +513,7 @@ func NewRouterMetrics() *RouterMetrics {
 		redirectRejections: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_redirect_rejections_total",
-				Help: "Redirected requests refused, by reason (malformed, signature, expired, site, path, key, body).",
+				Help: "Refused redirect tokens, by reason (malformed, signature, expired, site, path, scope, replay, key, body).",
 			},
 			[]string{"reason"},
 		),
@@ -1232,9 +1233,26 @@ func (m *RouterMetrics) Redirect(model, site string, hop int) {
 	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop)}).Inc()
 }
 
-// RedirectRejected counts a redirected request refused, by reason.
+// RedirectRejected counts a refused redirect token, by reason.
 func (m *RouterMetrics) RedirectRejected(reason string) {
 	m.redirectRejections.With(prometheus.Labels{"reason": reason}).Inc()
+}
+
+// RegisterSiblingMap publishes the sibling map's state for the map writer's
+// drift dashboard: hivenet_sibling_map_version and
+// hivenet_sibling_map_hints_expired (1 while every hint is ignored). Both are
+// read at scrape time. Call once, only when cross-site redirect is enabled.
+func (m *RouterMetrics) RegisterSiblingMap(version, hintsExpired func() float64) {
+	m.registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_version",
+			Help: "Version of the sibling map this router holds (0 before the first push).",
+		}, version),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_hints_expired",
+			Help: "1 when the sibling map's hints are expired or absent and every hint is ignored, else 0.",
+		}, hintsExpired),
+	)
 }
 
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted

@@ -2,16 +2,21 @@
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
 // Package redirect implements cross-site redirects: when no healthy agent on
-// this site serves a model, the router answers HTTP 307 to a sibling site that
-// does, so a client configured with one hostname still reaches its model.
+// this policloud serves a model, the router answers HTTP 307 to a sibling
+// policloud that does, so a client configured with one hostname still reaches
+// its model.
 //
 // Clients drop the Authorization header when a redirect changes host, so the
-// 307 carries a short-lived signed token in the ?rt= query parameter. The
-// sibling authenticates the repeated request with that token (TokenAuth).
+// 307 carries a short-lived, single-use signed token in the ?rt= query
+// parameter. The sibling authenticates the repeated request with that token
+// (TokenAuth).
 //
 // The router only receives the sibling map; an external controller builds it
-// and pushes it through POST /admin/sibling-map. With no site ID configured the
-// package is never wired in and the router behaves exactly as before.
+// and pushes it through POST /admin/sibling-map. With no site ID configured
+// the package is never wired in and the router behaves exactly as before.
+//
+// The map format, the redirect decision and the token are frozen in contract 3
+// v2 (hivenet_ai_infra docs/contracts/03-sibling-map.md).
 package redirect
 
 import (
@@ -23,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,19 +40,41 @@ const (
 	QueryParam = "rt"
 
 	// MaxHops is the loop guard: a request that has already been redirected
-	// this many times is never redirected again, so a stale or inconsistent
-	// map costs at most one extra hop, never a loop.
+	// this many times is never redirected again.
 	MaxHops = 2
 
-	// tokenPrefix versions the token format so it can change without
-	// ambiguity during a rolling upgrade.
-	tokenPrefix = "v1."
+	// Schema is the only sibling-map schema this router understands.
+	Schema = 2
+
+	// ClockSkew is the grace a token gets past its expiry, for clock drift
+	// between the routers that sign and verify it.
+	ClockSkew = 5 * time.Second
+
+	// homeSize is how many sibling policlouds one key + model may use, which
+	// keeps the key's rate limits meaningful (contract 3 v2 §3 step 4).
+	homeSize = 2
+
+	tokenPrefix = "v2."
 )
 
-// Errors returned by Map.Replace and Signer.Verify.
+// Placement kinds: which inference endpoints may redirect for a model.
+const (
+	KindChat      = "chat"
+	KindEmbedding = "embedding"
+	KindRerank    = "rerank"
+)
+
+// Hint loads.
+const (
+	LoadOK   = "ok"
+	LoadBusy = "busy"
+	LoadFull = "full"
+)
+
+// Errors returned by Map.Replace, NewSigner and Signer.Verify.
 var (
-	// ErrStaleVersion is returned when a pushed map is older than the current
-	// one. Versions compare lexicographically, as API-key registry versions do.
+	// ErrStaleVersion is returned when a pushed map has a lower version than
+	// the current one. Versions compare numerically.
 	ErrStaleVersion = errors.New("redirect: stale sibling map version")
 
 	ErrTokenMalformed = errors.New("redirect: malformed token")
@@ -53,184 +82,475 @@ var (
 	ErrTokenExpired   = errors.New("redirect: token expired")
 )
 
-// Site is one entry of the sibling map: a site's ID, its public base URL and
-// the models it serves.
-type Site struct {
-	ID     string   `json:"id"`
-	URL    string   `json:"url"`
-	Models []string `json:"models"`
+// ---- sibling map ------------------------------------------------------------
+
+// Policlouds, placements and hints as pushed. Pointers mark required fields
+// whose zero value is meaningful (a missing bool must not read as false).
+type (
+	// Policloud is one policloud: its public entry URL and where it is.
+	Policloud struct {
+		ID      string `json:"id"`
+		URL     string `json:"url"`
+		Country string `json:"country"`
+		EU      *bool  `json:"eu"`
+	}
+
+	// Placement says a model of a kind runs in a policloud. Only Model, Kind,
+	// Policloud and ScaleFromZero decide where a request goes; Hint only lets
+	// the router skip a full or cold target.
+	Placement struct {
+		Model         string `json:"model"`
+		Kind          string `json:"kind"`
+		Policloud     string `json:"policloud"`
+		ScaleFromZero *bool  `json:"scale_from_zero"`
+		Hint          *Hint  `json:"hint,omitempty"`
+	}
+
+	// Hint is advisory load for one placement. A missing field reads as the
+	// default: warm, ok.
+	Hint struct {
+		Warm *bool  `json:"warm,omitempty"`
+		Load string `json:"load,omitempty"`
+	}
+
+	// MapDoc is the body of POST /admin/sibling-map.
+	MapDoc struct {
+		Schema        int         `json:"schema"`
+		Version       *uint64     `json:"version"`
+		Region        string      `json:"region"`
+		GeneratedAt   string      `json:"generated_at,omitempty"`
+		Policlouds    []Policloud `json:"policlouds"`
+		Placements    []Placement `json:"placements"`
+		HintsExpireAt string      `json:"hints_expire_at,omitempty"`
+	}
+)
+
+func (h *Hint) warm() bool { return h == nil || h.Warm == nil || *h.Warm }
+
+func (h *Hint) load() string {
+	if h == nil || h.Load == "" {
+		return LoadOK
+	}
+	return h.Load
 }
 
-// Map is the versioned, in-memory sibling map. It is replaced whole by each
-// push and is safe for concurrent use. The map is also the redirect allowlist:
-// a Location header only ever points at a URL taken from it.
+// Map is the in-memory sibling map, replaced whole by each push and safe for
+// concurrent use. It is also the redirect allowlist: a Location header only
+// ever points at a policloud URL taken from it.
 type Map struct {
-	mu      sync.RWMutex
-	version string
-	sites   []Site
-	byModel map[string][]Site
+	mu          sync.RWMutex
+	doc         MapDoc
+	set         bool
+	policlouds  map[string]Policloud
+	byModel     map[string][]Placement
+	hintsExpire time.Time
 }
 
-// NewMap returns an empty map; no model is redirected until the first push.
-func NewMap() *Map { return &Map{byModel: map[string][]Site{}} }
+// NewMap returns an empty map; nothing is redirected until the first push.
+func NewMap() *Map { return &Map{} }
 
-// Replace validates sites and swaps them in atomically. A version older than
-// the current one is rejected with ErrStaleVersion; an equal version is a
-// harmless replay. Nothing changes when any site is invalid.
-func (m *Map) Replace(version string, sites []Site) error {
-	if version == "" {
+var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// Replace validates doc and swaps it in atomically. A lower version is
+// rejected with ErrStaleVersion; an equal version is a harmless replay.
+// Nothing changes when anything is invalid.
+func (m *Map) Replace(doc MapDoc) error {
+	if doc.Schema != Schema {
+		return fmt.Errorf("redirect: unsupported map schema %d (this router supports %d)", doc.Schema, Schema)
+	}
+	if doc.Version == nil {
 		return errors.New("redirect: version is required")
 	}
-	byModel := map[string][]Site{}
-	seen := map[string]bool{}
-	clean := make([]Site, 0, len(sites))
-	for i, s := range sites {
-		u, err := validateSite(s)
+	if doc.Region == "" {
+		return errors.New("redirect: region is required")
+	}
+
+	policlouds := make(map[string]Policloud, len(doc.Policlouds))
+	clean := make([]Policloud, 0, len(doc.Policlouds))
+	for i, p := range doc.Policlouds {
+		u, err := validatePolicloud(p)
 		if err != nil {
-			return fmt.Errorf("redirect: site[%d]: %w", i, err)
+			return fmt.Errorf("redirect: policlouds[%d]: %w", i, err)
 		}
-		if seen[s.ID] {
-			return fmt.Errorf("redirect: site[%d]: duplicate id %q", i, s.ID)
+		if _, dup := policlouds[p.ID]; dup {
+			return fmt.Errorf("redirect: policlouds[%d]: duplicate id %q", i, p.ID)
 		}
-		seen[s.ID] = true
-		s.URL = u
-		s.Models = append([]string(nil), s.Models...)
-		clean = append(clean, s)
-		for _, model := range s.Models {
-			byModel[model] = append(byModel[model], s)
+		p.URL = u
+		policlouds[p.ID] = p
+		clean = append(clean, p)
+	}
+
+	byModel := map[string][]Placement{}
+	seen := map[[2]string]bool{}
+	hinted := false
+	for i, pl := range doc.Placements {
+		if err := validatePlacement(pl, policlouds); err != nil {
+			return fmt.Errorf("redirect: placements[%d]: %w", i, err)
 		}
+		key := [2]string{pl.Model, pl.Policloud}
+		if seen[key] {
+			return fmt.Errorf("redirect: placements[%d]: duplicate placement of %q in %q", i, pl.Model, pl.Policloud)
+		}
+		seen[key] = true
+		hinted = hinted || pl.Hint != nil
+		byModel[pl.Model] = append(byModel[pl.Model], pl)
+	}
+
+	var hintsExpire time.Time
+	switch {
+	case doc.HintsExpireAt != "":
+		t, err := time.Parse(time.RFC3339, doc.HintsExpireAt)
+		if err != nil {
+			return fmt.Errorf("redirect: hints_expire_at: %w", err)
+		}
+		hintsExpire = t
+	case hinted:
+		return errors.New("redirect: hints_expire_at is required when any placement carries a hint")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if version < m.version {
+	if m.set && *doc.Version < *m.doc.Version {
 		return ErrStaleVersion
 	}
-	m.version, m.sites, m.byModel = version, clean, byModel
+	doc.Policlouds = clean
+	doc.Placements = append([]Placement(nil), doc.Placements...)
+	m.doc, m.set, m.policlouds, m.byModel, m.hintsExpire = doc, true, policlouds, byModel, hintsExpire
 	return nil
 }
 
-// validateSite checks one entry and returns its URL without a trailing slash.
-// Only absolute https URLs without path, query or credentials are accepted:
-// clients follow a redirect even from https down to http and then send the
-// token (and some send the API key) in clear text.
-func validateSite(s Site) (string, error) {
-	if s.ID == "" {
+// validatePolicloud checks one entry and returns its URL without a trailing
+// slash. Only absolute https origins are accepted: clients follow a redirect
+// from https down to http and then send the token (and some the API key) in
+// clear text.
+func validatePolicloud(p Policloud) (string, error) {
+	if p.ID == "" {
 		return "", errors.New("id must not be empty")
 	}
-	u, err := url.Parse(s.URL)
+	u, err := url.Parse(p.URL)
 	if err != nil {
-		return "", fmt.Errorf("site %q: url: %w", s.ID, err)
+		return "", fmt.Errorf("policloud %q: url: %w", p.ID, err)
 	}
 	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		strings.Trim(u.Path, "/") != "" {
-		return "", fmt.Errorf("site %q: url must be an absolute https:// origin with no path, query or credentials, got %q", s.ID, s.URL)
+		return "", fmt.Errorf("policloud %q: url must be an absolute https:// origin with no path, query or credentials, got %q", p.ID, p.URL)
 	}
-	for _, model := range s.Models {
-		if model == "" {
-			return "", fmt.Errorf("site %q: model names must not be empty", s.ID)
+	if !countryCode.MatchString(p.Country) {
+		return "", fmt.Errorf("policloud %q: country must be an ISO 3166-1 alpha-2 code, got %q", p.ID, p.Country)
+	}
+	if p.EU == nil {
+		return "", fmt.Errorf("policloud %q: eu is required", p.ID)
+	}
+	return strings.TrimSuffix(p.URL, "/"), nil
+}
+
+func validatePlacement(pl Placement, policlouds map[string]Policloud) error {
+	if pl.Model == "" {
+		return errors.New("model must not be empty")
+	}
+	switch pl.Kind {
+	case KindChat, KindEmbedding, KindRerank:
+	default:
+		return fmt.Errorf("model %q: unknown kind %q", pl.Model, pl.Kind)
+	}
+	if _, ok := policlouds[pl.Policloud]; !ok {
+		return fmt.Errorf("model %q: unknown policloud %q", pl.Model, pl.Policloud)
+	}
+	if pl.ScaleFromZero == nil {
+		return fmt.Errorf("model %q in %q: scale_from_zero is required", pl.Model, pl.Policloud)
+	}
+	if pl.Hint != nil {
+		switch pl.Hint.Load {
+		case "", LoadOK, LoadBusy, LoadFull:
+		default:
+			return fmt.Errorf("model %q in %q: unknown hint load %q", pl.Model, pl.Policloud, pl.Hint.Load)
 		}
 	}
-	return strings.TrimSuffix(s.URL, "/"), nil
+	return nil
 }
 
-// Snapshot returns the current version and a copy of the sites.
-func (m *Map) Snapshot() (string, []Site) {
+// Snapshot returns the current map (zero MapDoc before the first push).
+func (m *Map) Snapshot() MapDoc {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.version, append([]Site(nil), m.sites...)
+	doc := m.doc
+	doc.Policlouds = append([]Policloud(nil), m.doc.Policlouds...)
+	doc.Placements = append([]Placement(nil), m.doc.Placements...)
+	return doc
 }
 
-// Target picks the sibling for model, excluding the site self. The choice is
-// a rendezvous hash of affinity over the candidate sites: the same affinity
-// key always lands on the same site, and a site leaving the map moves only the
-// keys it was winning. ok is false when no other site serves the model.
-func (m *Map) Target(model, self, affinity string) (site Site, ok bool) {
+// Version returns the current map version (0 before the first push).
+func (m *Map) Version() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var best uint64
-	for _, s := range m.byModel[model] {
-		if s.ID == self {
+	if !m.set {
+		return 0
+	}
+	return *m.doc.Version
+}
+
+// HintsExpired reports whether the router currently ignores every hint:
+// none were pushed, or hints_expire_at has passed.
+func (m *Map) HintsExpired(now time.Time) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !now.Before(m.hintsExpire)
+}
+
+// Policloud returns a policloud of the map by ID.
+func (m *Map) Policloud(id string) (Policloud, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.policlouds[id]
+	return p, ok
+}
+
+// TargetRequest is the input of Map.Target.
+type TargetRequest struct {
+	Model, Kind string
+	Self, From  string // this policloud and the request's origin; both excluded
+	KeyID       string
+	Session     string // the X-Session-ID header ("" when absent)
+	Scope       Scope
+	Now         time.Time
+}
+
+// Target picks the sibling policloud for a request (contract 3 v2 §3 steps
+// 3–6): placements of the model and kind, inside the scope, minus this
+// policloud and the origin; the key's home set (top 2 by H(keyID, model,
+// policloud)); ranked by the session; then skipping full or non-wakeable cold
+// targets while the hints are fresh. ok is false when no candidate is left.
+func (m *Map) Target(req TargetRequest) (Policloud, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	type cand struct {
+		pl       Placement
+		pc       Policloud
+		home, by uint64
+	}
+	var cands []cand
+	for _, pl := range m.byModel[req.Model] {
+		if pl.Kind != req.Kind || pl.Policloud == req.Self || pl.Policloud == req.From {
 			continue
 		}
-		h := sha256.Sum256([]byte(affinity + "\x00" + s.ID))
-		if score := binary.BigEndian.Uint64(h[:8]); !ok || score > best {
-			site, best, ok = s, score, true
+		pc := m.policlouds[pl.Policloud]
+		if !req.Scope.Contains(pc) {
+			continue
+		}
+		cands = append(cands, cand{pl: pl, pc: pc, home: score(req.KeyID, req.Model, pc.ID)})
+	}
+	if len(cands) == 0 {
+		return Policloud{}, false
+	}
+
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].pc.ID, cands[j].pc.ID) })
+	if len(cands) > homeSize {
+		cands = cands[:homeSize]
+	}
+	session := req.KeyID + "\x00" + req.Session
+	for i := range cands {
+		cands[i].by = score(session, req.Model, cands[i].pc.ID)
+	}
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].pc.ID, cands[j].pc.ID) })
+
+	if !req.Now.Before(m.hintsExpire) {
+		return cands[0].pc, true // no fresh hints: the session order alone
+	}
+	firstEligible := -1
+	for i, c := range cands {
+		if c.pl.Hint.load() == LoadFull || (!c.pl.Hint.warm() && !*c.pl.ScaleFromZero) {
+			continue
+		}
+		if c.pl.Hint.warm() {
+			return c.pc, true // the first eligible warm target
+		}
+		if firstEligible < 0 {
+			firstEligible = i
 		}
 	}
-	return site, ok
+	if firstEligible >= 0 {
+		return cands[firstEligible].pc, true // only cold, wakeable targets
+	}
+	return cands[0].pc, true // every target skipped: a stale hint must not block service
 }
 
-// Location builds the redirect URL: the sibling's origin, the request's own
+// score is H(a, model, policloud): the first 8 bytes, big-endian, of
+// SHA-256(a + "\x00" + model + "\x00" + policloud).
+func score(a, model, policloud string) uint64 {
+	h := sha256.Sum256([]byte(a + "\x00" + model + "\x00" + policloud))
+	return binary.BigEndian.Uint64(h[:8])
+}
+
+// better orders by score, highest first; the ID only breaks an (unlikely) tie
+// so every router still computes the same order.
+func better(a, b uint64, idA, idB string) bool {
+	if a != b {
+		return a > b
+	}
+	return idA < idB
+}
+
+// Location builds the redirect URL: the policloud's origin, the request's own
 // path, the request's own query parameters (any previous token replaced) and
 // the new token.
-func Location(siteURL string, req *url.URL, token string) string {
+func Location(policloudURL string, req *url.URL, token string) string {
 	q := req.Query()
 	q.Set(QueryParam, token)
-	return siteURL + req.Path + "?" + q.Encode()
+	return policloudURL + req.Path + "?" + q.Encode()
 }
 
-// Claims is the body of a redirect token.
+// ---- scope ------------------------------------------------------------------
+
+// Scope bounds where a request may be served: "all", "EU" or "country:XX".
+type Scope string
+
+// ScopeAll is the widest scope. Until scope_max lands on keys (W5.5), every
+// request's effective scope is ScopeAll.
+const ScopeAll Scope = "all"
+
+// ParseScope validates a scope string.
+func ParseScope(s string) (Scope, error) {
+	switch {
+	case s == string(ScopeAll), s == "EU":
+		return Scope(s), nil
+	case strings.HasPrefix(s, "country:") && countryCode.MatchString(strings.TrimPrefix(s, "country:")):
+		return Scope(s), nil
+	}
+	return "", fmt.Errorf("redirect: invalid scope %q", s)
+}
+
+// Contains reports whether policloud p is inside the scope. An unknown scope
+// contains nothing (fail-closed).
+func (s Scope) Contains(p Policloud) bool {
+	switch {
+	case s == ScopeAll:
+		return true
+	case s == "EU":
+		return p.EU != nil && *p.EU
+	case strings.HasPrefix(string(s), "country:"):
+		return p.Country == strings.TrimPrefix(string(s), "country:")
+	}
+	return false
+}
+
+// ---- token ------------------------------------------------------------------
+
+// Claims is the body of a redirect token (contract 3 v2 §4).
 type Claims struct {
-	KeyID     string `json:"kid"`   // the caller's API-key ID ("" with auth mode none), never the key
-	RequestID string `json:"rid"`   // the request ID the first site assigned
-	Model     string `json:"model"` // the model the first site routed on
-	Site      string `json:"site"`  // the only site that accepts this token
+	KeyID     string `json:"key"`   // the caller's API-key ID ("" with auth mode none), never the key
+	RequestID string `json:"rid"`   // the first router's request ID; the target adopts it
+	Model     string `json:"model"` // the concrete model the first router routed on
+	Scope     Scope  `json:"scope"` // the effective scope at the first router
+	From      string `json:"from"`  // the first router's policloud ID
+	Site      string `json:"site"`  // the only policloud that accepts this token
 	Path      string `json:"path"`  // the only path the token is valid for
 	Hop       int    `json:"hop"`   // redirects so far, including this one
 	BodySHA   string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
-	Exp       int64  `json:"exp"`   // expiry, Unix seconds
+	IssuedAt  int64  `json:"iat"`   // Unix seconds
+	Exp       int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
 }
 
-// Signer creates and checks redirect tokens with one HMAC-SHA256 key shared
-// by every site.
+// Secret is one signing secret and its ID (the token's kid).
+type Secret struct {
+	ID  string
+	Key []byte
+}
+
+var secretID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
+
+// ParseSecrets parses "id:secret" entries, one per line; blank lines are
+// skipped and every value is trimmed. The first entry signs, every entry
+// verifies. Each secret must be at least 32 bytes and IDs unique.
+func ParseSecrets(text string) ([]Secret, error) {
+	var out []Secret
+	seen := map[string]bool{}
+	for n, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, key, ok := strings.Cut(line, ":")
+		id, key = strings.TrimSpace(id), strings.TrimSpace(key)
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("redirect secret %d: want id:secret", n+1)
+		case !secretID.MatchString(id):
+			return nil, fmt.Errorf("redirect secret %d: id %q must match [A-Za-z0-9_-]{1,16}", n+1, id)
+		case len(key) < 32:
+			return nil, fmt.Errorf("redirect secret %q: must be at least 32 bytes", id)
+		case seen[id]:
+			return nil, fmt.Errorf("redirect secret %q: duplicate id", id)
+		}
+		seen[id] = true
+		out = append(out, Secret{ID: id, Key: []byte(key)})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("redirect: no secrets")
+	}
+	return out, nil
+}
+
+// Signer creates and checks redirect tokens. The first secret signs; every
+// secret verifies, so a secret can be rotated without breaking redirects.
 type Signer struct {
-	key []byte
-	ttl time.Duration
+	sign Secret
+	byID map[string][]byte
+	ttl  time.Duration
 }
 
 // NewSigner returns a Signer whose tokens are valid for ttl.
-func NewSigner(key []byte, ttl time.Duration) *Signer {
-	return &Signer{key: append([]byte(nil), key...), ttl: ttl}
+func NewSigner(secrets []Secret, ttl time.Duration) (*Signer, error) {
+	if len(secrets) == 0 {
+		return nil, errors.New("redirect: no secrets")
+	}
+	if ttl <= 0 {
+		return nil, errors.New("redirect: token TTL must be > 0")
+	}
+	s := &Signer{sign: secrets[0], byID: make(map[string][]byte, len(secrets)), ttl: ttl}
+	for _, sec := range secrets {
+		s.byID[sec.ID] = append([]byte(nil), sec.Key...)
+	}
+	return s, nil
 }
 
-// Sign stamps c with an expiry of now + ttl and returns the token:
-// "v1." + base64url(JSON claims) + "." + base64url(HMAC-SHA256).
+// Sign stamps c with iat = now and exp = now + ttl and returns the token:
+// "v2." + kid + "." + base64url(JSON claims) + "." + base64url(HMAC-SHA256).
 func (s *Signer) Sign(c Claims, now time.Time) string {
-	c.Exp = now.Add(s.ttl).Unix()
+	c.IssuedAt, c.Exp = now.Unix(), now.Add(s.ttl).Unix()
 	body, _ := json.Marshal(c) // Claims holds only strings and ints: cannot fail
-	payload := tokenPrefix + base64.RawURLEncoding.EncodeToString(body)
-	return payload + "." + base64.RawURLEncoding.EncodeToString(s.mac(payload))
+	payload := tokenPrefix + s.sign.ID + "." + base64.RawURLEncoding.EncodeToString(body)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac(s.sign.Key, payload))
 }
 
-// Verify checks the signature and expiry of token and returns its claims.
-// The signature is checked before the payload is decoded.
+// Verify checks token's format, signature (before decoding the claims) and
+// expiry (with ClockSkew) and returns its claims.
 func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
 	var c Claims
-	dot := strings.LastIndexByte(token, '.')
-	if !strings.HasPrefix(token, tokenPrefix) || dot <= len(tokenPrefix) {
+	parts := strings.Split(strings.TrimPrefix(token, tokenPrefix), ".")
+	if !strings.HasPrefix(token, tokenPrefix) || len(parts) != 3 {
 		return c, ErrTokenMalformed
 	}
-	payload, sig := token[:dot], token[dot+1:]
-	got, err := base64.RawURLEncoding.DecodeString(sig)
-	if err != nil || !hmac.Equal(got, s.mac(payload)) {
+	key, ok := s.byID[parts[0]]
+	if !ok {
+		return c, ErrTokenMalformed
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !hmac.Equal(sig, mac(key, tokenPrefix+parts[0]+"."+parts[1])) {
 		return c, ErrTokenSignature
 	}
-	body, err := base64.RawURLEncoding.DecodeString(payload[len(tokenPrefix):])
-	if err != nil {
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || json.Unmarshal(body, &c) != nil {
 		return c, ErrTokenMalformed
 	}
-	if err := json.Unmarshal(body, &c); err != nil {
-		return c, ErrTokenMalformed
-	}
-	if now.Unix() > c.Exp {
+	if now.After(time.Unix(c.Exp, 0).Add(ClockSkew)) {
 		return c, ErrTokenExpired
 	}
 	return c, nil
 }
 
-func (s *Signer) mac(payload string) []byte {
-	m := hmac.New(sha256.New, s.key)
+func mac(key []byte, payload string) []byte {
+	m := hmac.New(sha256.New, key)
 	m.Write([]byte(payload))
 	return m.Sum(nil)
 }
@@ -239,4 +559,41 @@ func (s *Signer) mac(payload string) []byte {
 func BodySHA(body []byte) string {
 	h := sha256.Sum256(body)
 	return fmt.Sprintf("%x", h)
+}
+
+// ---- single use ---------------------------------------------------------------
+
+// ReplayGuard makes tokens single-use: a request ID is accepted once until its
+// token can no longer verify (exp + ClockSkew).
+//
+// ponytail: in memory, so a token can be used once per router of the target
+// policloud, not once per policloud. Contract 3 v2 moves this to the
+// policloud's shared Valkey with Epic A.
+type ReplayGuard struct {
+	mu        sync.Mutex
+	seen      map[string]time.Time
+	lastSweep time.Time
+}
+
+// NewReplayGuard returns an empty guard.
+func NewReplayGuard() *ReplayGuard { return &ReplayGuard{seen: map[string]time.Time{}} }
+
+// First records rid until the given time and reports whether this is its
+// first use. Expired entries are swept at most every 10 seconds.
+func (g *ReplayGuard) First(rid string, until, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if now.Sub(g.lastSweep) > 10*time.Second {
+		for k, t := range g.seen {
+			if now.After(t) {
+				delete(g.seen, k)
+			}
+		}
+		g.lastSweep = now
+	}
+	if t, ok := g.seen[rid]; ok && !now.After(t) {
+		return false
+	}
+	g.seen[rid] = until
+	return true
 }
