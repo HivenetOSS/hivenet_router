@@ -740,7 +740,11 @@ The following endpoints work only when the client API uses dynamic authenticatio
 export HIVENET_ROUTER_AUTH_MODE=dynamic
 ```
 
-Dynamic key state is held in memory. After a router restart, an external control service must repopulate the registry.
+Dynamic key state is held in memory. After a router restart, an external control service must repopulate the registry, unless the [persistent key store](/security/api-keys#persistent-key-store-warm-start) is enabled, in which case the router warm-starts from it.
+
+With the persistent key store enabled, a mutation that is applied in memory but cannot be written to the store returns HTTP `503` with `"applied": true`. Retry the same request with the same version.
+
+A version lower than the registry's current version returns HTTP `409` with `current_version` on every mutating endpoint, including `POST /admin/api-keys/replace`.
 
 When dynamic mode is not active, these endpoints return HTTP `501`:
 
@@ -998,9 +1002,22 @@ Response:
 ```json
 {
   "version": "rev_00000004",
-  "count": 3
+  "count": 3,
+  "persistent": true,
+  "degraded": false,
+  "restored": true,
+  "confirmed": false,
+  "dirty": false
 }
 ```
+
+| Field | Meaning |
+| --- | --- |
+| `persistent` | The persistent key store is enabled and in use |
+| `degraded` | The key store is configured but could not be opened or read; the registry runs memory-only |
+| `restored` | The registry was warm-started from the key store at startup |
+| `confirmed` | A full `POST /admin/api-keys/replace` has been applied since startup |
+| `dirty` | The last key-store write failed; a background retry is pending |
 
 ### List registry entries
 

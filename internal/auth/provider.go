@@ -88,7 +88,7 @@ type AuthResult struct {
 	// Gin context as "tenant_id" and used by the quota enforcement layer (Ticket 5).
 	TenantID string
 
-	// KeyID is the machines service key identifier (e.g. "key-abc123").
+	// KeyID is the upstream key-sync service key identifier (e.g. "key-abc123").
 	// Injected into the Gin context as "key_id" for metric labeling and audit.
 	// Empty string for StaticKeyProvider.
 	KeyID string
