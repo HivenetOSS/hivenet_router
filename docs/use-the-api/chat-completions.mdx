@@ -108,6 +108,8 @@ Do not depend on a particular JSON error body for `413` responses. Handle the HT
 | `Content-Type: application/json` | Recommended | Identifies the JSON request body |
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Request-ID: <uuid>` | No | Correlates requests with logs and traces |
+| `X-Hivenet-Scope: <scope>` | No | Where the request may be [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`. Default: the country of the policloud the request reached |
+| `X-Session-ID: <id>` | No | Keeps a conversation on the same policloud when the request is [redirected](/routing/cross-site-redirect#choosing-the-policloud) |
 
 If `X-Request-ID` contains a valid UUID, Hivenet Router preserves it. If it is missing or invalid, the router creates a new UUID. The value is returned in the response.
 
