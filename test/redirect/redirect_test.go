@@ -420,6 +420,9 @@ func TestWakeable(t *testing.T) {
 	if got := m.WakeableModels("de-1"); len(got) != 2 || got[0] != "e" || got[1] != "m" {
 		t.Errorf("WakeableModels(de-1) = %v, want [e m]", got)
 	}
+	if !m.WakeableHere("e", "de-1") || m.WakeableHere("n", "fr-2") || m.WakeableHere("m", "fr-1") {
+		t.Error("WakeableHere: want e on de-1 only, not n (scale_from_zero false) nor m on fr-1")
+	}
 	if got := m.WakeableModels("fr-1"); len(got) != 0 {
 		t.Errorf("WakeableModels(fr-1) = %v, want none", got)
 	}

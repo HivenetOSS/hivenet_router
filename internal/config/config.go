@@ -88,16 +88,23 @@ type Config struct {
 	// serves it, is held until the model wakes. Needs SiteID. WakeHoldBudget
 	// is the longest a request is held when its placement has no
 	// hold_budget (5m: a large model can take several minutes to wake).
-	// WakeHoldMax caps the requests held per model; more get 503
-	// model_waking at once. WakeKeepAlive is the delay before, and interval
-	// between, the keepalive bytes a held request receives (0 disables them).
-	// Invalid values stop startup.
+	// WakeHoldMax caps the requests held per model, WakeHoldMaxPerKey per
+	// API key and model (so one key cannot take a model's whole share), and
+	// WakeHoldMaxTotal across all models (which bounds the memory held
+	// requests use); past any of them a request gets 503 model_waking at
+	// once. WakeKeepAlive is the delay before, and interval between, the
+	// keepalive bytes a held request receives (0 disables them). Invalid
+	// values stop startup.
 	// Env: HIVENET_ROUTER_WAKE_HOLD_BUDGET, HIVENET_ROUTER_WAKE_HOLD_MAX,
+	// HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY, HIVENET_ROUTER_WAKE_HOLD_MAX_TOTAL,
 	// HIVENET_ROUTER_WAKE_KEEPALIVE.
-	// Flag: --wake-hold-budget, --wake-hold-max, --wake-keepalive.
-	WakeHoldBudget time.Duration
-	WakeHoldMax    int
-	WakeKeepAlive  time.Duration
+	// Flag: --wake-hold-budget, --wake-hold-max, --wake-hold-max-per-key,
+	// --wake-hold-max-total, --wake-keepalive.
+	WakeHoldBudget    time.Duration
+	WakeHoldMax       int
+	WakeHoldMaxPerKey int
+	WakeHoldMaxTotal  int
+	WakeKeepAlive     time.Duration
 
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
 	// protecting the router from memory exhaustion by an oversized payload
@@ -270,6 +277,8 @@ func DefaultConfig() *Config {
 		RedirectTokenTTL:       60 * time.Second,
 		WakeHoldBudget:         5 * time.Minute,
 		WakeHoldMax:            100,
+		WakeHoldMaxPerKey:      20,
+		WakeHoldMaxTotal:       1000,
 		WakeKeepAlive:          15 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
@@ -410,11 +419,19 @@ func LoadFromEnv() *Config {
 			*dst.d = d
 		}
 	}
-	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_WAKE_HOLD_MAX")); v != "" {
+	for env, dst := range map[string]*int{
+		"HIVENET_ROUTER_WAKE_HOLD_MAX":         &cfg.WakeHoldMax,
+		"HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY": &cfg.WakeHoldMaxPerKey,
+		"HIVENET_ROUTER_WAKE_HOLD_MAX_TOTAL":   &cfg.WakeHoldMaxTotal,
+	} {
+		v := strings.TrimSpace(os.Getenv(env))
+		if v == "" {
+			continue
+		}
 		if n, err := strconv.Atoi(v); err != nil || n <= 0 {
-			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_WAKE_HOLD_MAX=%q: must be an integer > 0", v))
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: must be an integer > 0", env, v))
 		} else {
-			cfg.WakeHoldMax = n
+			*dst = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_REQUEST_BYTES"); v != "" {

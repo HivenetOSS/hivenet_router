@@ -1077,7 +1077,8 @@ func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentReg
 	if rd == nil {
 		return nil
 	}
-	holder := wake.NewHolder(cfg.WakeHoldMax, agents.CountHealthyByModel, func(model string, outcome wake.Outcome, held time.Duration) {
+	limits := wake.Limits{PerModel: cfg.WakeHoldMax, PerCaller: cfg.WakeHoldMaxPerKey, Total: cfg.WakeHoldMaxTotal}
+	holder := wake.NewHolder(limits, agents.CountHealthyByModel, func(model string, outcome wake.Outcome, held time.Duration) {
 		m.WakeHoldDone(model, string(outcome), held)
 		switch outcome {
 		case wake.Woken:
@@ -1085,7 +1086,9 @@ func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentReg
 		case wake.Expired:
 			log.Warnf("hold at zero: %s did not wake within the hold budget; answered 503 model_waking", model)
 		case wake.Full:
-			log.Warnf("hold at zero: %s already holds %d requests; answered 503 model_waking", model, cfg.WakeHoldMax)
+			// Debug only: a flood of refusals must not flood the log; the
+			// refusals are counted in hivenet_wake_holds_total{outcome="full"}.
+			log.Debugf("hold at zero: a hold limit is reached for %s; answered 503 model_waking", model)
 		}
 	})
 	m.RegisterPendingDemand(func() map[string]int {

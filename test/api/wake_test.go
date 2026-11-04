@@ -4,6 +4,8 @@
 package api_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +33,14 @@ type wakeSite struct {
 
 	mu      sync.Mutex
 	healthy map[string]int
+	status  int // the status the last request recorded
+	h       *api.Handlers
+}
+
+func (s *wakeSite) recorded() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status
 }
 
 func (s *wakeSite) count(model string) int {
@@ -77,7 +87,7 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 	s := &wakeSite{testSite: &testSite{queue: make(chan *domain.PendingRequest, 8)}, healthy: map[string]int{}}
 	s.rd = &redirect.Redirector{Self: "b", Map: redirect.NewMap(testDomains), Signer: testSigner(t), Replay: redirect.NewReplayGuard()}
 	push(t, doc, s.testSite)
-	s.holder = wake.NewHolder(maxHeld, s.count, nil)
+	s.holder = wake.NewHolder(wake.Limits{PerModel: maxHeld, PerCaller: maxHeld, Total: 1000}, s.count, nil)
 	s.holder.SetPollInterval(time.Hour) // only wakeUp releases
 
 	keys := testKeys(t, allowed...)
@@ -92,11 +102,18 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 	)
 	h.SetRedirect(s.rd)
 	h.SetWake(s.holder, cfg)
+	s.h = h
 	e := gin.New()
+	e.Use(func(c *gin.Context) { // what the audit log and the HTTP metrics read
+		c.Next()
+		s.mu.Lock()
+		s.status = c.Writer.Status()
+		s.mu.Unlock()
+	})
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(redirect.Wrap(s.rd, keys, keys))).
 		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(),
-			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), s.count), h.WakeHold())
+			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)
 	inference.POST("/embeddings", h.Embeddings)
@@ -360,6 +377,9 @@ func TestWakeHold_ErrorsAfterKeepAlive(t *testing.T) {
 			!strings.HasSuffix(body, "\n\n") || !strings.Contains(body, `data: {"error":{"code":"model_waking"`) {
 			t.Fatalf("got %d %q, want keepalives then a model_waking SSE error event", w.Code, body)
 		}
+		if st := s.recorded(); st != http.StatusServiceUnavailable {
+			t.Errorf("recorded status %d, want 503 for the audit log and metrics", st)
+		}
 	})
 
 	t.Run("budget expires on an Anthropic stream", func(t *testing.T) {
@@ -395,5 +415,48 @@ func TestWakeHold_ErrorsAfterKeepAlive(t *testing.T) {
 		if body := w.Body.String(); !strings.HasSuffix(body, `data: {"error":{"code":"no_capacity","message":"all agents are busy","source":"router"}}`+"\n\n") {
 			t.Fatalf("body %q, want the error as a final SSE event", body)
 		}
+		if st := s.recorded(); st != http.StatusServiceUnavailable {
+			t.Errorf("recorded status %d, want 503", st)
+		}
 	})
+}
+
+// TestWakeHold_QuotaCountsOneReplica checks that the per-model RPM quota,
+// which scales with the healthy replicas and is skipped at zero, counts at
+// least one replica for a model that may be held here: a held request is
+// charged like any other.
+func TestWakeHold_QuotaCountsOneReplica(t *testing.T) {
+	s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1, placement("x", redirect.KindChat, "a")))
+	replicas := s.h.QuotaReplicas(s.count)
+	if n := replicas("m"); n != 1 {
+		t.Errorf("m at zero, wakeable here: %d replicas, want 1", n)
+	}
+	if n := replicas("x"); n != 0 {
+		t.Errorf("x at zero, not placed here: %d replicas, want 0 (the request fails at once)", n)
+	}
+	s.wakeUp("m")
+	if n := replicas("m"); n != 1 {
+		t.Errorf("m awake: %d replicas, want the healthy count 1", n)
+	}
+}
+
+// TestWakeHold_ClientGoneRecords499 checks the status recorded for a client
+// that leaves during the hold.
+func TestWakeHold_ClientGoneRecords499(t *testing.T) {
+	s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest(http.MethodPost, chatPath, bytes.NewReader(chatBody)).WithContext(ctx)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+redirectKey)
+	done := make(chan struct{})
+	go func() { s.engine.ServeHTTP(httptest.NewRecorder(), r); close(done) }()
+	s.waitHeld(t, "m", 1)
+	cancel()
+	<-done
+	if st := s.recorded(); st != 499 {
+		t.Errorf("recorded status %d, want 499", st)
+	}
+	if d := s.holder.Demand(); len(d) != 0 {
+		t.Errorf("demand %v, want empty", d)
+	}
 }

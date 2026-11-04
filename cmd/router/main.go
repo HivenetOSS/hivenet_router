@@ -91,6 +91,8 @@ func main() {
 	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
 	wakeHoldBudget := flag.Duration("wake-hold-budget", cfg.WakeHoldBudget, "Longest a request is held while a model scaled to zero wakes, when its sibling-map placement has no hold_budget (env: HIVENET_ROUTER_WAKE_HOLD_BUDGET)")
 	wakeHoldMax := flag.Int("wake-hold-max", cfg.WakeHoldMax, "Most requests held per model while it wakes; more get 503 model_waking (env: HIVENET_ROUTER_WAKE_HOLD_MAX)")
+	wakeHoldMaxPerKey := flag.Int("wake-hold-max-per-key", cfg.WakeHoldMaxPerKey, "Most requests held per API key and model while it wakes (env: HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY)")
+	wakeHoldMaxTotal := flag.Int("wake-hold-max-total", cfg.WakeHoldMaxTotal, "Most requests held across all models; bounds the memory held requests use (env: HIVENET_ROUTER_WAKE_HOLD_MAX_TOTAL)")
 	wakeKeepAlive := flag.Duration("wake-keepalive", cfg.WakeKeepAlive, "Delay before, and interval between, keepalive bytes sent to a held request; 0 disables them (env: HIVENET_ROUTER_WAKE_KEEPALIVE)")
 
 	flag.Parse()
@@ -185,10 +187,15 @@ func main() {
 		log.Fatalf("--wake-hold-budget must be > 0, got %v", *wakeHoldBudget)
 	case *wakeHoldMax <= 0:
 		log.Fatalf("--wake-hold-max must be > 0, got %d", *wakeHoldMax)
+	case *wakeHoldMaxPerKey <= 0:
+		log.Fatalf("--wake-hold-max-per-key must be > 0, got %d", *wakeHoldMaxPerKey)
+	case *wakeHoldMaxTotal <= 0:
+		log.Fatalf("--wake-hold-max-total must be > 0, got %d", *wakeHoldMaxTotal)
 	case *wakeKeepAlive < 0:
 		log.Fatalf("--wake-keepalive must be >= 0, got %v", *wakeKeepAlive)
 	}
-	cfg.WakeHoldBudget, cfg.WakeHoldMax, cfg.WakeKeepAlive = *wakeHoldBudget, *wakeHoldMax, *wakeKeepAlive
+	cfg.WakeHoldBudget, cfg.WakeKeepAlive = *wakeHoldBudget, *wakeKeepAlive
+	cfg.WakeHoldMax, cfg.WakeHoldMaxPerKey, cfg.WakeHoldMaxTotal = *wakeHoldMax, *wakeHoldMaxPerKey, *wakeHoldMaxTotal
 	// Any invalid redirect setting stops startup rather than silently
 	// disabling or weakening cross-site redirect.
 	switch {
@@ -280,7 +287,8 @@ func main() {
 	if cfg.SiteID != "" {
 		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
 		log.Infof("  Allowed domains:     %s", cfg.RedirectAllowedDomains)
-		log.Infof("  Hold at zero:        budget %v, at most %d per model, keepalive %v", cfg.WakeHoldBudget, cfg.WakeHoldMax, cfg.WakeKeepAlive)
+		log.Infof("  Hold at zero:        budget %v, at most %d per model / %d per key and model / %d in total, keepalive %v",
+			cfg.WakeHoldBudget, cfg.WakeHoldMax, cfg.WakeHoldMaxPerKey, cfg.WakeHoldMaxTotal, cfg.WakeKeepAlive)
 	} else {
 		log.Info("  Site ID:             (not configured — redirect disabled)")
 	}

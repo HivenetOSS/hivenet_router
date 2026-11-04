@@ -469,6 +469,14 @@ func (m *Map) Wakeable(model, kind, policloud string) (budget time.Duration, ok 
 	return 0, false
 }
 
+// WakeableHere reports whether requests for model, of any kind, may be held
+// on policloud while the model wakes.
+func (m *Map) WakeableHere(model, policloud string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool { return pl.Policloud == policloud && *pl.ScaleFromZero })
+}
+
 // WakeableModels returns, sorted, the models the map places on policloud
 // with scale_from_zero: the models whose requests may be held there.
 func (m *Map) WakeableModels(policloud string) []string {

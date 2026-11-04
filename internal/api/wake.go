@@ -44,6 +44,24 @@ func (h *Handlers) SetWake(holder *wake.Holder, cfg WakeConfig) {
 	h.wake, h.wakeCfg = holder, cfg
 }
 
+// QuotaReplicas returns the replica count the per-model RPM quota scales
+// with: the healthy agents, but at least 1 for a model that may be held here
+// while it wakes. At zero replicas the quota is skipped because the request
+// fails at once; a held request is served later, so it is charged as if one
+// replica served it, and a key cannot hold requests past its quota.
+func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(model string) int {
+	if healthy == nil {
+		return nil
+	}
+	return func(model string) int {
+		n := healthy(model)
+		if n == 0 && h.wake != nil && h.redirect != nil && h.redirect.Map.WakeableHere(model, h.redirect.Self) {
+			return 1
+		}
+		return n
+	}
+}
+
 // WakeHold holds a request for a model that is scaled to zero here until an
 // agent serving it is healthy, then lets it continue as a normal request.
 //
@@ -87,20 +105,17 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 		}
 
 		resp := newHeldResponse(c)
-		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c)+"\x00"+c.GetString("request_id"), wake.Options{
+		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), c.GetString("request_id"), wake.Options{
 			Budget:      budget,
 			KeepAlive:   h.wakeCfg.KeepAlive,
 			OnKeepAlive: resp.keepAlive,
 		})
 		switch outcome {
 		case wake.Woken:
-			if resp.committed {
-				c.Writer = &heldWriter{ResponseWriter: c.Writer, resp: resp}
-			}
 			c.Next()
 		case wake.Gone:
 			// The client left: nothing reaches it. 499 (client closed the
-			// request) is for the audit log, unless keepalives already sent 200.
+			// request) is for the audit log and the HTTP metrics.
 			c.AbortWithStatus(statusClientClosedRequest)
 		default: // wake.Expired, wake.Full
 			msg := fmt.Sprintf("model %s is waking up; retry in %d seconds", model, int(wakeRetryAfter.Seconds()))
@@ -145,6 +160,11 @@ func (r *heldResponse) keepAlive() error {
 		}
 		w.WriteHeader(http.StatusOK)
 		r.committed = true
+		// From here on the status on the wire is 200. heldWriter records the
+		// status the rest of the request sets, for the audit log and the
+		// HTTP metrics, and frames errors in the body.
+		r.c.Writer = &heldWriter{ResponseWriter: w, resp: r}
+		w = r.c.Writer
 	}
 	ka := " "
 	if r.stream {
@@ -168,11 +188,9 @@ func (r *heldResponse) fail(msg string) {
 	body, _ := json.Marshal(domain.RouterErrorResponse{Error: rerr})
 	if !r.committed {
 		c.Header("Retry-After", strconv.Itoa(rerr.RetryAfter))
-		c.Data(http.StatusServiceUnavailable, "application/json", body)
-		c.Abort()
-		return
 	}
-	_, _ = c.Writer.Write(r.errorBody(body))
+	// After a keepalive, heldWriter records the 503 and frames the body.
+	c.Data(http.StatusServiceUnavailable, "application/json", body)
 	c.Writer.Flush()
 	c.Abort()
 }

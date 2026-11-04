@@ -25,7 +25,7 @@ const (
 	Woken Outcome = "woken"
 	// Expired: the hold budget ran out before the model woke.
 	Expired Outcome = "expired"
-	// Full: the model already holds the maximum number of requests.
+	// Full: a hold limit is reached (per model, per caller or in total).
 	Full Outcome = "full"
 	// Gone: the client went away during the hold.
 	Gone Outcome = "gone"
@@ -43,34 +43,43 @@ type Options struct {
 	OnKeepAlive func() error
 }
 
+// Limits bound how many requests a Holder holds at once. Each must be > 0.
+type Limits struct {
+	PerModel  int // per model
+	PerCaller int // per caller (API key) and model, so one caller cannot fill a model's share
+	Total     int // across all models, which bounds the memory held requests use
+}
+
 // Holder holds requests per model. It is safe for concurrent use.
 type Holder struct {
-	maxPerModel int
-	healthy     func(model string) int
-	poll        time.Duration
-	onDone      func(model string, outcome Outcome, held time.Duration)
+	limits  Limits
+	healthy func(model string) int
+	poll    time.Duration
+	onDone  func(model string, outcome Outcome, held time.Duration)
 
 	mu     sync.Mutex
+	total  int // requests held now, all models
 	models map[string]*modelHold
 }
 
 type modelHold struct {
-	holds  int            // requests held now, duplicates included
-	demand map[string]int // distinct demand keys → holds carrying that key
-	wake   chan struct{}  // closed by Wake, then replaced
+	holds   int               // requests held now, duplicates included
+	callers map[string]int    // caller → requests held now
+	demand  map[[2]string]int // distinct (caller, request ID) → holds carrying it
+	wake    chan struct{}     // closed by Wake, then replaced
 }
 
-// NewHolder returns a Holder that holds at most maxPerModel requests per
-// model. healthy reports how many healthy agents serve a model; a hold ends
-// as Woken as soon as it is above zero. onDone, if not nil, is called when a
-// hold ends, with how long the request was held (0 for Full).
-func NewHolder(maxPerModel int, healthy func(model string) int, onDone func(model string, outcome Outcome, held time.Duration)) *Holder {
+// NewHolder returns a Holder bounded by limits. healthy reports how many
+// healthy agents serve a model; a hold ends as Woken as soon as it is above
+// zero. onDone, if not nil, is called when a hold ends, with how long the
+// request was held (0 for Full).
+func NewHolder(limits Limits, healthy func(model string) int, onDone func(model string, outcome Outcome, held time.Duration)) *Holder {
 	return &Holder{
-		maxPerModel: maxPerModel,
-		healthy:     healthy,
-		poll:        time.Second,
-		onDone:      onDone,
-		models:      make(map[string]*modelHold),
+		limits:  limits,
+		healthy: healthy,
+		poll:    time.Second,
+		onDone:  onDone,
+		models:  make(map[string]*modelHold),
 	}
 }
 
@@ -81,20 +90,22 @@ func (h *Holder) SetPollInterval(d time.Duration) { h.poll = d }
 
 // Hold holds the calling request until the model has a healthy agent
 // (Woken), the budget runs out (Expired), ctx ends (Gone), or OnKeepAlive
-// fails (Gone). It returns Full at once when the model already holds the
-// maximum number of requests.
+// fails (Gone). It returns Full at once when a limit is reached.
 //
-// demandKey identifies the request in the pending demand: holds with the
-// same key (a client retrying the same request) count once.
-func (h *Holder) Hold(ctx context.Context, model, demandKey string, opts Options) Outcome {
+// caller identifies the client (its API key) and requestID the request. In
+// the pending demand, holds with the same caller and request ID (a client
+// retrying the same request) count once; another caller's request with the
+// same ID counts separately.
+func (h *Holder) Hold(ctx context.Context, model, caller, requestID string, opts Options) Outcome {
 	start := time.Now()
-	wake, ok := h.enter(model, demandKey)
+	key := [2]string{caller, requestID}
+	wake, ok := h.enter(model, caller, key)
 	if !ok {
 		h.done(model, Full, 0)
 		return Full
 	}
 	outcome := h.wait(ctx, model, wake, opts)
-	h.leave(model, demandKey)
+	h.leave(model, caller, key)
 	h.done(model, outcome, time.Since(start))
 	return outcome
 }
@@ -170,29 +181,35 @@ func (h *Holder) Held() []string {
 	return out
 }
 
-func (h *Holder) enter(model, demandKey string) (<-chan struct{}, bool) {
+func (h *Holder) enter(model, caller string, key [2]string) (<-chan struct{}, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	m, ok := h.models[model]
-	if !ok {
-		m = &modelHold{demand: make(map[string]int), wake: make(chan struct{})}
-		h.models[model] = m
-	}
-	if m.holds >= h.maxPerModel {
+	if h.total >= h.limits.Total || (ok && (m.holds >= h.limits.PerModel || m.callers[caller] >= h.limits.PerCaller)) {
 		return nil, false
 	}
+	if !ok {
+		m = &modelHold{callers: make(map[string]int), demand: make(map[[2]string]int), wake: make(chan struct{})}
+		h.models[model] = m
+	}
+	h.total++
 	m.holds++
-	m.demand[demandKey]++
+	m.callers[caller]++
+	m.demand[key]++
 	return m.wake, true
 }
 
-func (h *Holder) leave(model, demandKey string) {
+func (h *Holder) leave(model, caller string, key [2]string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	m := h.models[model]
+	h.total--
 	m.holds--
-	if m.demand[demandKey]--; m.demand[demandKey] == 0 {
-		delete(m.demand, demandKey)
+	if m.callers[caller]--; m.callers[caller] == 0 {
+		delete(m.callers, caller)
+	}
+	if m.demand[key]--; m.demand[key] == 0 {
+		delete(m.demand, key)
 	}
 	if m.holds == 0 {
 		// No entry is kept for a model nobody waits for, so the state never
