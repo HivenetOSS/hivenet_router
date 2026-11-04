@@ -29,6 +29,7 @@ import (
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/logger"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/router"
 	"hivenet_router/internal/tracing"
 )
@@ -62,8 +63,13 @@ func main() {
 	unhealthyAfter := flag.Duration("unhealthy-after", cfg.UnhealthyAfter, "Mark agent unhealthy after this long without a heartbeat (must be > heartbeat-interval)")
 	removeAfter := flag.Duration("remove-after", cfg.RemoveAfter, "Remove agent after this long without a heartbeat (must be > unhealthy-after)")
 	heartbeatInterval := flag.Duration("heartbeat-interval", cfg.HeartbeatInterval, "Heartbeat interval")
-	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engineHistory)")
-	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup (use for testing or schema migrations)")
+	diskDBPath := flag.String("disk-db-path", cfg.DiskDBPath, "Path for persistent BadgerDB (engine history, quota counters)")
+	resetDiskDB := flag.Bool("reset-disk-db", false, "Wipe the persistent disk BadgerDB on startup — engine history and quota counters; the key store (--key-store-path) is not touched (use for testing or schema migrations)")
+	keyStoreBackend := flag.String("key-store", cfg.KeyStoreBackend, "Dynamic API key registry persistence: memory (default) or badger (warm-start cache at --key-store-path)")
+	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
+	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
+	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
+	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
 	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")
@@ -79,6 +85,10 @@ func main() {
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
+	siteID := flag.String("site-id", cfg.SiteID, "This router's policloud ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
+	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
+	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
+	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
 
 	flag.Parse()
 
@@ -98,6 +108,10 @@ func main() {
 	cfg.HeartbeatInterval = *heartbeatInterval
 	cfg.DiskDBPath = *diskDBPath
 	cfg.ResetDiskDB = *resetDiskDB
+	cfg.KeyStoreBackend = *keyStoreBackend
+	cfg.KeyStorePath = *keyStorePath
+	cfg.KeyStoreMaxAge = *keyStoreMaxAge
+	cfg.ResetKeyStore = *resetKeyStore
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
@@ -136,7 +150,46 @@ func main() {
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT secret is required — set HIVENET_ROUTER_JWT_SECRET or use --jwt-secret-file")
 	}
+	if *keyStoreSecretFile != "" {
+		data, err := os.ReadFile(*keyStoreSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --key-store-secret-file %q: %v", *keyStoreSecretFile, err)
+		}
+		cfg.KeyStoreSecret = strings.TrimSpace(string(data))
+	}
+	for _, err := range cfg.EnvErrors {
+		log.Errorf("invalid environment value: %v", err)
+	}
+	if len(cfg.EnvErrors) > 0 {
+		log.Fatalf("%d invalid environment value(s) — refusing to start", len(cfg.EnvErrors))
+	}
 	cfg.AuthConfigFile = *authConfigFile
+	cfg.SiteID = strings.TrimSpace(*siteID)
+	if *redirectSecretFile != "" {
+		data, err := os.ReadFile(*redirectSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --redirect-secret-file %q: %v", *redirectSecretFile, err)
+		}
+		cfg.RedirectSecrets = string(data) // redirect.ParseSecrets trims every line
+	}
+	if *redirectTokenTTL <= 0 {
+		log.Fatalf("--redirect-token-ttl must be > 0, got %v", *redirectTokenTTL)
+	}
+	cfg.RedirectTokenTTL = *redirectTokenTTL
+	cfg.RedirectAllowedDomains = strings.TrimSpace(*redirectAllowedDomains)
+	// Any invalid redirect setting stops startup rather than silently
+	// disabling or weakening cross-site redirect.
+	switch {
+	case cfg.SiteID == "" && strings.TrimSpace(cfg.RedirectSecrets) != "":
+		log.Fatal("redirect secrets are set but --site-id is empty — set HIVENET_ROUTER_SITE_ID or remove the secrets")
+	case cfg.SiteID != "":
+		if _, err := redirect.ParseSecrets(cfg.RedirectSecrets); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid signing secrets (HIVENET_ROUTER_REDIRECT_SECRETS or --redirect-secret-file): %v", err)
+		}
+		if _, err := redirect.ParseDomains(cfg.RedirectAllowedDomains); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid allowed domains (HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS or --redirect-allowed-domains): %v", err)
+		}
+	}
 
 	// Log startup banner with resolved configuration for operator visibility.
 	log.Info("Hivenet Router")
@@ -170,6 +223,16 @@ func main() {
 	log.Infof("  GC flush period:     %v", cfg.FlushPeriod)
 	log.Infof("  Universal flush:     %v", cfg.UniversalFlushInterval)
 	log.Infof("  Reset disk DB:       %v", cfg.ResetDiskDB)
+	log.Infof("  Key store:           %s", cfg.KeyStoreBackend)
+	if cfg.KeyStoreBackend == "badger" {
+		log.Infof("  Key store path:      %s", cfg.KeyStorePath)
+		if cfg.KeyStoreMaxAge == 0 {
+			log.Info("  Key store max age:   unlimited")
+		} else {
+			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
+		}
+		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
 	log.Info("Security:")
 	log.Info("  JWT secret:          configured")
 	log.Info("Session:")
@@ -201,6 +264,13 @@ func main() {
 		log.Info("  Auth config file:    (not configured — both /v1/* and /admin/* default to mode: none)")
 	}
 	log.Info("  Admin API keys:      set via HIVENET_ROUTER_ADMIN_API_KEYS env var")
+	log.Info("Cross-site redirect:")
+	if cfg.SiteID != "" {
+		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
+		log.Infof("  Allowed domains:     %s", cfg.RedirectAllowedDomains)
+	} else {
+		log.Info("  Site ID:             (not configured — redirect disabled)")
+	}
 	log.Info("=================")
 
 	// Initialize OpenTelemetry tracing.

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
@@ -161,6 +163,124 @@ type Router struct {
 	// keyRegistry is the mutable in-memory API key registry (dynamic mode).
 	// Nil when running in static-key or no-auth mode — guards against SIGHUP reload.
 	keyRegistry *auth.DynamicKeyProvider
+
+	// redirect is the cross-site redirect state (internal/redirect); nil when
+	// cfg.SiteID is empty, which disables redirects entirely.
+	redirect *redirect.Redirector
+}
+
+// wireKeyStore wires the optional persistent dynamic key registry
+// (KeyStoreBackend "badger") and validates the backend configuration.
+//
+// The persisted registry is a warm-start cache of the upstream key-sync
+// service, so a broken cache never takes the router down. Only configuration
+// errors — deterministic operator mistakes — are returned (startup fails).
+// When the store itself cannot be reset, opened or read, the registry
+// degrades to memory-only and starts empty, which denies every key until
+// key-sync pushes, exactly like memory mode; the reason is logged and exported
+// (hivenet_keystore_degraded, GET /admin/api-keys/version). Unusable,
+// over-age or unconfirmed snapshots are discarded and individual bad records
+// skipped — see auth.DynamicKeyProvider.LoadKeyStore. admit is the admission
+// check the admin handlers run on writes, applied to every restored key.
+func wireKeyStore(cfg *config.Config, keyRegistry *auth.DynamicKeyProvider, admit func(auth.DynamicKeyEntry) error) error {
+	switch cfg.KeyStoreBackend {
+	case "memory", "":
+		// default — RAM-only registry, state rebuilt by the upstream key-sync
+		// service after restarts.
+		if cfg.ResetKeyStore {
+			log.Warnf("--reset-key-store ignored: KeyStoreBackend is %q (only 'badger' persists a registry to wipe)", cfg.KeyStoreBackend)
+		}
+		return nil
+	case "badger":
+		if err := validateKeyStoreConfig(cfg, keyRegistry); err != nil {
+			return err
+		}
+		if cfg.KeyStoreMaxAge == 0 {
+			log.Warnf("Key store: --key-store-max-age=0 — persisted keys are restored regardless of age. Only safe without an upstream key-sync service")
+		}
+		degrade := func(err error) error {
+			log.Errorf("Key store DEGRADED — continuing memory-only and starting empty (keys are denied until the upstream key-sync service pushes): %v", err)
+			keyRegistry.DegradeKeyStore(err.Error())
+			return nil
+		}
+		if cfg.ResetKeyStore {
+			log.Warnf("--reset-key-store: wiping persisted dynamic API key registry at %s", cfg.KeyStorePath)
+			if err := os.RemoveAll(cfg.KeyStorePath); err != nil {
+				return degrade(fmt.Errorf("key store: reset: %w", err))
+			}
+		}
+		ks, err := auth.OpenBadgerKeyStore(cfg.KeyStorePath, []byte(cfg.KeyStoreSecret))
+		if err != nil {
+			return degrade(err)
+		}
+		keyRegistry.SetKeyStore(ks)
+		keyRegistry.SetOnPersistError(func(err error) {
+			log.Errorf("%v — registry changes are not durable until the next successful save (retrying in the background)", err)
+		})
+		rep, err := keyRegistry.LoadKeyStore(auth.KeyStoreLoadOptions{MaxAge: cfg.KeyStoreMaxAge, Admit: admit})
+		if err != nil {
+			return degrade(err)
+		}
+		for id, reason := range rep.SkippedReasons {
+			log.Warnf("Key store: skipped persisted key %q: %s", id, reason)
+		}
+		switch {
+		case rep.Discarded != "":
+			log.Warnf("Key store: persisted registry at %s discarded (%s) — starting empty, awaiting bootstrap from the upstream key-sync service", cfg.KeyStorePath, rep.Discarded)
+		case rep.Version != "" || rep.Restored > 0:
+			log.Infof("Key store: restored %d dynamic API key(s) from %s (registry version %q, snapshot age %s, %d skipped) — unconfirmed until the upstream key-sync service sends a full replace",
+				rep.Restored, cfg.KeyStorePath, rep.Version, rep.SnapshotAge.Round(time.Second), rep.Skipped)
+		}
+		return nil
+	default:
+		return fmt.Errorf("key store: invalid KeyStoreBackend %q (valid: memory, badger)", cfg.KeyStoreBackend)
+	}
+}
+
+// keyStoreSecretMinLen matches the JWT secret minimum (HS256, RFC 7518 §3.2).
+const keyStoreSecretMinLen = 32
+
+// validateKeyStoreConfig checks the badger key-store configuration. Every
+// error here is an operator mistake that stops startup.
+func validateKeyStoreConfig(cfg *config.Config, keyRegistry *auth.DynamicKeyProvider) error {
+	if keyRegistry == nil {
+		return fmt.Errorf("key store: KeyStoreBackend=badger requires dynamic auth mode (HIVENET_ROUTER_AUTH_MODE=dynamic)")
+	}
+	if cfg.KeyStorePath == "" {
+		return fmt.Errorf("key store: --key-store-path must not be empty")
+	}
+	if pathsOverlap(cfg.KeyStorePath, cfg.DiskDBPath) {
+		return fmt.Errorf("key store: --key-store-path %q overlaps --disk-db-path %q — the key store needs its own directory so each reset flag wipes only its own data", cfg.KeyStorePath, cfg.DiskDBPath)
+	}
+	if cfg.KeyStoreMaxAge < 0 {
+		return fmt.Errorf("key store: --key-store-max-age must be >= 0, got %v", cfg.KeyStoreMaxAge)
+	}
+	switch {
+	case cfg.KeyStoreSecret == "":
+		return fmt.Errorf("key store: a router-only secret is required with --key-store=badger — set HIVENET_ROUTER_KEY_STORE_SECRET or --key-store-secret-file")
+	case len(cfg.KeyStoreSecret) < keyStoreSecretMinLen:
+		return fmt.Errorf("key store: key-store secret too short (%d bytes): minimum %d", len(cfg.KeyStoreSecret), keyStoreSecretMinLen)
+	case cfg.KeyStoreSecret == cfg.JWTSecret:
+		return fmt.Errorf("key store: the key-store secret must differ from the JWT secret (agents hold the JWT secret)")
+	}
+	return nil
+}
+
+// pathsOverlap reports whether a and b are the same directory or one
+// contains the other (after cleaning; relative paths are made absolute).
+func pathsOverlap(a, b string) bool {
+	abs := func(p string) string {
+		if ap, err := filepath.Abs(p); err == nil {
+			return ap
+		}
+		return filepath.Clean(p)
+	}
+	a, b = abs(a), abs(b)
+	within := func(child, parent string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
+	}
+	return within(a, b) || within(b, a)
 }
 
 // New creates a new Router instance with initialized components.
@@ -253,6 +373,50 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
+	rd, err := newRedirector(cfg, apiProv, routerMetrics)
+	if err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
+	apiProv = redirect.Wrap(rd, apiProv, keyRegistry)
+
+	// Persistent dynamic key registry (--key-store=badger): a warm-start
+	// cache of the upstream key-sync service in its own BadgerDB, so a
+	// restarted router serves keys before key-sync re-pushes. Restored keys
+	// get the same admission check the admin handlers apply on writes,
+	// against the policies in force now. On an unreadable snapshot the
+	// router aborts startup (fail closed — see wireKeyStore).
+	admitRestored := func(e auth.DynamicKeyEntry) error {
+		return ValidateAdmissionInvariants(gatherPolicies(effectiveGlobal, namedPolicies), []auth.APIKeyEntry{dynamicEntryAsAPIKey(e)})
+	}
+	if err := wireKeyStore(cfg, keyRegistry, admitRestored); err != nil {
+		store.Close()   //nolint:errcheck
+		return nil, err // wireKeyStore's errors already carry the "key store:" prefix
+	}
+	// From here on, any failed return must also close the key store (it holds
+	// the BadgerDB directory lock and its retry goroutine).
+	newOK := false
+	defer func() {
+		if !newOK && keyRegistry != nil {
+			keyRegistry.CloseKeyStore() //nolint:errcheck
+		}
+	}()
+	if keyRegistry != nil && cfg.KeyStoreBackend == "badger" {
+		routerMetrics.RegisterKeyStore(func() metrics.KeyStoreSample {
+			st := keyRegistry.KeyStoreStatus()
+			return metrics.KeyStoreSample{
+				PersistErrors:       st.PersistErrors,
+				LastPersistSuccess:  st.LastPersistSuccess,
+				Dirty:               st.Dirty,
+				RestoredKeys:        st.RestoredKeys,
+				RestoredSnapshotAge: st.RestoredSnapshotAge,
+				Restored:            st.Restored,
+				Confirmed:           st.Confirmed,
+				SkippedEntries:      st.SkippedEntries,
+				Degraded:            st.Degraded,
+			}
+		})
+	}
 
 	// Admission invariants that span the policy and auth configs (e.g. a
 	// serverless key's input bucket must cover one maximum-size prompt). Neither
@@ -312,12 +476,18 @@ func New(cfg *config.Config) (*Router, error) {
 		// safety) and no parking (a per-key breach is denied immediately).
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
+		redirect:     rd,
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
 	// waiting for the first request from each tenant.
 	if r.keyRegistry != nil {
 		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
+		// Seed the gauges once for keys restored from the key store: wireKeyStore
+		// ran before this wiring existed, so the restore's onChange fired nil.
+		if _, entries := r.keyRegistry.Snapshot(); len(entries) > 0 {
+			r.publishTenantQuotas()
+		}
 	}
 	// Open the semantic decision log here, before Start launches any goroutine,
 	// so the field is written once and only read afterwards (no data race with
@@ -331,6 +501,7 @@ func New(cfg *config.Config) (*Router, error) {
 			routerMetrics.RegisterSemanticDecisionLog(dl.Dropped, dl.WriteErrors)
 		}
 	}
+	newOK = true
 	return r, nil
 }
 
@@ -560,7 +731,15 @@ func (r *Router) Close() error {
 		log.Warnf("closing semantic decision log: %v", err)
 	}
 
-	// 6. Close storage (safe — no goroutine can write to it now).
+	// 6. Close the dynamic key store (nil-safe; stops its background retry).
+	//    Admin mutations still arriving are applied in memory and answered 503.
+	if r.keyRegistry != nil {
+		if err := r.keyRegistry.CloseKeyStore(); err != nil {
+			log.Warnf("closing key store: %v", err)
+		}
+	}
+
+	// 7. Close storage (safe — no goroutine can write to it now).
 	return r.storage.Close()
 }
 
@@ -624,6 +803,7 @@ func (r *Router) startHTTPServer() {
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
 	}
+	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -818,7 +998,14 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
-	r.apiAuth.Swap(apiProv)
+	if err := redirect.CheckAuthMode(r.cfg.SiteID, apiProv); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
+	// Dynamic mode returned above without touching apiAuth, so the redirect
+	// wrapper installed at startup survives; here the provider is rebuilt and
+	// must be wrapped again or every redirected request would get 401.
+	r.apiAuth.Swap(redirect.Wrap(r.redirect, apiProv, nil))
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
 	r.minuteLimiter.Reset()
@@ -828,6 +1015,48 @@ func (r *Router) reloadAuthProviders() {
 	} else {
 		log.Info("SIGHUP: auth providers reloaded (no auth config file — both sections use mode=none)")
 	}
+}
+
+// newRedirector builds the cross-site redirect state, or returns nil when
+// cfg.SiteID is empty (redirect disabled). cmd/router validates the secrets
+// and allowed domains first, so a bad value stops startup there.
+func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterMetrics) (*redirect.Redirector, error) {
+	if cfg.SiteID == "" {
+		return nil, nil
+	}
+	if err := redirect.CheckAuthMode(cfg.SiteID, apiProv); err != nil {
+		return nil, err
+	}
+	secrets, err := redirect.ParseSecrets(cfg.RedirectSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	signer, err := redirect.NewSigner(secrets, cfg.RedirectTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	domains, err := redirect.ParseDomains(cfg.RedirectAllowedDomains)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	rd := &redirect.Redirector{
+		Self:       cfg.SiteID,
+		Map:        redirect.NewMap(domains),
+		Signer:     signer,
+		Replay:     redirect.NewReplayGuard(),
+		OnRedirect: m.Redirect,
+		OnReject:   m.RedirectRejected,
+	}
+	m.RegisterSiblingMap(
+		func() float64 { return float64(rd.Map.Version()) },
+		func() float64 {
+			if rd.Map.HintsExpired(time.Now()) {
+				return 1
+			}
+			return 0
+		},
+	)
+	return rd, nil
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.

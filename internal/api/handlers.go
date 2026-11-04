@@ -16,6 +16,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
@@ -261,6 +262,11 @@ type Handlers struct {
 	resolver         *semantic.Resolver
 	decisionLog      *semantic.DecisionLog
 	semanticObserver SemanticObserver // metrics hook, nil = off
+
+	// redirect answers 307 to a sibling policloud for a model with no healthy
+	// agent here; nil (the default) disables cross-site redirects. See
+	// RedirectTarget, RedirectDecision and SetRedirect.
+	redirect *redirect.Redirector
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.

@@ -309,10 +309,26 @@ func (h *Handlers) validateKeyAdmission(e auth.DynamicKeyEntry) error {
 	return nil
 }
 
-// writeRegistryError translates a registry-level error into a 409 (stale
-// version) or 400 (validation/format) response with a current_version hint
-// where available.
+// writeNotDurable answers a mutation that is in effect in memory but could not
+// be persisted with 503: the upstream key-sync service treats 5xx as
+// retryable and keeps its watermark behind, and the registry accepts the
+// equal-version replay, so the retry re-persists. Returning 200 here would
+// acknowledge e.g. a revocation that comes back after a restart.
+func writeNotDurable(c *gin.Context, err error) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{
+		"error":   err.Error(),
+		"applied": true, // in effect in memory; only durability failed
+	})
+}
+
+// writeRegistryError translates a registry-level error into a 503 (applied
+// but not persisted), 409 (stale version) or 400 (validation/format)
+// response with a current_version hint where available.
 func (h *Handlers) writeRegistryError(c *gin.Context, err error) {
+	if errors.Is(err, auth.ErrNotDurable) {
+		writeNotDurable(c, err)
+		return
+	}
 	if errors.Is(err, auth.ErrStaleVersion) {
 		ver, _ := h.keyRegistry.Version()
 		c.JSON(http.StatusConflict, gin.H{"error": "stale version", "current_version": ver})
@@ -393,7 +409,8 @@ func (h *Handlers) DeleteAPIKey(c *gin.Context) {
 }
 
 // ReplaceAPIKeys handles POST /admin/api-keys/replace.
-// Atomically replaces the entire key registry. Always accepted (no version check).
+// Atomically replaces the entire key registry. A version below the current
+// one is rejected with 409 (stale), like the single-key endpoints.
 // Body is capped at 16 MB to allow fleet-wide snapshots (~50k keys at 300 B each).
 func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	if h.keyRegistry == nil {
@@ -424,7 +441,7 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 		entries = append(entries, entry)
 	}
 	if err := h.keyRegistry.ReplaceAll(req.Version, entries); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.writeRegistryError(c, err) // 503 not durable, 409 stale, 400 otherwise
 		return
 	}
 	log.Infof("API key registry replaced via POST /admin/api-keys/replace (%d keys)", len(entries))
@@ -463,12 +480,25 @@ func (h *Handlers) GetAPIKey(c *gin.Context) {
 }
 
 // GetAPIKeyVersion handles GET /admin/api-keys/version.
-// Returns the current registry version and key count.
+// Returns the current registry version and key count, plus the key store
+// state: restored (warm-started from the key store at startup), confirmed
+// (the upstream key-sync service has sent a full replace since startup) and
+// dirty (the key store lags memory). A drift check upstream compares version
+// against its own revision and re-pushes when they differ.
 func (h *Handlers) GetAPIKeyVersion(c *gin.Context) {
 	if h.keyRegistry == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": errDynamicNotActive})
 		return
 	}
 	ver, count := h.keyRegistry.Version()
-	c.JSON(http.StatusOK, gin.H{"version": ver, "count": count})
+	st := h.keyRegistry.KeyStoreStatus()
+	c.JSON(http.StatusOK, gin.H{
+		"version":    ver,
+		"count":      count,
+		"persistent": st.Persistent,
+		"degraded":   st.Degraded,
+		"restored":   st.Restored,
+		"confirmed":  st.Confirmed,
+		"dirty":      st.Dirty,
+	})
 }
