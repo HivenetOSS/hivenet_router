@@ -506,11 +506,11 @@ Change the request timeout:
 --request-timeout 2m
 ```
 
-While waiting, the request resumes when an agent releases a capacity slot.
+While waiting, the request resumes when an agent releases a capacity slot, at the end of the response for a streamed one. A newly registered or recovered agent wakes every waiting request for its model.
 
 Hivenet Router then evaluates the candidates again. The request does not reserve a particular agent while it waits.
 
-If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step.
+If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond the queue depth.
 
 <Note>
   The queue is keyed by model. Traffic for one model does not consume another model’s queue depth.

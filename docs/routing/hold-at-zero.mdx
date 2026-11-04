@@ -1,0 +1,201 @@
+---
+title: "Hold at zero"
+description: "Hold requests for a model that is scaled to zero on this policloud until an agent for it is healthy, and publish the demand an autoscaler uses to wake it."
+sidebarTitle: "Hold at zero"
+---
+
+Hold at zero lets a model scale down to zero replicas without failing the requests that arrive while it is asleep. When a request asks for a model that the sibling map places on this policloud with `scale_from_zero: true`, and no healthy agent serves it here, Hivenet Router holds the request instead of failing it. It counts the request in the `hivenet_pending_demand` metric, keeps the connection alive, and serves the request as soon as an agent for the model registers.
+
+Hivenet Router does not start or stop models. An external autoscaler, such as [KEDA](https://keda.sh), reads `hivenet_pending_demand` and scales the model from zero. The agent registers once its backend answers its health check, and the router releases the held requests.
+
+Hold at zero needs [cross-site redirect](/routing/cross-site-redirect): the sibling map says which models may be held on this policloud. With no `--site-id`, or for a model the map does not place here with `scale_from_zero: true`, nothing is held and the router behaves as before.
+
+<Info>
+  The sibling map is held in memory. A restarted router holds nothing until the map writer pushes the map again, and requests for a model at zero fail as before in the meantime.
+</Info>
+
+## How a request is handled
+
+After the API key is authenticated, the model alias is resolved and the model is checked against the key’s allowlist:
+
+1. **Served here.** If a healthy agent on this policloud serves the model, the request is served here as usual.
+2. **Redirect first.** If the sibling map lists another policloud in the request’s scope that serves the model, the router answers `307` to it, following the rules in [Cross-site redirect](/routing/cross-site-redirect#choosing-the-policloud). The one exception: while the map’s hints are fresh, every candidate sibling is cold and the map places the model on this policloud, the request is not redirected, because a cold sibling is no faster than waking the model here. The request then continues to step 3, as it does when no sibling is in scope or the request has already been redirected twice.
+3. **Held here?** If the map places the model on this policloud, for the endpoint’s kind, with `scale_from_zero: true`, the request is held. Otherwise it fails as before, normally with `404 model_not_found`.
+4. **Quota.** The key’s quota is checked before the hold, so a key over its limits is refused at once. See [Quota while held](#quota-while-held).
+5. **Hold.** The request waits, counted once in `hivenet_pending_demand{model}`. After `--wake-keepalive`, the client receives [keepalive bytes](#keepalive).
+6. **Wake.** The autoscaler starts the model. When an agent for the model registers, every held request is released and continues as a normal request: admission, routing and the backend call.
+7. **Timeout.** If the model does not wake within the hold budget, the request gets `503 model_waking` with `Retry-After`.
+
+Every inference endpoint can be held, by the placement kind that matches it: `chat` for `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens`; `embedding` for `POST /v1/embeddings`; `rerank` for `POST /v1/rerank`.
+
+A request whose key may not use the model is never held: it gets `403 model_forbidden` at once.
+
+## What the client sees
+
+A held request looks like a slow first response. The client needs no changes, but its request timeout must be longer than the hold budget plus the generation time.
+
+| Outcome | Before keepalives start | After keepalives start |
+| --- | --- | --- |
+| The model wakes and the request succeeds | The normal response | `200`, keepalive bytes, then the normal response |
+| The hold budget runs out | `503 model_waking` with `Retry-After` | `200`, keepalive bytes, then the error in the body |
+| A hold limit is reached | `503 model_waking` with `Retry-After`, at once | Not applicable: the request is refused before it is held |
+| An error after the release, such as a routing failure | The normal error status | `200`, keepalive bytes, then the error in the body |
+
+### Keepalive
+
+A held connection carries no data, so proxies and load balancers with an idle timeout may close it, and client SDKs may then retry. After `--wake-keepalive` (default `15s`), and then at the same interval, the router sends:
+
+- an SSE comment, `: keep-alive`, to a streaming request (`"stream": true`);
+- a single space to any other request. Leading whitespace is valid before a JSON body.
+
+The first keepalive sends the `200` status and the response headers, so the status can no longer change. An error after it is written in the body:
+
+- for a streaming request, as a final SSE event. OpenAI-compatible endpoints get `data: {"error":{...}}`. `/v1/messages` gets an Anthropic `error` event whose message starts with the error code.
+- for any other request, as the usual JSON error envelope after the spaces.
+
+The audit log and the HTTP metrics record the status the request ended with, such as `503`, not the `200` sent on the wire.
+
+<Warning>
+  A non-streaming client that receives `200` parses the body as a success. With keepalives on, a hold that expires reaches such a client as a `200` whose body is an error envelope. Set `--wake-keepalive 0` to keep plain status codes when no proxy between your clients and the router closes idle connections within the hold budget.
+</Warning>
+
+### `model_waking`
+
+```text
+HTTP 503
+Retry-After: 30
+```
+
+```json
+{
+  "error": {
+    "code": "model_waking",
+    "message": "model llama-3-70b is waking up; retry in 30 seconds",
+    "source": "router",
+    "retry_after": 30
+  }
+}
+```
+
+The same code is returned when the hold budget runs out, when a [hold limit](#hold-limits) is reached, and when a request released by a wake finds no room before its hold budget ends. `retry_after` repeats the `Retry-After` header, in seconds. Retry with the same `X-Request-ID` so the retry is recognized as the same request.
+
+A client that disconnects while held is recorded with status `499` in the audit log.
+
+## Hold limits
+
+| Limit | Default | Setting |
+| --- | --- | --- |
+| How long a request is held | The placement’s `hold_budget`, else `5m` | `placements[].hold_budget` in the sibling map, `--wake-hold-budget` |
+| Requests held per model | `100` | `--wake-hold-max` |
+| Requests held per API key and model | `20` | `--wake-hold-max-per-key` |
+| Requests held in total, across all models | `1000` | `--wake-hold-max-total` |
+
+Each held request keeps its request body in memory, so `--wake-hold-max-total` bounds that memory. A request beyond any limit gets `503 model_waking` at once and is not counted in the pending demand.
+
+Set the hold budget per model from its measured cold start: the time from the autoscaler’s decision to the backend’s first successful health check, plus a margin. A budget shorter than the model’s cold start fails every wake.
+
+### Quota while held
+
+The per-model requests-per-minute quota scales with the number of healthy replicas, and is skipped when a model has none. For a model that may be held here, the quota counts at least one replica, so a held request is charged like any other and a key cannot hold requests past its quota.
+
+## After the wake
+
+A wake releases every held request together, often more than the woken replicas can serve at once. Released requests line up for the woken capacity instead of being refused:
+
+- The [admission gate](/routing/admission-control) (`max_inflight`, `admit_budget_tokens`) lets a released request wait for room until its hold budget ends, not only the short default wait.
+- The [capacity queue](/routing/fallback-chains#capacity-and-the-wait-queue) accepts released requests beyond `--queue-depth`. The hold limits already bound how many there are.
+
+A released request that still finds no room when its hold budget ends gets `503 model_waking`, never a `429`. Once it is dispatched to an agent, the normal request timeout applies.
+
+The order among released requests is best effort: waiting requests are woken together and compete for each free slot.
+
+## Pending demand and the autoscaler
+
+`hivenet_pending_demand{model}` is the number of distinct requests held now for a model. A client that retries the same request, with the same API key and `X-Request-ID`, counts once. Requests from different keys always count separately, even with the same request ID.
+
+The metric has a series, `0` when nothing is held, for every model that the map places on this policloud with `scale_from_zero: true`, so an autoscaler’s query always finds it. A model removed from the map leaves no series behind.
+
+Each router counts only the requests it holds itself. With several routers per policloud, sum the metric across them.
+
+### Waking the model
+
+Held requests are released when an agent for the model registers, so the agent must register only when its backend can serve. The Hivenet Router agent checks its backend’s health endpoint before it registers: run it next to the backend, for example as a sidecar container, and start them together.
+
+When an agent’s connection to the router drops, the agent leaves the routing pool at once. A model that was just scaled down is therefore held again immediately, rather than receiving requests for the missed-heartbeat timeout.
+
+### Example: KEDA and a LeaderWorkerSet
+
+This example scales a model served by a [LeaderWorkerSet](https://lws.sigs.k8s.io) (LWS) between 0 and 1 replica. The model wakes when a request is held, and stays awake while it serves traffic:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llama-3-70b
+spec:
+  scaleTargetRef:
+    apiVersion: leaderworkerset.x-k8s.io/v1
+    kind: LeaderWorkerSet
+    name: llama-3-70b
+  minReplicaCount: 1
+  maxReplicaCount: 1
+  idleReplicaCount: 0
+  pollingInterval: 5
+  cooldownPeriod: 1800
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc:9090
+      query: >-
+        sum(hivenet_pending_demand{model="llama-3-70b"})
+        + (sum(increase(hivenet_routing_requests_routed_total{model="llama-3-70b"}[30m])) or vector(0))
+      threshold: "1"
+      activationValue: "0.5"
+```
+
+- **Wake.** `hivenet_pending_demand` rises above `0` when a request is held, so the trigger becomes active and KEDA scales the LWS from `0` to `1`.
+- **Stay awake.** `increase(...[30m])` counts the requests routed in the last 30 minutes, so a model that is serving traffic is not scaled down while nothing is held.
+- **Idle.** With no held request and no traffic for 30 minutes, the trigger becomes inactive, and KEDA scales the LWS back to `idleReplicaCount: 0` after `cooldownPeriod`.
+- **No data.** `hivenet_routing_requests_routed_total` has no series before the model’s first request, so `or vector(0)` keeps the query from returning no result.
+
+Use `increase`, not `rate`: a per-second rate of a lightly used model stays below any useful threshold. Give the backend container a readiness probe on its health endpoint, so Kubernetes does not report the pod ready before the model can serve.
+
+## Configuration
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--wake-hold-budget` | `HIVENET_ROUTER_WAKE_HOLD_BUDGET` | `5m` | Longest a request is held when its placement has no `hold_budget` |
+| `--wake-hold-max` | `HIVENET_ROUTER_WAKE_HOLD_MAX` | `100` | Most requests held per model |
+| `--wake-hold-max-per-key` | `HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY` | `20` | Most requests held per API key and model |
+| `--wake-hold-max-total` | `HIVENET_ROUTER_WAKE_HOLD_MAX_TOTAL` | `1000` | Most requests held across all models |
+| `--wake-keepalive` | `HIVENET_ROUTER_WAKE_KEEPALIVE` | `15s` | Delay before, and interval between, keepalive bytes; `0` disables them |
+
+Durations use Go syntax, such as `90s` or `5m`. The router refuses to start when a value is invalid: a budget or limit that is not greater than `0`, or a negative keepalive.
+
+### The `hold_budget` placement field
+
+A placement in the [sibling map](/routing/cross-site-redirect#pushing-the-sibling-map) may set its own hold budget:
+
+```json
+{"model": "llama-3-70b", "kind": "chat", "policloud": "pc-fr-1", "scale_from_zero": true, "hold_budget": "240s"}
+```
+
+`hold_budget` is optional: a Go duration greater than `0` and at most `1h`. Any other value rejects the whole map push with `400`. It applies only to placements with `scale_from_zero: true`.
+
+## Metrics
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_pending_demand` | Gauge | `model` | Distinct requests held now on this router; `0` for every other model that may be held here |
+| `hivenet_wake_holds_total` | Counter | `model`, `outcome` | Holds that ended: `woken` (released), `expired` (budget ran out), `full` (a hold limit was reached), `gone` (the client left) |
+| `hivenet_wake_hold_seconds` | Histogram | `model` | How long released requests were held: the wake time as clients see it. Expired and abandoned holds are not observed |
+
+A rising `outcome="expired"` count means the model takes longer to wake than its hold budget. A rising `outcome="full"` count means the hold limits are too low for the traffic that arrives while the model is asleep.
+
+## Limitations
+
+- Hold at zero needs cross-site redirect and the sibling map: there is no other way to declare which models may be held.
+- A model whose wake takes longer than its hold budget is still held for the whole budget before `model_waking`. The router does not know a model’s expected wake time.
+- There is no endpoint to wake a model ahead of traffic. Scale it up with your autoscaler instead.
+- Each router holds its own requests. A client retry that reaches another router of the same policloud is counted there too.
+- Once keepalives have started, a later error is reported in the body of a `200` response.

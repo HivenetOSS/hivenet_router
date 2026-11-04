@@ -539,7 +539,9 @@ sequenceDiagram
     C->>H: POST /v1/chat/completions
     H->>H: Trace, request ID, audit
     H->>H: Authenticate API key
+    H-->>C: 307 to a sibling policloud (cross-site redirect, no local agent)
     H->>H: Enforce RPM and token admission
+    H->>H: Hold while the model wakes from zero (hold at zero)
     H->>H: Check model access
     H->>Q: Enqueue pending request
     Q->>P: Start routing session
@@ -595,7 +597,11 @@ requests_per_minute_per_replica
 × healthy replicas serving the model
 ```
 
-When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error.
+When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error. A model that may be [held at zero](/routing/hold-at-zero) on this policloud counts as one replica instead, so held requests are charged.
+
+#### Redirect and hold at zero
+
+With [cross-site redirect](/routing/cross-site-redirect) enabled, a request for a model with no healthy agent here is checked against the sibling map before quota: a sibling that serves it gets a `307`, and nothing is charged here. When the map places the model on this policloud with `scale_from_zero: true` instead, the request passes quota and is then [held](/routing/hold-at-zero) until an agent for the model registers, before the model admission below.
 
 ### 4. Model authorization and admission
 
@@ -706,12 +712,12 @@ The default maximum is:
 
 A request wakes when:
 
-- an agent releases a capacity slot
-- a new agent registers for the model
+- an agent releases a capacity slot, at the end of the response for a streamed one: one waiting request wakes
+- a new agent registers for the model, or a registered one recovers: every waiting request wakes, and those that find no free slot wait again
 
 The request deadline also bounds the wait.
 
-When the queue is full or the deadline expires, the routing session advances to the next fallback step.
+When the queue is full or the deadline expires, the routing session advances to the next fallback step. A request released by a model waking from zero may wait beyond the queue’s maximum.
 
 ### 9. Atomic slot acquisition
 

@@ -189,7 +189,7 @@ Agents collect backend and system state at different intervals. The router uses 
 | Routing signal push | 500 milliseconds |
 | Agent heartbeat | 5 seconds |
 | Router health check | 5 seconds |
-| Mark an agent unhealthy | 15 seconds without a heartbeat |
+| Mark an agent unhealthy | 15 seconds without a heartbeat, or at once when its last connection to the router drops |
 | Remove an agent | 30 seconds without a heartbeat |
 
 Routing signals carry recent engine and hardware data without updating the agent’s heartbeat timestamp. Heartbeats act as the health keepalive and include fallback metric information.

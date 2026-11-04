@@ -326,7 +326,7 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
-| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues |
+| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond it |
 | `--max-concurrent` | — | `50` | Maximum simultaneous router-to-agent request forwards |
 | `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | Deadline for the complete router-side request operation |
 | — | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
@@ -517,6 +517,20 @@ Request-per-minute quota buckets remain in memory even when the Badger quota bac
 | `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRETS` | Required when `--site-id` is set | Redirect-token signing secrets as `id:secret`, one per line in the file or comma-separated in the environment; the first signs, every one verifies; each at least 32 bytes and identical on every policloud; the file wins over the environment |
 | `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `60s` | How long a redirect token stays valid; an invalid or non-positive value stops startup |
 | `--redirect-allowed-domains` | `HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS` | Required when `--site-id` is set | Comma-separated host suffixes starting with `.`, such as `.inference.hivecompute.ai`; a sibling map with a policloud URL outside them is refused |
+
+### Hold at zero
+
+These settings apply when `--site-id` is set, to models that the sibling map places on this policloud with `scale_from_zero: true`. See [Hold at zero](/routing/hold-at-zero).
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--wake-hold-budget` | `HIVENET_ROUTER_WAKE_HOLD_BUDGET` | `5m` | Longest a request is held while its model wakes, when the placement has no `hold_budget` |
+| `--wake-hold-max` | `HIVENET_ROUTER_WAKE_HOLD_MAX` | `100` | Most requests held per model |
+| `--wake-hold-max-per-key` | `HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY` | `20` | Most requests held per API key and model |
+| `--wake-hold-max-total` | `HIVENET_ROUTER_WAKE_HOLD_MAX_TOTAL` | `1000` | Most requests held across all models; bounds the memory held request bodies use |
+| `--wake-keepalive` | `HIVENET_ROUTER_WAKE_KEEPALIVE` | `15s` | Delay before, and interval between, the keepalive bytes a held request receives; `0` disables them |
+
+An invalid value stops startup.
 
 ### Agent JWT secret
 
