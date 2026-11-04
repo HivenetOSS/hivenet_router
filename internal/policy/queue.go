@@ -19,8 +19,10 @@ var ErrQueueFull = errors.New("request queue full: too many requests waiting for
 //
 // When all agents for a model are at capacity, goroutines park in the queue via
 // Wait() instead of immediately escalating to a fallback policy step.
-// When any agent frees a slot (DecrementLoad) or a new agent registers,
-// Signal() wakes the head-of-queue goroutine so it can retry selection.
+// When an agent frees a slot (DecrementLoad), Signal() wakes the head-of-queue
+// goroutine so it can retry selection. When a new agent registers it brings
+// several slots at once, so Broadcast() wakes every waiter; those that find no
+// free slot park again.
 //
 // onEnqueue and onDequeue are optional callbacks invoked immediately after the
 // goroutine is appended to (or removed from) the waiter list, while the mutex
@@ -107,6 +109,18 @@ func (q *WaitQueue) Signal() {
 	ch := q.waiters[0]
 	q.waiters = q.waiters[1:]
 	ch <- struct{}{}
+}
+
+// Broadcast wakes every goroutine in the queue, in FIFO order. Called when
+// new capacity of unknown size arrives (a new agent registered): each woken
+// goroutine retries selection, and those that find no free slot park again.
+func (q *WaitQueue) Broadcast() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, ch := range q.waiters {
+		ch <- struct{}{}
+	}
+	q.waiters = nil
 }
 
 // Depth returns the current number of goroutines parked in the queue.

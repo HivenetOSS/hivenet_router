@@ -1501,8 +1501,9 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		AgentID:      peerID.String(),
 		Timestamp:    time.Now().UTC(),
 	})
-	// New agent brings fresh capacity — wake any requests waiting in the queue for this model.
-	r.executor.SignalCapacity(metadata.Model)
+	// A new agent brings several slots at once: wake every request waiting
+	// for capacity on this model, not just one.
+	r.executor.BroadcastCapacity(metadata.Model)
 
 	// Delete the old session only after the new agent is fully registered.
 	// A short grace period lets any in-flight routing-signal or heartbeat

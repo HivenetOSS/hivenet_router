@@ -213,8 +213,7 @@ func (e *Executor) getOrCreateQueue(model string) *WaitQueue {
 }
 
 // SignalCapacity wakes one goroutine waiting for capacity on model, if any.
-// Call this whenever a concurrency slot is freed (agent.DecrementLoad) or
-// new capacity arrives (new agent registered for model).
+// Call this whenever a concurrency slot is freed (agent.DecrementLoad).
 func (e *Executor) SignalCapacity(model string) {
 	if e.defaultQueueDepth == 0 {
 		return // queue disabled — no lock needed
@@ -227,6 +226,23 @@ func (e *Executor) SignalCapacity(model string) {
 	}
 	q.Signal()
 	// Depth update is handled by the onDequeue callback in Wait() — no call needed here.
+}
+
+// BroadcastCapacity wakes every goroutine waiting for capacity on model. Call
+// this when new capacity arrives (a new agent registered for model): an agent
+// brings several slots at once, so waking only one waiter would leave the
+// others parked until a slot is freed or their deadline expires.
+func (e *Executor) BroadcastCapacity(model string) {
+	if e.defaultQueueDepth == 0 {
+		return
+	}
+	e.queueMu.RLock()
+	q, ok := e.queues[model]
+	e.queueMu.RUnlock()
+	if !ok {
+		return
+	}
+	q.Broadcast()
 }
 
 // SetPolicy atomically replaces the global policy, preserving all named policies.
