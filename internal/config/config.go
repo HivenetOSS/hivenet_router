@@ -83,6 +83,22 @@ type Config struct {
 	RedirectTokenTTL       time.Duration
 	RedirectAllowedDomains string
 
+	// Hold-at-zero (internal/wake): a request for a model the sibling map
+	// places on this policloud with scale_from_zero, while no healthy agent
+	// serves it, is held until the model wakes. Needs SiteID. WakeHoldBudget
+	// is the longest a request is held when its placement has no
+	// hold_budget (5m: a large model can take several minutes to wake).
+	// WakeHoldMax caps the requests held per model; more get 503
+	// model_waking at once. WakeKeepAlive is the delay before, and interval
+	// between, the keepalive bytes a held request receives (0 disables them).
+	// Invalid values stop startup.
+	// Env: HIVENET_ROUTER_WAKE_HOLD_BUDGET, HIVENET_ROUTER_WAKE_HOLD_MAX,
+	// HIVENET_ROUTER_WAKE_KEEPALIVE.
+	// Flag: --wake-hold-budget, --wake-hold-max, --wake-keepalive.
+	WakeHoldBudget time.Duration
+	WakeHoldMax    int
+	WakeKeepAlive  time.Duration
+
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
 	// protecting the router from memory exhaustion by an oversized payload
 	// (bodies are buffered before parsing). Default 10 MB.
@@ -252,6 +268,9 @@ func DefaultConfig() *Config {
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
 		RedirectTokenTTL:       60 * time.Second,
+		WakeHoldBudget:         5 * time.Minute,
+		WakeHoldMax:            100,
+		WakeKeepAlive:          15 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -368,6 +387,35 @@ func LoadFromEnv() *Config {
 	}
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS")); v != "" {
 		cfg.RedirectAllowedDomains = v
+	}
+	// Hold-at-zero values are validated strictly too.
+	for env, dst := range map[string]struct {
+		d         *time.Duration
+		allowZero bool
+	}{
+		"HIVENET_ROUTER_WAKE_HOLD_BUDGET": {&cfg.WakeHoldBudget, false},
+		"HIVENET_ROUTER_WAKE_KEEPALIVE":   {&cfg.WakeKeepAlive, true},
+	} {
+		v := strings.TrimSpace(os.Getenv(env))
+		if v == "" {
+			continue
+		}
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: %w", env, v, err))
+		case d < 0 || (d == 0 && !dst.allowZero):
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: must be > 0", env, v))
+		default:
+			*dst.d = d
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_WAKE_HOLD_MAX")); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n <= 0 {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_WAKE_HOLD_MAX=%q: must be an integer > 0", v))
+		} else {
+			cfg.WakeHoldMax = n
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_REQUEST_BYTES"); v != "" {
 		// n == 0 is a valid value meaning "disabled"; only reject negatives.

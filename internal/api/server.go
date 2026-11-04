@@ -167,6 +167,11 @@ func (s *Server) registerRoutes() {
 	// so the redirecting router charges nothing. No-op when disabled.
 	inference.Use(s.handlers.RedirectDecision())
 	inference.Use(QuotaMiddleware(s.rateLimiter, s.routerMetrics, s.healthyAgentCount))
+	// Hold a request for a model that is scaled to zero here until it wakes:
+	// after the redirect (a warm sibling is better than a wait) and the quota
+	// check (an over-quota key is refused at once), before the handler's
+	// capacity gates, which need the agents that woke. No-op when disabled.
+	inference.Use(s.handlers.WakeHold())
 	{
 		// Generic allowlisted passthrough: routed by top-level "model" and
 		// forwarded verbatim to the backend's native endpoint at the same path.

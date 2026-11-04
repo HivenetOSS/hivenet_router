@@ -96,6 +96,11 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 		}},
 		{"hint without hints_expire_at", func(d *redirect.MapDoc) { d.Placements[0].Hint = &redirect.Hint{Load: "ok"} }},
 		{"unparsable hints_expire_at", func(d *redirect.MapDoc) { d.HintsExpireAt = "soon" }},
+		{"unparsable hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "4 minutes" }},
+		{"hold_budget without a unit", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "240" }},
+		{"zero hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "0s" }},
+		{"negative hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "-1m" }},
+		{"hold_budget over the maximum", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "61m" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,6 +383,49 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 				t.Fatalf("target %q, want a redirect: %v", got, tc.redirect)
 			}
 		})
+	}
+}
+
+// TestWakeable: which requests a policloud may hold while a model wakes,
+// and with which budget.
+func TestWakeable(t *testing.T) {
+	d := doc(1)
+	d.Placements[0].HoldBudget = "4m"                                                   // m on fr-2
+	d.Placements = append(d.Placements, place("n", redirect.KindChat, "fr-2", no, nil)) // never wakes from zero
+	m := redirect.NewMap(domains)
+	if err := m.Replace(d); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		model, kind, policloud string
+		budget                 time.Duration
+		ok                     bool
+	}{
+		{"m", redirect.KindChat, "fr-2", 4 * time.Minute, true},
+		{"m", redirect.KindChat, "de-1", 0, true}, // no hold_budget: the router's default applies
+		{"m", redirect.KindEmbedding, "fr-2", 0, false},
+		{"m", redirect.KindChat, "fr-1", 0, false}, // not placed there
+		{"n", redirect.KindChat, "fr-2", 0, false}, // scale_from_zero: false
+		{"unknown", redirect.KindChat, "fr-2", 0, false},
+	}
+	for _, tc := range cases {
+		budget, ok := m.Wakeable(tc.model, tc.kind, tc.policloud)
+		if budget != tc.budget || ok != tc.ok {
+			t.Errorf("Wakeable(%s, %s, %s) = %v, %v; want %v, %v", tc.model, tc.kind, tc.policloud, budget, ok, tc.budget, tc.ok)
+		}
+	}
+	if got := m.WakeableModels("fr-2"); len(got) != 1 || got[0] != "m" {
+		t.Errorf("WakeableModels(fr-2) = %v, want [m]", got)
+	}
+	if got := m.WakeableModels("de-1"); len(got) != 2 || got[0] != "e" || got[1] != "m" {
+		t.Errorf("WakeableModels(de-1) = %v, want [e m]", got)
+	}
+	if got := m.WakeableModels("fr-1"); len(got) != 0 {
+		t.Errorf("WakeableModels(fr-1) = %v, want none", got)
+	}
+	// The budget is kept as pushed in the map's snapshot.
+	if hb := m.Snapshot().Placements[0].HoldBudget; hb != "4m" {
+		t.Errorf("snapshot hold_budget %q, want 4m", hb)
 	}
 }
 

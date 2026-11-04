@@ -836,3 +836,66 @@ func TestSiblingMapGauges(t *testing.T) {
 		t.Fatalf("after a push: %v", got)
 	}
 }
+
+// TestPendingDemandGauge: hivenet_pending_demand is read at scrape time,
+// with one series per model returned, and none left behind for a model
+// that is no longer returned.
+func TestPendingDemandGauge(t *testing.T) {
+	m := metrics.NewRouterMetrics()
+	demand := map[string]int{"m": 0, "n": 3}
+	m.RegisterPendingDemand(func() map[string]int { return demand })
+	read := func() map[string]float64 {
+		t.Helper()
+		fams, err := m.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]float64{}
+		for _, f := range fams {
+			if f.GetName() != "hivenet_pending_demand" {
+				continue
+			}
+			for _, s := range f.GetMetric() {
+				out[s.GetLabel()[0].GetValue()] = s.GetGauge().GetValue()
+			}
+		}
+		return out
+	}
+	if got := read(); len(got) != 2 || got["m"] != 0 || got["n"] != 3 {
+		t.Fatalf("first scrape %v, want m=0 n=3", got)
+	}
+	demand = map[string]int{"m": 1}
+	if got := read(); len(got) != 1 || got["m"] != 1 {
+		t.Fatalf("second scrape %v, want only m=1", got)
+	}
+}
+
+// TestWakeHoldMetrics: every outcome is counted; only released requests are
+// observed in the wake-time histogram.
+func TestWakeHoldMetrics(t *testing.T) {
+	m := metrics.NewRouterMetrics()
+	m.WakeHoldDone("m", "woken", 120*time.Second)
+	m.WakeHoldDone("m", "expired", 300*time.Second)
+	m.WakeHoldDone("m", "full", 0)
+	fams, err := m.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var holds, observed float64
+	for _, f := range fams {
+		switch f.GetName() {
+		case "hivenet_wake_holds_total":
+			for _, s := range f.GetMetric() {
+				holds += s.GetCounter().GetValue()
+			}
+		case "hivenet_wake_hold_seconds":
+			observed = float64(f.GetMetric()[0].GetHistogram().GetSampleCount())
+			if sum := f.GetMetric()[0].GetHistogram().GetSampleSum(); sum != 120 {
+				t.Errorf("histogram sum %v, want 120 (the woken hold only)", sum)
+			}
+		}
+	}
+	if holds != 3 || observed != 1 {
+		t.Fatalf("holds %v observed %v, want 3 and 1", holds, observed)
+	}
+}

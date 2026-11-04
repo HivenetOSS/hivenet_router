@@ -54,6 +54,10 @@ const (
 	// between the routers that sign and verify it.
 	ClockSkew = 5 * time.Second
 
+	// MaxHoldBudget bounds a placement's hold_budget: how long a router may
+	// hold a request while the model wakes.
+	MaxHoldBudget = time.Hour
+
 	// homeSize is how many sibling policlouds one key + model may use, which
 	// keeps the key's rate limits meaningful (contract 3 v2 §3 step 4).
 	homeSize = 2
@@ -102,13 +106,18 @@ type (
 
 	// Placement says a model of a kind runs in a policloud. Only Model, Kind,
 	// Policloud and ScaleFromZero decide where a request goes; Hint only lets
-	// the router skip a full or cold target.
+	// the router skip a full or cold target. HoldBudget is optional: how long
+	// the policloud's routers hold a request while the model wakes from zero,
+	// as a Go duration such as "240s" (the router's default when absent).
 	Placement struct {
 		Model         string `json:"model"`
 		Kind          string `json:"kind"`
 		Policloud     string `json:"policloud"`
 		ScaleFromZero *bool  `json:"scale_from_zero"`
+		HoldBudget    string `json:"hold_budget,omitempty"`
 		Hint          *Hint  `json:"hint,omitempty"`
+
+		holdBudget time.Duration // HoldBudget, parsed by Map.Replace
 	}
 
 	// Hint is advisory load for one placement. A missing field reads as the
@@ -221,6 +230,11 @@ func (m *Map) Replace(doc MapDoc) error {
 		if err := validatePlacement(pl, policlouds); err != nil {
 			return fmt.Errorf("redirect: placements[%d]: %w", i, err)
 		}
+		budget, err := parseHoldBudget(pl)
+		if err != nil {
+			return fmt.Errorf("redirect: placements[%d]: %w", i, err)
+		}
+		pl.holdBudget = budget
 		key := [2]string{pl.Model, pl.Policloud}
 		if seen[key] {
 			return fmt.Errorf("redirect: placements[%d]: duplicate placement of %q in %q", i, pl.Model, pl.Policloud)
@@ -304,6 +318,19 @@ func validatePlacement(pl Placement, policlouds map[string]Policloud) error {
 		}
 	}
 	return nil
+}
+
+// parseHoldBudget returns a placement's hold budget, or 0 when it has none.
+func parseHoldBudget(pl Placement) (time.Duration, error) {
+	if pl.HoldBudget == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(pl.HoldBudget)
+	if err != nil || d <= 0 || d > MaxHoldBudget {
+		return 0, fmt.Errorf("model %q in %q: hold_budget %q must be a duration such as \"240s\", greater than 0 and at most %v",
+			pl.Model, pl.Policloud, pl.HoldBudget, MaxHoldBudget)
+	}
+	return d, nil
 }
 
 // allowedHost reports whether host ends with one of the allowed domains.
@@ -426,6 +453,35 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 		return cands[firstEligible].pc, true // only cold, wakeable targets
 	}
 	return cands[0].pc, true // every target skipped: a stale hint must not block service
+}
+
+// Wakeable reports whether a request for model, as kind, may be held on
+// policloud while the model wakes: the map places it there with
+// scale_from_zero. budget is the placement's hold_budget, 0 when it has none.
+func (m *Map) Wakeable(model, kind, policloud string) (budget time.Duration, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, pl := range m.byModel[model] {
+		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
+			return pl.holdBudget, true
+		}
+	}
+	return 0, false
+}
+
+// WakeableModels returns, sorted, the models the map places on policloud
+// with scale_from_zero: the models whose requests may be held there.
+func (m *Map) WakeableModels(policloud string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for model, pls := range m.byModel {
+		if slices.ContainsFunc(pls, func(pl Placement) bool { return pl.Policloud == policloud && *pl.ScaleFromZero }) {
+			out = append(out, model)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // placed reports whether the map places model, as kind, on policloud.

@@ -20,6 +20,7 @@ import (
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
+	"hivenet_router/internal/wake"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -267,6 +268,11 @@ type Handlers struct {
 	// agent here; nil (the default) disables cross-site redirects. See
 	// RedirectTarget, RedirectDecision and SetRedirect.
 	redirect *redirect.Redirector
+
+	// wake holds requests for a model that is scaled to zero here until it
+	// wakes; nil (the default) disables holding. See WakeHold and SetWake.
+	wake    *wake.Holder
+	wakeCfg WakeConfig
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.

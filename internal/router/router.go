@@ -31,6 +31,7 @@ import (
 	"hivenet_router/internal/tokenizer"
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
+	"hivenet_router/internal/wake"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
@@ -167,6 +168,11 @@ type Router struct {
 	// redirect is the cross-site redirect state (internal/redirect); nil when
 	// cfg.SiteID is empty, which disables redirects entirely.
 	redirect *redirect.Redirector
+
+	// wake holds requests for a model scaled to zero here until it wakes
+	// (internal/wake); nil when redirect is disabled, since the sibling map
+	// says which models may be held.
+	wake *wake.Holder
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -477,6 +483,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
+		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
@@ -804,6 +811,9 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
+	if r.wake != nil {               // nil = hold at zero disabled
+		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
+	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1057,6 +1067,37 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 		},
 	)
 	return rd, nil
+}
+
+// newWakeHolder returns the holder for requests to models scaled to zero
+// here, or nil when cross-site redirect is disabled. It publishes the
+// pending demand of every model the sibling map lets this policloud hold, 0
+// when none of its requests is held.
+func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentRegistry, m *metrics.RouterMetrics) *wake.Holder {
+	if rd == nil {
+		return nil
+	}
+	holder := wake.NewHolder(cfg.WakeHoldMax, agents.CountHealthyByModel, func(model string, outcome wake.Outcome, held time.Duration) {
+		m.WakeHoldDone(model, string(outcome), held)
+		switch outcome {
+		case wake.Woken:
+			log.Debugf("hold at zero: released a request for %s after %v", model, held.Round(time.Millisecond))
+		case wake.Expired:
+			log.Warnf("hold at zero: %s did not wake within the hold budget; answered 503 model_waking", model)
+		case wake.Full:
+			log.Warnf("hold at zero: %s already holds %d requests; answered 503 model_waking", model, cfg.WakeHoldMax)
+		}
+	})
+	m.RegisterPendingDemand(func() map[string]int {
+		demand := holder.Demand()
+		for _, model := range rd.Map.WakeableModels(rd.Self) {
+			if _, ok := demand[model]; !ok {
+				demand[model] = 0
+			}
+		}
+		return demand
+	})
+	return holder
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.
@@ -1502,8 +1543,12 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		Timestamp:    time.Now().UTC(),
 	})
 	// A new agent brings several slots at once: wake every request waiting
-	// for capacity on this model, not just one.
+	// for capacity on this model, not just one, and release every request
+	// held while the model was scaled to zero.
 	r.executor.BroadcastCapacity(metadata.Model)
+	if r.wake != nil {
+		r.wake.Wake(metadata.Model)
+	}
 
 	// Delete the old session only after the new agent is fully registered.
 	// A short grace period lets any in-flight routing-signal or heartbeat
@@ -1569,10 +1614,19 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	// Always update LastSeen — the agent is alive and reachable regardless of backend state.
 	a.UpdateLastSeen()
 
+	wasHealthy := a.IsHealthy()
 	prevBackendHealthy := a.SetBackendHealthy(payload.BackendHealthy)
 
 	if payload.BackendHealthy {
 		a.SetHealthy(true)
+		if !wasHealthy || !prevBackendHealthy {
+			// The agent is usable again without registering again: its slots
+			// are new capacity, and a model held at zero may now be awake.
+			r.executor.BroadcastCapacity(model)
+			if r.wake != nil {
+				r.wake.Wake(model)
+			}
+		}
 		if err := r.storage.UpdateAgentStatus(session.PeerID, true, time.Now()); err != nil {
 			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
 		}
