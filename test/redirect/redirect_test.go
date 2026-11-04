@@ -457,7 +457,7 @@ func signer(t *testing.T, ttl time.Duration, secrets ...redirect.Secret) *redire
 func TestSigner(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	s := signer(t, 60*time.Second, secretA)
-	claims := redirect.Claims{KeyID: "k-1", RequestID: "r-1", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "ab"}
+	claims := redirect.Claims{KeyID: "k-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000001", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "ab"}
 	tok := s.Sign(claims, now)
 	if !strings.HasPrefix(tok, "v2.k1.") || strings.Count(tok, ".") != 3 {
 		t.Fatalf("token %q is not v2.<kid>.<claims>.<sig>", tok)
@@ -652,7 +652,7 @@ func request(token, bearer string) *http.Request {
 func TestTokenAuth(t *testing.T) {
 	now := time.Now()
 	past := now.Add(-time.Hour)
-	valid := redirect.Claims{KeyID: "key-1", RequestID: "rid-1", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "bh"}
+	valid := redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000002", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "bh"}
 	sign := func(mod func(*redirect.Claims)) string {
 		c := valid
 		if mod != nil {
@@ -696,6 +696,9 @@ func TestTokenAuth(t *testing.T) {
 		{"EU scope at an EU policloud", request(sign(func(c *redirect.Claims) { c.Scope = "EU" }), ""), registry(t, true, nil), &recorder{}, false, true, "key-1", ""},
 		{"malformed scope", request(sign(func(c *redirect.Claims) { c.Scope = "world" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
 		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.RequestID = "evil'; DROP--" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"request ID with a line break", request(sign(func(c *redirect.Claims) { c.RequestID = "0190f3a2-7c4e-7b1a-9f3d-000000000002\nfake=1" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"request ID not in canonical form", request(sign(func(c *redirect.Claims) { c.RequestID = "0190F3A2-7C4E-7B1A-9F3D-000000000002" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"no jti", request(rawToken(secretA, noJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"short jti", request(rawToken(secretA, shortJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"expired token", request(signer(t, time.Second, secretA).Sign(valid, now.Add(-time.Minute)), ""), registry(t, true, nil), &recorder{}, true, false, "", "expired"},
@@ -731,7 +734,7 @@ func TestTokenAuth(t *testing.T) {
 				t.Fatalf("redirect info %+v, want present=%v", res.Redirect, tc.wantRedirect)
 			}
 			if res.Redirect != nil {
-				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "rid-1", Model: "m", Scope: res.Redirect.Scope, From: "fr-1",
+				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000002", Model: "m", Scope: res.Redirect.Scope, From: "fr-1",
 					TokenID: res.Redirect.TokenID, Exp: now.Add(time.Minute).Unix()}
 				if *res.Redirect != want || !redirect.ValidJTI(want.TokenID) {
 					t.Errorf("redirect info %+v, want %+v", *res.Redirect, want)
@@ -749,7 +752,7 @@ func TestTokenAuth_SingleUseIsLast(t *testing.T) {
 	rd := newRedirector(t, &rejects)
 	keys := registry(t, true, nil)
 	p := redirect.Wrap(rd, keys, keys)
-	claims := redirect.Claims{KeyID: "key-1", RequestID: "rid-9", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
+	claims := redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000009", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
 	now := time.Now()
 	tok, sameRID := rd.Signer.Sign(claims, now), rd.Signer.Sign(claims, now)
 
@@ -780,7 +783,7 @@ func TestTokenAuth_ScopeNeedsOwnCountry(t *testing.T) {
 	rd := newRedirector(t, &rejects)
 	rd.Self = "xx-1" // not in the map
 	keys := registry(t, true, nil)
-	tok := rd.Signer.Sign(redirect.Claims{KeyID: "key-1", RequestID: "r", Scope: "EU", Site: "xx-1", Path: "/v1/chat/completions", Hop: 1}, time.Now())
+	tok := rd.Signer.Sign(redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000003", Scope: "EU", Site: "xx-1", Path: "/v1/chat/completions", Hop: 1}, time.Now())
 	if _, err := redirect.Wrap(rd, keys, keys).Authenticate(request(tok, "")); err == nil || strings.Join(rejects, ",") != "scope" {
 		t.Fatalf("got %v %v, want a 401 for scope", err, rejects)
 	}

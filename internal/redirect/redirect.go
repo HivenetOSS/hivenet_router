@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -515,6 +517,15 @@ const jtiLen = 16
 func ValidJTI(jti string) bool {
 	b, err := base64.RawURLEncoding.DecodeString(jti)
 	return err == nil && len(b) == jtiLen
+}
+
+// ValidRequestID reports whether rid is a request ID as the issuing router
+// assigns it: a UUID in canonical form. The target adopts it and forwards it
+// to its agent and backend, so any other value is refused, even in a token
+// that is correctly signed.
+func ValidRequestID(rid string) bool {
+	u, err := uuid.Parse(rid)
+	return err == nil && u.String() == rid
 }
 
 // Secret is one signing secret and its ID (the token's kid).

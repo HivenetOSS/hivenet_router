@@ -61,7 +61,7 @@ Cache-Control: no-store
 
 The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin policloud, the target policloud, the request path, the hop count, a SHA-256 hash of the request body, its issue and expiry times, and a random token ID that is new for every token. The target checks, in order:
 
-1. the token is well formed and its signature is valid;
+1. the token is well formed, its signature is valid and its request ID is a UUID in canonical form;
 2. it has not expired, with 5 seconds of grace for clock drift between routers;
 3. it was not issued more than 5 seconds in the future. Such a token means this router’s clock is behind, and it would otherwise stay valid longer than its lifetime;
 4. it names this policloud and this request path;
@@ -74,7 +74,7 @@ A token is marked used only when it passes every check, so a request refused on 
 
 When a check fails and the request carries an `Authorization` header that authenticates, the token is ignored and the request is served on that key as a new request. Otherwise a refused token gets `401 unauthorized`, like any other invalid credential.
 
-An accepted request is served on the token’s key. It keeps the first router’s request ID, returned in `X-Request-ID`, so one request can be followed across both policlouds’ logs. It is routed on the token’s model, the concrete model the first router resolved, so an alias such as `model: "auto"` is not resolved again. The key’s quota is charged only here.
+An accepted request is served on the token’s key. It keeps the first router’s request ID, returned in `X-Request-ID`, so one request can be followed across both policlouds’ logs. Clients can choose that ID, so a consumer that combines records from several policlouds, such as billing, must match them on the key ID and the request ID together, never on the request ID alone. It is routed on the token’s model, the concrete model the first router resolved, so an alias such as `model: "auto"` is not resolved again. The key’s quota is charged only here.
 
 <Warning>
   Until it is used or expires, a token works for anyone who has the full URL **and** the same request body. Hivenet Router redacts the token from its own access log. Keep URLs out of other logs, and keep `--redirect-token-ttl` as short as your slowest clients allow.

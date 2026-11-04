@@ -101,6 +101,10 @@ curl http://localhost:8888/v1/models \
 
 The model ID returned here is the value clients must use when sending requests through Hivenet Router.
 
+<Note>
+  Hivenet Router forwards each request’s ID to vLLM in the `X-Request-ID` header, and vLLM uses it as the request ID in its logs. Clients can choose that ID, so two requests can arrive with the same one. vLLM keeps them apart by adding a random suffix to its internal request IDs. Do not set `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`: it turns that suffix off, and vLLM warns that duplicate request IDs may then cause failures or wrong results.
+</Note>
+
 ## Prepare the Hivenet Router agent
 
 <Tabs>

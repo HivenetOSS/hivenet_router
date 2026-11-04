@@ -521,7 +521,7 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		b := newSite(t, "b", nil, testKeys(t))
 		push(t, fleetDoc(1, placement("m", redirect.KindChat, "a")), b)
 		for i := 0; i < 10; i++ {
-			c := claims(func(c *redirect.Claims) { c.RequestID = fmt.Sprintf("rid-%d", i) })
+			c := claims(func(c *redirect.Claims) { c.RequestID = fmt.Sprintf("0190f3a2-7c4e-7b1a-9f3d-%012d", i) })
 			loc, next := locationToken(t, send(b, chatPath+"?rt="+sign(t, c), chatBody, map[string]string{"X-Session-ID": fmt.Sprint(i)}))
 			if loc.Host != "c.example.com" {
 				t.Fatalf("Location %s, want c (never a, the origin)", loc)

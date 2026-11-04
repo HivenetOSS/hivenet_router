@@ -115,6 +115,10 @@ The selected value is the request's single ID. It is:
 
 A client that retries with the same `X-Request-ID` keeps the same ID, so logs show the retry as the same request.
 
+<Warning>
+  The request ID can be chosen by the client. One key can reuse an ID, and different keys can send the same ID. Anything that deduplicates audit records, such as a billing pipeline, must key on `key_id` and `request_id` together, never on `request_id` alone.
+</Warning>
+
 Invalid values are never stored or forwarded, so arbitrary request-ID text cannot be injected into audit, agent, or backend logs.
 
 ### Trace IDs

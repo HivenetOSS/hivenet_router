@@ -136,7 +136,7 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 		return c, "clock"
 	case errors.Is(err, ErrTokenSignature):
 		return c, "signature"
-	case err != nil, c.RequestID == "", !ValidJTI(c.JTI):
+	case err != nil, !ValidRequestID(c.RequestID), !ValidJTI(c.JTI):
 		return c, "malformed"
 	case c.Site != t.r.Self:
 		return c, "site"
