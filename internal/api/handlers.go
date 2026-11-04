@@ -444,7 +444,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	}
 	defer reservation.Release()
 
-	m.requestID = generateRequestID()
+	m.requestID = requestIDFrom(c)
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
 	m.tpd, m.quotaModel = quotaBudgetFromContext(c)
 
@@ -1419,11 +1419,16 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 		h.onRequestReceived(MetricContext{TenantID: tenantID, KeyID: keyID, DeploymentID: deploymentID})
 	}
 
+	requestID := requestIDFrom(c)
+	// Forward only the request ID, so agent and backend logs carry the same
+	// ID as the router's for embeddings and rerank too.
+	fwdHeaders := http.Header{}
+	fwdHeaders.Set("X-Request-ID", requestID)
 	chatReq := &domain.ChatRequest{
-		Model:    req.Model,
-		RawBytes: rawBytes,
+		Model:       req.Model,
+		RawBytes:    rawBytes,
+		HttpHeaders: fwdHeaders,
 	}
-	requestID := generateRequestID()
 	pending := domain.NewPendingRequest(requestID, chatReq, h.timeout)
 	pending.Ctx = c.Request.Context()
 	pending.TenantID = tenantID
@@ -1530,13 +1535,6 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{
 		Error: domain.NewRouterError(code, message, source),
 	})
-}
-
-// generateRequestID creates a unique request identifier.
-func generateRequestID() string {
-
-	// Use nanosecond timestamp for uniqueness.
-	return fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 }
 
 // sseFlushingWriter wraps a gin.ResponseWriter and flushes after every Write so

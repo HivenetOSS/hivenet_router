@@ -121,21 +121,23 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return gin.Recovery()
 }
 
-// RequestIDMiddleware attaches a trace ID to every request and response.
+// RequestIDMiddleware gives every request one ID, used end to end.
 // If the caller provides an X-Request-ID header that is a valid UUID (any
-// version) it is reused; otherwise a fresh UUID v4 is generated. Accepting
-// any UUID version allows callers using v1/v7 time-ordered IDs (e.g. from
-// OpenTelemetry or Jaeger) to propagate their own trace IDs. Rejecting
-// non-UUID values prevents audit log poisoning via crafted request IDs.
-// The ID is stored in the Gin context ("request_id") and echoed back in the
-// X-Request-ID response header.
+// version) it is reused in canonical form; otherwise a fresh UUIDv7 is
+// generated. Accepting any version lets callers propagate their own IDs, and
+// reusing the caller's ID means a client retry that resends the same header
+// is recognisable as the same request. Rejecting non-UUID values prevents log
+// poisoning via crafted request IDs.
+//
+// The ID is stored in the Gin context ("request_id"), echoed in the
+// X-Request-ID response header, and written back to the request header so
+// the value forwarded to the agent and backend is the same validated ID.
 // Applied globally so every response — including 401s — is traceable.
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.GetHeader("X-Request-ID")
-		if _, err := uuid.Parse(id); err != nil {
-			// Header absent, empty, or not a valid UUID — generate a fresh v4.
-			id = uuid.New().String()
+		id := normalizeRequestID(c.GetHeader("X-Request-ID"))
+		if id == "" {
+			id = newRequestID()
 		}
 		setRequestID(c, id)
 		c.Next()
@@ -143,14 +145,51 @@ func RequestIDMiddleware() gin.HandlerFunc {
 }
 
 // setRequestID stores id as the request's ID: the Gin context, the
-// X-Request-ID response header and the active trace span (so Tempo traces
-// can be correlated with Loki audit logs that carry the same ID).
+// X-Request-ID response header, the X-Request-ID request header (so the
+// value forwarded to the agent and backend is this ID) and the active trace
+// span (so traces can be correlated with audit logs that carry the same ID).
 func setRequestID(c *gin.Context, id string) {
 	c.Set("request_id", id)
+	c.Request.Header.Set("X-Request-ID", id)
 	c.Header("X-Request-ID", id)
 	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
 		span.SetAttributes(attribute.String("request.id", id))
 	}
+}
+
+// normalizeRequestID returns the canonical form of a caller-supplied request
+// ID, or "" when it is absent or not a valid UUID.
+func normalizeRequestID(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
+}
+
+// newRequestID mints a UUIDv7: time-ordered, so IDs sort by creation time in
+// logs, and random enough that several router instances never collide.
+func newRequestID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		// NewV7 only fails if the system random source fails. Fall back to
+		// uuid.New, the previous behaviour, which panics in that case.
+		return uuid.New().String()
+	}
+	return id.String()
+}
+
+// requestIDFrom returns the request ID assigned by RequestIDMiddleware. A
+// handler reached without the middleware (only possible in tests) gets a
+// fresh ID so it never runs with an empty one.
+func requestIDFrom(c *gin.Context) string {
+	if id := c.GetString("request_id"); id != "" {
+		return id
+	}
+	return newRequestID()
 }
 
 // TraceResponseMiddleware injects the W3C traceparent header into HTTP responses.

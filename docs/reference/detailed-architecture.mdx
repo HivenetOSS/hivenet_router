@@ -564,7 +564,7 @@ The router creates or validates:
 - audit context
 - endpoint metrics
 
-A client-provided request ID is preserved only when it is a valid UUID. Otherwise, Hivenet Router generates one.
+A client-provided request ID is preserved only when it is a valid UUID. Otherwise, Hivenet Router generates a UUIDv7. The same ID is used in router logs and traces and is forwarded to the agent and backend.
 
 ### 2. Client authentication
 

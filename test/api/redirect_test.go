@@ -452,6 +452,14 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		if got := w.Header().Get("X-Request-ID"); got != rid {
 			t.Errorf("X-Request-ID %q, want the token's %q", got, rid)
 		}
+		// The adopted ID is the request's single ID: the processor's ID and
+		// the header forwarded to the agent carry it too.
+		if p.ID != rid {
+			t.Errorf("pending request ID %q, want the token's %q", p.ID, rid)
+		}
+		if got := p.Request.HttpHeaders.Get("X-Request-ID"); got != rid {
+			t.Errorf("forwarded X-Request-ID %q, want the token's %q", got, rid)
+		}
 		if *b.charges != 1 {
 			t.Errorf("quota charged %d times at the target, want 1", *b.charges)
 		}

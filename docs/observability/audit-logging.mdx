@@ -103,15 +103,19 @@ curl \
   http://localhost:8080/v1/models
 ```
 
-An absent, empty, or invalid value is replaced with a new UUID v4.
+A valid UUID of any version is accepted and normalized to its canonical lowercase form. An absent, empty, or invalid value is replaced with a new UUIDv7, which is time-ordered and unique across router instances.
 
-The selected value is:
+The selected value is the request's single ID. It is:
 
 - returned in the `X-Request-ID` response header
 - stored in the audit record
 - attached to the active trace span
+- used in the router's routing and error logs
+- forwarded to the agent and backend in the `X-Request-ID` header
 
-This prevents arbitrary request-ID text from being injected into audit records.
+A client that retries with the same `X-Request-ID` keeps the same ID, so logs show the retry as the same request.
+
+Invalid values are never stored or forwarded, so arbitrary request-ID text cannot be injected into audit, agent, or backend logs.
 
 ### Trace IDs
 
