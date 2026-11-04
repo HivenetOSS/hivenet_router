@@ -178,6 +178,21 @@ type RouterMetrics struct {
 	// Labels: reason, model.
 	admissionRejections *prometheus.CounterVec
 
+	// --- Cross-site redirect metrics (internal/redirect) ---
+
+	// redirects counts 307s written to a sibling site. hop is the redirect
+	// count after this one; hop="2" means the sibling map was stale.
+	// Labels: model, site, hop.
+	redirects *prometheus.CounterVec
+
+	// redirectRejections counts refused redirect tokens, by reason ∈
+	// {malformed, signature, expired, clock, site, path, scope, replay, key,
+	// body}.
+	// A rise in "expired" means clients take longer than the token TTL to
+	// follow; "replay" means a token was presented twice.
+	// Labels: reason.
+	redirectRejections *prometheus.CounterVec
+
 	// admissionOccupancyTokens is the current weighted in-flight token sum (Σw)
 	// for a model — the numerator of the occupancy-vs-budget utilization.
 	admissionOccupancyTokens *prometheus.GaugeVec
@@ -488,6 +503,20 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
 			},
 			[]string{"reason", "model"},
+		),
+		redirects: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirects_total",
+				Help: "307 redirects to a sibling site, by model, target site and hop count (2 = the sibling map was stale).",
+			},
+			[]string{"model", "site", "hop"},
+		),
+		redirectRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirect_rejections_total",
+				Help: "Refused redirect tokens, by reason (malformed, signature, expired, clock, site, path, scope, replay, key, body).",
+			},
+			[]string{"reason"},
 		),
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -905,6 +934,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantLastRequestTimestamp,
 		m.quotaBackendErrors,
 		m.admissionRejections,
+		m.redirects,
+		m.redirectRejections,
 		m.admissionOccupancyTokens,
 		m.admissionBudgetTokens,
 		m.admissionInflightRequests,
@@ -1196,6 +1227,33 @@ func (m *RouterMetrics) TenantSetPerModelTPDLimit(tenantID, model string, tpd in
 // b4_otpm}. B3 shed rate is rate(...{reason="b3"}); "429 by reason" sums over all.
 func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 	m.admissionRejections.With(prometheus.Labels{"reason": reason, "model": model}).Inc()
+}
+
+// Redirect counts a 307 to a sibling site.
+func (m *RouterMetrics) Redirect(model, site string, hop int) {
+	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop)}).Inc()
+}
+
+// RedirectRejected counts a refused redirect token, by reason.
+func (m *RouterMetrics) RedirectRejected(reason string) {
+	m.redirectRejections.With(prometheus.Labels{"reason": reason}).Inc()
+}
+
+// RegisterSiblingMap publishes the sibling map's state for the map writer's
+// drift dashboard: hivenet_sibling_map_version and
+// hivenet_sibling_map_hints_expired (1 while every hint is ignored). Both are
+// read at scrape time. Call once, only when cross-site redirect is enabled.
+func (m *RouterMetrics) RegisterSiblingMap(version, hintsExpired func() float64) {
+	m.registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_version",
+			Help: "Version of the sibling map this router holds (0 before the first push).",
+		}, version),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_hints_expired",
+			Help: "1 when the sibling map's hints are expired or absent and every hint is ignored, else 0.",
+		}, hintsExpired),
+	)
 }
 
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted
@@ -1599,6 +1657,79 @@ func (m *RouterMetrics) RegisterSemanticDecisionLog(dropped, writeErrors func() 
 			Name: "hivenet_semantic_decision_log_write_errors_total",
 			Help: "Encode or flush errors hit by the semantic decision log writer (e.g. a full disk).",
 		}, func() float64 { return float64(writeErrors()) }),
+	)
+}
+
+// KeyStoreSample is a point-in-time view of the persistent dynamic key
+// registry, read on every scrape (see RegisterKeyStore).
+type KeyStoreSample struct {
+	PersistErrors       uint64
+	LastPersistSuccess  time.Time // zero = never
+	Dirty               bool
+	RestoredKeys        int64
+	RestoredSnapshotAge time.Duration
+	Restored            bool
+	Confirmed           bool
+	SkippedEntries      uint64
+	Degraded            bool
+}
+
+// RegisterKeyStore exports the persistent key registry's health. Call once,
+// when the key store is wired (--key-store=badger); sample is read on every
+// scrape. Suggested alerts: hivenet_keystore_degraded == 1,
+// increase(hivenet_keystore_persist_errors_total[5m]) > 0,
+// hivenet_keystore_dirty == 1 for 5m, and hivenet_keystore_restored == 1 and
+// hivenet_keystore_confirmed == 0 for 10m (key-sync has not re-pushed).
+func (m *RouterMetrics) RegisterKeyStore(sample func() KeyStoreSample) {
+	b := func(v bool) float64 {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	m.registry.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_keystore_persist_errors_total",
+			Help: "Failed writes to the dynamic key store (mutations and background retries). Each failed mutation was answered 503.",
+		}, func() float64 { return float64(sample().PersistErrors) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_last_persist_success_timestamp_seconds",
+			Help: "Unix time of the last successful key store write (0 = never).",
+		}, func() float64 {
+			t := sample().LastPersistSuccess
+			if t.IsZero() {
+				return 0
+			}
+			return float64(t.UnixNano()) / 1e9
+		}),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_degraded",
+			Help: "1 when the key store could not be opened or read at startup and the registry runs memory-only.",
+		}, func() float64 { return b(sample().Degraded) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_dirty",
+			Help: "1 while the key store lags the in-memory registry (a write failed; background retry pending).",
+		}, func() float64 { return b(sample().Dirty) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored",
+			Help: "1 when the registry was warm-started from the key store at startup.",
+		}, func() float64 { return b(sample().Restored) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored_keys",
+			Help: "Keys installed from the key store at startup.",
+		}, func() float64 { return float64(sample().RestoredKeys) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_restored_snapshot_age_seconds",
+			Help: "Age of the restored key store snapshot at startup.",
+		}, func() float64 { return sample().RestoredSnapshotAge.Seconds() }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_keystore_confirmed",
+			Help: "1 once the upstream key-sync service has sent a full replace since startup.",
+		}, func() float64 { return b(sample().Confirmed) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "hivenet_keystore_skipped_entries_total",
+			Help: "Persisted keys skipped at startup (integrity failure, invalid, expired, admission check, duplicate hash).",
+		}, func() float64 { return float64(sample().SkippedEntries) }),
 	)
 }
 

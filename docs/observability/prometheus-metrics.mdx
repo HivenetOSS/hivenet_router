@@ -143,6 +143,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Queue | Requests waiting for agent capacity |
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
 | Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
+| Cross-site redirect | Redirects to sibling policlouds, refused redirect tokens, and the sibling map’s version and hint state |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -523,6 +524,41 @@ curl -X POST \
 
   It does not reset tenant quota counters or every router-level metric.
 </Danger>
+
+## Dynamic key store metrics
+
+Exported only with `--key-store=badger`.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `hivenet_keystore_persist_errors_total` | counter | Failed key-store writes (mutations answered `503`, plus background retries) |
+| `hivenet_keystore_last_persist_success_timestamp_seconds` | gauge | Unix time of the last successful write |
+| `hivenet_keystore_degraded` | gauge | `1` when the store could not be opened or read and the registry runs memory-only |
+| `hivenet_keystore_dirty` | gauge | `1` while the store lags the in-memory registry |
+| `hivenet_keystore_restored` | gauge | `1` when the registry was warm-started at startup |
+| `hivenet_keystore_restored_keys` | gauge | Keys installed by that restore |
+| `hivenet_keystore_restored_snapshot_age_seconds` | gauge | Age of the restored snapshot |
+| `hivenet_keystore_confirmed` | gauge | `1` once the upstream key-sync service has sent a full replace |
+| `hivenet_keystore_skipped_entries_total` | counter | Persisted keys skipped at startup |
+
+Suggested alerts:
+
+```yaml
+- alert: HivenetKeyStoreDegraded
+  expr: hivenet_keystore_degraded == 1
+  labels: {severity: critical}
+- alert: HivenetKeyStorePersistErrors
+  expr: increase(hivenet_keystore_persist_errors_total[5m]) > 0
+  labels: {severity: warning}
+- alert: HivenetKeyStoreDirty
+  expr: hivenet_keystore_dirty == 1
+  for: 5m
+  labels: {severity: critical}
+- alert: HivenetKeyStoreUnconfirmed
+  expr: hivenet_keystore_restored == 1 and hivenet_keystore_confirmed == 0
+  for: 10m
+  labels: {severity: warning}
+```
 
 ## Engine metrics
 
@@ -1354,6 +1390,19 @@ The `reason` label identifies the gate:
 The budget and backstop gauges can change as healthy replicas join or leave. Existing reservations remain visible in the occupancy gauges while the new denominators affect subsequent admissions.
 
 `POST /v1/messages/count_tokens`, embedding, and reranking requests do not enter B1 through B4, so they do not change these occupancy gauges. See [Admission control metrics](/observability/admission-control-metrics) for panel queries and alert interpretation.
+
+## Cross-site redirect metrics
+
+These series exist only when [cross-site redirect](/routing/cross-site-redirect) is enabled with `--site-id`. The two gauges appear at startup; the counters appear with the first redirect or refusal:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_redirects_total` | Counter | `model`, `site`, `hop` | `307` responses to a sibling policloud; `hop="2"` means the sibling map was stale |
+| `hivenet_redirect_rejections_total` | Counter | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key`, `body` |
+| `hivenet_sibling_map_version` | Gauge | None | Version of the sibling map this router holds; `0` before the first push |
+| `hivenet_sibling_map_hints_expired` | Gauge | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
+
+A rising `reason="expired"` rate means clients take longer than `--redirect-token-ttl` to follow the redirect; `reason="clock"` means this router’s clock is behind the router that signed the token; `reason="replay"` means a token was presented twice. A router whose `hivenet_sibling_map_version` lags the others missed a map push.
 
 ## Per-request duration by agent
 

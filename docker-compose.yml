@@ -36,7 +36,7 @@ services:
       # - "/app/auth.yaml"
       #
       # Alternatively, for dynamic key management (keys pushed at runtime
-      # by the machines service via admin API), set the auth mode env var
+      # by the upstream key-sync service via admin API), set the auth mode env var
       # instead of using an auth.yaml file.
     environment:
       # JWT secret for agent authentication (required).
@@ -57,7 +57,7 @@ services:
       # Auth mode — controls how API keys are managed:
       #   none      (default) — no authentication
       #   api-key   — keys loaded from auth.yaml (requires --auth-config-file)
-      #   dynamic   — keys pushed at runtime via admin API by machines service.
+      #   dynamic   — keys pushed at runtime via admin API by the upstream key-sync service.
       #               Admin auth is mandatory in this mode: the router auto-
       #               elevates admin.mode to api-key, so HIVENET_ROUTER_ADMIN_API_KEYS
       #               above MUST be set or startup fails. This protects the

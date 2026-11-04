@@ -104,11 +104,18 @@ func dynamicKeysAsEntries(reg *auth.DynamicKeyProvider) []auth.APIKeyEntry {
 	keys := reg.ListKeys()
 	out := make([]auth.APIKeyEntry, 0, len(keys))
 	for _, e := range keys {
-		out = append(out, auth.APIKeyEntry{
-			KeyPreview: e.ID,
-			Models:     e.AllowedModels,
-			Quota:      auth.QuotaConfig{InputTokensPerMinute: e.Quota.InputTokensPerMinute},
-		})
+		out = append(out, dynamicEntryAsAPIKey(e))
 	}
 	return out
+}
+
+// dynamicEntryAsAPIKey projects one dynamic key onto the fields
+// ValidateAdmissionInvariants reads (the same check the admin handlers'
+// validateKeyAdmission applies on writes).
+func dynamicEntryAsAPIKey(e auth.DynamicKeyEntry) auth.APIKeyEntry {
+	return auth.APIKeyEntry{
+		KeyPreview: e.ID,
+		Models:     e.AllowedModels,
+		Quota:      auth.QuotaConfig{InputTokensPerMinute: e.Quota.InputTokensPerMinute},
+	}
 }

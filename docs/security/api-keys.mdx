@@ -782,16 +782,73 @@ The raw bearer key cannot be recovered from the registry.
 
 ## Dynamic restart behavior
 
-Dynamic key state is memory-only.
+By default (`--key-store=memory`) dynamic key state is memory-only.
 
 After every router restart:
 
 1. the registry is empty
 2. every previous client key fails authentication
-3. the external control service must push a current snapshot
+3. the upstream key-sync service must push a current snapshot
 4. the service can confirm state through `/admin/api-keys/version`
 
 SIGHUP does not clear or replace the dynamic registry. It can reload the administration provider, but dynamic client keys remain under API control.
+
+## Persistent key store (warm start)
+
+With `--key-store=badger` (`HIVENET_ROUTER_KEY_STORE=badger`) the router keeps a copy of the dynamic registry in its own BadgerDB at `--key-store-path`. A restarted router serves keys immediately instead of returning `401` until the upstream key-sync service pushes again.
+
+The persisted registry is a **warm-start cache**, never a second source of truth. The upstream key-sync service stays authoritative, and each router keeps its own local copy.
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--key-store` | `HIVENET_ROUTER_KEY_STORE` | `memory` | `memory` or `badger` |
+| `--key-store-path` | `HIVENET_ROUTER_KEY_STORE_PATH` | `./badger_keystore` | Key-store directory, created with mode `0700`. Must not overlap `--disk-db-path` |
+| `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | — | **Required** with `badger`. Router-only secret (at least 32 bytes, different from the JWT secret) used to authenticate stored records |
+| `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` | Discard a snapshot whose last write or last key-sync confirmation (whichever is older) is older than this, or that was never confirmed. `0` disables the bound. An invalid value stops startup |
+| `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` | Wipe the key-store directory before startup (one-shot) |
+
+### What is stored
+
+- one record per key: the SHA-256 key hash and metadata, never the raw bearer key
+- a meta record: schema, registry version, the time of the last write, and the time of the last full replace from key-sync
+- every record carries an HMAC-SHA256 keyed by a secret derived (HKDF) from the router-only key-store secret; records that do not verify are rejected. The JWT secret is deliberately not used: every agent holds it
+
+Writes are fsynced, so an acknowledged change — including a revocation — survives a node crash.
+
+### Restore rules
+
+On startup the router:
+
+1. **Never fails startup because of the cache.** Only configuration mistakes stop the router (missing or weak secret, overlapping paths, invalid max age).
+2. **Runs degraded** (memory-only, empty, `hivenet_keystore_degraded == 1`) when the store cannot be opened, read, or reset — a full disk, a damaged database after power loss, wrong permissions. An empty registry denies every key until key-sync pushes, exactly like memory mode.
+3. **Discards the snapshot, rewrites the store, and starts empty** when the meta record fails its integrity check (for example after changing the key-store secret), is corrupt, or has another schema version — including a **newer** one after a release rollback — and when the snapshot is older than `--key-store-max-age` measured from the older of its last write and its last key-sync confirmation, or was never confirmed by a full replace.
+4. **Skips individual records** that fail their integrity check, do not decode, fail field validation, are expired, fail the current admission check (the same check `PUT /admin/api-keys/{id}` applies), or duplicate another key's hash. Skipped records are logged, counted in `hivenet_keystore_skipped_entries_total`, and removed.
+5. Marks the restored registry **unconfirmed** until the first `POST /admin/api-keys/replace` from the upstream key-sync service. `GET /admin/api-keys/version` reports `restored` and `confirmed`.
+
+The max age bounds how long a key revoked upstream while the router was down can keep working: at most `--key-store-max-age` after key-sync last confirmed the full set, and in practice until key-sync's next full push. Single-key pushes do not extend it.
+
+A full replace whose key set equals the stored one rewrites only the meta record, so key-sync's periodic full re-push stays cheap.
+
+Because the max age is measured from the last full replace, `--key-store-max-age` must be comfortably larger than the upstream key-sync service's full-replace interval (at least twice as large). If key-sync sends a full replace less often than that, or stops sending one when versions already match, every restart discards the snapshot and the warm start never takes effect.
+
+### Write failures
+
+Every admin mutation is applied in memory first, so a revocation takes effect immediately. If the write to the key store then fails, the endpoint answers `503` with `"applied": true`. The upstream key-sync service treats `5xx` as retryable and replays the same version, which the registry accepts and persists again. The router also marks the store dirty and rewrites the full registry in the background until a write succeeds.
+
+### Runbook
+
+| Symptom | Action |
+| --- | --- |
+| Log line `Key store DEGRADED` / `hivenet_keystore_degraded == 1` | The router is serving memory-only. Fix the volume behind `--key-store-path` (space, permissions, damaged files; `--reset-key-store` wipes it), then restart |
+| Startup fails with `key store: ... secret` | Provide `HIVENET_ROUTER_KEY_STORE_SECRET` (or `--key-store-secret-file`): at least 32 bytes, different from the JWT secret |
+| `hivenet_keystore_dirty == 1` or rising `hivenet_keystore_persist_errors_total` | Check the volume behind `--key-store-path` (space, permissions, I/O errors). Serving is unaffected; durability resumes on the next successful write |
+| `restored == 1` and `confirmed == 0` for more than 10 minutes | key-sync has not pushed a full snapshot. Check key-sync's connectivity and its drift check against `/admin/api-keys/version` |
+| Log line `persisted registry ... discarded` | Expected after downtime longer than `--key-store-max-age`, a key-store secret change, or a release rollback/upgrade across a schema change. key-sync's next push restores the keys |
+| `--reset-disk-db` used | The key store is a separate directory and is not touched |
+
+<Warning>
+  Set `--key-store-max-age=0` only when no upstream key-sync service exists (local development, proofs of concept). Then the snapshot is the only copy of the keys and is restored regardless of age.
+</Warning>
 
 ## Admin keys are separate
 
