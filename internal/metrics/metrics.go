@@ -178,6 +178,21 @@ type RouterMetrics struct {
 	// Labels: reason, model.
 	admissionRejections *prometheus.CounterVec
 
+	// --- Cross-site redirect metrics (internal/redirect) ---
+
+	// redirects counts 307s written to a sibling site. hop is the redirect
+	// count after this one; hop="2" means the sibling map was stale.
+	// Labels: model, site, hop.
+	redirects *prometheus.CounterVec
+
+	// redirectRejections counts refused redirect tokens, by reason ∈
+	// {malformed, signature, expired, clock, site, path, scope, replay, key,
+	// body}.
+	// A rise in "expired" means clients take longer than the token TTL to
+	// follow; "replay" means a token was presented twice.
+	// Labels: reason.
+	redirectRejections *prometheus.CounterVec
+
 	// admissionOccupancyTokens is the current weighted in-flight token sum (Σw)
 	// for a model — the numerator of the occupancy-vs-budget utilization.
 	admissionOccupancyTokens *prometheus.GaugeVec
@@ -488,6 +503,20 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
 			},
 			[]string{"reason", "model"},
+		),
+		redirects: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirects_total",
+				Help: "307 redirects to a sibling site, by model, target site and hop count (2 = the sibling map was stale).",
+			},
+			[]string{"model", "site", "hop"},
+		),
+		redirectRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_redirect_rejections_total",
+				Help: "Refused redirect tokens, by reason (malformed, signature, expired, clock, site, path, scope, replay, key, body).",
+			},
+			[]string{"reason"},
 		),
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -905,6 +934,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantLastRequestTimestamp,
 		m.quotaBackendErrors,
 		m.admissionRejections,
+		m.redirects,
+		m.redirectRejections,
 		m.admissionOccupancyTokens,
 		m.admissionBudgetTokens,
 		m.admissionInflightRequests,
@@ -1196,6 +1227,33 @@ func (m *RouterMetrics) TenantSetPerModelTPDLimit(tenantID, model string, tpd in
 // b4_otpm}. B3 shed rate is rate(...{reason="b3"}); "429 by reason" sums over all.
 func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 	m.admissionRejections.With(prometheus.Labels{"reason": reason, "model": model}).Inc()
+}
+
+// Redirect counts a 307 to a sibling site.
+func (m *RouterMetrics) Redirect(model, site string, hop int) {
+	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop)}).Inc()
+}
+
+// RedirectRejected counts a refused redirect token, by reason.
+func (m *RouterMetrics) RedirectRejected(reason string) {
+	m.redirectRejections.With(prometheus.Labels{"reason": reason}).Inc()
+}
+
+// RegisterSiblingMap publishes the sibling map's state for the map writer's
+// drift dashboard: hivenet_sibling_map_version and
+// hivenet_sibling_map_hints_expired (1 while every hint is ignored). Both are
+// read at scrape time. Call once, only when cross-site redirect is enabled.
+func (m *RouterMetrics) RegisterSiblingMap(version, hintsExpired func() float64) {
+	m.registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_version",
+			Help: "Version of the sibling map this router holds (0 before the first push).",
+		}, version),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "hivenet_sibling_map_hints_expired",
+			Help: "1 when the sibling map's hints are expired or absent and every hint is ignored, else 0.",
+		}, hintsExpired),
+	)
 }
 
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted

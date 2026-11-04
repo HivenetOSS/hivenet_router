@@ -25,6 +25,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
@@ -162,6 +163,10 @@ type Router struct {
 	// keyRegistry is the mutable in-memory API key registry (dynamic mode).
 	// Nil when running in static-key or no-auth mode — guards against SIGHUP reload.
 	keyRegistry *auth.DynamicKeyProvider
+
+	// redirect is the cross-site redirect state (internal/redirect); nil when
+	// cfg.SiteID is empty, which disables redirects entirely.
+	redirect *redirect.Redirector
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -368,6 +373,12 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
+	rd, err := newRedirector(cfg, apiProv, routerMetrics)
+	if err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
+	apiProv = redirect.Wrap(rd, apiProv, keyRegistry)
 
 	// Persistent dynamic key registry (--key-store=badger): a warm-start
 	// cache of the upstream key-sync service in its own BadgerDB, so a
@@ -465,6 +476,7 @@ func New(cfg *config.Config) (*Router, error) {
 		// safety) and no parking (a per-key breach is denied immediately).
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
+		redirect:     rd,
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
@@ -791,6 +803,7 @@ func (r *Router) startHTTPServer() {
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
 	}
+	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -985,7 +998,14 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
-	r.apiAuth.Swap(apiProv)
+	if err := redirect.CheckAuthMode(r.cfg.SiteID, apiProv); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
+	// Dynamic mode returned above without touching apiAuth, so the redirect
+	// wrapper installed at startup survives; here the provider is rebuilt and
+	// must be wrapped again or every redirected request would get 401.
+	r.apiAuth.Swap(redirect.Wrap(r.redirect, apiProv, nil))
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
 	r.minuteLimiter.Reset()
@@ -995,6 +1015,48 @@ func (r *Router) reloadAuthProviders() {
 	} else {
 		log.Info("SIGHUP: auth providers reloaded (no auth config file — both sections use mode=none)")
 	}
+}
+
+// newRedirector builds the cross-site redirect state, or returns nil when
+// cfg.SiteID is empty (redirect disabled). cmd/router validates the secrets
+// and allowed domains first, so a bad value stops startup there.
+func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterMetrics) (*redirect.Redirector, error) {
+	if cfg.SiteID == "" {
+		return nil, nil
+	}
+	if err := redirect.CheckAuthMode(cfg.SiteID, apiProv); err != nil {
+		return nil, err
+	}
+	secrets, err := redirect.ParseSecrets(cfg.RedirectSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	signer, err := redirect.NewSigner(secrets, cfg.RedirectTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	domains, err := redirect.ParseDomains(cfg.RedirectAllowedDomains)
+	if err != nil {
+		return nil, fmt.Errorf("cross-site redirect: %w", err)
+	}
+	rd := &redirect.Redirector{
+		Self:       cfg.SiteID,
+		Map:        redirect.NewMap(domains),
+		Signer:     signer,
+		Replay:     redirect.NewReplayGuard(),
+		OnRedirect: m.Redirect,
+		OnReject:   m.RedirectRejected,
+	}
+	m.RegisterSiblingMap(
+		func() float64 { return float64(rd.Map.Version()) },
+		func() float64 {
+			if rd.Map.HintsExpired(time.Now()) {
+				return 1
+			}
+			return 0
+		},
+	)
+	return rd, nil
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.

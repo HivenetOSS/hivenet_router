@@ -29,6 +29,7 @@ import (
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/logger"
+	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/router"
 	"hivenet_router/internal/tracing"
 )
@@ -84,6 +85,10 @@ func main() {
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
+	siteID := flag.String("site-id", cfg.SiteID, "This router's policloud ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
+	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
+	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
+	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
 
 	flag.Parse()
 
@@ -159,6 +164,32 @@ func main() {
 		log.Fatalf("%d invalid environment value(s) — refusing to start", len(cfg.EnvErrors))
 	}
 	cfg.AuthConfigFile = *authConfigFile
+	cfg.SiteID = strings.TrimSpace(*siteID)
+	if *redirectSecretFile != "" {
+		data, err := os.ReadFile(*redirectSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --redirect-secret-file %q: %v", *redirectSecretFile, err)
+		}
+		cfg.RedirectSecrets = string(data) // redirect.ParseSecrets trims every line
+	}
+	if *redirectTokenTTL <= 0 {
+		log.Fatalf("--redirect-token-ttl must be > 0, got %v", *redirectTokenTTL)
+	}
+	cfg.RedirectTokenTTL = *redirectTokenTTL
+	cfg.RedirectAllowedDomains = strings.TrimSpace(*redirectAllowedDomains)
+	// Any invalid redirect setting stops startup rather than silently
+	// disabling or weakening cross-site redirect.
+	switch {
+	case cfg.SiteID == "" && strings.TrimSpace(cfg.RedirectSecrets) != "":
+		log.Fatal("redirect secrets are set but --site-id is empty — set HIVENET_ROUTER_SITE_ID or remove the secrets")
+	case cfg.SiteID != "":
+		if _, err := redirect.ParseSecrets(cfg.RedirectSecrets); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid signing secrets (HIVENET_ROUTER_REDIRECT_SECRETS or --redirect-secret-file): %v", err)
+		}
+		if _, err := redirect.ParseDomains(cfg.RedirectAllowedDomains); err != nil {
+			log.Fatalf("cross-site redirect (--site-id) needs valid allowed domains (HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS or --redirect-allowed-domains): %v", err)
+		}
+	}
 
 	// Log startup banner with resolved configuration for operator visibility.
 	log.Info("Hivenet Router")
@@ -233,6 +264,13 @@ func main() {
 		log.Info("  Auth config file:    (not configured — both /v1/* and /admin/* default to mode: none)")
 	}
 	log.Info("  Admin API keys:      set via HIVENET_ROUTER_ADMIN_API_KEYS env var")
+	log.Info("Cross-site redirect:")
+	if cfg.SiteID != "" {
+		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
+		log.Infof("  Allowed domains:     %s", cfg.RedirectAllowedDomains)
+	} else {
+		log.Info("  Site ID:             (not configured — redirect disabled)")
+	}
 	log.Info("=================")
 
 	// Initialize OpenTelemetry tracing.
