@@ -88,7 +88,7 @@ type AuthResult struct {
 	// Gin context as "tenant_id" and used by the quota enforcement layer (Ticket 5).
 	TenantID string
 
-	// KeyID is the machines service key identifier (e.g. "key-abc123").
+	// KeyID is the upstream key-sync service key identifier (e.g. "key-abc123").
 	// Injected into the Gin context as "key_id" for metric labeling and audit.
 	// Empty string for StaticKeyProvider.
 	KeyID string
@@ -106,6 +106,23 @@ type AuthResult struct {
 	// QuotaLimits holds the rate/token limits for this tenant.
 	// Zero values mean unlimited. Enforcement is planned for Ticket 5.
 	QuotaLimits QuotaLimits
+
+	// Redirect is set only for a request authenticated by a cross-site
+	// redirect token (internal/redirect); nil otherwise.
+	Redirect *RedirectInfo
+}
+
+// RedirectInfo is what a verified redirect token tells the API layer about a
+// request repeated at a sibling policloud (contract 3 v2 §4).
+type RedirectInfo struct {
+	Hop       int    // redirects taken, including the one that brought it here
+	BodySHA   string // hex SHA-256 the request body must match, checked before quota
+	RequestID string // the first router's request ID, adopted here
+	Model     string // the concrete model the first router routed on, used as is
+	Scope     string // the effective scope at the first router
+	From      string // the first router's policloud ID, never redirected back to
+	TokenID   string // the token's jti, marked used once the body check passes
+	Exp       int64  // the token's expiry (Unix seconds), how long its jti is remembered
 }
 
 // Provider authenticates an incoming HTTP request and returns an AuthResult.

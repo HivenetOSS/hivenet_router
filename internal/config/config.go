@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -61,6 +62,26 @@ type Config struct {
 	// JWTSecret is the shared HMAC-SHA256 key used to sign and verify agent JWTs.
 	// Must match between router and all agents. Required — startup fails if empty.
 	JWTSecret string
+
+	// Cross-site redirect (internal/redirect, contract 3 v2). SiteID is this
+	// router's policloud ID in the sibling map; empty (the default) disables
+	// redirects entirely. RedirectSecrets holds the token signing secrets as
+	// "id:secret" lines (parsed by redirect.ParseSecrets: the first signs,
+	// every line verifies; required when SiteID is set). RedirectTokenTTL is
+	// how long a token stays valid (60s: an overloaded client took up to ~46s
+	// between the 307 and its follow-up). RedirectAllowedDomains lists the
+	// host suffixes a sibling-map URL must end with (parsed by
+	// redirect.ParseDomains; required when SiteID is set). Invalid values stop
+	// startup.
+	// Env: HIVENET_ROUTER_SITE_ID, HIVENET_ROUTER_REDIRECT_SECRETS
+	// (comma-separated id:secret), HIVENET_ROUTER_REDIRECT_TOKEN_TTL,
+	// HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS (comma-separated).
+	// Flag: --site-id, --redirect-secret-file (one id:secret per line),
+	// --redirect-token-ttl, --redirect-allowed-domains.
+	SiteID                 string
+	RedirectSecrets        string
+	RedirectTokenTTL       time.Duration
+	RedirectAllowedDomains string
 
 	// MaxRequestBytes caps request body size on the /v1/* inference endpoints,
 	// protecting the router from memory exhaustion by an oversized payload
@@ -136,6 +157,51 @@ type Config struct {
 	// Env: HIVENET_ROUTER_QUOTA_BACKEND
 	QuotaBackend string
 
+	// KeyStoreBackend selects the persistence backend for the dynamic API key
+	// registry (dynamic auth mode only; static keys live in auth.yaml).
+	//   "memory" (default) — the registry is RAM-only; state is lost on
+	//                        restart and rebuilt by the upstream key-sync
+	//                        service (the router is a cache, never the source
+	//                        of truth for keys).
+	//   "badger"           — the registry is persisted to a dedicated BadgerDB
+	//                        at KeyStorePath on every mutation and used as a
+	//                        warm-start cache on startup (bounded by
+	//                        KeyStoreMaxAge), so a restarted router serves keys
+	//                        before the upstream key-sync service re-pushes.
+	// Flag: --key-store   Env: HIVENET_ROUTER_KEY_STORE
+	KeyStoreBackend string
+
+	// KeyStorePath is the directory of the key-store BadgerDB. It is separate
+	// from DiskDBPath so --reset-disk-db and --reset-key-store each wipe only
+	// their own data. Created with mode 0700.
+	// Flag: --key-store-path   Env: HIVENET_ROUTER_KEY_STORE_PATH
+	KeyStorePath string
+
+	// KeyStoreMaxAge bounds the staleness of a restored snapshot: one whose
+	// last write or last key-sync confirmation (whichever is older) is older
+	// than this, or that was never confirmed, is discarded at startup (the router starts
+	// empty, as in memory mode). 0 disables the bound — only for deployments
+	// with no upstream key-sync service, where the snapshot is the only copy.
+	// Flag: --key-store-max-age   Env: HIVENET_ROUTER_KEY_STORE_MAX_AGE
+	KeyStoreMaxAge time.Duration
+
+	// KeyStoreSecret is the router-only secret the key-store record MAC key is
+	// derived from (HKDF). Required when KeyStoreBackend is "badger", at least
+	// 32 bytes, and must differ from JWTSecret (which every agent also holds).
+	// Changing it discards the persisted registry (one cold start).
+	// Flag: --key-store-secret-file   Env: HIVENET_ROUTER_KEY_STORE_SECRET
+	KeyStoreSecret string
+
+	// ResetKeyStore wipes the key-store directory on startup (use to recover
+	// from an unreadable snapshot; only meaningful when KeyStoreBackend is
+	// "badger"). One-shot: remove it after use.
+	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
+	ResetKeyStore bool
+
+	// EnvErrors collects invalid environment values that LoadFromEnv could
+	// not apply and that must stop startup (see the key-store settings).
+	EnvErrors []error
+
 	// Closed-source provider configuration.
 	// Credentials for providers that may be used as fallbacks when local routing steps are exhausted.
 	// The routing policy (e.g., fallback_provider.engine) selects which provider to use; the order
@@ -170,6 +236,9 @@ func DefaultConfig() *Config {
 		QueueSize:              100,
 		MaxConcurrentForwards:  50,
 		DiskDBPath:             "./badger_disk",
+		KeyStoreBackend:        "memory",
+		KeyStorePath:           "./badger_keystore",
+		KeyStoreMaxAge:         15 * time.Minute,
 		FlushPeriod:            5 * time.Second,
 		DiskDBTTLDays:          30,
 		UniversalFlushInterval: 30 * time.Second,
@@ -182,6 +251,7 @@ func DefaultConfig() *Config {
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
+		RedirectTokenTTL:       60 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -276,6 +346,29 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
+	// Cross-site redirect values are validated strictly (like the key store):
+	// a typo must stop startup, not silently disable or weaken redirects.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_SITE_ID")); v != "" {
+		cfg.SiteID = v
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_SECRETS")); v != "" {
+		// One id:secret per comma here; redirect.ParseSecrets reads lines.
+		cfg.RedirectSecrets = strings.ReplaceAll(v, ",", "\n")
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL")); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_REDIRECT_TOKEN_TTL=%q: %w", v, err))
+		case d <= 0:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_REDIRECT_TOKEN_TTL=%q: must be > 0", v))
+		default:
+			cfg.RedirectTokenTTL = d
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS")); v != "" {
+		cfg.RedirectAllowedDomains = v
+	}
 	if v := os.Getenv("HIVENET_ROUTER_MAX_REQUEST_BYTES"); v != "" {
 		// n == 0 is a valid value meaning "disabled"; only reject negatives.
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
@@ -290,6 +383,39 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_QUOTA_BACKEND"); v != "" {
 		cfg.QuotaBackend = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {
+		cfg.KeyStoreBackend = v
+	}
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_PATH"); v != "" {
+		cfg.KeyStorePath = v
+	}
+	// Key-store values are validated strictly: the max age is a security
+	// bound, so a typo ("15min") must stop startup rather than silently fall
+	// back to the default. Errors are collected in EnvErrors.
+	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_KEY_STORE_MAX_AGE=%q: %w", v, err))
+		case d < 0:
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_KEY_STORE_MAX_AGE=%q: must be >= 0", v))
+		default:
+			cfg.KeyStoreMaxAge = d
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_RESET_KEY_STORE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_RESET_KEY_STORE=%q: %w", v, err))
+		} else {
+			cfg.ResetKeyStore = b
+		}
+	}
+	// Trimmed like --key-store-secret-file, so the same secret yields the same
+	// MAC key whichever source provides it.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
+		cfg.KeyStoreSecret = v
 	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})

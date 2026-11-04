@@ -245,3 +245,31 @@ func TestLoadFromEnv_SemanticDecisionLog(t *testing.T) {
 		t.Errorf("overrides = %q/%d", cfg.SemanticDecisionLog, cfg.SemanticDecisionLogBuffer)
 	}
 }
+
+// TestLoadFromEnv_Redirect: the cross-site redirect settings. Values are
+// trimmed, the secrets list is comma-separated in env (one id:secret per line
+// in the file form), and a bad TTL refuses startup via EnvErrors.
+func TestLoadFromEnv_Redirect(t *testing.T) {
+	if c := config.LoadFromEnv(); c.SiteID != "" || c.RedirectSecrets != "" || c.RedirectTokenTTL != 60*time.Second || c.RedirectAllowedDomains != "" {
+		t.Fatalf("defaults: site %q secrets %q ttl %v domains %q, want disabled and 60s",
+			c.SiteID, c.RedirectSecrets, c.RedirectTokenTTL, c.RedirectAllowedDomains)
+	}
+
+	t.Setenv("HIVENET_ROUTER_SITE_ID", " pc-fr-1 ")
+	t.Setenv("HIVENET_ROUTER_REDIRECT_SECRETS", " k2:new-secret,k1:old-secret ")
+	t.Setenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL", "90s")
+	t.Setenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS", " .inference.hivecompute.ai ")
+	c := config.LoadFromEnv()
+	if c.SiteID != "pc-fr-1" || c.RedirectSecrets != "k2:new-secret\nk1:old-secret" || c.RedirectTokenTTL != 90*time.Second ||
+		c.RedirectAllowedDomains != ".inference.hivecompute.ai" || len(c.EnvErrors) != 0 {
+		t.Fatalf("site %q secrets %q ttl %v domains %q errors %v",
+			c.SiteID, c.RedirectSecrets, c.RedirectTokenTTL, c.RedirectAllowedDomains, c.EnvErrors)
+	}
+
+	for _, bad := range []string{"soon", "0s", "-1m"} {
+		t.Setenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL", bad)
+		if c := config.LoadFromEnv(); len(c.EnvErrors) != 1 || c.RedirectTokenTTL != 60*time.Second {
+			t.Errorf("TTL %q: errors %v ttl %v, want one EnvError and the 60s default", bad, c.EnvErrors, c.RedirectTokenTTL)
+		}
+	}
+}

@@ -137,16 +137,19 @@ func RequestIDMiddleware() gin.HandlerFunc {
 			// Header absent, empty, or not a valid UUID — generate a fresh v4.
 			id = uuid.New().String()
 		}
-		c.Set("request_id", id)
-		c.Header("X-Request-ID", id)
-
-		// Link the request ID to the active trace span so Tempo traces
-		// can be correlated with Loki audit logs that carry the same ID.
-		if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
-			span.SetAttributes(attribute.String("request.id", id))
-		}
-
+		setRequestID(c, id)
 		c.Next()
+	}
+}
+
+// setRequestID stores id as the request's ID: the Gin context, the
+// X-Request-ID response header and the active trace span (so Tempo traces
+// can be correlated with Loki audit logs that carry the same ID).
+func setRequestID(c *gin.Context, id string) {
+	c.Set("request_id", id)
+	c.Header("X-Request-ID", id)
+	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
+		span.SetAttributes(attribute.String("request.id", id))
 	}
 }
 
@@ -198,6 +201,10 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set("key_preview", result.KeyPreview)
 		c.Set("allowed_models", result.AllowedModels)
 		c.Set("quota_limits", result.QuotaLimits)
+		if result.Redirect != nil {
+			// Accepted once RedirectTarget has checked the body.
+			c.Set(ctxKeyRedirect, result.Redirect)
+		}
 		c.Next()
 	}
 }
