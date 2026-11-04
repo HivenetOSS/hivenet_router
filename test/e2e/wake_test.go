@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/router"
 )
@@ -165,4 +168,151 @@ func metricLine(url, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// TestHoldAtZeroBurstLinesUp wakes a model with more held requests than the
+// woken capacity: an agent with one slot, a capacity queue of depth 1 and a
+// backend that takes 300 ms per request. The released requests must line up
+// for the slot and succeed, not be refused by the admission gate (429) or the
+// full queue (503). A request still waiting for room when its hold budget
+// ends gets model_waking, as a hold that expires does.
+func TestHoldAtZeroBurstLinesUp(t *testing.T) {
+	cases := []struct {
+		name       string
+		policy     string // global policy file
+		holdBudget string
+		n          int
+		want       map[string]int // outcome → count
+	}{
+		{"admission limit max_inflight 1", "routing_policy:\n  strategy: least-loaded\nmax_inflight: 1\n", "60s", 6, map[string]int{"200": 6}},
+		{"no admission limit, queue depth 1", "routing_policy:\n  strategy: least-loaded\n", "60s", 6, map[string]int{"200": 6}},
+		// 300 ms per request and a 1 s budget: the first ~3 fit, the rest
+		// are still waiting for room when the budget ends.
+		{"hold budget ends while waiting", "routing_policy:\n  strategy: least-loaded\nmax_inflight: 1\n", "1s", 8, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := burst(t, tc.policy, tc.holdBudget, tc.n)
+			if tc.want != nil {
+				for k, v := range tc.want {
+					if got[k] != v {
+						t.Fatalf("outcomes %v, want %v", got, tc.want)
+					}
+				}
+				return
+			}
+			if got["200"] == 0 || got["503 model_waking"] == 0 || got["200"]+got["503 model_waking"] != tc.n {
+				t.Fatalf("outcomes %v, want some 200 and the rest 503 model_waking, never 429", got)
+			}
+		})
+	}
+}
+
+// burst holds n requests for a model at zero, then starts an agent with one
+// slot behind a 300 ms backend, and returns how the requests ended.
+func burst(t *testing.T, policy, holdBudget string, n int) map[string]int {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, stubModel)
+	})
+	backend := httptest.NewServer(mux)
+	t.Cleanup(backend.Close)
+
+	dir := t.TempDir()
+	policyFile := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(policyFile, []byte(policy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HIVENET_ROUTER_ALLOW_INSECURE_ADMIN", "true")
+	cfg := config.DefaultConfig()
+	cfg.HTTPPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.GRPCPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.MetricsPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.P2PPort = fmt.Sprintf("%d", freePort(t))
+	cfg.P2PListenAddr = "127.0.0.1"
+	cfg.JWTSecret = jwtSecret
+	cfg.DiskDBPath = filepath.Join(dir, "badger")
+	cfg.PolicyFile = policyFile
+	cfg.QueueDepth = 1
+	cfg.SiteID = "pc-a"
+	cfg.RedirectSecrets = "k1:0123456789abcdef0123456789abcdef"
+	cfg.RedirectAllowedDomains = ".example.com"
+	r, err := router.New(cfg)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	go r.Start()                    //nolint:errcheck
+	t.Cleanup(func() { r.Close() }) //nolint:errcheck
+	base := "http://127.0.0.1" + cfg.HTTPPort
+	waitFor(t, 15*time.Second, "router HTTP API ready", func() bool {
+		resp, err := http.Get(base + "/v1/models")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+	siblingMap := fmt.Sprintf(`{"schema":2,"version":1,"region":"eu",
+		"policlouds":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
+		"placements":[{"model":%q,"kind":"chat","policloud":"pc-a","scale_from_zero":true,"hold_budget":%q}]}`, stubModel, holdBudget)
+	resp, err := http.Post(base+"/admin/sibling-map", "application/json", strings.NewReader(siblingMap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	outcomes := make(chan string, n)
+	for range n {
+		go func() {
+			body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":5}`, stubModel)
+			resp, err := http.Post(base+"/v1/chat/completions", "application/json", strings.NewReader(body))
+			if err != nil {
+				outcomes <- err.Error()
+				return
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			switch {
+			case resp.StatusCode == http.StatusOK:
+				outcomes <- "200"
+			case resp.StatusCode == http.StatusServiceUnavailable && strings.Contains(string(b), `"model_waking"`) && resp.Header.Get("Retry-After") == "30":
+				outcomes <- "503 model_waking"
+			default:
+				outcomes <- fmt.Sprintf("%d %s", resp.StatusCode, b)
+			}
+		}()
+	}
+	demand := fmt.Sprintf(`hivenet_pending_demand{model=%q} `, stubModel)
+	waitFor(t, 5*time.Second, "all requests held", func() bool {
+		return metricLine("http://127.0.0.1"+cfg.MetricsPort+"/metrics", demand) == fmt.Sprintf("%s%d", demand, n)
+	})
+
+	acfg := config.DefaultAgentConfig()
+	acfg.JWTSecret = jwtSecret
+	acfg.Model = stubModel
+	acfg.Engine = "custom"
+	acfg.BackendURL = backend.URL
+	acfg.HealthURL = backend.URL + "/health"
+	acfg.RouterGRPCAddr = "127.0.0.1" + cfg.GRPCPort
+	acfg.RouterP2PAddr = fmt.Sprintf("/ip4/127.0.0.1/tcp/%s", cfg.P2PPort)
+	acfg.IdentityPath = filepath.Join(dir, "agent.key")
+	acfg.Capacity = 1
+	a := agent.NewAgent(acfg, &agent.CustomEngine{HealthURL: acfg.HealthURL})
+	go a.Run() //nolint:errcheck
+	t.Cleanup(a.Stop)
+
+	got := map[string]int{}
+	for i := range n {
+		select {
+		case o := <-outcomes:
+			got[o]++
+		case <-time.After(30 * time.Second):
+			t.Fatalf("only %d of %d requests finished: %v", i, n, got)
+		}
+	}
+	return got
 }

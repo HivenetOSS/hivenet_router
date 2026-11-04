@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"time"
 
+	"hivenet_router/internal/admission"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/policy"
 	"hivenet_router/internal/wake"
 
 	"github.com/gin-gonic/gin"
@@ -105,6 +107,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 		}
 
 		resp := newHeldResponse(c)
+		deadline := time.Now().Add(budget)
 		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), c.GetString("request_id"), wake.Options{
 			Budget:      budget,
 			KeepAlive:   h.wakeCfg.KeepAlive,
@@ -112,6 +115,12 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 		})
 		switch outcome {
 		case wake.Woken:
+			// Released requests line up for the woken capacity instead of
+			// being refused by it: the admission gate lets them wait until
+			// their hold budget ends, and the capacity queue takes them past
+			// its depth (the hold limits already bound how many there are).
+			c.Set(ctxKeyHoldDeadline, deadline)
+			c.Request = c.Request.WithContext(policy.WithReleasedFromHold(c.Request.Context()))
 			c.Next()
 		case wake.Gone:
 			// The client left: nothing reaches it. 499 (client closed the
@@ -125,6 +134,41 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 			resp.fail(msg)
 		}
 	}
+}
+
+// ctxKeyHoldDeadline holds, for a request released by a wake, the time its
+// hold budget ends.
+const ctxKeyHoldDeadline = "wake_hold_deadline"
+
+// admitOccupancy admits a request against ctrl. A request released by a wake
+// waits for room until its hold budget ends, not only the short default park:
+// it already waited for the model, and the burst of a wake is expected.
+func admitOccupancy(c *gin.Context, ctrl *admission.Controller, key string, footprint int, grows bool, budgetTokens, maxInflight int) *admission.Reservation {
+	if v, ok := c.Get(ctxKeyHoldDeadline); ok {
+		if wait := time.Until(v.(time.Time)); wait > 0 {
+			return ctrl.AdmitWithin(c.Request.Context(), key, footprint, grows, budgetTokens, maxInflight, wait)
+		}
+	}
+	return ctrl.Admit(c.Request.Context(), key, footprint, grows, budgetTokens, maxInflight)
+}
+
+// rejectReleased answers a request released by a wake that still found no
+// room when its hold budget ended: 503 model_waking with Retry-After, the
+// same answer as a hold that expires, rather than a 429 after a long wait.
+// It reports false, writing nothing, for any other request.
+func rejectReleased(c *gin.Context, model string) bool {
+	if _, ok := c.Get(ctxKeyHoldDeadline); !ok {
+		return false
+	}
+	c.Header("Retry-After", strconv.Itoa(int(wakeRetryAfter.Seconds())))
+	rerr := domain.NewRouterError(domain.ErrCodeModelWaking,
+		fmt.Sprintf("model %s woke up but is still at capacity; retry in %d seconds", model, int(wakeRetryAfter.Seconds())),
+		domain.SourceRouter)
+	rerr.RetryAfter = int(wakeRetryAfter.Seconds())
+	c.Set(auditKeyErrorCode, string(rerr.Code))
+	setRootSpanError(c, rerr.Message)
+	c.JSON(http.StatusServiceUnavailable, domain.RouterErrorResponse{Error: rerr})
+	return true
 }
 
 // heldResponse is the response of a held request: whether keepalives have

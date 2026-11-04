@@ -170,3 +170,24 @@ func TestWaitQueue_DepthCallbacks(t *testing.T) {
 		t.Fatalf("callbacks: enqueue %d, dequeue %d; want 2 and 2", enq.Load(), deq.Load())
 	}
 }
+
+// TestWaitQueue_ReleasedFromHoldPassesTheBound checks that a request released
+// by a wake may wait past the queue's bound, while any other request is still
+// refused.
+func TestWaitQueue_ReleasedFromHoldPassesTheBound(t *testing.T) {
+	q := newWaitQueue(1)
+	first := park(t, q, context.Background())
+	if err := q.Wait(context.Background()); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("a normal request on a full queue = %v, want ErrQueueFull", err)
+	}
+	released := park(t, q, WithReleasedFromHold(context.Background()))
+	if d := q.Depth(); d != 2 {
+		t.Fatalf("depth = %d, want 2", d)
+	}
+	q.Broadcast()
+	for _, w := range []<-chan error{first, released} {
+		if err := result(t, w); err != nil {
+			t.Fatalf("waiter: %v", err)
+		}
+	}
+}

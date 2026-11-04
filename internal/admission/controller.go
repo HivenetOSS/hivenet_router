@@ -144,6 +144,14 @@ func (c *Controller) SweepIdle(ttl time.Duration) int {
 // owns release (a single deferred Release on every exit path); the reservation
 // is never released here.
 func (c *Controller) Admit(ctx context.Context, model string, footprint int, grows bool, budgetTokens, maxInflight int) *Reservation {
+	return c.AdmitWithin(ctx, model, footprint, grows, budgetTokens, maxInflight, c.parkFor)
+}
+
+// AdmitWithin is Admit with its own park duration instead of the configured
+// one. A request that already waited for its model to wake from zero uses it
+// to wait for room as long as its hold budget allows, rather than being
+// refused after the short default park.
+func (c *Controller) AdmitWithin(ctx context.Context, model string, footprint int, grows bool, budgetTokens, maxInflight int, parkFor time.Duration) *Reservation {
 	s := c.stateFor(model)
 	w := int64(footprint)
 	budget := c.effectiveBudget(budgetTokens)
@@ -159,11 +167,11 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 	if budget > 0 && w > budget {
 		return nil
 	}
-	if c.parkFor <= 0 {
+	if parkFor <= 0 {
 		return nil
 	}
 
-	timer := time.NewTimer(c.parkFor)
+	timer := time.NewTimer(parkFor)
 	defer timer.Stop()
 	for {
 		// Grab the current wake channel BEFORE re-checking, so a release that

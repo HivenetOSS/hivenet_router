@@ -679,12 +679,14 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, poolBudget, poolInflight)
+		res := admitOccupancy(c, h.admission, req.Model, footprint, grows, poolBudget, poolInflight)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
-			c.Header("Retry-After", "1")
-			writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
-				"server at capacity for this model, please retry", domain.SourceRouter)
+			if !rejectReleased(c, req.Model) {
+				c.Header("Retry-After", "1")
+				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
+					"server at capacity for this model, please retry", domain.SourceRouter)
+			}
 			return nil, false
 		}
 		rs = append(rs, res)
@@ -700,13 +702,15 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
-			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
+			res := admitOccupancy(c, h.keyAdmission, keyID+"\x00"+req.Model, footprint, grows, budget, 0)
 			if res == nil {
 				rs.Release() // hand back the global reservation already taken
 				h.fireAdmissionReject("b4_occupancy", req.Model)
-				c.Header("Retry-After", "1")
-				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
-					"per-key occupancy share exceeded, please retry", domain.SourceRouter)
+				if !rejectReleased(c, req.Model) {
+					c.Header("Retry-After", "1")
+					writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
+						"per-key occupancy share exceeded, please retry", domain.SourceRouter)
+				}
 				return nil, false
 			}
 			rs = append(rs, res)

@@ -14,6 +14,23 @@ import (
 // rather than waiting indefinitely — the queue itself is overloaded.
 var ErrQueueFull = errors.New("request queue full: too many requests waiting for capacity")
 
+// releasedFromHoldKey marks the context of a request released by a wake.
+type releasedFromHoldKey struct{}
+
+// WithReleasedFromHold marks ctx as the context of a request that was held
+// while its model woke from zero, then released. Such a request may wait in
+// the capacity queue past the queue's bound: the hold limits already bound
+// how many there are, and refusing them right after the wait would turn a
+// wake into a burst of errors.
+func WithReleasedFromHold(ctx context.Context) context.Context {
+	return context.WithValue(ctx, releasedFromHoldKey{}, true)
+}
+
+func releasedFromHold(ctx context.Context) bool {
+	v, _ := ctx.Value(releasedFromHoldKey{}).(bool)
+	return v
+}
+
 // WaitQueue is a bounded, per-model FIFO queue of goroutines waiting for a
 // concurrency slot to become available.
 //
@@ -47,7 +64,8 @@ func newWaitQueue(bound int) *WaitQueue {
 // Wait parks the calling goroutine in the queue until one of three things happens:
 //   - Signal() is called (a slot became available) → returns nil.
 //   - ctx is cancelled or its deadline expires → returns ctx.Err().
-//   - The queue is already at its bound → returns ErrQueueFull immediately (no parking).
+//   - The queue is already at its bound → returns ErrQueueFull immediately (no
+//     parking), unless ctx is marked WithReleasedFromHold.
 //
 // On nil return, the caller should retry agent selection.
 // On non-nil return, the caller should escalate to the next fallback step.
@@ -55,7 +73,7 @@ func (q *WaitQueue) Wait(ctx context.Context) error {
 	ch := make(chan struct{}, 1)
 
 	q.mu.Lock()
-	if len(q.waiters) >= q.bound {
+	if len(q.waiters) >= q.bound && !releasedFromHold(ctx) {
 		q.mu.Unlock()
 		return ErrQueueFull
 	}
