@@ -539,6 +539,9 @@ sequenceDiagram
     C->>H: POST /v1/chat/completions
     H->>H: Trace, request ID, audit
     H->>H: Authenticate API key
+    opt No healthy local agent and a sibling policloud serves the model
+        H-->>C: 307 to the sibling (cross-site redirect); the request ends here
+    end
     H->>H: Enforce RPM and token admission
     H->>H: Check model access
     H->>Q: Enqueue pending request
@@ -596,6 +599,10 @@ requests_per_minute_per_replica
 ```
 
 When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error.
+
+#### Cross-site redirect
+
+With [cross-site redirect](/routing/cross-site-redirect) enabled, a request for a model with no healthy agent here is checked against the sibling map before quota. When a sibling policloud in the request’s scope serves the model, the router answers `307` to it, and nothing is admitted, queued or charged here.
 
 ### 4. Model authorization and admission
 
