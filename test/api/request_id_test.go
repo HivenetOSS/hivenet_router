@@ -4,6 +4,7 @@
 package api_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,7 +85,9 @@ func TestRequestID_InvalidClientIDNotForwarded(t *testing.T) {
 
 // TestRequestID_PendingRequestUsesMiddlewareID checks that the ID the
 // processor logs and traces is the same one the client sees, and that it is
-// forwarded to the agent, for both the chat and the embeddings paths.
+// forwarded to the agent, on every inference path. It also checks that a
+// backend echoing its own X-Request-ID doesn't add a second value for the
+// client.
 func TestRequestID_PendingRequestUsesMiddlewareID(t *testing.T) {
 	cases := []struct {
 		name string
@@ -92,18 +95,27 @@ func TestRequestID_PendingRequestUsesMiddlewareID(t *testing.T) {
 		body string
 		call func(h *api.Handlers, c *gin.Context)
 	}{
-		{"chat", "/v1/messages",
+		{"chat", "/v1/chat/completions",
+			`{"model":"qwen","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`,
+			func(h *api.Handlers, c *gin.Context) { h.Passthrough(c) }},
+		{"chat streaming", "/v1/chat/completions",
+			`{"model":"qwen","stream":true,"messages":[{"role":"user","content":"hi"}],"max_tokens":10}`,
+			func(h *api.Handlers, c *gin.Context) { h.Passthrough(c) }},
+		{"messages", "/v1/messages",
 			`{"model":"qwen","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`,
 			func(h *api.Handlers, c *gin.Context) { h.Passthrough(c) }},
 		{"embeddings", "/v1/embeddings",
 			`{"model":"embed","input":"hi"}`,
 			func(h *api.Handlers, c *gin.Context) { h.Embeddings(c) }},
+		{"rerank", "/v1/rerank",
+			`{"model":"rerank","query":"q","documents":["a","b"]}`,
+			func(h *api.Handlers, c *gin.Context) { h.Rerank(c) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			q := make(chan *domain.PendingRequest, 1)
 			h := newTestHandlers(q, &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000})
-			c, _ := newCtx(tc.path, []byte(tc.body))
+			c, w := newCtx(tc.path, []byte(tc.body))
 			c.Set("quota_limits", auth.QuotaLimits{TokensPerDay: 1_000_000})
 			id := uuid.Must(uuid.NewV7()).String()
 			c.Set("request_id", id)
@@ -120,11 +132,51 @@ func TestRequestID_PendingRequestUsesMiddlewareID(t *testing.T) {
 				if got := pending.Request.HttpHeaders.Get("X-Request-ID"); got != id {
 					t.Errorf("forwarded X-Request-ID = %q, want %q", got, id)
 				}
-				pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+				// The backend echoes its own X-Request-ID, as vLLM does with
+				// --enable-request-id-headers.
+				resp := &domain.ChatResponse{
+					RawBytes:    []byte(`{"ok":true}`),
+					HttpHeaders: http.Header{"X-Request-Id": {"backend-echo"}},
+				}
+				if strings.Contains(tc.body, `"stream":true`) {
+					resp.Body = io.NopCloser(strings.NewReader("data: [DONE]\n\n"))
+				}
+				pending.Response <- resp
 			case <-time.After(time.Second):
 				t.Fatal("request was not enqueued")
 			}
 			<-done
+			if got := w.Header().Values("X-Request-ID"); len(got) != 1 || got[0] != id {
+				t.Errorf("client X-Request-ID = %q, want exactly [%q]", got, id)
+			}
 		})
 	}
+}
+
+// TestRequestID_FallbackWithoutMiddleware checks that a handler reached
+// without RequestIDMiddleware (for example from a test or an embedded router)
+// still gets a valid UUIDv7 instead of an empty ID.
+func TestRequestID_FallbackWithoutMiddleware(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	h := newTestHandlers(q, &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000})
+	c, _ := newCtx("/v1/embeddings", []byte(`{"model":"embed","input":"hi"}`))
+	c.Set("quota_limits", auth.QuotaLimits{TokensPerDay: 1_000_000})
+
+	done := make(chan struct{})
+	go func() { h.Embeddings(c); close(done) }()
+
+	select {
+	case pending := <-q:
+		parsed, err := uuid.Parse(pending.ID)
+		if err != nil || parsed.Version() != 7 {
+			t.Errorf("fallback ID = %q, want a UUIDv7", pending.ID)
+		}
+		if got := pending.Request.HttpHeaders.Get("X-Request-ID"); got != pending.ID {
+			t.Errorf("forwarded X-Request-ID = %q, want %q", got, pending.ID)
+		}
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
 }

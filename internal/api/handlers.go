@@ -1066,7 +1066,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
-	domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+	copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 	c.Status(http.StatusOK)
 
 	if resp.Body == nil {
@@ -1446,7 +1446,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	select {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
-		domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+		copyBackendHeaders(c, resp.HttpHeaders, requestID)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:
@@ -1535,6 +1535,15 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{
 		Error: domain.NewRouterError(code, message, source),
 	})
+}
+
+// copyBackendHeaders copies the backend's response headers to the client and
+// keeps the router's request ID as the only X-Request-ID value. Backends that
+// echo the header back (for example vLLM with --enable-request-id-headers)
+// would otherwise add a second copy.
+func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+	domain.CopyHttpHeaders(c.Writer.Header(), src)
+	c.Header("X-Request-ID", requestID)
 }
 
 // sseFlushingWriter wraps a gin.ResponseWriter and flushes after every Write so
