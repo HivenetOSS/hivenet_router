@@ -95,7 +95,7 @@ func TestHoldAtZeroEndToEnd(t *testing.T) {
 	})
 	time.Sleep(500 * time.Millisecond) // a few keepalives while the model is at zero
 
-	startAgent(t, cfg, backend.URL, filepath.Join(t.TempDir(), "agent.key"))
+	a := startAgent(t, cfg, backend.URL, filepath.Join(t.TempDir(), "agent.key"))
 
 	var res result
 	select {
@@ -118,6 +118,36 @@ func TestHoldAtZeroEndToEnd(t *testing.T) {
 	woken := fmt.Sprintf(`hivenet_wake_holds_total{model=%q,outcome="woken"} `, stubModel)
 	if got := metricLine(metricsURL, woken); got != woken+"1" {
 		t.Errorf("holds: %q, want %s1", got, woken)
+	}
+
+	// Scaled back to zero: the agent goes away. A request right after must be
+	// held again, not routed to the agent that left, even before its
+	// missed-heartbeat timeout.
+	a.Stop()
+	waitFor(t, 5*time.Second, "the agent out of the routing pool", func() bool { return !modelHealthy(base) })
+	again := make(chan result, 1)
+	go func() {
+		body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":5}`, stubModel)
+		resp, err := http.Post(base+"/v1/chat/completions", "application/json", bytes.NewReader([]byte(body)))
+		if err != nil {
+			again <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		again <- result{resp.StatusCode, resp.Header.Get("Content-Type"), string(b), err}
+	}()
+	waitFor(t, 5*time.Second, "the request after the scale-down held", func() bool {
+		return metricLine(metricsURL, demand) == demand+"1"
+	})
+	startAgent(t, cfg, backend.URL, filepath.Join(t.TempDir(), "agent2.key"))
+	select {
+	case res = <-again:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request held after the scale-down was not served")
+	}
+	if res.err != nil || res.status != http.StatusOK || !strings.Contains(res.body, "PONG") {
+		t.Fatalf("after the second wake: %d %q %v, want 200 with the answer", res.status, res.body, res.err)
 	}
 }
 

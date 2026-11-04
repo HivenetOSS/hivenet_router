@@ -580,13 +580,29 @@ func (r *Router) Start() error {
 			// Fire the "unregistered" registration event before the slot is
 			// closed — the watcher gets sub-second loss detection (<1s libp2p
 			// drop notification vs. the 30s reaper). The agent stays in
-			// AgentRegistry; only the registration-feed view changes here. The
-			// reaper publishes a second "unregistered" later — the watcher's
-			// 1s debounce collapses the pair to one annotation write.
+			// AgentRegistry, but it leaves the routing pool now: the router
+			// never dials agents, so without a connection it cannot serve, and
+			// waiting for the missed-heartbeat timeout would route requests to
+			// it (and keep a model scaled to zero from being held) for up to
+			// UnhealthyAfter. Its next heartbeat after reconnecting marks it
+			// healthy again. A disconnect is not counted as an agent failure: a
+			// scale-down closes the connection on purpose. The reaper publishes
+			// a second "unregistered" later — the watcher's 1s debounce
+			// collapses the pair to one annotation write.
 			if agent := r.agents.Get(peerID); agent != nil {
 				agent.RLock()
 				dep, rep := agent.Metadata.DeploymentID, agent.Metadata.ReplicaID
+				meta := agent.Metadata
 				agent.RUnlock()
+				if agent.IsHealthy() {
+					agent.SetHealthy(false)
+					if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
+						log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
+					}
+					r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
+						strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
+					log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
+				}
 				r.registrationNotifier.Publish(domain.RegistrationEvent{
 					EventType:    domain.RegistrationUnregistered,
 					DeploymentID: dep,
