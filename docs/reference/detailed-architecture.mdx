@@ -540,7 +540,7 @@ sequenceDiagram
     H->>H: Trace, request ID, audit
     H->>H: Authenticate API key
     opt No healthy local agent and a sibling policloud serves the model
-        H-->>C: 307 to the sibling (cross-site redirect); the request ends here
+        H-->>C: 307 to the sibling (cross-site redirect)#59; the request ends here
     end
     H->>H: Enforce RPM and token admission
     H->>H: Check model access
