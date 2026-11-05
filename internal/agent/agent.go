@@ -82,8 +82,13 @@ type Agent struct {
 	cfg        *config.AgentConfig
 	engine     Engine
 	httpClient *http.Client
-	identity   crypto.PrivKey // persistent libp2p identity — same peer ID across reconnects
-	peerID     peer.ID        // derived from identity once at startup; stamped on agent-side spans so Tempo spanmetrics carry peer_id
+
+	// engineVersion is the backend's version as the engine reported it
+	// (VersionReporter), a string; unset when unknown. Read at startup,
+	// sent at every registration.
+	engineVersion atomic.Value
+	identity      crypto.PrivKey // persistent libp2p identity — same peer ID across reconnects
+	peerID        peer.ID        // derived from identity once at startup; stamped on agent-side spans so Tempo spanmetrics carry peer_id
 
 	// gater restricts the libp2p node to the routers this agent authenticated
 	// against. Set to the router's peer ID from the auth response before dialing.
@@ -499,11 +504,18 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 // always supply a timeout so a stalled libp2p connection cannot block
 // indefinitely (see runReAuth for the session-renewal path).
 func (a *Agent) registerWithRouter(ctx context.Context, routerClient *http.Client, node host.Host, sessionToken string) error {
+	// The engine may have been replaced since the last registration: every
+	// registration carries the version it reports now. Bounded, so a backend
+	// slow to answer does not hold the registration up.
+	vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
+	a.readEngineVersion(vctx)
+	vcancel()
 	payload := map[string]any{
-		"session_token": sessionToken,
-		"peer_id":       node.ID().String(),
-		"deployment_id": a.cfg.DeploymentID,
-		"replica_id":    a.cfg.ReplicaID,
+		"session_token":  sessionToken,
+		"peer_id":        node.ID().String(),
+		"deployment_id":  a.cfg.DeploymentID,
+		"replica_id":     a.cfg.ReplicaID,
+		"engine_version": a.EngineVersion(),
 	}
 
 	body, err := json.Marshal(payload)
@@ -700,6 +712,11 @@ func (a *Agent) runBackendHealthChecker(done <-chan struct{}) {
 			if err == nil {
 				if !a.backendHealthy.Load() {
 					log.Infof("Backend health check recovered")
+				}
+				// A backend that failed a check and answers again may be
+				// another engine build (a restart with a new image).
+				if consecutiveFailures > 0 {
+					a.refreshEngineVersion()
 				}
 				consecutiveFailures = 0
 				a.backendHealthy.Store(true)
@@ -1152,6 +1169,7 @@ func (a *Agent) waitForBackend() (string, error) {
 			}
 			model = models[0]
 		}
+		a.readEngineVersion(ctx)
 
 		// The warm-up is a chat completion, so only a chat model gets one:
 		// an embedding or rerank model would fail it on every try.
@@ -1168,6 +1186,75 @@ func (a *Agent) waitForBackend() (string, error) {
 		}
 		return model, nil
 	}
+}
+
+// readEngineVersion reads the backend's version, so the router can tell
+// which isolation features it has (see VersionReporter). It runs once the
+// backend first answers, before every registration and when the backend
+// recovers from a failed health check. An engine that cannot report one is
+// left unknown (see cachesalt.Support for how the router counts that); a
+// failed read keeps the last version read.
+func (a *Agent) readEngineVersion(ctx context.Context) {
+	vr, ok := a.engine.(VersionReporter)
+	if !ok {
+		return
+	}
+	v, err := vr.EngineVersion(ctx, a.cfg.BackendURL, a.httpClient)
+	if err != nil {
+		log.Warnf("Could not read the %s engine version (%v): the router treats it as unknown", a.engine.Name(), err)
+		return
+	}
+	if old, _ := a.engineVersion.Load().(string); old != v {
+		log.Infof("Engine %s version %s", a.engine.Name(), v)
+	}
+	a.engineVersion.Store(v)
+}
+
+// refreshEngineVersion reads the engine version again and, when it changed,
+// registers again with every router the agent is serving, so each router's
+// view of the engine (and of what it isolates, see cachesalt) follows a
+// restart with another build. A failed registration is logged and left to
+// the next session renewal.
+func (a *Agent) refreshEngineVersion() {
+	old := a.EngineVersion()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	a.readEngineVersion(ctx)
+	cancel()
+	if now := a.EngineVersion(); now != old {
+		log.Infof("Engine %s version changed from %q to %q: registering again with every router", a.engine.Name(), old, now)
+		a.reRegisterAll()
+	}
+}
+
+// reRegisterAll registers again with every router session that is up, with
+// its current session token. A session renewing its token concurrently
+// (runReAuth) registers with the current version itself.
+func (a *Agent) reRegisterAll() {
+	a.routers.mu.Lock()
+	node := a.routers.node
+	var up []*routerSession
+	for _, e := range a.routers.entries {
+		if e.rs != nil && e.rs.up.Load() {
+			up = append(up, e.rs)
+		}
+	}
+	a.routers.mu.Unlock()
+	if node == nil {
+		return
+	}
+	for _, rs := range up {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := a.registerWithRouter(ctx, rs.client, node, rs.sessionToken()); err != nil {
+			log.Warnf("Router %s: registering again after an engine version change failed: %v (the next session renewal carries the new version)", rs.addr, err)
+		}
+		cancel()
+	}
+}
+
+// EngineVersion returns the backend's version as last read, "" when unknown.
+func (a *Agent) EngineVersion() string {
+	v, _ := a.engineVersion.Load().(string)
+	return v
 }
 
 // authenticate performs gRPC authentication with the router.

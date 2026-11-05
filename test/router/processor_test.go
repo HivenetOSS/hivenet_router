@@ -407,3 +407,38 @@ func TestDispatchClientError_DoesNotPenalizeAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessor_UnsentRequestLeavesAgentCounters: a forward that fails before
+// anything is sent to the agent (the router could not prepare the body) fails
+// the request with its error and records nothing on the agent: neither a
+// failure, nor a success with the near-zero RTT of a request never sent,
+// which would make the agent look fast and pull traffic onto it.
+func TestProcessor_UnsentRequestLeavesAgentCounters(t *testing.T) {
+	exec, counters, m := newExec(t)
+	queue := make(chan *domain.PendingRequest, 1)
+	calls := 0
+	p := router.NewRequestProcessor(queue, exec, nil, m, counters, 10, nil, nil,
+		router.WithForwardFunc(func(_ context.Context, a *domain.Agent, _ *domain.PendingRequest) (*domain.ChatResponse, float64, error) {
+			calls++
+			a.DecrementLoad()
+			return nil, 0, router.NotSent(domain.NewRouterError(domain.ErrCodeRequestInvalid, "Invalid request body: malformed", domain.SourceRouter))
+		}),
+		router.WithPeerCloser(&fakePeerCloser{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.Start(ctx)
+
+	pending := newPending()
+	queue <- pending
+	_, err := awaitResult(t, pending)
+	var re *domain.RouterError
+	if !errors.As(err, &re) || re.Code != domain.ErrCodeRequestInvalid {
+		t.Fatalf("error %v, want the request_invalid error", err)
+	}
+	if calls != 1 {
+		t.Errorf("forwarded %d times, want once (an unsent request is not retried)", calls)
+	}
+	if successRate, srtt, fails, ok := counters.LiveSnapshot(peer.ID("agent-pid-0001")); ok && (successRate != 0 || srtt != 0 || fails != 0) {
+		t.Errorf("agent counters moved: success rate %v, srtt %v, consecutive fails %d; want nothing recorded", successRate, srtt, fails)
+	}
+}

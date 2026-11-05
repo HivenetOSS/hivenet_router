@@ -125,6 +125,10 @@ type RouterMetrics struct {
 	// tenantRateLimited counts requests rejected due to RPM quota per tenant.
 	tenantRateLimited *prometheus.CounterVec
 
+	// cacheIsolationEnabled is 1 when the router isolates tenants' prefix
+	// caches (cache salt on), else 0 (SetCacheIsolation).
+	cacheIsolationEnabled prometheus.Gauge
+
 	// tenantQuotaRPMLimit exposes the configured RPM limit per tenant (0 = unlimited).
 	// Populated only for keys on the legacy flat quota shape. Per-model keys
 	// leave this series at its seeded 0 value — see tenantPerModelQuotaRPMLimit
@@ -474,6 +478,10 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"tenant_id", "key_id"},
 		),
+		cacheIsolationEnabled: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "hivenet_cache_isolation_enabled",
+			Help: "1 when the router isolates tenants' prefix caches on the engines that support it (cache salt on), else 0.",
+		}),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_tenant_quota_rpm_limit",
@@ -977,6 +985,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantRequestSuccess,
 		m.tenantRequestFailed,
 		m.tenantRateLimited,
+		m.cacheIsolationEnabled,
 		m.tenantQuotaRPMLimit,
 		m.tenantQuotaTPDLimit,
 		m.tenantPerModelQuotaRPMLimit,
@@ -1884,6 +1893,41 @@ func (m *RouterMetrics) ServeMetrics(addr string) {
 			log.Errorf("metrics server error: %v", err)
 		}
 	}()
+}
+
+// SetCacheIsolation sets hivenet_cache_isolation_enabled and, when gaps is
+// not nil, registers hivenet_cache_isolation_gaps: the registered LLM agents,
+// per model and engine, that serve a generation path without per-tenant
+// prefix-cache isolation, computed from gaps at every scrape, so it is always
+// the current registry and never shows a partial update. Call once, at
+// startup.
+func (m *RouterMetrics) SetCacheIsolation(enabled bool, gaps func() map[[2]string]int) {
+	if enabled {
+		m.cacheIsolationEnabled.Set(1)
+	} else {
+		m.cacheIsolationEnabled.Set(0)
+	}
+	if gaps != nil {
+		m.registry.MustRegister(&cacheIsolationGaps{gaps: gaps, desc: prometheus.NewDesc(
+			"hivenet_cache_isolation_gaps",
+			"Registered LLM agents serving a generation path without per-tenant prefix-cache isolation, per model and engine.",
+			[]string{"model", "engine"}, nil)})
+	}
+}
+
+// cacheIsolationGaps is the scrape-time collector behind
+// hivenet_cache_isolation_gaps (SetCacheIsolation).
+type cacheIsolationGaps struct {
+	desc *prometheus.Desc
+	gaps func() map[[2]string]int
+}
+
+func (c *cacheIsolationGaps) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *cacheIsolationGaps) Collect(ch chan<- prometheus.Metric) {
+	for k, n := range c.gaps() {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), k[0], k[1])
+	}
 }
 
 // Register adds extra collectors to this instance's registry. Used by optional

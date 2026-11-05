@@ -836,3 +836,43 @@ func TestAllowlist_IntersectsAllowedModelsAndPerModel(t *testing.T) {
 		}
 	}
 }
+
+// TestIsolation_TrailingDataRejected: on every inference route, a body that is
+// not exactly one JSON object (an object followed by more data, another JSON
+// value, invalid JSON) is refused with 400 before routing: nothing is queued.
+// The handlers' decoding stops after the first value, so before this check a
+// body like {"model":"m",...} x was accepted and only failed when the router
+// edited it for the agent, after an agent had been chosen.
+func TestIsolation_TrailingDataRejected(t *testing.T) {
+	s := newIsoServer(t)
+	for _, c := range isoInferenceCalls(t, s) {
+		for name, body := range map[string]string{
+			"trailing data": c.body + " x",
+			"second object": c.body + "{}",
+			"array":         "[" + c.body + "]",
+			"invalid JSON":  strings.TrimSuffix(c.body, "}"),
+			"empty":         "",
+		} {
+			w := s.call(t, http.MethodPost, c.path, body, isoKeyA)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "request_invalid") || len(s.queue) != 0 {
+				t.Errorf("%s %s: status %d, %d queued, body %s; want 400 request_invalid and nothing queued", c.path, name, w.Code, len(s.queue), w.Body)
+			}
+		}
+		// The same body, well formed, is served.
+		if w := s.call(t, http.MethodPost, c.path, c.body, isoKeyA); w.Code != http.StatusOK {
+			t.Errorf("%s well formed: status %d, want 200", c.path, w.Code)
+		}
+	}
+	// On /v1/messages, an extra_params llama.cpp could not carry the prompt
+	// cache switch in is refused for every engine; null passes like absent.
+	for body, want := range map[string]int{
+		`{"model":"m","max_tokens":5,"messages":[],"extra_params":"x"}`:  http.StatusBadRequest,
+		`{"model":"m","max_tokens":5,"messages":[],"extra_params":[1]}`:  http.StatusBadRequest,
+		`{"model":"m","max_tokens":5,"messages":[],"extra_params":null}`: http.StatusOK,
+		`{"model":"m","max_tokens":5,"messages":[],"extra_params":{}}`:   http.StatusOK,
+	} {
+		if w := s.call(t, http.MethodPost, "/v1/messages", body, isoKeyA); w.Code != want {
+			t.Errorf("/v1/messages %s: status %d, want %d; body %s", body, w.Code, want, w.Body)
+		}
+	}
+}

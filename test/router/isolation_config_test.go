@@ -4,12 +4,18 @@
 package router_test
 
 import (
+	"strings"
 	"testing"
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/router"
 )
+
+// salt enables per-tenant cache salting with the given secret.
+func salt(secret string) func(*config.Config) {
+	return func(c *config.Config) { c.CacheSalt, c.CacheSaltSecret = true, secret }
+}
 
 // TestValidateIsolationConfig: each tenant-isolation setting is checked
 // against the API auth provider; a combination that cannot work refuses to
@@ -34,9 +40,28 @@ func TestValidateIsolationConfig(t *testing.T) {
 		{"require allowlist, no auth", func(c *config.Config) { c.RequireModelAllowlist = true }, auth.NewNoAuthProvider(), true},
 		{"require allowlist, static keys", func(c *config.Config) { c.RequireModelAllowlist = true }, static, false},
 		{"require allowlist, dynamic keys", func(c *config.Config) { c.RequireModelAllowlist = true }, auth.NewDynamicKeyProvider(), false},
+		// Salting needs its own secret: at least 32 bytes, and none of the
+		// router's other secrets (agents hold the JWT secret, every site the
+		// redirect secrets, the shared store the Valkey password).
+		{"salt without secret", salt(""), static, true},
+		{"salt with short secret", salt(strings.Repeat("s", 31)), static, true},
+		{"salt with the JWT secret", func(c *config.Config) { c.CacheSalt, c.CacheSaltSecret = true, c.JWTSecret }, static, true},
+		{"salt with the key-store secret", func(c *config.Config) { c.CacheSalt, c.CacheSaltSecret = true, c.KeyStoreSecret }, static, true},
+		{"salt with a redirect secret", func(c *config.Config) {
+			c.RedirectSecrets = "old:" + strings.Repeat("o", 32) + "\nnew:" + strings.Repeat("r", 32)
+			c.CacheSalt, c.CacheSaltSecret = true, strings.Repeat("r", 32)
+		}, static, true},
+		{"salt with the Valkey password", func(c *config.Config) {
+			c.SyncValkeyPassword = strings.Repeat("v", 32)
+			c.CacheSalt, c.CacheSaltSecret = true, strings.Repeat("v", 32)
+		}, static, true},
+		{"salt with its own secret", salt(strings.Repeat("s", 32)), static, false},
+		{"secret without salting", func(c *config.Config) { c.CacheSaltSecret = "short" }, static, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.DefaultConfig()
+			cfg.JWTSecret = strings.Repeat("j", 40)
+			cfg.KeyStoreSecret = strings.Repeat("k", 40)
 			if tc.mutate != nil {
 				tc.mutate(cfg)
 			}

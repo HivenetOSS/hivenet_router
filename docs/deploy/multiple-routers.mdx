@@ -152,10 +152,23 @@ Requirements:
 
 - Without [discovery](#let-agents-find-every-router), each address reaches **one specific router**, never the client load balancer or a Kubernetes ClusterIP Service. Through a load balancer the agent gets a single session to whichever router answers, and the other routers never see the agent; nothing reports it. In Kubernetes, use the pod DNS names of a headless Service (`router-0.router-headless:50051`, …). With discovery, the list is only where the agent starts: it finds every router from the first one it reaches.
 - List every router, and update the list when you add one, or let the agents [find every router](#let-agents-find-every-router). Every router divides the occupancy budgets by the live routers, whether or not agents reach it: a router no agent connects to lowers the others' share and cannot serve requests itself.
-- Every router of the site uses the same JWT secret.
+- Every router of the site uses the same secrets (see [Secrets every router shares](#secrets-every-router-shares)).
 - Each router sends its libp2p address in the authentication response. A router behind NAT must set `--p2p-announce-addr` to an address the agents can reach.
 
 `--router-grpc` still connects an agent to a single router; it is used when `--routers` is empty.
+
+## Secrets every router shares
+
+Every router of a site must be started with the same:
+
+| Secret | Why |
+| --- | --- |
+| JWT secret (`HIVENET_ROUTER_JWT_SECRET`) | Every agent authenticates to every router with it |
+| Cache-salt secret (`--cache-salt-secret-file`), with `--cache-salt` | A tenant's salt is derived from it; with different secrets, one tenant's requests through different routers stop sharing its own prefix cache, with no error |
+| Redirect secrets (`HIVENET_ROUTER_REDIRECT_SECRETS`), with cross-site redirect | Any router of the site may verify a token another one issued |
+| Valkey password (`--sync-valkey-password-file`) | All routers use the same store |
+
+The cache-salt secret must also differ from every other router secret: the others above and the key-store secret (`--key-store-secret-file`). The router refuses to start when it equals one of them.
 
 ## Let agents find every router
 

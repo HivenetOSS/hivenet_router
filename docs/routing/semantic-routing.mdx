@@ -6,7 +6,7 @@ sidebarTitle: "Semantic model aliases"
 
 A semantic model alias is a virtual model name, such as `auto`, that you declare in a per-model policy document. When a request names an alias, Hivenet Router picks one concrete model from the request's content, rewrites the request's `model` field, and then applies quota, admission control, and replica routing to that model exactly as if the client had named it.
 
-Requests that name a concrete model never enter this path. They cost one map lookup and are forwarded byte-identical.
+Requests that name a concrete model never enter this path. They cost one map lookup and are forwarded byte-identical (apart from `cache_salt` when [per-tenant prefix-cache salting](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) is on).
 
 <Info>
 The decision uses **structural signals only**: tool activity, conversation size, images, output constraints, and lexical markers for code, stack traces, and maths, plus keyword lists you write. It does not call a model or an embedding service. Topics without such markers (for example, "why is the sky blue?") fall through to the alias's default route.

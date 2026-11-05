@@ -8,6 +8,7 @@ package e2e
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,13 +17,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
+	"hivenet_router/internal/domain"
 )
 
 const (
@@ -498,4 +502,270 @@ func derivedStaticKeyID(token string) string {
 	h := sha256.Sum256([]byte(token))
 	id := sha256.Sum256([]byte("hivenet-router/key-id/v1\x00static-\x00" + hex.EncodeToString(h[:])))
 	return "static-" + hex.EncodeToString(id[:8])
+}
+
+// bodyRecorder is a backend for every engine path the router forwards to. It
+// records each request body by path and answers with a minimal valid reply
+// (streaming for chat when asked). It reports engine versions the way vLLM
+// (/version), SGLang (/server_info) and llama.cpp (/props) do; empty fields
+// get defaults recent enough for every isolation feature.
+type bodyRecorder struct {
+	mu    sync.Mutex
+	calls []backendCall
+
+	sglangVersion string // default 0.5.11
+	llamaBuild    string // default b11795-261700b
+}
+
+func (b *bodyRecorder) start(t *testing.T, models ...string) *httptest.Server {
+	t.Helper()
+	record := func(r *http.Request) []byte {
+		body, _ := io.ReadAll(r.Body)
+		b.mu.Lock()
+		b.calls = append(b.calls, backendCall{path: r.URL.Path, body: body})
+		b.mu.Unlock()
+		return body
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	sglang, llama := cmp.Or(b.sglangVersion, "0.5.11"), cmp.Or(b.llamaBuild, "b11795-261700b")
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"version":"0.31.0"}`) })
+	mux.HandleFunc("/server_info", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintf(w, `{"version":%q}`, sglang) })
+	mux.HandleFunc("/props", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintf(w, `{"build_info":%q}`, llama) })
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, _ *http.Request) {
+		data := make([]string, len(models))
+		for i, m := range models {
+			data[i] = fmt.Sprintf(`{"id":%q,"object":"model"}`, m)
+		}
+		fmt.Fprintf(w, `{"object":"list","data":[%s]}`, strings.Join(data, ","))
+	})
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.Unmarshal(record(r), &req)
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"PONG"},"finish_reason":null}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	})
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"PONG"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	})
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	})
+	mux.HandleFunc("/v1/rerank", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[{"index":0,"relevance_score":0.5}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func (b *bodyRecorder) last() backendCall {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.calls) == 0 {
+		return backendCall{}
+	}
+	return b.calls[len(b.calls)-1]
+}
+
+// startEngineAgent runs an agent with the given engine, serving model with
+// the given capability, against backendURL.
+func startEngineAgent(t *testing.T, rcfg *config.Config, backendURL string, engine agent.Engine, model, capability string) {
+	t.Helper()
+	startAgentWithEngine(t, rcfg, backendURL, filepath.Join(t.TempDir(), model+".key"), engine, func(c *config.AgentConfig) {
+		c.Model = model
+		c.Capability = capability
+	})
+}
+
+// TestIsolation_CacheSaltPerTenant: with --cache-salt, every request the
+// router forwards to a vLLM agent carries exactly one cache_salt, the
+// tenant's: chat (streaming and not), Anthropic messages, embeddings and
+// rerank. Two keys of one tenant share the salt; two tenants never do. A
+// cache_salt sent by the client (escaped spellings included) is replaced,
+// and the rest of the body is unchanged; one sent twice, which two readers
+// could pick differently, is refused before routing.
+// An agent whose engine has no salt support gets no cache_salt at all.
+func TestIsolation_CacheSaltPerTenant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const keyA2 = "sk-e2e-tenant-a-2"
+	authYAML := writeAuthYAML(
+		testKey{Token: isoKeyA, Owner: "tenant-a", Name: "a1"},
+		testKey{Token: keyA2, Owner: "tenant-a", Name: "a2"},
+		testKey{Token: isoKeyB, Owner: "tenant-b", Name: "b"},
+	)
+	saltSecret := "e2e-cache-salt-secret-0123456789abcdef"
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: authYAML, AdminKey: isoAdminKey, Mutate: func(c *config.Config) {
+		c.CacheSalt = true
+		c.CacheSaltSecret = saltSecret
+	}})
+	be := &bodyRecorder{}
+	backend := be.start(t, "chat-vllm", "embed-vllm", "rerank-vllm", "chat-plain", "chat-sglang", "chat-llama")
+	// A llama.cpp build older than b11795 cannot isolate /v1/messages.
+	oldBackend := (&bodyRecorder{llamaBuild: "b11000-0a1ef30"}).start(t, "chat-llama-old")
+	startEngineAgent(t, rcfg, oldBackend.URL, &agent.LlamaCPPEngine{}, "chat-llama-old", domain.CapabilityLLM)
+	startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "chat-vllm", domain.CapabilityLLM)
+	startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "embed-vllm", domain.CapabilityEmbedding)
+	startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "rerank-vllm", domain.CapabilityReranker)
+	startEngineAgent(t, rcfg, backend.URL, &agent.CustomEngine{HealthURL: backend.URL + "/health"}, "chat-plain", domain.CapabilityLLM)
+	startEngineAgent(t, rcfg, backend.URL, &agent.SGLangEngine{}, "chat-sglang", domain.CapabilityLLM)
+	startEngineAgent(t, rcfg, backend.URL, &agent.LlamaCPPEngine{}, "chat-llama", domain.CapabilityLLM)
+	for _, m := range []string{"chat-vllm", "embed-vllm", "rerank-vllm", "chat-plain", "chat-sglang", "chat-llama", "chat-llama-old"} {
+		waitFor(t, 30*time.Second, m+" registered and healthy", func() bool { return modelHealthyAs(base, isoKeyA, m) })
+	}
+
+	type call struct{ name, path, body string }
+	vllmCalls := []call{
+		{"chat", "/v1/chat/completions", `{"model":"chat-vllm","cache\u005fsalt":"guess-1","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`},
+		{"streaming chat", "/v1/chat/completions", `{"model":"chat-vllm","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":true,"cache_salt":"guess"}`},
+		{"messages", "/v1/messages", `{"model":"chat-vllm","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`},
+		{"embeddings", "/v1/embeddings", `{"model":"embed-vllm","input":"x","cache_salt":"guess"}`},
+		{"rerank", "/v1/rerank", `{"model":"rerank-vllm","query":"q","documents":["d"]}`},
+	}
+	// send posts c with key and returns the body the backend received,
+	// decoded, plus how many top-level cache_salt members it had.
+	send := func(t *testing.T, key string, c call) (map[string]any, int) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, base+c.path, strings.NewReader(c.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d body %s", c.name, resp.StatusCode, raw)
+		}
+		got := be.last()
+		if got.path != c.path {
+			t.Fatalf("%s: backend saw path %q, want %q", c.name, got.path, c.path)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(got.body, &m); err != nil {
+			t.Fatalf("%s: backend body %q: %v", c.name, got.body, err)
+		}
+		return m, strings.Count(string(got.body), `"cache_salt"`)
+	}
+	saltFmt := regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+	t.Run("client cache_salt twice", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(
+			`{"model":"chat-vllm","cache_salt":"guess-1","messages":[{"role":"user","content":"hi"}],"cache_salt":"guess-2"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+isoKeyA)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status %d, want 400", resp.StatusCode)
+		}
+	})
+	for _, c := range vllmCalls {
+		t.Run(c.name, func(t *testing.T) {
+			salts := map[string]any{}
+			for name, key := range map[string]string{"a1": isoKeyA, "a2": keyA2, "b": isoKeyB} {
+				got, n := send(t, key, c)
+				salt, _ := got["cache_salt"].(string)
+				if n != 1 || !saltFmt.MatchString(salt) || strings.HasPrefix(salt, "guess") {
+					t.Fatalf("%s: backend got %d cache_salt members, value %q; want exactly one router salt", name, n, salt)
+				}
+				salts[name] = salt
+				var sent map[string]any
+				_ = json.Unmarshal([]byte(c.body), &sent)
+				delete(sent, "cache_salt")
+				delete(got, "cache_salt")
+				if !reflect.DeepEqual(got, sent) {
+					t.Errorf("%s: body changed beyond cache_salt:\n got  %v\n sent %v", name, got, sent)
+				}
+			}
+			if salts["a1"] != salts["a2"] {
+				t.Errorf("keys of one tenant got different salts %v / %v", salts["a1"], salts["a2"])
+			}
+			if salts["a1"] == salts["b"] {
+				t.Errorf("tenant-a and tenant-b share salt %v", salts["a1"])
+			}
+		})
+	}
+
+	t.Run("engine without salt support", func(t *testing.T) {
+		got, n := send(t, isoKeyA, call{"plain chat", "/v1/chat/completions",
+			`{"model":"chat-plain","cache_salt":"guess","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`})
+		if n != 0 {
+			t.Errorf("custom-engine backend got %d cache_salt members (%v), want none", n, got["cache_salt"])
+		}
+	})
+
+	t.Run("sglang chat is salted", func(t *testing.T) {
+		got, n := send(t, isoKeyA, call{"sglang chat", "/v1/chat/completions",
+			`{"model":"chat-sglang","cache_salt":"guess","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`})
+		if salt, _ := got["cache_salt"].(string); n != 1 || !saltFmt.MatchString(salt) {
+			t.Errorf("sglang backend got %d cache_salt members, value %q; want the router salt", n, salt)
+		}
+	})
+
+	t.Run("llama.cpp chat skips its prompt cache", func(t *testing.T) {
+		got, n := send(t, isoKeyA, call{"llama.cpp chat", "/v1/chat/completions",
+			`{"model":"chat-llama","cache_salt":"guess","cache_prompt":true,"messages":[{"role":"user","content":"hi"}],"max_tokens":5}`})
+		if n != 0 || got["cache_prompt"] != false {
+			t.Errorf("llama.cpp backend got %d cache_salt members and cache_prompt %v; want none and false", n, got["cache_prompt"])
+		}
+	})
+
+	t.Run("llama.cpp messages skip the prompt cache through extra_params", func(t *testing.T) {
+		got, n := send(t, isoKeyA, call{"llama.cpp messages", "/v1/messages",
+			`{"model":"chat-llama","max_tokens":5,"extra_params":{"seed":7,"cache_prompt":true},"messages":[{"role":"user","content":"hi"}]}`})
+		extra, _ := got["extra_params"].(map[string]any)
+		if n != 0 || extra["cache_prompt"] != false || extra["seed"] != float64(7) {
+			t.Errorf("llama.cpp backend got %d cache_salt members and extra_params %v; want none, cache_prompt false and the client's seed", n, got["extra_params"])
+		}
+	})
+
+	// The router counts the LLM agents left with a gap: custom (no
+	// isolation), SGLang (no isolation on /v1/messages) and the llama.cpp
+	// build older than b11795 (none on /v1/messages either); the vLLM agents
+	// and the recent llama.cpp build have none. The agents report their
+	// versions, and the router reads them.
+	t.Run("agents without isolation are counted", func(t *testing.T) {
+		resp, err := http.Get("http://127.0.0.1" + rcfg.MetricsPort + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		for _, want := range []string{
+			`hivenet_cache_isolation_enabled 1`,
+			`hivenet_cache_isolation_gaps{engine="custom",model="chat-plain"} 1`,
+			`hivenet_cache_isolation_gaps{engine="sglang",model="chat-sglang"} 1`,
+			`hivenet_cache_isolation_gaps{engine="llamacpp",model="chat-llama-old"} 1`,
+		} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("metrics lack %s", want)
+			}
+		}
+		for _, unwanted := range []string{`hivenet_cache_isolation_gaps{engine="vllm"`, `hivenet_cache_isolation_gaps{engine="llamacpp",model="chat-llama"}`} {
+			if strings.Contains(string(raw), unwanted) {
+				t.Errorf("metrics count an isolated agent as a gap: %s", unwanted)
+			}
+		}
+	})
 }

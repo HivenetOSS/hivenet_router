@@ -313,7 +313,7 @@ Send Anthropic-compatible requests to:
 POST /v1/messages
 ```
 
-The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend.
+The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend (apart from `cache_salt` when [per-tenant prefix-cache salting](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) is on).
 
 ```bash
 curl -X POST \

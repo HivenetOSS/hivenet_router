@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
@@ -90,6 +91,9 @@ type RequestProcessor struct {
 	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
+
+	// salter, when set, salts each forwarded body per tenant (WithCacheSalter).
+	salter *cachesalt.Salter
 	// peers drops dead libp2p connections to an agent on a connection-level forward
 	// failure so the next attempt re-dials. Defaults to httpHost.StreamHost.Network().
 	peers PeerCloser
@@ -149,6 +153,12 @@ func NewRequestProcessor(
 // Intended for tests.
 func WithPeerCloser(pc PeerCloser) ProcessorOption {
 	return func(p *RequestProcessor) { p.peers = pc }
+}
+
+// WithCacheSalter makes every forward attempt salt the body for the tenant
+// (see cachesalt.Salter.Apply). nil (the default) forwards bodies unchanged.
+func WithCacheSalter(s *cachesalt.Salter) ProcessorOption {
+	return func(p *RequestProcessor) { p.salter = s }
 }
 
 // WithForwardFunc overrides the per-attempt forward function. Intended for tests.
@@ -381,6 +391,18 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			return
 		}
 
+		// Nothing reached the agent: the router could not prepare the request
+		// (e.g. a body it cannot salt). That says nothing about the agent, so
+		// it fails the request without touching any agent counter: neither a
+		// failure, nor a success with the near-zero RTT of a request that was
+		// never sent, which would make the agent look fast.
+		var unsent *unsentError
+		if errors.As(fwdErr, &unsent) {
+			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+			pending.Error <- unsent.err
+			return
+		}
+
 		// Short-circuit on non-retryable client errors (e.g. context_length_exceeded,
 		// invalid_parameter). These are request-level failures — retrying against other
 		// agents would produce the same error and incorrectly penalise healthy agents.
@@ -534,7 +556,32 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	pending.DispatchedAgentID.Store(agent.ID.String())
 
 	if pending.Request == nil {
-		return nil, 0, fmt.Errorf("missing request")
+		return nil, 0, NotSent(fmt.Errorf("missing request"))
+	}
+
+	// The path this attempt forwards to: embeddings and rerank by capability,
+	// otherwise the handler's path (e.g. "/v1/messages" for the Anthropic
+	// passthrough), defaulting to chat completions.
+	forwardPath := pending.Path
+	switch {
+	case pending.Capability == domain.CapabilityEmbedding:
+		forwardPath = "/v1/embeddings"
+	case pending.Capability == domain.CapabilityReranker:
+		forwardPath = "/v1/rerank"
+	case forwardPath == "":
+		forwardPath = "/v1/chat/completions"
+	}
+
+	// Salt per attempt, for the engine this attempt lands on: a retry or a
+	// fallback step may reach a different engine. RawBytes is shared by every
+	// attempt and is never modified.
+	body := pending.Request.RawBytes
+	if p.salter != nil {
+		salted, err := p.salter.Apply(body, engine, forwardPath, pending.TenantID)
+		if err != nil {
+			return nil, 0, NotSent(domain.NewRouterError(domain.ErrCodeRequestInvalid, "Invalid request body: "+err.Error(), domain.SourceRouter))
+		}
+		body = salted
 	}
 
 	// AddrInfo carries the peer ID only — no dial addresses. The stream is opened
@@ -582,13 +629,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 
 	// Embedding and reranking: simple synchronous forward — no streaming, no token accounting.
 	if pending.Capability == domain.CapabilityEmbedding || pending.Capability == domain.CapabilityReranker {
-		path := "/v1/embeddings"
-		if pending.Capability == domain.CapabilityReranker {
-			path = "/v1/rerank"
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(pending.Request.RawBytes))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, forwardPath, bytes.NewReader(body))
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
+			return nil, 0, NotSent(fmt.Errorf("failed to build HTTP request: %w", err))
 		}
 		// Forward the headers the handler set (only X-Request-ID: client headers
 		// are not forwarded on this path), then enforce Content-Type and inject
@@ -654,16 +697,10 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}, rttMs, nil
 	}
 
-	// Forward to the path the handler requested (e.g. "/v1/messages" for the
-	// Anthropic passthrough); default to chat/completions for native LLM requests.
-	forwardPath := pending.Path
-	if forwardPath == "" {
-		forwardPath = "/v1/chat/completions"
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		forwardPath, bytes.NewReader(pending.Request.RawBytes))
+		forwardPath, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
+		return nil, 0, NotSent(fmt.Errorf("failed to build HTTP request: %w", err))
 	}
 	// apply original request headers (including any custom headers added by the openAI client library) so they are forwarded to the backend engine.
 	// A copy, so one attempt's headers never leak into the next or into the pending request.
@@ -945,6 +982,19 @@ func (p *RequestProcessor) drainStream(
 	releaseSlot()
 	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
 }
+
+// unsentError marks an error the router raised before it sent anything to the
+// agent (preparing the body, building the request). dispatchWithPolicy fails
+// the request on it without recording anything on the agent.
+type unsentError struct{ err error }
+
+func (e *unsentError) Error() string { return e.err.Error() }
+func (e *unsentError) Unwrap() error { return e.err }
+
+// NotSent wraps an error a ForwardFunc raised before it sent anything to the
+// agent, such as a body it could not prepare. The request fails with err, and
+// nothing is recorded on the agent: the error says nothing about it.
+func NotSent(err error) error { return &unsentError{err: err} }
 
 // dailyBudget names the daily token budgets a request's output is charged
 // to: the same buckets its prompt estimate was charged to at admission. A

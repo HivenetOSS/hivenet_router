@@ -117,7 +117,7 @@ func inferenceEngine(h *api.Handlers, provider auth.Provider, lim *countingLimit
 	e := gin.New()
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(provider)).
-		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
+		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
 			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), healthy))
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)
