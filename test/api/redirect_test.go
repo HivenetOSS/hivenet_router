@@ -638,19 +638,24 @@ func TestRedirect_SingleUseCannotBeStolen(t *testing.T) {
 			t.Fatalf("the other key: status %d key %q, want 200 on its own key-2", got.Code, p.KeyID)
 		}
 		got, p := follow(t, b, victim, chatBody)
-		if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
-			t.Fatalf("the victim: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
-				got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+		if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Client-Request-ID") != clientRID ||
+			got.Header().Get("X-Request-ID") != victim.Header().Get("X-Request-ID") {
+			t.Fatalf("the victim: status %d key %q X-Request-ID %q X-Client-Request-ID %q, want 200 on key-1 under %s, client ID %s",
+				got.Code, p.KeyID, got.Header().Get("X-Request-ID"), got.Header().Get("X-Client-Request-ID"),
+				victim.Header().Get("X-Request-ID"), clientRID)
 		}
 	})
 
 	t.Run("a same-key retry with its own X-Request-ID is served", func(t *testing.T) {
 		a, b := entryAndTarget(t)
 		for try := 1; try <= 2; try++ {
-			got, p := follow(t, b, send(a, chatPath, chatBody, withRID(redirectKey)), chatBody)
-			if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
-				t.Fatalf("try %d: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
-					try, got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+			first := send(a, chatPath, chatBody, withRID(redirectKey))
+			got, p := follow(t, b, first, chatBody)
+			if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Client-Request-ID") != clientRID ||
+				got.Header().Get("X-Request-ID") != first.Header().Get("X-Request-ID") {
+				t.Fatalf("try %d: status %d key %q X-Request-ID %q X-Client-Request-ID %q, want 200 on key-1 under %s, client ID %s",
+					try, got.Code, p.KeyID, got.Header().Get("X-Request-ID"), got.Header().Get("X-Client-Request-ID"),
+					first.Header().Get("X-Request-ID"), clientRID)
 			}
 		}
 		if len(b.rejects) != 0 {

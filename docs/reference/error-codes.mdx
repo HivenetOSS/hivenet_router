@@ -1118,7 +1118,8 @@ Hivenet Router can add the following headers.
 
 | Header | When present | Meaning |
 | --- | --- | --- |
-| `X-Request-ID` | Every router response | UUID used for logs, audit records, and support correlation |
+| `X-Request-ID` | Every router response | The request ID the router generated, used for logs, audit records, and support correlation |
+| `X-Client-Request-ID` | The client sent a valid UUID as its own ID | The client's ID, echoed |
 | `traceparent` | When a valid trace span exists | W3C trace context for Tempo or another tracing backend |
 | `WWW-Authenticate` | `401` responses | Bearer authentication challenge |
 | `X-RateLimit-Remaining-Requests` | Finite RPM quota | Remaining request-bucket capacity |

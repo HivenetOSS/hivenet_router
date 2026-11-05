@@ -1423,7 +1423,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// Forward only the request ID, so agent and backend logs carry the same
 	// ID as the router's for embeddings and rerank too.
 	fwdHeaders := http.Header{}
-	fwdHeaders.Set("X-Request-ID", requestID)
+	fwdHeaders.Set(headerRequestID, requestID)
 	chatReq := &domain.ChatRequest{
 		Model:       req.Model,
 		RawBytes:    rawBytes,
@@ -1540,11 +1540,21 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 // copyBackendHeaders copies the backend's response headers to the client and
 // keeps the router's request ID as the only X-Request-ID value. Backends that
 // echo the header back (for example vLLM with --enable-request-id-headers)
-// would otherwise add a second copy.
+// would otherwise add a second copy. An upstream that returns its own ID
+// (a cloud provider, or a backend that ignores ours) keeps it visible in
+// X-Upstream-Request-ID.
 func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
 	domain.CopyHttpHeaders(c.Writer.Header(), src)
-	c.Header("X-Request-ID", requestID)
+	c.Writer.Header().Del(headerUpstreamRequestID)
+	if up := src.Get(headerRequestID); up != "" && up != requestID {
+		c.Header(headerUpstreamRequestID, up)
+	}
+	c.Header(headerRequestID, requestID)
 }
+
+// headerUpstreamRequestID carries the request ID an upstream returned when it
+// differs from the router's.
+const headerUpstreamRequestID = "X-Upstream-Request-ID"
 
 // sseFlushingWriter wraps a gin.ResponseWriter and flushes after every Write so
 // SSE chunks reach the client as soon as they arrive from the backend.

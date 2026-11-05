@@ -698,7 +698,7 @@ func TestTokenAuth(t *testing.T) {
 		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.RequestID = "evil'; DROP--" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"request ID with a line break", request(sign(func(c *redirect.Claims) { c.RequestID = "0190f3a2-7c4e-7b1a-9f3d-000000000002\nfake=1" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
-		{"request ID not in canonical form", request(sign(func(c *redirect.Claims) { c.RequestID = "0190F3A2-7C4E-7B1A-9F3D-000000000002" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"client request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.ClientRequestID = "evil\nfake=1" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"no jti", request(rawToken(secretA, noJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"short jti", request(rawToken(secretA, shortJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"expired token", request(signer(t, time.Second, secretA).Sign(valid, now.Add(-time.Minute)), ""), registry(t, true, nil), &recorder{}, true, false, "", "expired"},
@@ -741,6 +741,26 @@ func TestTokenAuth(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTokenAuth_NormalizesIDs: a token whose request IDs are UUIDs in another
+// spelling (uppercase, urn:uuid:) is accepted, and the IDs are passed on in
+// canonical form.
+func TestTokenAuth_NormalizesIDs(t *testing.T) {
+	var rejects []string
+	rd := newRedirector(t, &rejects)
+	keys := registry(t, true, nil)
+	p := redirect.Wrap(rd, keys, keys)
+	const rid, crid = "0190f3a2-7c4e-7b1a-9f3d-000000000002", "6f1d3a52-0c4b-4d2e-9a8f-2b7c5e1d9a00"
+	claims := redirect.Claims{KeyID: "key-1", RequestID: strings.ToUpper(rid), ClientRequestID: "urn:uuid:" + crid,
+		Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
+	res, err := p.Authenticate(request(rd.Signer.Sign(claims, time.Now()), ""))
+	if err != nil || res.Redirect == nil {
+		t.Fatalf("token with non-canonical IDs refused: err %v, rejects %v", err, rejects)
+	}
+	if res.Redirect.RequestID != rid || res.Redirect.ClientRequestID != crid {
+		t.Errorf("IDs passed on as %q / %q, want %q / %q", res.Redirect.RequestID, res.Redirect.ClientRequestID, rid, crid)
 	}
 }
 

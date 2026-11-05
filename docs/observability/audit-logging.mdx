@@ -46,7 +46,8 @@ Each request produces one JSON object on one line:
   "log_type": "audit",
   "level": "info",
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "request_id": "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a",
+  "request_id": "019a5c1e-8d2f-7b3a-9c4d-5e6f7a8b9c0d",
+  "client_request_id": "8b9e4a6d-dfb4-4b95-bada-319e7e5b878a",
   "tenant_id": "acme-corp",
   "key_id": "acme-prod",
   "model": "meta-llama/Llama-3.1-8B-Instruct",
@@ -70,7 +71,8 @@ The timestamp and values above are examples.
 | `log_type` | Always `audit` |
 | `level` | `info` below HTTP `400`; `error` for HTTP `400` and above |
 | `trace_id` | OpenTelemetry trace ID; empty when no valid trace is active |
-| `request_id` | Valid client-supplied UUID or a generated UUID |
+| `request_id` | The request ID: a UUIDv7 the router generates, unique for every request |
+| `client_request_id` | The client's own ID, when it sent a valid UUID; otherwise empty |
 | `tenant_id` | Authenticated key owner; `default` in no-auth mode; empty for failures before identity resolution |
 | `key_id` | Dynamic key-registry ID; normally empty for static keys and no-auth traffic |
 | `model` | Top-level request model when the handler could read it |
@@ -87,39 +89,29 @@ The timestamp and values above are examples.
 
 ### Request IDs
 
-Hivenet Router accepts an incoming:
-
-```text
-X-Request-ID
-```
-
-only when its value is a valid UUID.
-
-A valid UUID is preserved:
-
-```bash
-curl \
-  -H "X-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
-  http://localhost:8080/v1/models
-```
-
-A valid UUID of any version is accepted and normalized to its canonical lowercase form. An absent, empty, or invalid value is replaced with a new UUIDv7, which is time-ordered and unique across router instances.
-
-The selected value is the request's single ID. It is:
+Every request gets a request ID that Hivenet Router generates: a UUIDv7, time-ordered and unique across router instances. The router never uses an ID chosen by the client as the request ID, so no two requests share one. It is:
 
 - returned in the `X-Request-ID` response header
-- stored in the audit record
+- stored in the audit record as `request_id`
 - attached to the active trace span
 - used in the router's routing and error logs
 - forwarded to the agent and backend in the `X-Request-ID` header
 
-A client that retries with the same `X-Request-ID` keeps the same ID, so logs show the retry as the same request.
+A client can also send its own ID, in `X-Client-Request-ID` or, as before, in `X-Request-ID`:
 
-<Warning>
-  The request ID can be chosen by the client. One key can reuse an ID, and different keys can send the same ID. Anything that deduplicates audit records, such as a billing pipeline, must key on `key_id` and `request_id` together, never on `request_id` alone.
-</Warning>
+```bash
+curl \
+  -H "X-Client-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
+  http://localhost:8080/v1/models
+```
 
-Invalid values are never stored or forwarded, so arbitrary request-ID text cannot be injected into audit, agent, or backend logs.
+When the value is a valid UUID of any version, it is normalized to its canonical lowercase form, stored in the audit record as `client_request_id` and returned in the `X-Client-Request-ID` response header. `X-Client-Request-ID` is preferred when a client sends both headers. A client that resends the same ID on a retry can find both attempts by `client_request_id`.
+
+The client's ID is a label only: it is never forwarded to the agent or backend, and two requests with the same client ID are still two requests with two request IDs. Anything that deduplicates audit records, such as a billing pipeline, should key on `request_id`.
+
+Invalid values are dropped: they are never stored, returned or forwarded, so arbitrary text cannot be injected into audit, agent, or backend logs.
+
+When the backend or a cloud provider returns its own `X-Request-ID`, different from the router's, it is returned in `X-Upstream-Request-ID`, so the ID a provider's support asks for stays visible.
 
 ### Trace IDs
 

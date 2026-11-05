@@ -496,18 +496,21 @@ func (s Scope) Contains(p Policloud) bool {
 
 // Claims is the body of a redirect token (contract 3 v2 §4).
 type Claims struct {
-	KeyID     string `json:"key"`   // the caller's API-key ID ("" with auth mode none), never the key
-	RequestID string `json:"rid"`   // the first router's request ID; the target adopts it
-	Model     string `json:"model"` // the concrete model the first router routed on
-	Scope     Scope  `json:"scope"` // the effective scope at the first router
-	From      string `json:"from"`  // the first router's policloud ID
-	Site      string `json:"site"`  // the only policloud that accepts this token
-	Path      string `json:"path"`  // the only path the token is valid for
-	Hop       int    `json:"hop"`   // redirects so far, including this one
-	BodySHA   string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
-	IssuedAt  int64  `json:"iat"`   // Unix seconds
-	Exp       int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
-	JTI       string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
+	KeyID     string `json:"key"` // the caller's API-key ID ("" with auth mode none), never the key
+	RequestID string `json:"rid"` // the first router's request ID; the target adopts it
+	// ClientRequestID is the ID the client sent, if any. The target adopts it
+	// too, so a client retry is still recognised after a redirect.
+	ClientRequestID string `json:"crid,omitempty"`
+	Model           string `json:"model"` // the concrete model the first router routed on
+	Scope           Scope  `json:"scope"` // the effective scope at the first router
+	From            string `json:"from"`  // the first router's policloud ID
+	Site            string `json:"site"`  // the only policloud that accepts this token
+	Path            string `json:"path"`  // the only path the token is valid for
+	Hop             int    `json:"hop"`   // redirects so far, including this one
+	BodySHA         string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
+	IssuedAt        int64  `json:"iat"`   // Unix seconds
+	Exp             int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
+	JTI             string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
 }
 
 // jtiLen is the length of a token ID, in random bytes.
@@ -519,13 +522,16 @@ func ValidJTI(jti string) bool {
 	return err == nil && len(b) == jtiLen
 }
 
-// ValidRequestID reports whether rid is a request ID as the issuing router
-// assigns it: a UUID in canonical form. The target adopts it and forwards it
-// to its agent and backend, so any other value is refused, even in a token
-// that is correctly signed.
-func ValidRequestID(rid string) bool {
-	u, err := uuid.Parse(rid)
-	return err == nil && u.String() == rid
+// CanonicalRequestID returns raw in canonical UUID form (lowercase, no
+// prefix or braces) and true, or "" and false when raw is not a UUID. It is
+// the one rule for request IDs: the API middleware applies it to the
+// client's ID and the redirect target to the IDs a token carries.
+func CanonicalRequestID(raw string) (string, bool) {
+	u, err := uuid.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	return u.String(), true
 }
 
 // Secret is one signing secret and its ID (the token's kid).
