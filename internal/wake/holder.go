@@ -92,10 +92,11 @@ func (h *Holder) SetPollInterval(d time.Duration) { h.poll = d }
 // (Woken), the budget runs out (Expired), ctx ends (Gone), or OnKeepAlive
 // fails (Gone). It returns Full at once when a limit is reached.
 //
-// caller identifies the client (its API key) and requestID the request. In
-// the pending demand, holds with the same caller and request ID (a client
-// retrying the same request) count once; another caller's request with the
-// same ID counts separately.
+// caller identifies the client (its API key) and requestID the request: the
+// client's own ID when it sent one, else the router's. In the pending
+// demand, holds with the same caller and request ID (a client retrying the
+// same request) count once; another caller's request with the same ID
+// counts separately.
 func (h *Holder) Hold(ctx context.Context, model, caller, requestID string, opts Options) Outcome {
 	start := time.Now()
 	key := [2]string{caller, requestID}
