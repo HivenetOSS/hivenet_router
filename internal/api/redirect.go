@@ -64,9 +64,8 @@ func redirectInfo(c *gin.Context) *auth.RedirectInfo {
 //     key (already verified as the token's key) is served as a fresh request
 //     on it, as for any refused token; otherwise 401;
 //   - an accepted request adopts the first router's request ID (logs, audit,
-//     X-Request-ID), so both hops can be matched. The client can choose that
-//     ID, so consumers that deduplicate records (billing, for example) must
-//     key on the key ID and the request ID together, never the ID alone;
+//     X-Request-ID), so both hops can be matched, and the client's own ID if
+//     it sent one (X-Client-Request-ID);
 //   - it uses the token's model, the concrete model the first router
 //     resolved, so an alias such as "auto" is not resolved again here. The
 //     body is still hashed as sent (ctxKeyClientBody keeps those bytes).
@@ -108,6 +107,9 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 			return
 		}
 		setRequestID(c, info.RequestID)
+		if info.ClientRequestID != "" {
+			setClientRequestID(c, info.ClientRequestID)
+		}
 		routed := body
 		var peek struct {
 			Model string `json:"model"`
@@ -187,15 +189,16 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			return
 		}
 		token := h.redirect.Signer.Sign(redirect.Claims{
-			KeyID:     keyID,
-			RequestID: c.GetString("request_id"),
-			Model:     model,
-			Scope:     scope,
-			From:      from,
-			Site:      target.ID,
-			Path:      c.Request.URL.Path,
-			Hop:       hop + 1,
-			BodySHA:   redirect.BodySHA(clientBody(c)),
+			KeyID:           keyID,
+			RequestID:       c.GetString("request_id"),
+			ClientRequestID: c.GetString(ctxKeyClientRequestID),
+			Model:           model,
+			Scope:           scope,
+			From:            from,
+			Site:            target.ID,
+			Path:            c.Request.URL.Path,
+			Hop:             hop + 1,
+			BodySHA:         redirect.BodySHA(clientBody(c)),
 		}, now)
 		c.Header("Location", redirect.Location(target.URL, c.Request.URL, token))
 		c.Header("Cache-Control", "no-store")
