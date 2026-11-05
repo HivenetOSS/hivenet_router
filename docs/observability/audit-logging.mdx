@@ -74,7 +74,7 @@ The timestamp and values above are examples.
 | `request_id` | The request ID: a UUIDv7 the router generates, unique for every request |
 | `client_request_id` | The client's own ID, when it sent a valid UUID; otherwise empty |
 | `tenant_id` | Authenticated key owner; `default` in no-auth mode; empty for failures before identity resolution |
-| `key_id` | Dynamic key-registry ID; `static-` plus 16 hex characters derived from the key hash for static `auth.yaml` keys; `admin-` plus 16 derived hex characters for admin keys; empty for no-auth traffic |
+| `key_id` | Dynamic key-registry ID; `static-` plus 16 hex characters derived from the key hash for static `auth.yaml` keys; `admin-` plus 16 derived hex characters for admin keys; `anonymous` for no-auth traffic; empty for failures before identity resolution |
 | `model` | Top-level request model when the handler could read it |
 | `status_code` | Final HTTP response status |
 | `latency_ms` | Time from request entry until the response completes |
@@ -86,6 +86,7 @@ The timestamp and values above are examples.
 | `alias` | Present only on [semantic alias](/routing/semantic-routing) requests: the alias the client named. `model` holds the resolved model, or the alias when resolution failed |
 | `semantic_route` | Present only on semantic alias requests: the route that chose the model; empty when resolution failed |
 | `ts` | Request start time in the `Europe/Rome` time zone, including the active UTC offset |
+| `router_id` | Present when the router runs with `--router-id`: the router that wrote the line. Several routers of a site can write to one log; a retried or redirected request appears on more than one |
 
 ### Request IDs
 
@@ -158,30 +159,27 @@ key_id
 
 contains the stable registry entry ID.
 
-Static keys do not currently have a stable key ID, so their audit records normally contain:
-
-```json
-{
-  "key_id": ""
-}
-```
+Static `auth.yaml` keys carry a stable derived ID (`static-` plus 16 hex characters), the same on every router and across restarts.
 
 In no-auth mode, successful API requests use:
 
 ```json
 {
   "tenant_id": "default",
-  "key_id": ""
+  "key_id": "anonymous"
 }
 ```
 
 Authentication failures happen before Hivenet Router can resolve a tenant or key, so those fields remain empty.
 
-<Note>
-  Audit records and Prometheus labels use different empty-key conventions.
+Every authenticated request's record carries a non-empty `key_id`, so one customer's requests can be selected from a shared audit log by `tenant_id` and `key_id`. Audit records, the semantic decision log and tenant metrics use the same `key_id` values.
 
-  No-auth audit records use an empty `key_id`, while tenant metrics use `key_id="anonymous"` for those requests.
-</Note>
+<Warning>
+  Two changes break existing queries and shippers:
+
+  - No-auth records carry `key_id: "anonymous"` instead of an empty `key_id`, and static-key records carry their derived `static-` ID. A query that filters on an empty `key_id` no longer matches them.
+  - The audit file is created, or narrowed, to mode `0600`. A log shipper that runs as another user can no longer read it (see [Bare-metal permissions](#bare-metal-permissions)).
+</Warning>
 
 ### Agent and provider identity
 
@@ -244,6 +242,8 @@ The dedicated audit record does not include:
 - request path
 
 Hivenet Router’s separate application log records method, path, status, latency, and client IP, but deliberately excludes the authorization header.
+
+A backend error's body, which engines often fill with the input they could not process, is returned to the client but kept out of every log and every trace: log lines and span statuses name only the error code (and the HTTP status for an agent's backend), on retried and final errors alike, whatever shape the body has (the router's own error envelope, an OpenAI or Anthropic-shaped error, or plain text). The same holds for errors from the OpenAI and Anthropic fallback providers.
 
 <Warning>
   Metadata-only logging reduces content exposure but does not make the records anonymous.
@@ -319,17 +319,15 @@ The file is opened for append when the router process starts.
 
 ## Fallback to stdout
 
-If Hivenet Router cannot create the directory or open the file, the router still starts and writes audit JSON to standard output.
+Hivenet Router opens the audit file at startup. If it cannot create the directory or open the file, the router still starts and writes audit JSON to standard output.
 
-It also writes an explanatory message to standard error:
+It writes an explanatory message to standard error, and logs an error at startup:
 
 ```text
 audit: cannot open <path>: <error> — falling back to stdout
 ```
 
-This is useful for local development, but it can mix structured audit entries with application logs and change the expected Promtail pipeline.
-
-Check startup logs whenever the audit file remains empty.
+This is useful for local development, but it mixes every tenant's audit entries with application logs and changes the expected Promtail pipeline. Check startup logs whenever the audit file remains empty.
 
 ## Bare-metal permissions
 
@@ -350,15 +348,7 @@ Set the environment variable in the router service:
 Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
 ```
 
-Hivenet Router creates the file when it starts.
-
-Its final permissions are affected by the process umask. With the hardened systemd unit from the bare-metal guide:
-
-```ini
-UMask=0027
-```
-
-the requested file mode is reduced accordingly.
+Hivenet Router creates the file at startup, with mode `0600`: the records name every tenant and key, so only the router's own user can read them. A regular file that already exists with a wider mode is narrowed to `0600`; a non-regular path such as `/dev/stdout` is left as it is. Give a log shipper access by running it as the router's user or by reading the router's standard output instead.
 
 Check the result:
 

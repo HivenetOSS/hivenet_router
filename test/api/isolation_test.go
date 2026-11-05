@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
+	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
 )
@@ -874,5 +876,41 @@ func TestIsolation_TrailingDataRejected(t *testing.T) {
 		if w := s.call(t, http.MethodPost, "/v1/messages", body, isoKeyA); w.Code != want {
 			t.Errorf("/v1/messages %s: status %d, want %d; body %s", body, w.Code, want, w.Body)
 		}
+	}
+}
+
+// TestIsolation_DecisionLogAttributable: each semantic-alias decision record
+// carries the caller's tenant and key, so one customer's routing decisions
+// can be selected from the shared decision log.
+func TestIsolation_DecisionLogAttributable(t *testing.T) {
+	path := t.TempDir() + "/decisions.jsonl"
+	dl, err := semantic.OpenDecisionLog(path, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newAliasHandlers(t, nil)
+	h.SetDecisionLog(dl)
+	auth := func(c *gin.Context) {
+		c.Set("tenant_id", "tenant-a")
+		c.Set("key_id", "key-a1")
+		c.Next()
+	}
+	var out seen
+	if w := post(aliasRouter(h, auth, &out), "/v1/chat/completions", `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if err := dl.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &rec); err != nil {
+		t.Fatalf("decision log %q: %v", raw, err)
+	}
+	if rec["tenant_id"] != "tenant-a" || rec["key_id"] != "key-a1" {
+		t.Errorf("decision record tenant_id %v key_id %v, want tenant-a / key-a1", rec["tenant_id"], rec["key_id"])
 	}
 }

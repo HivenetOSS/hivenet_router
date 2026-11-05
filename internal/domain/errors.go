@@ -64,7 +64,22 @@ type RouterError struct {
 	AgentID string `json:"-"`
 }
 
-func (e *RouterError) Error() string { return e.Message }
+// Error is the error as logs and traces see it. Only the router's own
+// messages (SourceRouter), which carry no request content, are shown. Any
+// other message can be a backend's text, which often echoes the prompt: for
+// an error from the backend, and for one whose source the router does not
+// know (as a body decoded from an agent's response can claim), Error is the
+// code only. The client still gets the message, in the JSON body (Message).
+func (e *RouterError) Error() string {
+	switch e.Source {
+	case SourceRouter:
+		return e.Message
+	case SourceBackend:
+		return string(e.Code) + " (from the backend)"
+	default:
+		return string(e.Code) + " (from an unknown source)"
+	}
+}
 
 // RouterErrorResponse is the top-level JSON envelope returned to clients:
 //

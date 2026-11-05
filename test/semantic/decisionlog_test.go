@@ -75,3 +75,31 @@ func TestDecisionLog_WriteDuringClose(t *testing.T) {
 		t.Error("the late write should be counted as dropped")
 	}
 }
+
+// TestDecisionLog_FileMode: the decision log names tenants and keys, so it is
+// owner-only like the audit log: created with mode 0600, and a file created
+// earlier with a wider mode is narrowed to 0600 when opened.
+func TestDecisionLog_FileMode(t *testing.T) {
+	for name, pre := range map[string]bool{"new file": false, "existing world-readable file": true} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "decisions.jsonl")
+			if pre {
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dl, err := semantic.OpenDecisionLog(path, 4)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { dl.Close() }) //nolint:errcheck
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := fi.Mode().Perm(); perm != 0o600 {
+				t.Errorf("decision log mode %o, want 600", perm)
+			}
+		})
+	}
+}
