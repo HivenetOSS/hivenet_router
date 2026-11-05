@@ -36,6 +36,8 @@ Hivenet Router supports two ways to define model access:
 
 An empty or omitted allowlist grants access to every registered model, provided that `quota.per_model` is not configured.
 
+On a router shared by several customers, set `--require-model-allowlist` (`HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST=true`). A key with no allowlist and no `quota.per_model` can then call and list no model at all, instead of every model. The setting applies to chat, messages, embeddings, reranking, semantic aliases, cross-site redirects and `/v1/models`. The router refuses to start with it when API auth mode is `none`.
+
 ### Static key
 
 ```yaml
@@ -808,7 +810,7 @@ The failed-request metric includes other failure types. Use audit logs when you 
     }
     ```
 
-    An empty allowlist means unrestricted access.
+    An empty allowlist means unrestricted access, unless the router runs with `--require-model-allowlist`, which makes it no access.
 
     Also check whether you edited the correct key and router environment.
   </Accordion>

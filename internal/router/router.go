@@ -373,6 +373,10 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
+	if err := ValidateIsolationConfig(cfg, apiProv); err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -810,6 +814,7 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
+	handlers.SetIsolation(api.Isolation{RequireModelAllowlist: r.cfg.RequireModelAllowlist})
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1005,6 +1010,10 @@ func (r *Router) reloadAuthProviders() {
 		return
 	}
 	if err := redirect.CheckAuthMode(r.cfg.SiteID, apiProv); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
+	if err := ValidateIsolationConfig(r.cfg, apiProv); err != nil {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}

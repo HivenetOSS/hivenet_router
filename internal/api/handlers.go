@@ -267,6 +267,9 @@ type Handlers struct {
 	// agent here; nil (the default) disables cross-site redirects. See
 	// RedirectTarget, RedirectDecision and SetRedirect.
 	redirect *redirect.Redirector
+
+	// isolation holds the tenant-isolation switches (see SetIsolation).
+	isolation Isolation
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -528,8 +531,37 @@ func (h *Handlers) parsePassthroughRequest(c *gin.Context, req *domain.ChatReque
 	return true
 }
 
+// Isolation holds the tenant-isolation switches for the client API. The zero
+// value changes nothing.
+type Isolation struct {
+	// RequireModelAllowlist makes a key with no allowlist unable to call or
+	// list any model (instead of every model). For shared multi-tenant
+	// routers, where an unrestricted key would reach other customers' models.
+	RequireModelAllowlist bool
+}
+
+// SetIsolation sets the tenant-isolation switches. Call before serving.
+func (h *Handlers) SetIsolation(iso Isolation) { h.isolation = iso }
+
+// ctxKeyRequireAllowlist marks a request whose key must carry a model
+// allowlist (see effectiveAllowedModels).
+const ctxKeyRequireAllowlist = "require_model_allowlist"
+
+// IsolationContext stamps the isolation switches into each /v1 request
+// context, right after authentication, so every model check downstream
+// (aliases, redirects, quota, handlers, discovery) applies them alike.
+func (h *Handlers) IsolationContext() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.isolation.RequireModelAllowlist {
+			c.Set(ctxKeyRequireAllowlist, true)
+		}
+		c.Next()
+	}
+}
+
 // authorizeModel enforces the per-key model allowlist (empty allowlist = all
-// models). Returns false (after writing 403) when the model is not permitted.
+// models, unless an allowlist is required). Returns false (after writing 403)
+// when the model is not permitted.
 func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
 	allowSet, unrestricted := effectiveAllowedModels(c)
 	if unrestricted {
@@ -842,13 +874,26 @@ func (h *Handlers) estimatePromptTokens(req *domain.ChatRequest) int {
 //     allow-set = that list, when non-empty.
 //
 //  3. Neither set → unrestricted=true. Legacy flat keys with no allowlist see
-//     the full catalog, matching the pre-HAI-232 behaviour.
+//     the full catalog, matching the pre-HAI-232 behaviour — unless an
+//     allowlist is required (Isolation.RequireModelAllowlist), in which case
+//     the allow-set is empty and the key may use no model.
 //
 // Used by /v1/models and /v1/models/:model to filter the discovery surface so
 // callers only see models they can actually invoke (and don't learn the names
 // of other tenants' models). Also used by authorizeModel to enforce the same
 // rule on inference verbs.
 func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+	allowSet, unrestricted = resolveAllowedModels(c)
+	if unrestricted && c.GetBool(ctxKeyRequireAllowlist) {
+		// Fail closed: a key without an allowlist may use no model.
+		return map[string]struct{}{}, false
+	}
+	return allowSet, unrestricted
+}
+
+// resolveAllowedModels is effectiveAllowedModels without the
+// require-allowlist rule (applied by its caller below).
+func resolveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
 	if raw, ok := c.Get("quota_limits"); ok {
 		if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel != nil {
 			allowSet = make(map[string]struct{}, len(limits.PerModel))
@@ -1390,22 +1435,11 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// Set audit model key now so all subsequent early returns carry the model in the audit log.
 	c.Set(auditKeyModel, req.Model)
 
-	// Check model access: if the authenticated key has a model allowlist, verify
-	// the requested model is on it. Empty allowlist = access to all models.
-	if raw, exists := c.Get("allowed_models"); exists {
-		if allowedModels, ok := raw.([]string); ok && len(allowedModels) > 0 {
-			permitted := false
-			for _, m := range allowedModels {
-				if m == req.Model {
-					permitted = true
-					break
-				}
-			}
-			if !permitted {
-				writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+req.Model, domain.SourceRouter)
-				return
-			}
-		}
+	// Check model access with the same rule as chat: the key's allowlist, or
+	// its per_model quota entries, or none at all (unless an allowlist is
+	// required).
+	if !h.authorizeModel(c, req.Model) {
+		return
 	}
 
 	// Get the raw body cached by QuotaMiddleware.

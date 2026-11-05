@@ -69,6 +69,7 @@ func main() {
 	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
 	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
 	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
+	requireModelAllowlist := flag.Bool("require-model-allowlist", cfg.RequireModelAllowlist, "Refuse every model to a key that has no model allowlist (models / allowed_models / quota.per_model), instead of allowing all; for shared multi-tenant routers (env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST)")
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
@@ -112,6 +113,7 @@ func main() {
 	cfg.KeyStorePath = *keyStorePath
 	cfg.KeyStoreMaxAge = *keyStoreMaxAge
 	cfg.ResetKeyStore = *resetKeyStore
+	cfg.RequireModelAllowlist = *requireModelAllowlist
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
@@ -232,6 +234,9 @@ func main() {
 			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
 		}
 		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
+	if cfg.RequireModelAllowlist {
+		log.Infof("  Model allowlist:     required (keys without one can use no model)")
 	}
 	log.Info("Security:")
 	log.Info("  JWT secret:          configured")
