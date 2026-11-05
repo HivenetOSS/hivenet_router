@@ -261,6 +261,8 @@ Peer IDs and timestamps will differ.
 | `is_healthy` | Current router health state for the agent |
 | `last_seen` | Unix timestamp of the most recent recorded heartbeat |
 
+When the router runs with `--hide-agent-identity` (`HIVENET_ROUTER_HIDE_AGENT_IDENTITY=true`), this endpoint leaves out `peer_id`, `version`, `organization`, `machine` and `last_seen`, so callers sharing the router cannot map its agents. `GET /admin/models/{model}` always returns every field.
+
 Check the health of every agent serving a model:
 
 ```bash
