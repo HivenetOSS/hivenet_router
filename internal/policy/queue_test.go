@@ -191,3 +191,31 @@ func TestWaitQueue_ReleasedFromHoldPassesTheBound(t *testing.T) {
 		}
 	}
 }
+
+// TestWaitQueue_RejoinKeepsItsPlace checks that a waiter woken by Broadcast
+// that finds no free slot parks again at the head, ahead of later arrivals,
+// even when the queue is at its bound.
+func TestWaitQueue_RejoinKeepsItsPlace(t *testing.T) {
+	q := newWaitQueue(1)
+	later := park(t, q, context.Background()) // fills the bound
+
+	rejoined := make(chan error, 1)
+	go func() { rejoined <- q.Rejoin(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for q.Depth() != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("rejoining waiter was refused or did not enter the queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	q.Signal()
+	if err := result(t, rejoined); err != nil {
+		t.Fatalf("rejoined waiter: %v", err)
+	}
+	stillParked(t, later)
+	q.Signal()
+	if err := result(t, later); err != nil {
+		t.Fatalf("later waiter: %v", err)
+	}
+}

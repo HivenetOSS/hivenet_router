@@ -336,13 +336,13 @@ func TestTarget_Hints(t *testing.T) {
 }
 
 // TestTarget_WakeHereBeforeColdSibling: while the hints are fresh, no
-// redirect when every candidate is cold and the model is placed here (it is
-// woken here instead); otherwise the cold sibling is still used.
+// redirect when every candidate is cold and the model may be woken here (it
+// is held and woken here instead); otherwise the cold sibling is still used.
 func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	const key, session = "key-1", "s"
 	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
 	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
-	build := func(hereKind string, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
+	build := func(hereKind string, hereWakes *bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
 			Schema: 2, Version: u64(1), Region: "eu",
 			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
@@ -353,7 +353,7 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 			HintsExpireAt: expire.UTC().Format(time.RFC3339),
 		}
 		if hereKind != "" {
-			d.Placements = append(d.Placements, place("m", hereKind, "self", yes, cold))
+			d.Placements = append(d.Placements, place("m", hereKind, "self", hereWakes, cold))
 		}
 		m := redirect.NewMap(domains)
 		if err := m.Replace(d); err != nil {
@@ -362,22 +362,25 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 		return m
 	}
 	cases := []struct {
-		name     string
-		hereKind string // kind of the model's placement here ("" = none)
-		ha, hb   *redirect.Hint
-		expire   time.Time
-		redirect bool
+		name      string
+		hereKind  string // kind of the model's placement here ("" = none)
+		hereWakes *bool  // its scale_from_zero
+		ha, hb    *redirect.Hint
+		expire    time.Time
+		redirect  bool
 	}{
-		{"all cold, placed here: wake here", redirect.KindChat, cold, cold, fresh, false},
-		{"all cold, not placed here: cold sibling", "", cold, cold, fresh, true},
-		{"all cold, placed here as another kind: cold sibling", redirect.KindEmbedding, cold, cold, fresh, true},
-		{"one warm sibling: redirect", redirect.KindChat, cold, warm, fresh, true},
-		{"no hint means warm: redirect", redirect.KindChat, cold, nil, fresh, true},
-		{"hints expired: redirect", redirect.KindChat, cold, cold, stale, true},
+		{"all cold, wakeable here: wake here", redirect.KindChat, yes, cold, cold, fresh, false},
+		{"all cold, not placed here: cold sibling", "", yes, cold, cold, fresh, true},
+		{"all cold, placed here as another kind: cold sibling", redirect.KindEmbedding, yes, cold, cold, fresh, true},
+		// Not held here, so the request must go where it can wake.
+		{"all cold, placed here without scale_from_zero: cold sibling", redirect.KindChat, no, cold, cold, fresh, true},
+		{"one warm sibling: redirect", redirect.KindChat, yes, cold, warm, fresh, true},
+		{"no hint means warm: redirect", redirect.KindChat, yes, cold, nil, fresh, true},
+		{"hints expired: redirect", redirect.KindChat, yes, cold, cold, stale, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := target(t, build(tc.hereKind, tc.ha, tc.hb, tc.expire),
+			got := target(t, build(tc.hereKind, tc.hereWakes, tc.ha, tc.hb, tc.expire),
 				redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "self", From: "self", KeyID: key, Session: session})
 			if (got != "") != tc.redirect {
 				t.Fatalf("target %q, want a redirect: %v", got, tc.redirect)
@@ -419,9 +422,6 @@ func TestWakeable(t *testing.T) {
 	}
 	if got := m.WakeableModels("de-1"); len(got) != 2 || got[0] != "e" || got[1] != "m" {
 		t.Errorf("WakeableModels(de-1) = %v, want [e m]", got)
-	}
-	if !m.WakeableHere("e", "de-1") || m.WakeableHere("n", "fr-2") || m.WakeableHere("m", "fr-1") {
-		t.Error("WakeableHere: want e on de-1 only, not n (scale_from_zero false) nor m on fr-1")
 	}
 	if got := m.WakeableModels("fr-1"); len(got) != 0 {
 		t.Errorf("WakeableModels(fr-1) = %v, want none", got)

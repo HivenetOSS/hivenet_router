@@ -5,10 +5,12 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"hivenet_router/internal/admission"
@@ -47,20 +49,27 @@ func (h *Handlers) SetWake(holder *wake.Holder, cfg WakeConfig) {
 }
 
 // QuotaReplicas returns the replica count the per-model RPM quota scales
-// with: the healthy agents, but at least 1 for a model that may be held here
-// while it wakes. At zero replicas the quota is skipped because the request
-// fails at once; a held request is served later, so it is charged as if one
-// replica served it, and a key cannot hold requests past its quota.
-func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(model string) int {
+// with: the healthy agents, but at least 1 for a request that may be held
+// here while its model wakes (the model is placed here with scale_from_zero
+// for the request's endpoint). At zero replicas the quota is skipped because
+// the request fails at once; a held request is served later, so it is
+// charged as if one replica served it, and a key cannot hold requests past
+// its quota.
+func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Context, model string) int {
 	if healthy == nil {
 		return nil
 	}
-	return func(model string) int {
+	return func(c *gin.Context, model string) int {
 		n := healthy(model)
-		if n == 0 && h.wake != nil && h.redirect != nil && h.redirect.Map.WakeableHere(model, h.redirect.Self) {
-			return 1
+		if n > 0 || h.wake == nil || h.redirect == nil {
+			return n
 		}
-		return n
+		if kind := endpointKinds[c.Request.URL.Path]; kind != "" {
+			if _, ok := h.redirect.Map.Wakeable(model, kind, h.redirect.Self); ok {
+				return 1
+			}
+		}
+		return 0
 	}
 }
 
@@ -78,13 +87,17 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(model stri
 // it has none). When the budget runs out, or the model already holds the
 // maximum number of requests, the answer is 503 model_waking with a
 // Retry-After. Each held request counts once in the pending demand, the
-// signal an autoscaler uses to wake the model.
+// signal an autoscaler uses to wake the model, until the model starts
+// answering it: a request released by the wake that still waits for capacity
+// stays counted.
 //
 // After WakeConfig.KeepAlive the router sends keepalive bytes so clients and
 // proxies do not close an idle connection: an SSE comment for a streaming
-// request, a space before the JSON body otherwise. That sends the 200 status,
-// so an error after it is written in the body: as a final SSE error event
-// for a streaming request, as the JSON error envelope otherwise.
+// request, a space before the JSON body otherwise. They go on after the
+// release, while the request waits for capacity, and stop when the response
+// starts. The first keepalive sends the 200 status, so an error after it is
+// written in the body: as a final SSE error event for a streaming request,
+// as the JSON error envelope otherwise.
 func (h *Handlers) WakeHold() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := endpointKinds[c.Request.URL.Path]
@@ -108,7 +121,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 
 		resp := newHeldResponse(c)
 		deadline := time.Now().Add(budget)
-		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), demandID(c), wake.Options{
+		outcome, release := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), demandID(c), wake.Options{
 			Budget:      budget,
 			KeepAlive:   h.wakeCfg.KeepAlive,
 			OnKeepAlive: resp.keepAlive,
@@ -121,6 +134,9 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 			// its depth (the hold limits already bound how many there are).
 			c.Set(ctxKeyHoldDeadline, deadline)
 			c.Request = c.Request.WithContext(policy.WithReleasedFromHold(c.Request.Context()))
+			w := newReleasedWriter(c, resp, release)
+			w.keepAliveUntilStart(c.Request.Context(), h.wakeCfg.KeepAlive)
+			defer w.finish()
 			c.Next()
 		case wake.Gone:
 			// The client left: nothing reaches it. 499 (client closed the
@@ -192,9 +208,17 @@ func newHeldResponse(c *gin.Context) *heldResponse {
 	return r
 }
 
-// keepAlive sends one keepalive, sending the 200 status first if needed.
+// keepAlive sends one keepalive during the hold, sending the 200 status
+// first if needed.
 func (r *heldResponse) keepAlive() error {
-	w := r.c.Writer
+	w, err := r.keepAliveOn(r.c.Writer)
+	r.c.Writer = w
+	return err
+}
+
+// keepAliveOn sends one keepalive on w. The first one sends the 200 status
+// and returns the heldWriter that wraps w from then on.
+func (r *heldResponse) keepAliveOn(w gin.ResponseWriter) (gin.ResponseWriter, error) {
 	if !r.committed {
 		if r.stream {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -207,18 +231,17 @@ func (r *heldResponse) keepAlive() error {
 		// From here on the status on the wire is 200. heldWriter records the
 		// status the rest of the request sets, for the audit log and the
 		// HTTP metrics, and frames errors in the body.
-		r.c.Writer = &heldWriter{ResponseWriter: w, resp: r}
-		w = r.c.Writer
+		w = &heldWriter{ResponseWriter: w, resp: r}
 	}
 	ka := " "
 	if r.stream {
 		ka = ": keep-alive\n\n"
 	}
 	if _, err := w.WriteString(ka); err != nil {
-		return err
+		return w, err
 	}
 	w.Flush()
-	return nil
+	return w, nil
 }
 
 // fail answers model_waking: a 503 with Retry-After, or the error in the
@@ -306,4 +329,167 @@ func demandID(c *gin.Context) string {
 		return id
 	}
 	return c.GetString("request_id")
+}
+
+// releasedWriter is the response writer of a request released by a wake.
+// Until the response starts (the first write, status or flush), it sends
+// keepalives while the request waits for capacity, and it keeps the request
+// in the pending demand. When the response starts, or the request ends, it
+// stops the keepalives and calls release.
+//
+// The keepalives run on their own goroutine, so every write goes through mu.
+// Until the response starts, the handler sets headers on a copy: the
+// keepalive goroutine may send the 200 status, which reads the real ones.
+type releasedWriter struct {
+	gin.ResponseWriter // the writer at release, for CloseNotify, Hijack and Pusher
+	resp               *heldResponse
+	release            func()
+
+	mu      sync.Mutex
+	inner   gin.ResponseWriter // where writes go; becomes a heldWriter after the first keepalive
+	header  http.Header        // the handler's headers until the response starts
+	started bool
+	stop    chan struct{}
+}
+
+// newReleasedWriter installs a releasedWriter as c's writer.
+func newReleasedWriter(c *gin.Context, resp *heldResponse, release func()) *releasedWriter {
+	w := &releasedWriter{
+		ResponseWriter: c.Writer,
+		resp:           resp,
+		release:        release,
+		inner:          c.Writer,
+		header:         c.Writer.Header().Clone(),
+		stop:           make(chan struct{}),
+	}
+	c.Writer = w
+	return w
+}
+
+// keepAliveUntilStart sends a keepalive every interval until the response
+// starts or ctx ends. An interval of 0 sends none.
+func (w *releasedWriter) keepAliveUntilStart(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !w.keepAlive() {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// keepAlive sends one keepalive unless the response has started. It reports
+// whether more should follow.
+func (w *releasedWriter) keepAlive() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.started {
+		return false
+	}
+	inner, err := w.resp.keepAliveOn(w.inner)
+	w.inner = inner
+	return err == nil
+}
+
+// start marks the response as started: no more keepalives, the request
+// leaves the pending demand, and, unless a keepalive already sent the
+// status, the handler's headers become the response's. Called with mu held.
+func (w *releasedWriter) start() {
+	if w.started {
+		return
+	}
+	w.started = true
+	close(w.stop)
+	w.release()
+	if !w.resp.committed {
+		h := w.inner.Header()
+		for k := range h {
+			delete(h, k)
+		}
+		for k, v := range w.header {
+			h[k] = v
+		}
+	}
+}
+
+// finish ends the keepalives and releases the request if the handler wrote
+// nothing (gin then writes the status itself).
+func (w *releasedWriter) finish() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+}
+
+func (w *releasedWriter) Header() http.Header {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.started {
+		return w.inner.Header()
+	}
+	return w.header
+}
+
+func (w *releasedWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+	w.inner.WriteHeader(code)
+}
+
+func (w *releasedWriter) WriteHeaderNow() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+	w.inner.WriteHeaderNow()
+}
+
+func (w *releasedWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+	return w.inner.Write(b)
+}
+
+func (w *releasedWriter) WriteString(s string) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+	return w.inner.WriteString(s)
+}
+
+func (w *releasedWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start()
+	w.inner.Flush()
+}
+
+func (w *releasedWriter) Status() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.inner.Status()
+}
+
+func (w *releasedWriter) Size() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.inner.Size()
+}
+
+func (w *releasedWriter) Written() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.inner.Written()
 }

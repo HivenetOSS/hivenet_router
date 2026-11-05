@@ -434,6 +434,17 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 // healthyAgentCount may be nil in legacy deployments; per-model keys then
 // fall back to a flat per_replica ceiling (no per-replica multiplication).
 func QuotaMiddleware(limiter auth.RateLimiter, m *metrics.RouterMetrics, healthyAgentCount func(model string) int) gin.HandlerFunc {
+	var replicas func(c *gin.Context, model string) int
+	if healthyAgentCount != nil {
+		replicas = func(_ *gin.Context, model string) int { return healthyAgentCount(model) }
+	}
+	return QuotaMiddlewareWithReplicas(limiter, m, replicas)
+}
+
+// QuotaMiddlewareWithReplicas is QuotaMiddleware with a replica count that
+// may depend on the request (its endpoint, for a request that may be held
+// while its model wakes: see Handlers.QuotaReplicas).
+func QuotaMiddlewareWithReplicas(limiter auth.RateLimiter, m *metrics.RouterMetrics, replicas func(c *gin.Context, model string) int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		caller := resolveCaller(c)
 		limits, _ := c.Get("quota_limits")
@@ -443,7 +454,11 @@ func QuotaMiddleware(limiter auth.RateLimiter, m *metrics.RouterMetrics, healthy
 		if quota.PerModel == nil {
 			allowed = enforceFlatQuota(c, limiter, m, caller, quota)
 		} else {
-			allowed = enforcePerModelQuota(c, limiter, m, caller, quota, healthyAgentCount)
+			var count func(string) int
+			if replicas != nil {
+				count = func(model string) int { return replicas(c, model) }
+			}
+			allowed = enforcePerModelQuota(c, limiter, m, caller, quota, count)
 		}
 		if allowed {
 			c.Next()

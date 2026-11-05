@@ -113,7 +113,7 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(redirect.Wrap(s.rd, keys, keys))).
 		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(),
-			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
+			h.RedirectDecision(), api.QuotaMiddlewareWithReplicas(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)
 	inference.POST("/embeddings", h.Embeddings)
@@ -459,15 +459,24 @@ func TestWakeHold_ErrorsAfterKeepAlive(t *testing.T) {
 // charged like any other.
 func TestWakeHold_QuotaCountsOneReplica(t *testing.T) {
 	s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1, placement("x", redirect.KindChat, "a")))
-	replicas := s.h.QuotaReplicas(s.count)
-	if n := replicas("m"); n != 1 {
+	count := s.h.QuotaReplicas(s.count)
+	ctxFor := func(path string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+		return c
+	}
+	chat, embed := ctxFor(chatPath), ctxFor("/v1/embeddings")
+	if n := count(chat, "m"); n != 1 {
 		t.Errorf("m at zero, wakeable here: %d replicas, want 1", n)
 	}
-	if n := replicas("x"); n != 0 {
+	if n := count(embed, "m"); n != 0 {
+		t.Errorf("m at zero, not wakeable here for embeddings: %d replicas, want 0 (the request fails at once)", n)
+	}
+	if n := count(chat, "x"); n != 0 {
 		t.Errorf("x at zero, not placed here: %d replicas, want 0 (the request fails at once)", n)
 	}
 	s.wakeUp("m")
-	if n := replicas("m"); n != 1 {
+	if n := count(chat, "m"); n != 1 {
 		t.Errorf("m awake: %d replicas, want the healthy count 1", n)
 	}
 }
@@ -490,5 +499,30 @@ func TestWakeHold_ClientGoneRecords499(t *testing.T) {
 	}
 	if d := s.holder.Demand(); len(d) != 0 {
 		t.Errorf("demand %v, want empty", d)
+	}
+}
+
+// TestWakeHold_ReleasedWaitsForCapacity checks a request released by a wake
+// that still waits for capacity: it stays in the pending demand, and gets
+// keepalives so the connection is not idle, until the model answers it.
+func TestWakeHold_ReleasedWaitsForCapacity(t *testing.T) {
+	s := newWakeSite(t, api.WakeConfig{Budget: time.Minute, KeepAlive: 20 * time.Millisecond}, 10, fleetDoc(1))
+	done := sendAsync(s.testSite, chatPath, chatBody, bearer())
+	s.waitHeld(t, "m", 1)
+	s.wakeUp("m") // released before any keepalive
+
+	// Nothing serves the queued request yet: it waits for capacity.
+	time.Sleep(90 * time.Millisecond)
+	if n := s.holder.Demand()["m"]; n != 1 {
+		t.Errorf("demand while the released request waits = %d, want 1", n)
+	}
+	serveOne(t, s.testSite)
+	w := result(t, done)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.HasPrefix(body, " ") || strings.TrimLeft(body, " ") != `{"served":true}` {
+		t.Fatalf("got %d %q, want 200, keepalive spaces sent while waiting, then the response", w.Code, body)
+	}
+	if d := s.holder.Demand(); len(d) != 0 {
+		t.Errorf("demand after the answer = %v, want empty", d)
 	}
 }
