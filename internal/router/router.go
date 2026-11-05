@@ -1572,6 +1572,18 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 
 	if payload.BackendHealthy {
 		a.SetHealthy(true)
+		// A heartbeat handled while the connection closes must not undo the
+		// disconnect: DisconnectedF may have marked the agent unhealthy just
+		// before SetHealthy(true), and requests would then go to a peer with
+		// no connection until the health monitor notices. The check runs
+		// after SetHealthy(true), so a disconnect after it still finds the
+		// agent healthy and marks it unhealthy itself.
+		if !r.peerConnected(session.PeerID) {
+			a.SetHealthy(false)
+			log.Debugf("handleAgentHeartbeat: %s disconnected while its heartbeat was handled — left unhealthy", peerIDStr[:8])
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if err := r.storage.UpdateAgentStatus(session.PeerID, true, time.Now()); err != nil {
 			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
 		}
@@ -1597,6 +1609,15 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// peerConnected reports whether the router has a live libp2p connection to
+// the peer. Without a libp2p host (tests) every peer counts as connected.
+func (r *Router) peerConnected(id peer.ID) bool {
+	if r.p2pHost == nil {
+		return true
+	}
+	return r.p2pHost.Network().Connectedness(id) == libp2pnet.Connected
 }
 
 // handleRoutingSignals receives high-frequency metric pushes from agents (default 500ms).
