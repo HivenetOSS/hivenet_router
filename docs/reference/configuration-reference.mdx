@@ -476,6 +476,8 @@ These settings harden a router that serves several customers. Each one is off by
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `--require-model-allowlist` | `HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST` | `false` | A key without a model allowlist (`models` / `allowed_models`, or `quota.per_model`) can call and list no model, instead of every model. Refused with API auth mode `none` |
+| `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` | Set a per-tenant `cache_salt` on requests to vLLM agents and remove any client-sent one. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) |
+| `--cache-salt-secret-file` | `HIVENET_ROUTER_CACHE_SALT_SECRET` | — | Router-only secret for the salt HMAC; required with `--cache-salt`, at least 32 bytes, different from the JWT and key-store secrets, the same on every router in front of the same agents |
 
 An unparsable boolean value stops startup.
 
@@ -793,6 +795,8 @@ The complete current router flag set is:
 | `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` |
 | `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` |
 | `--require-model-allowlist` | `HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST` | `false` |
+| `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` |
+| `--cache-salt-secret-file` | `HIVENET_ROUTER_CACHE_SALT_SECRET` | Empty (required with `--cache-salt`) |
 | `--universal-flush-interval` | — | `30s` |
 | `--max-concurrent` | — | `50` |
 | `--policy-file` | `HIVENET_ROUTER_POLICY_FILE` | Empty |

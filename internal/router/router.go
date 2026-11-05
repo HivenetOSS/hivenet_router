@@ -22,6 +22,7 @@ import (
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
@@ -191,6 +192,8 @@ type Router struct {
 	// (internal/wake); nil when redirect is disabled, since the sibling map
 	// says which models may be held.
 	wake *wake.Holder
+	// salter salts forwarded bodies per tenant; nil when --cache-salt is off.
+	salter *cachesalt.Salter
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -401,6 +404,11 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, err
 	}
+	salter, err := newCacheSalter(cfg)
+	if err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -506,6 +514,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
+		salter:       salter,
 	}
 	// Over-budget requests wait in a per-model queue (--admission-queue-depth,
 	// by default --queue-depth) for room before a 429: half the request timeout
@@ -685,7 +694,8 @@ func (r *Router) Start() error {
 	}
 
 	// Create request processor now that httpHost is ready
-	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter)
+	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
+		WithCacheSalter(r.salter))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -1841,6 +1851,7 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 		a.SetHealthy(false)
 	}
 	r.agents.Register(a)
+	r.checkCacheIsolation(a)
 	return connected
 }
 
@@ -1993,6 +2004,7 @@ func (r *Router) healthMonitor() {
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)
+			r.refreshCacheIsolationGaps()
 			log.Infof("Active agents: %d", r.agents.Count())
 		}
 	}

@@ -69,6 +69,8 @@ func main() {
 	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
 	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
 	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
+	cacheSalt := flag.Bool("cache-salt", cfg.CacheSalt, "Set a per-tenant cache_salt on requests to vLLM agents and strip any client-sent one, so tenants never share prefix-cache blocks; requires a salt secret (env: HIVENET_ROUTER_CACHE_SALT)")
+	cacheSaltSecretFile := flag.String("cache-salt-secret-file", "", "Path to file containing the router-only cache-salt secret (env: HIVENET_ROUTER_CACHE_SALT_SECRET; required with --cache-salt, >= 32 bytes, must differ from the JWT secret; the same on every router in front of the same agents)")
 	requireModelAllowlist := flag.Bool("require-model-allowlist", cfg.RequireModelAllowlist, "Refuse every model to a key that has no model allowlist (models / allowed_models / quota.per_model), instead of allowing all; for shared multi-tenant routers (env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST)")
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
@@ -131,6 +133,7 @@ func main() {
 	cfg.KeyStoreMaxAge = *keyStoreMaxAge
 	cfg.ResetKeyStore = *resetKeyStore
 	cfg.RequireModelAllowlist = *requireModelAllowlist
+	cfg.CacheSalt = *cacheSalt
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
@@ -179,6 +182,13 @@ func main() {
 			log.Fatalf("cannot read --key-store-secret-file %q: %v", *keyStoreSecretFile, err)
 		}
 		cfg.KeyStoreSecret = strings.TrimSpace(string(data))
+	}
+	if *cacheSaltSecretFile != "" {
+		data, err := os.ReadFile(*cacheSaltSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --cache-salt-secret-file %q: %v", *cacheSaltSecretFile, err)
+		}
+		cfg.CacheSaltSecret = strings.TrimSpace(string(data))
 	}
 	for _, err := range cfg.EnvErrors {
 		log.Errorf("invalid environment value: %v", err)
@@ -317,6 +327,9 @@ func main() {
 			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
 		}
 		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
+	if cfg.CacheSalt {
+		log.Infof("  Prefix-cache salt:   per tenant (vLLM agents)")
 	}
 	if cfg.RequireModelAllowlist {
 		log.Infof("  Model allowlist:     required (keys without one can use no model)")

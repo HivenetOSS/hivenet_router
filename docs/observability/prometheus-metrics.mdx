@@ -257,6 +257,20 @@ time()
 )
 ```
 
+### Agents without prefix-cache isolation
+
+```promql
+hivenet_cache_isolation_gaps
+```
+
+Labels: `model`, `engine`. With `--cache-salt` on, the number of registered LLM agents that serve a generation path (`/v1/chat/completions` or `/v1/messages`) without per-tenant prefix-cache isolation. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) for which engines isolate which paths. The router also logs a warning when such an agent registers.
+
+Alert when a shared model has such agents:
+
+```promql
+sum by (model) (hivenet_cache_isolation_gaps) > 0
+```
+
 ### Routed requests
 
 ```promql

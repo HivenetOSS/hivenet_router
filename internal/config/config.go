@@ -276,6 +276,18 @@ type Config struct {
 	// Flag: --require-model-allowlist   Env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST
 	RequireModelAllowlist bool
 
+	// CacheSalt sets a per-tenant cache_salt on every request forwarded to an
+	// engine that supports it (vLLM) and strips any client-sent cache_salt, so
+	// tenants never share prefix-cache blocks (prefix-cache timing side
+	// channel). Requires CacheSaltSecret.
+	// Flag: --cache-salt   Env: HIVENET_ROUTER_CACHE_SALT
+	CacheSalt bool
+
+	// CacheSaltSecret keys the per-tenant salt HMAC. At least 32 bytes, the same
+	// on every router in front of the same agents, and never given to agents.
+	// Flag: --cache-salt-secret-file   Env: HIVENET_ROUTER_CACHE_SALT_SECRET
+	CacheSaltSecret string
+
 	// EnvErrors collects invalid environment values that LoadFromEnv could
 	// not apply and that must stop startup (see the key-store settings).
 	EnvErrors []error
@@ -593,6 +605,11 @@ func LoadFromEnv() *Config {
 		cfg.KeyStoreSecret = v
 	}
 	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
+	envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
+	// Trimmed like --cache-salt-secret-file, so either source gives the same salts.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_CACHE_SALT_SECRET")); v != "" {
+		cfg.CacheSaltSecret = v
+	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})
 	}
