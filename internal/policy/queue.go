@@ -70,14 +70,30 @@ func newWaitQueue(bound int) *WaitQueue {
 // On nil return, the caller should retry agent selection.
 // On non-nil return, the caller should escalate to the next fallback step.
 func (q *WaitQueue) Wait(ctx context.Context) error {
+	return q.wait(ctx, false)
+}
+
+// Rejoin parks again a goroutine that Wait woke but that found no free slot
+// (Broadcast wakes every waiter, and only some get a slot). It goes back to
+// the head of the queue, ahead of later arrivals, and the bound does not
+// apply: it already had its place. Otherwise it behaves like Wait.
+func (q *WaitQueue) Rejoin(ctx context.Context) error {
+	return q.wait(ctx, true)
+}
+
+func (q *WaitQueue) wait(ctx context.Context, rejoin bool) error {
 	ch := make(chan struct{}, 1)
 
 	q.mu.Lock()
-	if len(q.waiters) >= q.bound && !releasedFromHold(ctx) {
+	if !rejoin && len(q.waiters) >= q.bound && !releasedFromHold(ctx) {
 		q.mu.Unlock()
 		return ErrQueueFull
 	}
-	q.waiters = append(q.waiters, ch)
+	if rejoin {
+		q.waiters = append([]chan struct{}{ch}, q.waiters...)
+	} else {
+		q.waiters = append(q.waiters, ch)
+	}
 	q.mu.Unlock()
 
 	if q.onEnqueue != nil {
@@ -131,7 +147,8 @@ func (q *WaitQueue) Signal() {
 
 // Broadcast wakes every goroutine in the queue, in FIFO order. Called when
 // new capacity of unknown size arrives (a new agent registered): each woken
-// goroutine retries selection, and those that find no free slot park again.
+// goroutine retries selection, and those that find no free slot park again
+// with Rejoin, keeping their place ahead of later arrivals.
 func (q *WaitQueue) Broadcast() {
 	q.mu.Lock()
 	defer q.mu.Unlock()

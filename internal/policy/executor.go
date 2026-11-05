@@ -463,6 +463,9 @@ type Session struct {
 // A TryAcquireSlot race (slot filled between scoring and acquisition) does NOT
 // count as a forward failure — selection retries immediately within the same step.
 func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
+	// rejoin: the session was woken from the queue, so if it parks again it
+	// keeps its place (WaitQueue.Rejoin) rather than queueing at the tail.
+	rejoin := false
 	for s.stepIdx < len(s.steps) {
 		step := &s.steps[s.stepIdx]
 
@@ -477,7 +480,12 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 					trace.WithAttributes(attribute.String("model", s.model)),
 				)
 				start := time.Now()
-				waitErr := queue.Wait(ctx)
+				var waitErr error
+				if rejoin {
+					waitErr = queue.Rejoin(ctx)
+				} else {
+					waitErr = queue.Wait(ctx)
+				}
 				elapsed := time.Since(start)
 				// Depth gauge is updated by onDequeue callback in Wait() — no call needed here.
 				// Only record wait duration on successful dispatch (waitErr == nil): the histogram
@@ -495,6 +503,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 				queueSpan.End()
 				if waitErr == nil {
 					// A slot may be available — retry selection within the same step.
+					rejoin = true
 					continue
 				}
 				// ErrQueueFull or ctx expired — escalate to the fallback chain.
@@ -502,6 +511,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 					step.name, waitErr, s.model)
 			}
 			s.advanceStep("no_candidates")
+			rejoin = false
 			continue
 		}
 

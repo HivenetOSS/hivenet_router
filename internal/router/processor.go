@@ -328,8 +328,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// fallback step that had capacity). The slot is already acquired; release
 		// it cleanly before returning so the next waiter can use it immediately.
 		if pending.IsExpired() {
-			agent.DecrementLoad()
-			p.executor.SignalCapacity(agent.Metadata.Model)
+			p.slotRelease(agent)()
 			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
 			pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out waiting for an available agent", domain.SourceRouter)
 			return

@@ -14,6 +14,14 @@ import (
 	"hivenet_router/internal/wake"
 )
 
+// holdNow holds like h.Hold and releases a Woken request at once, as if the
+// model answered it straight away.
+func holdNow(h *wake.Holder, ctx context.Context, model, caller, requestID string, opts wake.Options) wake.Outcome {
+	o, release := h.Hold(ctx, model, caller, requestID, opts)
+	release()
+	return o
+}
+
 // fleet is a fake count of healthy agents per model.
 type fleet struct {
 	mu      sync.Mutex
@@ -66,7 +74,7 @@ func hold(t *testing.T, h *wake.Holder, ctx context.Context, model, key string, 
 	t.Helper()
 	before := total(h.Demand())
 	out := make(chan wake.Outcome, 1)
-	go func() { out <- h.Hold(ctx, model, "caller", key, opts) }()
+	go func() { out <- holdNow(h, ctx, model, "caller", key, opts) }()
 	deadline := time.Now().Add(time.Second)
 	for total(h.Demand()) == before && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -160,7 +168,7 @@ func TestHold_AlreadyHealthyIsWokenAtOnce(t *testing.T) {
 	h, f, _ := newHolder(t, 10)
 	f.set("m", 1)
 	start := time.Now()
-	if o := h.Hold(context.Background(), "m", "caller", "a", long); o != wake.Woken {
+	if o := holdNow(h, context.Background(), "m", "caller", "a", long); o != wake.Woken {
 		t.Fatalf("hold = %s, want woken", o)
 	}
 	if d := time.Since(start); d > 100*time.Millisecond {
@@ -173,7 +181,7 @@ func TestHold_AlreadyHealthyIsWokenAtOnce(t *testing.T) {
 func TestHold_BudgetExpires(t *testing.T) {
 	h, _, e := newHolder(t, 10)
 	start := time.Now()
-	o := h.Hold(context.Background(), "m", "caller", "a", wake.Options{Budget: 50 * time.Millisecond})
+	o := holdNow(h, context.Background(), "m", "caller", "a", wake.Options{Budget: 50 * time.Millisecond})
 	if o != wake.Expired {
 		t.Fatalf("hold = %s, want expired", o)
 	}
@@ -192,7 +200,7 @@ func TestHold_FullModelRefusesAtOnce(t *testing.T) {
 	a := hold(t, h, context.Background(), "m", "a", long)
 	b := hold(t, h, context.Background(), "m", "b", long)
 
-	if o := h.Hold(context.Background(), "m", "caller", "c", long); o != wake.Full {
+	if o := holdNow(h, context.Background(), "m", "caller", "c", long); o != wake.Full {
 		t.Fatalf("third hold = %s, want full", o)
 	}
 	if d := h.Demand()["m"]; d != 2 {
@@ -233,7 +241,7 @@ func TestHold_DemandCountsDistinctRequests(t *testing.T) {
 	h, f, _ := newHolder(t, 10)
 	first := hold(t, h, context.Background(), "m", "same", long)
 	second := make(chan wake.Outcome, 1)
-	go func() { second <- h.Hold(context.Background(), "m", "caller", "same", long) }()
+	go func() { second <- holdNow(h, context.Background(), "m", "caller", "same", long) }()
 	third := hold(t, h, context.Background(), "m", "other", long)
 	time.Sleep(20 * time.Millisecond)
 
@@ -254,7 +262,7 @@ func TestHold_DemandCountsDistinctRequests(t *testing.T) {
 func TestHold_KeepAlive(t *testing.T) {
 	h, _, _ := newHolder(t, 10)
 	var n atomic.Int64
-	o := h.Hold(context.Background(), "m", "caller", "a", wake.Options{
+	o := holdNow(h, context.Background(), "m", "caller", "a", wake.Options{
 		Budget:    500 * time.Millisecond,
 		KeepAlive: 100 * time.Millisecond,
 		OnKeepAlive: func() error {
@@ -269,7 +277,7 @@ func TestHold_KeepAlive(t *testing.T) {
 		t.Fatalf("%d keepalives in 500ms at 100ms, want about 4", got)
 	}
 
-	o = h.Hold(context.Background(), "m", "caller", "b", wake.Options{
+	o = holdNow(h, context.Background(), "m", "caller", "b", wake.Options{
 		Budget:      time.Minute,
 		KeepAlive:   10 * time.Millisecond,
 		OnKeepAlive: func() error { return errors.New("client closed the connection") },
@@ -283,7 +291,7 @@ func TestHold_KeepAlive(t *testing.T) {
 func TestHold_ReportsHeldDuration(t *testing.T) {
 	h, f, e := newHolder(t, 1)
 	out := hold(t, h, context.Background(), "m", "a", long)
-	h.Hold(context.Background(), "m", "caller", "b", long) // full
+	holdNow(h, context.Background(), "m", "caller", "b", long) // full
 	time.Sleep(30 * time.Millisecond)
 	f.set("m", 1)
 	h.Wake("m")
@@ -305,7 +313,7 @@ func TestHold_SameRequestIDFromAnotherCallerCountsSeparately(t *testing.T) {
 	h, f, _ := newHolder(t, 10)
 	outs := []<-chan wake.Outcome{hold(t, h, context.Background(), "m", "same", long)}
 	o := make(chan wake.Outcome, 1)
-	go func() { o <- h.Hold(context.Background(), "m", "other-caller", "same", long) }()
+	go func() { o <- holdNow(h, context.Background(), "m", "other-caller", "same", long) }()
 	outs = append(outs, o)
 	deadline := time.Now().Add(time.Second)
 	for h.Demand()["m"] != 2 && time.Now().Before(deadline) {
@@ -329,17 +337,17 @@ func TestHold_PerCallerAndTotalLimits(t *testing.T) {
 	h.SetPollInterval(time.Hour)
 	start := func(model, caller, rid string) <-chan wake.Outcome {
 		out := make(chan wake.Outcome, 1)
-		go func() { out <- h.Hold(context.Background(), model, caller, rid, long) }()
+		go func() { out <- holdNow(h, context.Background(), model, caller, rid, long) }()
 		return out
 	}
 	held := []<-chan wake.Outcome{start("m", "k1", "1"), start("m", "k1", "2")}
 	time.Sleep(20 * time.Millisecond)
-	if o := h.Hold(context.Background(), "m", "k1", "3", long); o != wake.Full {
+	if o := holdNow(h, context.Background(), "m", "k1", "3", long); o != wake.Full {
 		t.Fatalf("third hold of one caller = %s, want full (per-caller limit 2)", o)
 	}
 	held = append(held, start("m", "k2", "1")) // another caller still fits
 	time.Sleep(20 * time.Millisecond)
-	if o := h.Hold(context.Background(), "other", "k3", "1", long); o != wake.Full {
+	if o := holdNow(h, context.Background(), "other", "k3", "1", long); o != wake.Full {
 		t.Fatalf("fourth hold overall = %s, want full (total limit 3)", o)
 	}
 	f.set("m", 1)
@@ -351,7 +359,32 @@ func TestHold_PerCallerAndTotalLimits(t *testing.T) {
 	}
 	// Released holds free the limits again.
 	f.set("other", 1)
-	if o := h.Hold(context.Background(), "other", "k3", "1", long); o != wake.Woken {
+	if o := holdNow(h, context.Background(), "other", "k3", "1", long); o != wake.Woken {
 		t.Fatalf("hold after the release = %s, want woken", o)
+	}
+}
+
+// TestHold_WokenCountsUntilReleased checks that a woken request stays in the
+// pending demand until its release, but no longer counts against the hold
+// limits.
+func TestHold_WokenCountsUntilReleased(t *testing.T) {
+	h, f, _ := newHolder(t, 1)
+	long := wake.Options{Budget: time.Minute}
+	f.set("m", 1)
+	o, release := h.Hold(context.Background(), "m", "caller", "a", long)
+	if o != wake.Woken {
+		t.Fatalf("outcome %s, want woken", o)
+	}
+	if n := h.Demand()["m"]; n != 1 {
+		t.Errorf("demand before release = %d, want 1", n)
+	}
+	// The limit is 1, and the woken request no longer takes it.
+	if o := holdNow(h, context.Background(), "m", "caller", "b", long); o != wake.Woken {
+		t.Errorf("second hold: %s, want woken (not full)", o)
+	}
+	release()
+	release() // a second call does nothing
+	if d := h.Demand(); len(d) != 0 {
+		t.Errorf("demand after release = %v, want empty", d)
 	}
 }

@@ -702,15 +702,16 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
-			res := admitOccupancy(c, h.keyAdmission, keyID+"\x00"+req.Model, footprint, grows, budget, 0)
+			// Never waits, even for a request released by a wake: it would
+			// hold the global reservation taken above while it waits. Over
+			// its share is the key's own limit, so the answer stays 429.
+			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
 			if res == nil {
 				rs.Release() // hand back the global reservation already taken
 				h.fireAdmissionReject("b4_occupancy", req.Model)
-				if !rejectReleased(c, req.Model) {
-					c.Header("Retry-After", "1")
-					writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
-						"per-key occupancy share exceeded, please retry", domain.SourceRouter)
-				}
+				c.Header("Retry-After", "1")
+				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeRateLimitExceeded,
+					"per-key occupancy share exceeded, please retry", domain.SourceRouter)
 				return nil, false
 			}
 			rs = append(rs, res)
