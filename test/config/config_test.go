@@ -289,4 +289,14 @@ func TestLoadFromEnv_IsolationSwitches(t *testing.T) {
 	if c := config.LoadFromEnv(); c.RequireModelAllowlist || len(c.EnvErrors) != 1 {
 		t.Errorf("RequireModelAllowlist=%v errors=%v, want false and one error", c.RequireModelAllowlist, c.EnvErrors)
 	}
+	t.Setenv("HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", "")
+
+	t.Setenv("HIVENET_ROUTER_CACHE_SALT", "1")
+	t.Setenv("HIVENET_ROUTER_CACHE_SALT_SECRET", "  a-secret  ")
+	t.Setenv("HIVENET_ROUTER_HIDE_AGENT_IDENTITY", "true")
+	c := config.LoadFromEnv()
+	if !c.CacheSalt || c.CacheSaltSecret != "a-secret" || !c.HideAgentIdentity || len(c.EnvErrors) != 0 {
+		t.Errorf("CacheSalt=%v secret=%q HideAgentIdentity=%v errors=%v, want true, trimmed secret, true, none",
+			c.CacheSalt, c.CacheSaltSecret, c.HideAgentIdentity, c.EnvErrors)
+	}
 }
