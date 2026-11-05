@@ -603,6 +603,12 @@ func (r *Router) Start() error {
 	// All agent management endpoints are registered under a single protocol so
 	// that agents can use one NamespacedClient for both /register and /heartbeat.
 	r.httpHost = &p2phttp.Host{StreamHost: r.p2pHost}
+	// libp2phttp creates its peer-metadata cache lazily, unsynchronised, on the
+	// first NamespacedClient call. Concurrent first forwards (one goroutine per
+	// request) race on that pointer. Create it now, while still single-threaded;
+	// the cache itself is thread-safe. Set+Remove leaves it empty.
+	r.httpHost.SetPeerMetadata("", nil)
+	r.httpHost.RemovePeerMetadata("")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", r.handleAgentRegister)
