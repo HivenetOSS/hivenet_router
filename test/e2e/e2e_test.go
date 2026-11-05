@@ -215,6 +215,7 @@ func startRouterHandle(t *testing.T, opts routerOpts) (baseURL string, cfg *conf
 type testKey struct {
 	Token, Owner, Name string
 	RPM, TPD           int
+	Models             []string // model allowlist; empty = every model
 }
 
 // writeAuthYAML returns an api-key auth.yaml for the given keys, hashing each
@@ -227,6 +228,9 @@ func writeAuthYAML(keys ...testKey) string {
 		h := sha256.Sum256([]byte(k.Token))
 		fmt.Fprintf(&b, "    - key_hash: %q\n      metadata:\n        name: %q\n        owner: %q\n",
 			hex.EncodeToString(h[:]), k.Name, k.Owner)
+		if len(k.Models) > 0 {
+			fmt.Fprintf(&b, "      models: [%s]\n", strings.Join(k.Models, ", "))
+		}
 		if k.RPM > 0 || k.TPD > 0 {
 			fmt.Fprintf(&b, "      quota:\n        requests_per_minute: %d\n        tokens_per_day: %d\n", k.RPM, k.TPD)
 		}
