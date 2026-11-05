@@ -113,6 +113,19 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 	return &StaticKeyProvider{keys: keys, tenants: tenants}, nil
 }
 
+// KeysWithoutModelAllowlist returns how many keys have neither a model list
+// (models) nor per-model quotas: keys that may use every model, or none when
+// an allowlist is required.
+func (s *StaticKeyProvider) KeysWithoutModelAllowlist() int {
+	n := 0
+	for _, e := range s.keys {
+		if len(e.result.AllowedModels) == 0 && e.result.QuotaLimits.PerModel == nil {
+			n++
+		}
+	}
+	return n
+}
+
 // TenantIDs returns every tenant with a key. Cheaper than Tenants: no
 // ceilings are computed.
 func (s *StaticKeyProvider) TenantIDs() []string {

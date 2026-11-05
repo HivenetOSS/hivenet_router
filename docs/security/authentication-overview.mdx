@@ -408,7 +408,7 @@ A request for a disallowed model returns HTTP `403`:
 
 The model catalog is also filtered to the models visible to the calling key.
 
-When `quota.per_model` is configured, its model names become the effective allowlist. A model missing from that map is hidden from discovery and rejected for inference with HTTP `429 rate_limit_exceeded`, rather than `403 model_forbidden`.
+When `quota.per_model` is configured, its model names become the effective allowlist (with an explicit allowlist too, only the models in both). A model missing from that map is hidden from discovery and rejected for inference with HTTP `403 model_forbidden`, before any quota is charged.
 
 See [Model restrictions](/security/model-restrictions) for the complete behavior.
 

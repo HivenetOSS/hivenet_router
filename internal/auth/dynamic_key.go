@@ -172,6 +172,21 @@ func (r *DynamicKeyProvider) rebuildTenantsLocked() {
 	r.tenants = tenantBudgets(byTenant)
 }
 
+// KeysWithoutModelAllowlist returns how many keys in the registry have
+// neither allowed_models nor per-model quotas: keys that may use every model,
+// or none when an allowlist is required.
+func (r *DynamicKeyProvider) KeysWithoutModelAllowlist() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, e := range r.byID {
+		if len(e.AllowedModels) == 0 && e.Quota.PerModel == nil {
+			n++
+		}
+	}
+	return n
+}
+
 // TenantIDs returns every tenant with a key in the registry, in no
 // particular order. Cheaper than Tenants: no ceilings are computed.
 func (r *DynamicKeyProvider) TenantIDs() []string {

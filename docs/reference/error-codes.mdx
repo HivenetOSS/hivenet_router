@@ -118,11 +118,11 @@ Clients should therefore handle:
 | `invalid_parameter` | `400` | Usually `backend` | Backend rejected one or more request fields |
 | `input_too_long` | `400` | `router` | Policy input-token or image cap exceeded |
 | `unauthorized` | `401` | `router` | Client or administrator credentials are missing or invalid |
-| `model_forbidden` | `403` | `router` | The client key’s explicit allowlist does not permit the model |
+| `model_forbidden` | `403` | `router` | The client key’s allowlist (`models`, `allowed_models` or `quota.per_model`) does not permit the model |
 | `model_not_found` | `404` | `router` | The model is not registered or is deliberately hidden from the caller |
 | `model_redirected` | `307` | `router` | Another site serves the model: repeat the request at the `Location` URL ([Cross-site redirect](/routing/cross-site-redirect)) |
 | Not guaranteed | `413` | Server | The request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
-| `rate_limit_exceeded` | `429` | `router` | RPM, serverless per-key occupancy, ITPM, or OTPM limit exhausted, or strict per-model quota entry missing |
+| `rate_limit_exceeded` | `429` | `router` | RPM, serverless per-key occupancy, ITPM, or OTPM limit exhausted |
 | `token_limit_exceeded` | `429` | `router` | Daily token admission or output accounting rejected the request |
 | `concurrency_limit_exceeded` | `429` | `router` | Model occupancy or in-flight budget remained full, or the healthy serving pool breached `shed_if` |
 | `no_agents_available` | `503` | `router` | The policy chain found no eligible agent |
@@ -147,9 +147,10 @@ HTTP 400
 
 Common triggers include:
 
-- malformed JSON
+- malformed JSON, or a body that is not exactly one JSON object
 - empty request body
 - missing `model`
+- a field name that appears twice, or a field the router reads spelled in another letter case, such as `Model`, at the top level (`model`, `max_tokens`, `stream`, `messages`…) or in an object the router reads inside it: each message (`role`, `content`), each content part or block, a message's or the `system` array's, including a `tool_result`'s (`type`, `text`, `image_url`…). The router would read a different value than the backend, which matches field names exactly. Free-form objects such as tool schemas, `tool_calls` and `metadata` are not checked
 - model ID longer than 256 characters
 - an inference engine used with an unsupported capability
 - request parsing failure inside a Hivenet Router agent
@@ -290,7 +291,7 @@ Do not retry until the credential or header is corrected.
 HTTP 403
 ```
 
-The key uses an explicit model allowlist and the requested model is not included.
+The requested model is not in the key's allowlist: its `models` / `allowed_models` list, or the models of its `quota.per_model` block (only the models in both when it has both). The router refuses it before charging any quota, waking a model or redirecting the request.
 
 ```json
 {
@@ -305,12 +306,6 @@ The key uses an explicit model allowlist and the requested model is not included
 Do not retry the same key and model combination.
 
 Use an allowed model or update the key’s access configuration.
-
-<Note>
-  A model missing from `quota.per_model` does not produce `model_forbidden`.
-
-  That strict-enumeration case produces `rate_limit_exceeded`.
-</Note>
 
 ### `model_not_found`
 
@@ -485,31 +480,7 @@ These responses include `Retry-After: 1`. Occupancy and input-token limits rejec
 
 #### Missing per-model quota declaration
 
-A key using `quota.per_model` must enumerate every permitted model.
-
-An undeclared model returns:
-
-```json
-{
-  "error": {
-    "code": "rate_limit_exceeded",
-    "message": "no quota declared for model restricted-model on this API key",
-    "source": "router"
-  }
-}
-```
-
-This is a configuration error, not temporary RPM exhaustion.
-
-Do not retry until the key has a complete entry such as:
-
-```yaml
-quota:
-  per_model:
-    restricted-model:
-      requests_per_minute_per_replica: 0
-      tokens_per_day: 0
-```
+A key using `quota.per_model` must enumerate every permitted model. An undeclared model is outside the key's allowlist and is refused with `403 model_forbidden`, before any quota is charged (see [`model_forbidden`](#model_forbidden)).
 
 ### `token_limit_exceeded`
 

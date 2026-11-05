@@ -407,6 +407,10 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
+	if err := ValidateIsolationConfig(cfg, apiProv); err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -524,11 +528,11 @@ func New(cfg *config.Config) (*Router, error) {
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
 	// waiting for the first request from each tenant.
 	if r.keyRegistry != nil {
-		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
+		r.keyRegistry.SetOnChange(r.keysChanged)
 		// Seed the gauges once for keys restored from the key store: wireKeyStore
 		// ran before this wiring existed, so the restore's onChange fired nil.
 		if _, entries := r.keyRegistry.Snapshot(); len(entries) > 0 {
-			r.publishTenantQuotas()
+			r.keysChanged()
 		}
 	}
 	// Open the semantic decision log here, before Start launches any goroutine,
@@ -724,7 +728,7 @@ func (r *Router) Start() error {
 	// forever, with or without a shared store.
 	go r.reapLeakedReservations(processorCtx)
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
-	r.publishTenantQuotas()
+	r.keysChanged()
 	go r.startGRPCServer()
 	go r.healthMonitor()
 	go r.processor.Start(processorCtx)
@@ -883,6 +887,7 @@ func (r *Router) startHTTPServer() {
 	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
+	handlers.SetIsolation(api.Isolation{RequireModelAllowlist: r.cfg.RequireModelAllowlist})
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1070,6 +1075,31 @@ func (r *Router) publishTenantUsageOnce(tenants []string, usageOf func(string) (
 	wg.Wait()
 }
 
+// keysChanged runs whenever the API keys may have changed: at startup, after
+// SIGHUP and after every key push. It republishes the tenant quota gauges and
+// warns about keys a required model allowlist refuses on every model.
+func (r *Router) keysChanged() {
+	r.publishTenantQuotas()
+	r.warnKeysWithoutAllowlist()
+}
+
+// warnKeysWithoutAllowlist logs how many API keys have no model allowlist
+// while one is required (--require-model-allowlist): each of them is refused
+// on every model, and the request logs alone would only show the individual
+// refusals. Typically key-sync does not push allowlists yet.
+func (r *Router) warnKeysWithoutAllowlist() {
+	if !r.cfg.RequireModelAllowlist {
+		return
+	}
+	counter, ok := r.apiAuth.Load().(interface{ KeysWithoutModelAllowlist() int })
+	if !ok {
+		return
+	}
+	if n := counter.KeysWithoutModelAllowlist(); n > 0 {
+		log.Warnf("--require-model-allowlist: %d API key(s) have no model allowlist (models/allowed_models or quota.per_model) and are refused on every model", n)
+	}
+}
+
 // publishTenantQuotas pre-populates Prometheus quota gauges for every tenant
 // defined in the auth config. This ensures the Grafana $tenant_id variable is
 // populated within the first scrape (~5 s) instead of waiting for the first
@@ -1142,6 +1172,10 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
+	if err := ValidateIsolationConfig(r.cfg, apiProv); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
 	// Dynamic mode returned above without touching apiAuth, so the redirect
 	// wrapper installed at startup survives; here the provider is rebuilt and
 	// must be wrapped again or every redirected request would get 401.
@@ -1149,7 +1183,7 @@ func (r *Router) reloadAuthProviders() {
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
 	r.minuteLimiter.Reset()
-	r.publishTenantQuotas()
+	r.keysChanged()
 	if r.cfg.AuthConfigFile != "" {
 		log.Infof("SIGHUP: auth providers reloaded from %s", r.cfg.AuthConfigFile)
 	} else {

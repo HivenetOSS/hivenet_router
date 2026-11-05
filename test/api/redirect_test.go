@@ -82,6 +82,12 @@ func testSigner(t *testing.T) *redirect.Signer {
 // (absent = 0); keys is the dynamic key registry shared by every site.
 func newSite(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider) *testSite {
 	t.Helper()
+	return newSiteWith(t, id, healthy, keys, api.Isolation{})
+}
+
+// newSiteWith is newSite with tenant-isolation switches.
+func newSiteWith(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider, iso api.Isolation) *testSite {
+	t.Helper()
 	s := &testSite{queue: make(chan *domain.PendingRequest, 4)}
 	s.rd = &redirect.Redirector{
 		Self: id, Map: redirect.NewMap(testDomains), Signer: testSigner(t), Replay: redirect.NewReplayGuard(),
@@ -101,6 +107,7 @@ func newSite(t *testing.T, id string, healthy map[string]int, keys *auth.Dynamic
 		nil, nil, nil, nil, nil, nil, nil,
 	)
 	h.SetRedirect(s.rd)
+	h.SetIsolation(iso)
 	s.engine = inferenceEngine(h, redirect.Wrap(s.rd, keys, keys), lim, healthyCount)
 	return s
 }
@@ -110,7 +117,7 @@ func inferenceEngine(h *api.Handlers, provider auth.Provider, lim *countingLimit
 	e := gin.New()
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(provider)).
-		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(),
+		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
 			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), healthy))
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)

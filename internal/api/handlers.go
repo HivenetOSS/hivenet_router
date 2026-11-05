@@ -287,6 +287,8 @@ type Handlers struct {
 	// wakes; nil (the default) disables holding. See WakeHold and SetWake.
 	wake    *wake.Holder
 	wakeCfg WakeConfig
+	// isolation holds the tenant-isolation switches (see SetIsolation).
+	isolation Isolation
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -573,18 +575,53 @@ func (h *Handlers) parsePassthroughRequest(c *gin.Context, req *domain.ChatReque
 	return true
 }
 
-// authorizeModel enforces the per-key model allowlist (empty allowlist = all
-// models). Returns false (after writing 403) when the model is not permitted.
-func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
-	allowSet, unrestricted := effectiveAllowedModels(c)
-	if unrestricted {
-		return true
+// Isolation holds the tenant-isolation switches for the client API. The zero
+// value changes nothing.
+type Isolation struct {
+	// RequireModelAllowlist makes a key with no allowlist unable to call or
+	// list any model (instead of every model). For shared multi-tenant
+	// routers, where an unrestricted key would reach other customers' models.
+	RequireModelAllowlist bool
+}
+
+// SetIsolation sets the tenant-isolation switches. Call before serving.
+func (h *Handlers) SetIsolation(iso Isolation) { h.isolation = iso }
+
+// ModelACL refuses, with 403, a request for a model its key may not use,
+// before it is charged any quota, wakes a model scaled to zero, is redirected
+// or is queued. It runs after RedirectTarget and AliasMiddleware, so it sees
+// the model the request will be served as (a redirect token's model, or the
+// model an alias resolved to). A body without a model is left to the
+// handler's 400. The handlers check again, so a route outside this chain is
+// still refused.
+func (h *Handlers) ModelACL() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if model := peekModel(c); model != "" && !h.authorizeModel(c, model) {
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
-	if _, ok := allowSet[model]; ok {
+}
+
+// authorizeModel enforces the per-key model allowlist (allowedModels).
+// Returns false (after writing 403) when the model is not permitted.
+func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
+	if h.modelAllowed(c, model) {
 		return true
 	}
 	writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+model, domain.SourceRouter)
 	return false
+}
+
+// modelAllowed reports whether the authenticated key may use model.
+func (h *Handlers) modelAllowed(c *gin.Context, model string) bool {
+	allowSet, unrestricted := h.allowedModels(c)
+	if unrestricted {
+		return true
+	}
+	_, ok := allowSet[model]
+	return ok
 }
 
 // inputCapTolerance is how far the input estimate may exceed max_input_tokens
@@ -925,42 +962,67 @@ func (h *Handlers) estimatePromptTokens(req *domain.ChatRequest) int {
 	return promptTokens
 }
 
-// effectiveAllowedModels returns the set of models the calling API key may use.
-// The set is derived in this precedence order:
+// allowedModels returns the set of models the calling API key may use:
 //
-//  1. quota.per_model (strict per-model quotas): allow-set = the map's keys.
-//     The per_model declaration IS the allow-list — a caller that has no quota
-//     entry for a model cannot call it (admission would 429 anyway), so the
-//     discovery view must hide it too. This keeps a single source of truth.
+//  1. quota.per_model (strict per-model quotas): the map's keys. A caller with
+//     no quota entry for a model cannot call it (admission would 429 anyway),
+//     so the discovery view hides it too.
 //
-//  2. allowed_models (legacy explicit allowlist on the auth.yaml key entry):
-//     allow-set = that list, when non-empty.
+//  2. allowed_models (the explicit allowlist, models in auth.yaml): that list,
+//     when non-empty.
 //
-//  3. Neither set → unrestricted=true. Legacy flat keys with no allowlist see
-//     the full catalog, matching the pre-HAI-232 behaviour.
+//  3. Both: only the models in both lists. Neither list ever widens the other.
 //
-// Used by /v1/models and /v1/models/:model to filter the discovery surface so
-// callers only see models they can actually invoke (and don't learn the names
-// of other tenants' models). Also used by authorizeModel to enforce the same
-// rule on inference verbs.
-func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+//  4. Neither → unrestricted=true: the key sees and may call every model,
+//     unless an allowlist is required (Isolation.RequireModelAllowlist), in
+//     which case the set is empty and the key may use no model.
+//
+// Every model check on the client API goes through it: inference (ModelACL
+// and the handlers), discovery (/v1/models and /v1/models/:model), semantic
+// aliases, cross-site redirects and holds at zero. The require-allowlist rule
+// is read from h.isolation, not from the request, so no route can skip it.
+func (h *Handlers) allowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+	allowSet, unrestricted = resolveAllowedModels(c)
+	if unrestricted && h.isolation.RequireModelAllowlist {
+		// Fail closed: a key without an allowlist may use no model.
+		return map[string]struct{}{}, false
+	}
+	return allowSet, unrestricted
+}
+
+// resolveAllowedModels is allowedModels without the require-allowlist rule.
+func resolveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+	var perModel map[string]struct{}
 	if raw, ok := c.Get("quota_limits"); ok {
 		if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel != nil {
-			allowSet = make(map[string]struct{}, len(limits.PerModel))
+			perModel = make(map[string]struct{}, len(limits.PerModel))
 			for model := range limits.PerModel {
-				allowSet[model] = struct{}{}
+				perModel[model] = struct{}{}
 			}
-			return allowSet, false
 		}
 	}
+	var listed map[string]struct{}
 	if raw, ok := c.Get("allowed_models"); ok {
 		if list, ok := raw.([]string); ok && len(list) > 0 {
-			allowSet = make(map[string]struct{}, len(list))
+			listed = make(map[string]struct{}, len(list))
 			for _, m := range list {
-				allowSet[m] = struct{}{}
+				listed[m] = struct{}{}
 			}
-			return allowSet, false
 		}
+	}
+	switch {
+	case perModel != nil && listed != nil:
+		both := make(map[string]struct{}, min(len(perModel), len(listed)))
+		for m := range perModel {
+			if _, ok := listed[m]; ok {
+				both[m] = struct{}{}
+			}
+		}
+		return both, false
+	case perModel != nil:
+		return perModel, false
+	case listed != nil:
+		return listed, false
 	}
 	return nil, true
 }
@@ -1326,7 +1388,7 @@ func (h *Handlers) writeModelList(c *gin.Context, applyAllowSet bool) {
 	}
 
 	models := buildModelMap(agents)
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := h.allowedModels(c)
 
 	data := make([]domain.ModelObject, 0, len(models))
 	for id, m := range models {
@@ -1369,7 +1431,7 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 	modelID := strings.TrimPrefix(c.Param("model"), "/")
 
 	if applyAllowSet {
-		allowSet, unrestricted := effectiveAllowedModels(c)
+		allowSet, unrestricted := h.allowedModels(c)
 		if !unrestricted {
 			if _, ok := allowSet[modelID]; !ok {
 				writeRouterError(c, http.StatusNotFound, domain.ErrCodeModelNotFound, "No agents registered for model: "+modelID, domain.SourceRouter)
@@ -1521,22 +1583,11 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// Set audit model key now so all subsequent early returns carry the model in the audit log.
 	c.Set(auditKeyModel, req.Model)
 
-	// Check model access: if the authenticated key has a model allowlist, verify
-	// the requested model is on it. Empty allowlist = access to all models.
-	if raw, exists := c.Get("allowed_models"); exists {
-		if allowedModels, ok := raw.([]string); ok && len(allowedModels) > 0 {
-			permitted := false
-			for _, m := range allowedModels {
-				if m == req.Model {
-					permitted = true
-					break
-				}
-			}
-			if !permitted {
-				writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+req.Model, domain.SourceRouter)
-				return
-			}
-		}
+	// Check model access with the same rule as chat: the key's allowlist, or
+	// its per_model quota entries, or none at all (unless an allowlist is
+	// required).
+	if !h.authorizeModel(c, req.Model) {
+		return
 	}
 
 	// Get the raw body cached by QuotaMiddleware.

@@ -105,7 +105,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 			return
 		}
 		model := peekModel(c)
-		if model == "" || !modelAllowed(c, model) || h.healthyAgentCount(model) > 0 {
+		if model == "" || !h.modelAllowed(c, model) || h.healthyAgentCount(model) > 0 {
 			c.Next()
 			return
 		}

@@ -37,6 +37,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 1.6 | Concurrent responses are never delivered to the wrong request or tenant, streaming or not. | done | `TestIsolation_ConcurrentResponsesNotCrossWired` |
 | 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP (the previous keys stay in force). | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
 | 1.8 | A static key's hash is checked like a dynamic key's (64 hex characters, either case): a hash that could never authenticate fails at load. | done | `TestStaticKeyProvider_KeyHashNormalized` |
+| 1.9 | The router reads a request the way the backend does: a body with a repeated name, or with a differently cased spelling of a field the router reads (Unicode case folding included, e.g. `Model` next to `model`), at the top level or in an object it reads inside (each message, content part or block, `system` block), is refused with 400 before any allowlist, quota or routing decision, on every inference endpoint. | done | `TestIsolation_AmbiguousFieldsRefused`, `TestIsolation_ForbiddenModelCostsNothing`, `TestCheckNames`, `TestCheckShape` |
 
 ## 2. Per-customer counters, limits and scope
 
@@ -47,14 +48,14 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 2.3 | A key ID reassigned to another tenant starts with fresh counters: requests per minute, tokens per minute and tokens per day. | done | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated`, `TestMinute_KeyReassignedToOtherTenantStartsFresh` |
 | 2.4 | `X-RateLimit-*` headers describe the calling key only. | done | `TestIsolation_RateLimitHeadersArePerKey` |
 | 2.5 | A key exhausting its request rate or daily tokens never causes a 429 for another key, of its own tenant or another (end to end, output tokens included). | done | `TestIsolation_TwoTenantsQuotaE2E` |
-| 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. The setting cannot be combined with auth mode `none`. | planned (PR-3) | `TestIsolation_RequireModelAllowlist`, `TestValidateIsolationConfig`, `TestLoadFromEnv_IsolationSwitches` |
-| 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | planned (PR-3) | `TestEmbeddings_HonoursEffectiveAllowlist` |
+| 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. The setting cannot be combined with auth mode `none`. | done | `TestIsolation_RequireModelAllowlist`, `TestValidateIsolationConfig`, `TestLoadFromEnv_IsolationSwitches` |
+| 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | done | `TestEmbeddings_HonoursEffectiveAllowlist` |
 | 2.8 | A redirect token's scope cannot be widened by the client. | done | `TestIsolation_RedirectTokenCannotWidenScope`, `TestRedirect_Scope` |
 | 2.9 | A key's `scope_max` caps the scope a request may ask for. | Epic F | `TestIsolation_ScopeMaxCapsKeyScope` (skipped until Epic F) |
 | 2.10 | A tenant-wide daily token budget: the lowest `tenant_tokens_per_day` among a tenant's keys caps all of them together, site-wide. A request refused by the key's or the tenant's budget charges neither, and its 429 names the budget that refused it, at admission and after the response; a refusal the budget does not explain (one router's share used up for the moment) carries `Retry-After`. | done | `TestInMemoryLimiter_TenantCap`, `TestTenantCapSharedAcrossRouters`, `TestIsolation_TenantCapE2E`, `TestIsolation_TenantCapOutputRefusalNamesOrganization` |
 | 2.11 | Capacity is shared per model (B2/B3 budgets, queue, wait queue), so one customer's burst can slow another (noisy neighbour, vLLM ④). | out of scope | none: accepted residual; `max_occupancy_share` caps one key's share, and a dedicated replica (Tier 1, Epic N) removes it |
-| 2.12 | A model outside the key's allowlist is refused with 403 before any quota is charged, any model is woken or any redirect is issued, on every inference endpoint. | planned (PR-3) | `TestIsolation_ForbiddenModelCostsNothing` |
-| 2.13 | A key with both `allowed_models` and `quota.per_model` may use only the models in both. | planned (PR-3) | `TestAllowlist_IntersectsAllowedModelsAndPerModel` |
+| 2.12 | A model outside the key's allowlist is refused with 403 before any quota is charged, any model is woken or any redirect is issued, on every inference endpoint. | done | `TestIsolation_ForbiddenModelCostsNothing` |
+| 2.13 | A key with both `allowed_models` and `quota.per_model` may use only the models in both. | done | `TestAllowlist_IntersectsAllowedModelsAndPerModel` |
 | 2.14 | Daily budgets (the key's and the tenant's) and the per-minute input rate count the prompt the backend reports, not only the router's estimate of it: the difference is charged after the response, and a non-streaming answer it does not fit is refused. | done | `TestIsolation_InputChargedFromBackendCount`, `TestB4_ITPMChargesBackendPromptTokens`, `TestInputShortfall`, `TestMinute_ChargeInputTokens` |
 
 ## 3. Per-customer prefix-cache salt (vLLM ①, CVE-2025-46570)
