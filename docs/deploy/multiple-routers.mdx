@@ -168,7 +168,7 @@ Every router of a site must be started with the same:
 | Redirect secrets (`HIVENET_ROUTER_REDIRECT_SECRETS`), with cross-site redirect | Any router of the site may verify a token another one issued |
 | Valkey password (`--sync-valkey-password-file`) | All routers use the same store |
 
-The cache-salt secret must also differ from every other router secret: the others above and the key-store secret (`--key-store-secret-file`). The router refuses to start when it equals one of them.
+The cache-salt secret must also differ from every other router secret: the others above, the key-store secret (`--key-store-secret-file`) and the `/metrics` bearer token (`--metrics-bearer-token-file`). The router refuses to start when it equals one of them.
 
 ## Let agents find every router
 

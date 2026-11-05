@@ -768,7 +768,7 @@ func (r *Router) Start() error {
 	// A reservation an exit path forgot to release would hold its budget
 	// forever, with or without a shared store.
 	go r.reapLeakedReservations(processorCtx)
-	r.metrics.ServeMetrics(r.cfg.MetricsPort)
+	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
 	r.keysChanged()
 	go r.startGRPCServer()
 	go r.healthMonitor()

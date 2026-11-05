@@ -4,8 +4,12 @@
 package metrics
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1882,18 +1886,32 @@ func (m *RouterMetrics) ObserveHTTPClientRequest(provider string, statusCode int
 	}).Observe(durationSeconds)
 }
 
-// ServeMetrics starts the Prometheus metrics HTTP server on the given address
-// (e.g. ":2112"). It runs in its own goroutine and logs fatal errors.
-func (m *RouterMetrics) ServeMetrics(addr string) {
+// ServeMetrics starts the Prometheus metrics HTTP server on the given listen
+// address (":2112" for every interface, "127.0.0.1:2112" for one), requiring
+// "Authorization: Bearer <token>" when token is non-empty (see
+// MetricsHandler). It runs in its own goroutine and logs fatal errors. A
+// client must send its request headers within metricsReadHeaderTimeout, so a
+// connection that never finishes them (slowloris) cannot be held open.
+func (m *RouterMetrics) ServeMetrics(addr, token string) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", m.MetricsHandler(token))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: metricsReadHeaderTimeout,
+		IdleTimeout:       2 * time.Minute,
+	}
 	go func() {
 		log.Infof("Prometheus metrics server listening on %s/metrics", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			log.Errorf("metrics server error: %v", err)
 		}
 	}()
 }
+
+// metricsReadHeaderTimeout bounds how long the metrics server waits for a
+// request's headers.
+const metricsReadHeaderTimeout = 10 * time.Second
 
 // SetCacheIsolation sets hivenet_cache_isolation_enabled and, when gaps is
 // not nil, registers hivenet_cache_isolation_gaps: the registered LLM agents,
@@ -1947,4 +1965,46 @@ func (m *RouterMetrics) AdmissionReaped(n int) {
 		m.registry.MustRegister(m.admissionReaped)
 	})
 	m.admissionReaped.Add(float64(n))
+}
+
+// MetricsHandler serves the registry in the Prometheus text format. The
+// series name every tenant and key with their usage, so on a shared router a
+// non-empty token makes the handler answer 401 unless the request carries
+// "Authorization: Bearer <token>". The header and the expected value are
+// compared as SHA-256 digests in constant time, so neither the content nor
+// the length of the token leaks through timing.
+func (m *RouterMetrics) MetricsHandler(token string) http.Handler {
+	h := promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	if token == "" {
+		return h
+	}
+	want := sha256.Sum256([]byte("Bearer " + token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// IsPrivateBindAddr reports whether a listen address is reachable only from
+// this host or a private network: a loopback IP (127.0.0.0/8, ::1),
+// "localhost", or a private IP (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+// fc00::/7). Every other address is public as far as it can tell: every
+// interface (":2112", "0.0.0.0", "::"), a public IP, and any other hostname,
+// whose address DNS could change. An address that does not parse is public
+// too, so a check built on it errs on the safe side.
+func IsPrivateBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
