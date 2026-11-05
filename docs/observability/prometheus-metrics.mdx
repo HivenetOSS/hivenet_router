@@ -17,9 +17,9 @@ curl http://localhost:2112/metrics
 ```
 
 <Warning>
-  The metrics endpoint does not have built-in authentication.
+  The tenant series name every tenant and key with their usage and limits. By default the metrics endpoint has no authentication.
 
-  Restrict it to Prometheus and trusted operators through a private network, firewall, reverse proxy, or equivalent network control.
+  Restrict it to Prometheus and trusted operators: bind it to a private address, require a bearer token (below), and use a firewall or network policy. A router serving several customers should do all of these.
 </Warning>
 
 ## Start the metrics server
@@ -44,6 +44,33 @@ The metrics endpoint is then available at:
 
 ```text
 http://<router-host>:9212/metrics
+```
+
+`--metrics-port` takes a full listen address, so you can bind one interface, for example `--metrics-port 127.0.0.1:2112` or a private IP. A value with no host, such as `:2112`, or `0.0.0.0:2112` listens on every interface.
+
+### Require a bearer token
+
+Set a token with `--metrics-bearer-token-file` (a file holding the token) or `HIVENET_ROUTER_METRICS_BEARER_TOKEN`:
+
+```bash
+openssl rand -hex 32 > /etc/hivenet-router/metrics.token
+
+./bin/hivenet-router \
+  --metrics-bearer-token-file /etc/hivenet-router/metrics.token \
+  ...
+```
+
+Requests without `Authorization: Bearer <token>` then get HTTP `401` and no series. Give Prometheus the same token:
+
+```yaml
+scrape_configs:
+  - job_name: hivenet-router
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets:
+          - router.example.internal:2112
 ```
 
 ## Configure Prometheus

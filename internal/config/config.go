@@ -276,6 +276,11 @@ type Config struct {
 	// Flag: --require-model-allowlist   Env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST
 	RequireModelAllowlist bool
 
+	// MetricsBearerToken, when set, makes /metrics require
+	// "Authorization: Bearer <token>". The series name every tenant and key.
+	// Flag: --metrics-bearer-token-file   Env: HIVENET_ROUTER_METRICS_BEARER_TOKEN
+	MetricsBearerToken string
+
 	// HideAgentIdentity leaves the agent's peer ID, organization, machine,
 	// version and last-seen time out of the client-facing GET /v1/models/:model
 	// (the admin view keeps them).
@@ -613,6 +618,9 @@ func LoadFromEnv() *Config {
 	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
 	envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
 	envBool(cfg, "HIVENET_ROUTER_HIDE_AGENT_IDENTITY", &cfg.HideAgentIdentity)
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_METRICS_BEARER_TOKEN")); v != "" {
+		cfg.MetricsBearerToken = v
+	}
 	// Trimmed like --cache-salt-secret-file, so either source gives the same salts.
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_CACHE_SALT_SECRET")); v != "" {
 		cfg.CacheSaltSecret = v

@@ -720,7 +720,7 @@ func (r *Router) Start() error {
 		r.shared.Start(processorCtx)
 		go r.publishTenantUsage(processorCtx)
 	}
-	r.metrics.ServeMetrics(r.cfg.MetricsPort)
+	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
 	go r.healthMonitor()

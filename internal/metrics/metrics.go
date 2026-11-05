@@ -4,6 +4,8 @@
 package metrics
 
 import (
+	"crypto/subtle"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -1856,11 +1858,13 @@ func (m *RouterMetrics) ObserveHTTPClientRequest(provider string, statusCode int
 	}).Observe(durationSeconds)
 }
 
-// ServeMetrics starts the Prometheus metrics HTTP server on the given address
-// (e.g. ":2112"). It runs in its own goroutine and logs fatal errors.
-func (m *RouterMetrics) ServeMetrics(addr string) {
+// ServeMetrics starts the Prometheus metrics HTTP server on the given listen
+// address (":2112" for every interface, "127.0.0.1:2112" for one), requiring
+// "Authorization: Bearer <token>" when token is non-empty (see
+// MetricsHandler). It runs in its own goroutine and logs fatal errors.
+func (m *RouterMetrics) ServeMetrics(addr, token string) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", m.MetricsHandler(token))
 	go func() {
 		log.Infof("Prometheus metrics server listening on %s/metrics", addr)
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -1882,4 +1886,40 @@ func (m *RouterMetrics) SetCacheIsolationGaps(counts map[[2]string]int) {
 // subsystems (shared counters) that own their metrics.
 func (m *RouterMetrics) Register(cs ...prometheus.Collector) {
 	m.registry.MustRegister(cs...)
+}
+
+// MetricsHandler serves the registry in the Prometheus text format. The
+// series name every tenant and key with their usage, so on a shared router a
+// non-empty token makes the handler answer 401 unless the request carries
+// "Authorization: Bearer <token>" (compared in constant time).
+func (m *RouterMetrics) MetricsHandler(token string) http.Handler {
+	h := promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	if token == "" {
+		return h
+	}
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// IsWildcardAddr reports whether a listen address accepts connections on
+// every interface: an empty host (":2112") or an unspecified IP
+// ("0.0.0.0:2112", "[::]:2112"). An address that does not parse counts as
+// wildcard, so a check built on it errs on the safe side.
+func IsWildcardAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
 }
