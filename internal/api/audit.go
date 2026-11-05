@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	_ "time/tzdata" // embed IANA timezone database so time.LoadLocation works in Docker
 
@@ -44,7 +45,20 @@ const (
 // Keeping audit output separate from stdout ensures docker compose logs router
 // stays human-readable; Promtail scrapes the file via a shared volume.
 // Falls back to stdout if the file cannot be opened (e.g. local dev without a volume).
-var auditLog = func() *zap.Logger {
+// Opened on first use (auditLogger), not at package init, so the path is read
+// when the router starts serving.
+var (
+	auditLogOnce sync.Once
+	auditLog     *zap.Logger
+)
+
+// auditLogger returns the audit logger, opening the file on first use.
+func auditLogger() *zap.Logger {
+	auditLogOnce.Do(func() { auditLog = newAuditLogger() })
+	return auditLog
+}
+
+func newAuditLogger() *zap.Logger {
 	cfg := zap.NewProductionEncoderConfig()
 	cfg.TimeKey = ""    // ts is written explicitly as the request start time
 	cfg.LevelKey = ""   // level is written as a computed field per request, not a fixed "info"
@@ -56,7 +70,7 @@ var auditLog = func() *zap.Logger {
 		zapcore.InfoLevel,
 	)
 	return zap.New(core).With(zap.String("log_type", "audit"))
-}()
+}
 
 // auditLogFile is the underlying *os.File for auditLog (nil when falling back to stdout).
 // Retained so SyncAuditLog can flush pending kernel buffers and release the file descriptor.
@@ -74,10 +88,19 @@ func openAuditFile() zapcore.WriteSyncer {
 		fmt.Fprintf(os.Stderr, "audit: cannot create log dir: %v — falling back to stdout\n", err)
 		return zapcore.AddSync(os.Stdout)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// 0600: audit lines name every tenant and key, so only the router's own
+	// user may read them. A regular file created earlier with a wider mode is
+	// narrowed; anything else (e.g. /dev/stdout, a pipe or a terminal) is
+	// left alone.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit: cannot open %s: %v — falling back to stdout\n", path, err)
 		return zapcore.AddSync(os.Stdout)
+	}
+	if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm() != 0o600 {
+		if err := f.Chmod(0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "audit: cannot restrict %s to mode 0600: %v\n", path, err)
+		}
 	}
 	auditLogFile = f
 	// zapcore.Lock wraps the file with a mutex so concurrent goroutines don't interleave lines.
@@ -90,7 +113,7 @@ func openAuditFile() zapcore.WriteSyncer {
 // file descriptor is released cleanly.
 // Safe to call multiple times; a nil file is a no-op.
 func SyncAuditLog() {
-	_ = auditLog.Sync()
+	_ = auditLogger().Sync()
 	if auditLogFile != nil {
 		_ = auditLogFile.Close()
 	}
@@ -121,6 +144,11 @@ func AuditMiddleware() gin.HandlerFunc {
 			clientReqID, _ := c.Get(ctxKeyClientRequestID)
 			tenantID, _ := c.Get("tenant_id")
 			keyID, _ := c.Get("key_id")
+			// An authenticated request always names its key: no-auth requests
+			// (tenant "default", no key) log "anonymous", like the metrics.
+			if tenantID != nil && strDefault(keyID, "") == "" {
+				keyID = "anonymous"
+			}
 			model, _ := c.Get(auditKeyModel)
 			inTok, _ := c.Get(auditKeyInputTokens)
 			outTok, _ := c.Get(auditKeyOutputTokens)
@@ -174,7 +202,7 @@ func AuditMiddleware() gin.HandlerFunc {
 				route, _ := c.Get(auditKeySemanticRoute)
 				fields = append(fields, zap.String("alias", strDefault(alias, "")), zap.String("semantic_route", strDefault(route, "")))
 			}
-			auditLog.Info("", fields...)
+			auditLogger().Info("", fields...)
 		}()
 
 		c.Next()
