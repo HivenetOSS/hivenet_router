@@ -20,6 +20,7 @@ import (
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
@@ -167,6 +168,9 @@ type Router struct {
 	// redirect is the cross-site redirect state (internal/redirect); nil when
 	// cfg.SiteID is empty, which disables redirects entirely.
 	redirect *redirect.Redirector
+
+	// salter salts forwarded bodies per tenant; nil when --cache-salt is off.
+	salter *cachesalt.Salter
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -377,6 +381,11 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, err
 	}
+	salter, err := newCacheSalter(cfg)
+	if err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -481,6 +490,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
+		salter:       salter,
 	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
@@ -654,7 +664,8 @@ func (r *Router) Start() error {
 	}
 
 	// Create request processor now that httpHost is ready
-	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter)
+	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
+		WithCacheSalter(r.salter))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()

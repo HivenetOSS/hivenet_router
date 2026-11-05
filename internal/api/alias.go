@@ -4,7 +4,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/jsonbody"
 	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
@@ -272,129 +272,17 @@ func describeFiltered(filtered map[string]string, allowed func(string) bool) str
 	return strings.Join(parts, ", ")
 }
 
-// replaceTopLevelModel returns body with the value of the top-level "model"
-// key replaced by model. Every other byte is preserved, so the forwarded
-// request differs from the client's only in the model name. When the key is
-// duplicated the LAST occurrence is replaced, matching encoding/json (which
-// peekModel and the handler use), so quota and routing see the same model.
-//
-// It is a byte scanner rather than a json.Decoder walk: the body was already
-// validated by semantic.ParseView, and agentic bodies are hundreds of KB with
-// "model" often serialised after "messages".
+// replaceTopLevelModel returns body with the value of its top-level "model"
+// key replaced by model, every other byte unchanged. With duplicate keys it
+// replaces the last one — the one encoding/json decodes — so the rewrite
+// matches what the agent and backend parse.
 func replaceTopLevelModel(body []byte, model string) ([]byte, error) {
-	i := skipWS(body, 0)
-	if i >= len(body) || body[i] != '{' {
-		return nil, errors.New("request body must be a JSON object")
-	}
-	i++
-	valStart, valEnd := -1, -1
-	for {
-		i = skipWS(body, i)
-		if i < len(body) && body[i] == '}' {
-			break
-		}
-		if i >= len(body) || body[i] != '"' {
-			return nil, errors.New("malformed JSON object")
-		}
-		keyStart := i
-		i = skipString(body, i)
-		key := body[keyStart:i]
-		i = skipWS(body, i)
-		if i >= len(body) || body[i] != ':' {
-			return nil, errors.New("malformed JSON object")
-		}
-		i = skipWS(body, i+1)
-		vs := i
-		i = skipValue(body, i)
-		if i < 0 {
-			return nil, errors.New("malformed JSON value")
-		}
-		if isModelKey(key) {
-			valStart, valEnd = vs, i
-		}
-		i = skipWS(body, i)
-		if i < len(body) && body[i] == ',' {
-			i++
-			continue
-		}
-		if i < len(body) && body[i] == '}' {
-			break
-		}
-		return nil, errors.New("malformed JSON object")
-	}
-	if valStart < 0 {
+	quoted, _ := json.Marshal(model)
+	out, err := jsonbody.ReplaceTopLevel(body, "model", quoted)
+	if errors.Is(err, jsonbody.ErrNoKey) {
 		return nil, errors.New("request body has no top-level model field")
 	}
-	quoted, _ := json.Marshal(model)
-	out := make([]byte, 0, len(body)-(valEnd-valStart)+len(quoted))
-	out = append(out, body[:valStart]...)
-	out = append(out, quoted...)
-	return append(out, body[valEnd:]...), nil
-}
-
-// isModelKey reports whether a quoted JSON key decodes to "model" (escaped
-// spellings such as "mod\u0065l" included, as encoding/json would decode them).
-func isModelKey(quoted []byte) bool {
-	if string(quoted) == `"model"` {
-		return true
-	}
-	if !bytes.ContainsRune(quoted, '\\') {
-		return false
-	}
-	var k string
-	return json.Unmarshal(quoted, &k) == nil && k == "model"
-}
-
-func skipWS(b []byte, i int) int {
-	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
-		i++
-	}
-	return i
-}
-
-// skipString returns the index just past the string starting at b[i] == '"'.
-func skipString(b []byte, i int) int {
-	for i++; i < len(b); i++ {
-		switch b[i] {
-		case '\\':
-			i++
-		case '"':
-			return i + 1
-		}
-	}
-	return len(b)
-}
-
-// skipValue returns the index just past the JSON value starting at b[i], or -1.
-func skipValue(b []byte, i int) int {
-	if i >= len(b) {
-		return -1
-	}
-	switch b[i] {
-	case '"':
-		return skipString(b, i)
-	case '{', '[':
-		depth := 0
-		for ; i < len(b); i++ {
-			switch b[i] {
-			case '"':
-				i = skipString(b, i) - 1
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-				if depth == 0 {
-					return i + 1
-				}
-			}
-		}
-		return -1
-	default: // number, true, false, null
-		for i < len(b) && b[i] != ',' && b[i] != '}' && b[i] != ']' && b[i] != ' ' && b[i] != '\t' && b[i] != '\n' && b[i] != '\r' {
-			i++
-		}
-		return i
-	}
+	return out, err
 }
 
 // aliasModelObjects returns /v1/models entries for aliases the caller may use:
