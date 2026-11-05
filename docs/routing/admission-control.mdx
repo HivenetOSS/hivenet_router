@@ -147,6 +147,8 @@ When a request does not fit, it waits for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEO
 
 Retry this error with bounded exponential backoff and jitter.
 
+A request released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) waits longer: until its hold budget ends, even when `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` is `0`, because it already waited for the model. If there is still no room then, it gets `503 model_waking` with `Retry-After: 30` instead of this `429`.
+
 ## B3: front-door shedding
 
 Use `shed_if` to reject new work before queueing when the healthy serving pool is already under pressure:

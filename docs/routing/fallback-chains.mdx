@@ -268,7 +268,7 @@ Disable queueing:
 
 While a request waits, it does not reserve a particular agent. When capacity becomes available, Hivenet Router evaluates the current policy step again. A freed slot wakes one waiting request; a newly registered or recovered agent wakes every waiting request for its model.
 
-Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond `--queue-depth`: the hold limits already bound how many there are.
+Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond `--queue-depth`: the hold limits already bound how many there are. With `--queue-depth 0` they do not wait either. A request woken from the queue that finds no free slot goes back to the head of the queue.
 
 Hivenet Router advances when:
 

@@ -386,7 +386,9 @@ Returned only for a model that the sibling map places on this policloud with `sc
 
 - the model did not wake within the hold budget;
 - a hold limit is reached: per model, per API key and model, or in total;
-- the model woke, but the request still found no room before its hold budget ended.
+- the model woke, but the request still found no room in the admission gate before its hold budget ended.
+
+The message differs in each case; see [`model_waking`](/routing/hold-at-zero#model_waking) for the three messages. Match on `code`, not on the message.
 
 ```json
 {
@@ -399,7 +401,7 @@ Returned only for a model that the sibling map places on this policloud with `sc
 }
 ```
 
-`retry_after` repeats the `Retry-After` header, in seconds. Retry after that delay with the same `X-Request-ID`. If the router already sent keepalive bytes to the held request, the status on the wire is `200` and this error is written in the body instead: as a final SSE event for a streaming request, as the JSON envelope after leading spaces otherwise.
+`retry_after` repeats the `Retry-After` header, in seconds. Retry after that delay. To have the retry recognized as the same request, send a UUID of your own in `X-Client-Request-ID` (or `X-Request-ID`) and resend the same one; the router ignores an ID that is not a UUID. If the router already sent keepalive bytes to the held request, the status on the wire is `200` and this error is written in the body instead: as a final SSE event for a streaming request, as the JSON envelope after leading spaces otherwise.
 
 ## Request-size rejection
 

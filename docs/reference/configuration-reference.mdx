@@ -326,7 +326,7 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
-| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model; `0` disables model queues. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond it |
+| `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Maximum capacity waiters per model. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond it. `0` disables model queues for every request, released ones included |
 | `--max-concurrent` | — | `50` | Maximum simultaneous router-to-agent request forwards |
 | `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | Deadline for the complete router-side request operation |
 | — | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |

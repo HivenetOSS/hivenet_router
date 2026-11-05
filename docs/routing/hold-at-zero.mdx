@@ -19,11 +19,11 @@ Hold at zero needs [cross-site redirect](/routing/cross-site-redirect): the sibl
 After the API key is authenticated, the model alias is resolved and the model is checked against the key’s allowlist:
 
 1. **Served here.** If a healthy agent on this policloud serves the model, the request is served here as usual.
-2. **Redirect first.** If the sibling map lists another policloud in the request’s scope that serves the model, the router answers `307` to it, following the rules in [Cross-site redirect](/routing/cross-site-redirect#choosing-the-policloud). The one exception: while the map’s hints are fresh, every candidate sibling is cold and the map places the model on this policloud, the request is not redirected, because a cold sibling is no faster than waking the model here. The request then continues to step 3, as it does when no sibling is in scope or the request has already been redirected twice.
+2. **Redirect first.** If the sibling map lists another policloud in the request’s scope that serves the model, the router answers `307` to it, following the rules in [Cross-site redirect](/routing/cross-site-redirect#choosing-the-policloud). The one exception: while the map’s hints are fresh, every sibling in the caller’s [home set](/routing/cross-site-redirect#choosing-the-policloud) (the two policlouds a key is redirected to for a model) is cold and the model may be held here (step 3), the request is not redirected, because a cold sibling is no faster than waking the model here. A warm sibling outside the home set does not prevent this. The request then continues to step 3, as it does when no sibling is in scope or the request has already been redirected twice.
 3. **Held here?** If the map places the model on this policloud, for the endpoint’s kind, with `scale_from_zero: true`, the request is held. Otherwise it fails as before, normally with `404 model_not_found`.
 4. **Quota.** The key’s quota is checked before the hold, so a key over its limits is refused at once. See [Quota while held](#quota-while-held).
 5. **Hold.** The request waits, counted once in `hivenet_pending_demand{model}`. After `--wake-keepalive`, the client receives [keepalive bytes](#keepalive).
-6. **Wake.** The autoscaler starts the model. When an agent for the model registers, every held request is released and continues as a normal request: admission, routing and the backend call.
+6. **Wake.** The autoscaler starts the model. When an agent for the model registers, every held request is released and continues as a normal request: admission, routing and the backend call. It stays counted in `hivenet_pending_demand`, and keeps receiving keepalives, until the model starts answering it. See [After the wake](#after-the-wake).
 7. **Timeout.** If the model does not wake within the hold budget, the request gets `503 model_waking` with `Retry-After`.
 
 Every inference endpoint can be held, by the placement kind that matches it: `chat` for `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens`; `embedding` for `POST /v1/embeddings`; `rerank` for `POST /v1/rerank`.
@@ -43,7 +43,7 @@ A held request looks like a slow first response. The client needs no changes, bu
 
 ### Keepalive
 
-A held connection carries no data, so proxies and load balancers with an idle timeout may close it, and client SDKs may then retry. After `--wake-keepalive` (default `15s`), and then at the same interval, the router sends:
+A held connection carries no data, so proxies and load balancers with an idle timeout may close it, and client SDKs may then retry. After `--wake-keepalive` (default `15s`), and then at the same interval, the router sends keepalive bytes. They go on after the wake while the released request waits for capacity, and stop when the response starts:
 
 - an SSE comment, `: keep-alive`, to a streaming request (`"stream": true`);
 - a single space to any other request. Leading whitespace is valid before a JSON body.
@@ -77,7 +77,17 @@ Retry-After: 30
 }
 ```
 
-The same code is returned when the hold budget runs out, when a [hold limit](#hold-limits) is reached, and when a request released by a wake finds no room before its hold budget ends. `retry_after` repeats the `Retry-After` header, in seconds. Send your own ID in `X-Client-Request-ID` (or `X-Request-ID`) and resend it when you retry, so the retry is recognized as the same request.
+The code is the same in every case; the message says which one it is:
+
+| Case | Message |
+| --- | --- |
+| The hold budget runs out | `model <model> is waking up; retry in 30 seconds` |
+| A [hold limit](#hold-limits) is reached | `model <model> is waking up and too many requests are already waiting for it; retry in 30 seconds` |
+| A request released by a wake finds no room in the admission gate before its hold budget ends | `model <model> woke up but is still at capacity; retry in 30 seconds` |
+
+Match on `code`, not on the message. `retry_after` repeats the `Retry-After` header, in seconds.
+
+When you retry, send your own ID in `X-Client-Request-ID` (or `X-Request-ID`) and resend the same ID, so the retry is recognized as the same request. The ID must be a UUID, in any letter case: the router ignores any other value, and the retry then counts as a new request.
 
 A client that disconnects while held is recorded with status `499` in the audit log.
 
@@ -96,22 +106,24 @@ Set the hold budget per model from its measured cold start: the time from the au
 
 ### Quota while held
 
-The per-model requests-per-minute quota scales with the number of healthy replicas, and is skipped when a model has none. For a model that may be held here, the quota counts at least one replica, so a held request is charged like any other and a key cannot hold requests past its quota.
+The per-model requests-per-minute quota scales with the number of healthy replicas, and is skipped when a model has none. For a request that may be held here (its model is placed here, for the endpoint’s kind, with `scale_from_zero: true`), the quota counts at least one replica, so a held request is charged like any other and a key cannot hold requests past its quota. A request refused at once because a hold limit is reached is charged too.
 
 ## After the wake
 
-A wake releases every held request together, often more than the woken replicas can serve at once. Released requests line up for the woken capacity instead of being refused:
+A wake releases every held request together, often more than the woken replicas can serve at once. Released requests line up for the woken capacity instead of being refused, and receive keepalives while they wait:
 
-- The [admission gate](/routing/admission-control) (`max_inflight`, `admit_budget_tokens`) lets a released request wait for room until its hold budget ends, not only the short default wait.
-- The [capacity queue](/routing/fallback-chains#capacity-and-the-wait-queue) accepts released requests beyond `--queue-depth`. The hold limits already bound how many there are.
+- **Admission gate.** The global [admission budget](/routing/admission-control#b2-pool-occupancy) (`max_inflight`, `admit_budget_tokens`) lets a released request wait for room until its hold budget ends, even when `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` is `0`. If there is still no room then, the request gets `503 model_waking`, not `429`. The per-key [`max_occupancy_share`](/routing/admission-control#b4-serverless-key-limits) does not wait: a key over its share gets `429 rate_limit_exceeded` at once, as usual.
+- **Capacity queue.** The [capacity queue](/routing/fallback-chains#capacity-and-the-wait-queue) accepts released requests beyond `--queue-depth`; the hold limits already bound how many there are. The wait there is bounded by `--request-timeout` (default `60s`), not by the hold budget. When it runs out, the request moves to the next fallback step, or gets `504 request_timeout` when there is none. With `--queue-depth 0` there is no queue: a released request that finds no free slot moves to the next fallback step or fails at once.
 
-A released request that still finds no room when its hold budget ends gets `503 model_waking`, never a `429`. Once it is dispatched to an agent, the normal request timeout applies.
+Size `--request-timeout` for the wake burst: with one replica of 4 slots and 100 released requests, many wait longer than `60s`.
 
-The order among released requests is best effort: waiting requests are woken together and compete for each free slot.
+A new or recovered agent wakes every queued request together; a request that finds no free slot goes back to the head of the queue, ahead of later arrivals.
 
 ## Pending demand and the autoscaler
 
-`hivenet_pending_demand{model}` is the number of distinct requests held now for a model. A client that retries the same request, with the same API key and the same [client request ID](/observability/audit-logging#request-ids) (`X-Client-Request-ID` or `X-Request-ID`), counts once. A request without a client ID counts on its own, and requests from different keys always count separately, even with the same client ID.
+`hivenet_pending_demand{model}` is the number of distinct requests waiting for a model: the requests held now, plus the requests released by a wake that the model has not started answering yet. It does not drop to `0` as soon as the first replica is up, so it also shows how many requests the woken capacity still has to take.
+
+A client that retries the same request, with the same API key and the same [client request ID](/observability/audit-logging#request-ids) (`X-Client-Request-ID` or `X-Request-ID`), counts once. The client ID must be a UUID: any other value is ignored, and each retry then counts on its own. A request without a client ID counts on its own, and requests from different keys always count separately, even with the same client ID.
 
 The metric has a series, `0` when nothing is held, for every model that the map places on this policloud with `scale_from_zero: true`, so an autoscaler’s query always finds it. A model removed from the map leaves no series behind.
 
@@ -152,14 +164,15 @@ spec:
           + (sum(increase(hivenet_routing_requests_routed_total{model="llama-3-70b"}[2m])) or vector(0)),
           1)
       threshold: "1"
-      activationValue: "0.5"
+      activationThreshold: "0.5"
 ```
 
-- **Wake.** `hivenet_pending_demand` rises above `0` when a request is held, so the trigger becomes active and KEDA scales the LWS from `0` to `1`.
+- **Wake.** `hivenet_pending_demand` rises above `0` when a request is held, so the value passes `activationThreshold` and KEDA scales the LWS from `0` to `1`.
 - **Stay awake.** `increase(...[2m])` is above `0` for 2 minutes after each routed request, so the trigger stays active while the model serves traffic.
 - **Idle.** `cooldownPeriod` is the idle window. KEDA starts it when the trigger becomes inactive, about 2 minutes after the last request, and scales the LWS back to `idleReplicaCount: 0` at its end. Keep the `increase` window short: a long window adds its own length to the cooldown, so `[30m]` with a 30-minute cooldown keeps an idle model up for about an hour.
-- **On or off only.** `clamp_max(..., 1)` makes the trigger say only whether the model should run. Without it, KEDA also reads the value as a replica count: with `threshold: "1"`, 30 requests in the window ask for 30 replicas. That does not matter with `maxReplicaCount: 1`, but for a model allowed more replicas, scale beyond 1 with a separate trigger on its load.
+- **On or off only.** `clamp_max(..., 1)` makes the trigger say only whether the model should run. Without it, KEDA also reads the value as a replica count: with `threshold: "1"`, 30 requests in the window ask for 30 replicas. That does not matter with `maxReplicaCount: 1`. For a model allowed more replicas, add a separate trigger for the replica count, for example `hivenet_pending_demand` divided by the requests one replica serves at once: it still counts the released requests waiting for capacity right after a wake.
 - **No data.** `hivenet_routing_requests_routed_total` has no series before the model’s first request, so `or vector(0)` keeps the query from returning no result.
+- **New series.** The counter has `tenant_id`, `engine` and `region` labels, and `increase` does not count the first sample of a series. The first request of a new label combination, or the first after a router restart, does not keep the trigger active, so the cooldown may start up to 2 minutes earlier than after the last request.
 
 Use `increase`, not `rate`: a per-second rate of a lightly used model stays below any useful threshold. Give the backend container a readiness probe on its health endpoint, so Kubernetes does not report the pod ready before the model can serve.
 
@@ -189,7 +202,7 @@ A placement in the [sibling map](/routing/cross-site-redirect#pushing-the-siblin
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `hivenet_pending_demand` | Gauge | `model` | Distinct requests held now on this router; `0` for every other model that may be held here |
+| `hivenet_pending_demand` | Gauge | `model` | Distinct requests on this router held now, or released by a wake and not answered yet; `0` for every other model that may be held here |
 | `hivenet_wake_holds_total` | Counter | `model`, `outcome` | Holds that ended: `woken` (released), `expired` (budget ran out), `full` (a hold limit was reached), `gone` (the client left) |
 | `hivenet_wake_hold_seconds` | Histogram | `model` | How long released requests were held: the wake time as clients see it. Expired and abandoned holds are not observed |
 
