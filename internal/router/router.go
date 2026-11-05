@@ -876,6 +876,7 @@ func (r *Router) startHTTPServer() {
 	)
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
+	handlers.SetKeyPushRejectedObserver(r.metrics.APIKeyPushRejected)
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
 	}

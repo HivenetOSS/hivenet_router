@@ -981,6 +981,7 @@ The operation:
 - validates every entry before applying changes
 - rejects duplicate IDs
 - rejects duplicate key hashes
+- rejects an `id` or `owner` that breaks the [identifier rules](/security/api-keys) (invalid UTF-8, a space at either end, control, invisible or line-separator characters, whitespace other than a plain space, or a reserved name), logging a warning that names the entry and counting the push in `hivenet_api_key_push_rejected_total`
 - replaces the registry atomically
 - accepts request bodies up to 16 MiB (`16777216` bytes)
 

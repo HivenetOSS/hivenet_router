@@ -194,6 +194,10 @@ type Handlers struct {
 	// May be nil.
 	onTokenLimited func(MetricContext)
 
+	// keyPushRejected is called when an admin key push (endpoint "upsert" or
+	// "replace") is refused for an invalid entry. May be nil.
+	keyPushRejected func(endpoint string)
+
 	// onRequestReceived is called at handler entry (after auth) with the tenant, key, and deployment IDs.
 	// Used to update the last-request timestamp metric. May be nil.
 	onRequestReceived func(MetricContext)
@@ -1549,13 +1553,13 @@ var passthroughAllowlist = map[string]bool{
 // fire only when the router is called without the full middleware chain (e.g.
 // in tests or direct local calls).
 func callerIDs(c *gin.Context) (tenantID, keyID, deploymentID string) {
-	tenantID = "anonymous"
+	tenantID = auth.AnonymousID
 	if raw, ok := c.Get("tenant_id"); ok {
 		if s, ok := raw.(string); ok && s != "" {
 			tenantID = s
 		}
 	}
-	keyID = "anonymous"
+	keyID = auth.AnonymousID
 	if raw, ok := c.Get("key_id"); ok {
 		if s, ok := raw.(string); ok && s != "" {
 			keyID = s

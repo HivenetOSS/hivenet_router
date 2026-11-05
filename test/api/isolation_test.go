@@ -24,7 +24,10 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -171,10 +174,8 @@ func isoInferenceCalls(t *testing.T, s *isoServer) []isoCall {
 func TestIsolation_TenantFromKeyOnly(t *testing.T) {
 	s := newIsoServer(t)
 	wantKeyID := s.keyIDOf(t, isoKeyA)
-	if wantKeyID == "" {
-		// Static keys carry no key ID until PR-1 (#72); the router then
-		// names every one of them "anonymous".
-		wantKeyID = "anonymous"
+	if !strings.HasPrefix(wantKeyID, "static-") {
+		t.Fatalf("static key ID %q, want a derived static- ID", wantKeyID)
 	}
 	spoof := bearerOf(isoKeyA)
 	for _, h := range []string{"X-Tenant-ID", "X-Organization", "X-Owner", "X-Key-ID", "X-API-Key-ID", "OpenAI-Organization"} {
@@ -401,4 +402,112 @@ func TestIsolation_RedirectTokenCannotWidenScope(t *testing.T) {
 // scope a request may ask for. Owned by Epic F (W5.5), which adds scope_max.
 func TestIsolation_ScopeMaxCapsKeyScope(t *testing.T) {
 	t.Skip("owned by Epic F (W5.5): scope_max does not exist yet")
+}
+
+// TestIsolation_StaticKeysHaveDistinctB4State: two static auth.yaml keys of
+// one tenant each get their own input-token-per-minute bucket, output-token-
+// per-minute bucket and occupancy share. Before static keys had an ID, every
+// static key of every tenant shared one "anonymous" state, so one key
+// draining it 429'd all the others.
+func TestIsolation_StaticKeysHaveDistinctB4State(t *testing.T) {
+	type server struct {
+		e *gin.Engine
+		q chan *domain.PendingRequest
+	}
+	newServer := func(t *testing.T, quota auth.QuotaConfig, share float64, pol *policy.Policy) server {
+		prov, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{
+			{KeyHash: sha256Hex(isoKeyA), Metadata: auth.KeyMetadata{Name: "a1", Owner: "tenant-a"}, Quota: quota, MaxOccupancyShare: share},
+			{KeyHash: sha256Hex(isoKeyB), Metadata: auth.KeyMetadata{Name: "a2", Owner: "tenant-a"}, Quota: quota, MaxOccupancyShare: share},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := make(chan *domain.PendingRequest, 2)
+		e := gin.New()
+		e.POST("/v1/chat/completions", api.AuthMiddleware(prov), newB4Handlers(q, pol).Passthrough)
+		return server{e, q}
+	}
+	// start sends a request and returns its status channel and, if it was
+	// queued, the queued request (nil when it was refused before queueing).
+	start := func(t *testing.T, s server, key string, body []byte) (<-chan int, *domain.PendingRequest) {
+		done := make(chan int, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+key)
+			s.e.ServeHTTP(w, r)
+			done <- w.Code
+		}()
+		select {
+		case p := <-s.q:
+			return done, p
+		case code := <-done:
+			done <- code
+			return done, nil
+		case <-time.After(2 * time.Second):
+			t.Fatal("request neither queued nor rejected")
+			return nil, nil
+		}
+	}
+	answer := func(p *domain.PendingRequest, completion int) {
+		p.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`),
+			Usage: domain.Usage{PromptTokens: 5, CompletionTokens: completion, TotalTokens: 5 + completion}}
+	}
+	send := func(t *testing.T, s server, key string, body []byte, completion int) int {
+		done, p := start(t, s, key, body)
+		if p != nil {
+			answer(p, completion)
+		}
+		return <-done
+	}
+
+	// Each request is ~14 input tokens (40 chars / 4 + 4), against a burst of 20.
+	t.Run("input tokens per minute", func(t *testing.T) {
+		s := newServer(t, auth.QuotaConfig{InputTokensPerMinute: 20}, 0, serverless(0))
+		if code := send(t, s, isoKeyA, textBody(40, 0), 1); code != http.StatusOK {
+			t.Fatalf("key a1 first request: %d, want 200", code)
+		}
+		if code := send(t, s, isoKeyA, textBody(40, 0), 1); code != http.StatusTooManyRequests {
+			t.Fatalf("key a1 second request: %d, want 429 (its bucket is drained)", code)
+		}
+		if code := send(t, s, isoKeyB, textBody(40, 0), 1); code != http.StatusOK {
+			t.Errorf("key a2 after a1 drained its bucket: %d, want 200 (own bucket)", code)
+		}
+	})
+
+	// a1's first response produces 50 output tokens against a limit of 10 a
+	// minute, so its next request is held off; a2's bucket is untouched.
+	t.Run("output tokens per minute", func(t *testing.T) {
+		s := newServer(t, auth.QuotaConfig{OutputTokensPerMinute: 10}, 0, serverless(0))
+		if code := send(t, s, isoKeyA, textBody(40, 0), 50); code != http.StatusOK {
+			t.Fatalf("key a1 first request: %d, want 200", code)
+		}
+		if code := send(t, s, isoKeyA, textBody(40, 0), 1); code != http.StatusTooManyRequests {
+			t.Fatalf("key a1 second request: %d, want 429 (its output bucket is spent)", code)
+		}
+		if code := send(t, s, isoKeyB, textBody(40, 0), 1); code != http.StatusOK {
+			t.Errorf("key a2 after a1 spent its output bucket: %d, want 200 (own bucket)", code)
+		}
+	})
+
+	// Share 0.4 of a 1000-token budget: a1 holds 400 in flight, so a second
+	// a1 request does not fit its share; a2 has its own share.
+	t.Run("occupancy share", func(t *testing.T) {
+		s := newServer(t, auth.QuotaConfig{}, 0.4, serverless(1000))
+		held, p := start(t, s, isoKeyA, b2Body(396))
+		if p == nil {
+			t.Fatalf("key a1 first request refused: %d", <-held)
+		}
+		if code := send(t, s, isoKeyA, b2Body(396), 1); code != http.StatusTooManyRequests {
+			t.Fatalf("key a1 second request: %d, want 429 (its share is in flight)", code)
+		}
+		if code := send(t, s, isoKeyB, b2Body(396), 1); code != http.StatusOK {
+			t.Errorf("key a2 while a1 holds its share: %d, want 200 (own share)", code)
+		}
+		answer(p, 1)
+		if code := <-held; code != http.StatusOK {
+			t.Errorf("key a1 first request: %d, want 200", code)
+		}
+	})
 }

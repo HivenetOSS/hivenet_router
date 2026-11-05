@@ -337,6 +337,34 @@ func (h *Handlers) writeRegistryError(c *gin.Context, err error) {
 	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 }
 
+// SetKeyPushRejectedObserver sets the function told when a key push is
+// refused for an invalid entry (hivenet_api_key_push_rejected_total).
+func (h *Handlers) SetKeyPushRejectedObserver(f func(endpoint string)) { h.keyPushRejected = f }
+
+// rejectKeyPush answers a key push refused because one entry is invalid: 400,
+// a warning that names the entry, and the rejection counter. Nothing in the
+// push is applied, so a refused full replace also leaves keys it would have
+// revoked in force: the warning and the counter are how an operator finds
+// out. The ID is quoted, so an ID with control characters cannot forge log
+// lines; the error quotes the values it names.
+func (h *Handlers) rejectKeyPush(c *gin.Context, endpoint, keyID string, err error) {
+	log.Warnf("API key push refused (%s): key %q: %v. Nothing in this push was applied", endpoint, keyID, err)
+	if h.keyPushRejected != nil {
+		h.keyPushRejected(endpoint)
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+}
+
+// checkPushedEntry runs every check a pushed entry must pass before the
+// registry sees it: the identity rules (auth.ValidateDynamicKeyEntry, which
+// the registry repeats), then the admission invariants.
+func (h *Handlers) checkPushedEntry(e auth.DynamicKeyEntry) error {
+	if err := auth.ValidateDynamicKeyEntry(e); err != nil {
+		return err
+	}
+	return h.validateKeyAdmission(e)
+}
+
 // UpsertAPIKey handles PUT /admin/api-keys/:id.
 // Adds or updates a single key entry. The :id URL parameter sets the entry ID;
 // field validation is delegated to the registry.
@@ -367,12 +395,11 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		Quota:             req.Quota,
 		MaxOccupancyShare: req.MaxOccupancyShare,
 	}.toEntry()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	if err == nil {
+		err = h.checkPushedEntry(entry)
 	}
-	if err := h.validateKeyAdmission(entry); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err != nil {
+		h.rejectKeyPush(c, "upsert", c.Param("id"), err)
 		return
 	}
 	if err := h.keyRegistry.Upsert(req.Version, entry); err != nil {
@@ -430,18 +457,24 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	entries := make([]auth.DynamicKeyEntry, 0, len(req.Keys))
 	for i, k := range req.Keys {
 		entry, err := k.toEntry()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("key[%d]: %s", i, err)})
-			return
+		if err == nil {
+			err = h.checkPushedEntry(entry)
 		}
-		if err := h.validateKeyAdmission(entry); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("key[%d]: %s", i, err)})
+		if err != nil {
+			h.rejectKeyPush(c, "replace", k.ID, fmt.Errorf("key[%d]: %w", i, err))
 			return
 		}
 		entries = append(entries, entry)
 	}
 	if err := h.keyRegistry.ReplaceAll(req.Version, entries); err != nil {
-		h.writeRegistryError(c, err) // 503 not durable, 409 stale, 400 otherwise
+		// What every entry passes on its own but the set fails (one key_hash
+		// or ID twice) is refused here, like an invalid entry; a stale
+		// version (409) or a save that failed (503) is not a refused push.
+		if !errors.Is(err, auth.ErrStaleVersion) && !errors.Is(err, auth.ErrNotDurable) {
+			h.rejectKeyPush(c, "replace", "", err)
+			return
+		}
+		h.writeRegistryError(c, err) // 503 not durable, 409 stale
 		return
 	}
 	log.Infof("API key registry replaced via POST /admin/api-keys/replace (%d keys)", len(entries))

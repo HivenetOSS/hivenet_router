@@ -289,7 +289,7 @@ type quotaCaller struct {
 // and applies the same defaults the old inline middleware used so external
 // behaviour stays identical.
 func resolveCaller(c *gin.Context) quotaCaller {
-	out := quotaCaller{tenantID: "anonymous", keyID: "anonymous", deploymentID: "unset"}
+	out := quotaCaller{tenantID: auth.AnonymousID, keyID: auth.AnonymousID, deploymentID: "unset"}
 	if raw, ok := c.Get("tenant_id"); ok {
 		if s, _ := raw.(string); s != "" {
 			out.tenantID = s

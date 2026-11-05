@@ -260,6 +260,9 @@ type RouterMetrics struct {
 	// Label: model.
 	queueWaitSeconds *prometheus.HistogramVec
 
+	// apiKeyPushRejected counts admin key pushes refused for an invalid entry.
+	apiKeyPushRejected *prometheus.CounterVec
+
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
 	policyReloadTotal *prometheus.CounterVec
@@ -931,6 +934,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"tenant_id", "key_id", "deployment_id"},
 		),
+		apiKeyPushRejected: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_api_key_push_rejected_total",
+				Help: "Admin API key pushes refused with 400 because an entry is invalid, by endpoint (upsert|replace). Nothing in a refused push is applied: a refused replace also leaves the keys it would have revoked in force.",
+			},
+			[]string{"endpoint"},
+		),
 		policyReloadTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_policy_reload_total",
@@ -1040,6 +1050,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueWaitSeconds,
 		// Policy management
 		m.policyReloadTotal,
+		m.apiKeyPushRejected,
 		// Semantic alias routing
 		m.semanticDecisions,
 		m.semanticDecisionSeconds,
@@ -1725,6 +1736,12 @@ func (m *RouterMetrics) AdmissionQueueDepthUpdated(model string, depth int) {
 // Implements policy.QueueMetrics.
 func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64) {
 	m.queueWaitSeconds.With(prometheus.Labels{"model": model}).Observe(durationSeconds)
+}
+
+// APIKeyPushRejected counts one admin key push refused for an invalid entry;
+// endpoint is "upsert" or "replace".
+func (m *RouterMetrics) APIKeyPushRejected(endpoint string) {
+	m.apiKeyPushRejected.With(prometheus.Labels{"endpoint": endpoint}).Inc()
 }
 
 // PolicyReload increments the policy reload counter.

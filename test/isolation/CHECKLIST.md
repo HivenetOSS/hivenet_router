@@ -31,12 +31,12 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 |---|---|---|---|
 | 1.1 | Tenant and key come only from the credential. Headers and body fields cannot override them, on every inference endpoint. | done | `TestIsolation_TenantFromKeyOnly` |
 | 1.2 | Every `/v1` route requires a valid API key; the admin key is not one. No route sits outside `/v1`, `/admin` and the public list (`/health`). | done | `TestIsolation_V1RoutesRequireKey`, `TestIsolation_NoUnclassifiedRoutes` |
-| 1.3 | Every static `auth.yaml` key has a stable, unique key ID; so does every admin key (doc-18 G8). | planned (PR-1) | `TestStaticKeyProvider_DerivesStableKeyID`, `TestStaticKeyProvider_RejectsDerivedIDCollision`, `TestStaticAdminKeyProvider_KeyIDPerKey` |
-| 1.4 | Key IDs and owners cannot contain characters that alias another key's counters or disguise a log line (control, format and line-separator characters), and cannot take an identity the router assigns itself (`admin`, `default`, `anonymous`, `static-…`, `admin-…`). | planned (PR-1) | `TestKeyIdentifiers_RejectControlChars`, `TestKeyIdentifiers_RejectReserved` |
+| 1.3 | Every static `auth.yaml` key has a stable, unique key ID; so does every admin key (doc-18 G8). | done | `TestStaticKeyProvider_DerivesStableKeyID`, `TestStaticKeyProvider_KeyHashNormalized`, `TestStaticAdminKeyProvider_KeyIDPerKey` |
+| 1.4 | Key IDs and owners cannot contain characters that alias another key's counters or disguise a log line (control, invisible and line-separator characters, whitespace other than a plain space, a space at either end), and cannot take an identity the router assigns itself (`admin`, `default`, `anonymous`, `static-…`, `admin-…`). | done | `TestKeyIdentifiers_RejectControlChars`, `TestKeyIdentifiers_RejectReserved` |
 | 1.5 | A redirect token resolves to its own key and tenant at the target. | done | `TestRedirect_AtTheTarget` |
 | 1.6 | Concurrent responses are never delivered to the wrong request or tenant, streaming or not. | done | `TestIsolation_ConcurrentResponsesNotCrossWired` |
 | 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP (the previous keys stay in force). | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
-| 1.8 | A static key's hash is checked like a dynamic key's (64 hex characters, either case): a hash that could never authenticate fails at load. | planned (PR-1) | `TestStaticKeyProvider_KeyHashNormalized` |
+| 1.8 | A static key's hash is checked like a dynamic key's (64 hex characters, either case): a hash that could never authenticate fails at load. | done | `TestStaticKeyProvider_KeyHashNormalized` |
 
 ## 2. Per-customer counters, limits and scope
 
