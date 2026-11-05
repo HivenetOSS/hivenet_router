@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -42,6 +43,7 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		return nil, fmt.Errorf("auth: api-key mode requires at least one key entry")
 	}
 	keys := make(map[string]keyEntry, len(entries))
+	ids := make(map[string]int, len(entries)) // derived key ID → entry index
 	for i, e := range entries {
 		if e.KeyHash == "" {
 			return nil, fmt.Errorf("auth: key entry %d: key_hash must not be empty", i)
@@ -49,12 +51,20 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		if e.Metadata.Owner == "" {
 			return nil, fmt.Errorf("auth: key entry %d (%q): metadata.owner must not be empty", i, e.KeyPreview)
 		}
+		if err := validateIdentifier(fmt.Sprintf("key entry %d (%q)", i, e.KeyPreview), "metadata.owner", e.Metadata.Owner); err != nil {
+			return nil, err
+		}
 		if e.Metadata.Name == "" {
 			return nil, fmt.Errorf("auth: key entry %d (%q): metadata.name must not be empty", i, e.KeyPreview)
 		}
 		if _, dup := keys[e.KeyHash]; dup {
 			return nil, fmt.Errorf("auth: duplicate key_hash in entry %d (%q)", i, e.KeyPreview)
 		}
+		keyID := staticKeyID(e.KeyHash)
+		if other, dup := ids[keyID]; dup {
+			return nil, fmt.Errorf("auth: key entries %d and %d derive the same key ID %q", other, i, keyID)
+		}
+		ids[keyID] = i
 		expiresAt, err := ParseExpiresAt(e.Metadata.ExpiresAt)
 		if err != nil {
 			return nil, fmt.Errorf("auth: key entry %d (%q): %w", i, e.KeyPreview, err)
@@ -71,6 +81,7 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		keys[e.KeyHash] = keyEntry{
 			result: AuthResult{
 				TenantID:      e.Metadata.Owner,
+				KeyID:         keyID,
 				KeyPreview:    e.KeyPreview,
 				AllowedModels: e.Models,
 				QuotaLimits:   quota,
@@ -79,6 +90,31 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		}
 	}
 	return &StaticKeyProvider{keys: keys}, nil
+}
+
+// keyIDDomain separates derived key IDs from the key hash: the ID is a hash
+// of the key hash under this label, not a prefix of it, so an ID seen in a
+// metric label or log line cannot be matched against a key_hash stored
+// elsewhere.
+const keyIDDomain = "hivenet-router/key-id/v1\x00"
+
+// derivedKeyID returns prefix + 16 hex characters (64 bits) of
+// SHA-256(keyIDDomain + lowercase key hash). It is stable: the same key always
+// gets the same ID, across restarts and across routers.
+//
+// Like anything derived from the key alone, the ID lets someone who sees it
+// test guesses of a weak, hand-picked key offline. Generated keys
+// ("hivenet-router keygen") have far too much entropy for that.
+func derivedKeyID(prefix, keyHash string) string {
+	h := sha256.Sum256([]byte(keyIDDomain + strings.ToLower(keyHash)))
+	return prefix + hex.EncodeToString(h[:8])
+}
+
+// staticKeyID derives the key ID of a static auth.yaml key ("static-" + 16
+// hex). Static keys have no upstream ID, and without one every static key
+// would share one identity in per-key counters, metric labels and audit lines.
+func staticKeyID(keyHash string) string {
+	return derivedKeyID("static-", keyHash)
 }
 
 // Tenants returns a map from tenant ID to QuotaLimits for every key entry,
@@ -148,7 +184,8 @@ func NewStaticAdminKeyProvider(rawKeys []string) (*StaticAdminKeyProvider, error
 
 // Authenticate hashes the bearer token and checks membership in the admin key set.
 // Returns ErrMissingCredentials if no token is present, ErrInvalidCredentials
-// if the hash is not in the set. On success, TenantID is always "admin".
+// if the hash is not in the set. On success, TenantID is always "admin" and
+// KeyID identifies which admin key was used.
 func (s *StaticAdminKeyProvider) Authenticate(r *http.Request) (*AuthResult, error) {
 	token := extractBearerToken(r)
 	if token == "" {
@@ -159,5 +196,7 @@ func (s *StaticAdminKeyProvider) Authenticate(r *http.Request) (*AuthResult, err
 	if _, ok := s.keys[hash]; !ok {
 		return nil, ErrInvalidCredentials
 	}
-	return &AuthResult{TenantID: "admin"}, nil
+	// KeyID tells admin keys apart in the audit log ("admin-" + 16 hex,
+	// derived like a static API key's ID).
+	return &AuthResult{TenantID: "admin", KeyID: derivedKeyID("admin-", hash)}, nil
 }

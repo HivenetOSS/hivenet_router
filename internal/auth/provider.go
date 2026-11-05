@@ -88,9 +88,11 @@ type AuthResult struct {
 	// Gin context as "tenant_id" and used by the quota enforcement layer (Ticket 5).
 	TenantID string
 
-	// KeyID is the upstream key-sync service key identifier (e.g. "key-abc123").
-	// Injected into the Gin context as "key_id" for metric labeling and audit.
-	// Empty string for StaticKeyProvider.
+	// KeyID identifies the key: the upstream key-sync service ID for dynamic
+	// keys (e.g. "key-abc123"), "static-" + 16 hex of the key hash for
+	// auth.yaml keys, "admin-" + 16 hex for admin keys. Injected into the Gin
+	// context as "key_id" for per-key limits, metric labels and audit.
+	// Empty only in auth mode none.
 	KeyID string
 
 	// KeyPreview is the truncated key (e.g. "sk-...KJ4") stored in

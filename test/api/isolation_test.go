@@ -22,6 +22,8 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/redirect"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -248,4 +250,55 @@ func TestIsolation_RedirectTokenCannotWidenScope(t *testing.T) {
 // scope a request may ask for. Owned by Epic F (W5.5), which adds scope_max.
 func TestIsolation_ScopeMaxCapsKeyScope(t *testing.T) {
 	t.Skip("owned by Epic F (W5.5): scope_max does not exist yet")
+}
+
+// TestIsolation_StaticKeysHaveDistinctB4State: two static auth.yaml keys of
+// one tenant each get their own input-token-per-minute bucket. Before static
+// keys had an ID, every static key of every tenant shared one "anonymous"
+// bucket, so one key draining it 429'd all the others.
+func TestIsolation_StaticKeysHaveDistinctB4State(t *testing.T) {
+	quota := auth.QuotaConfig{InputTokensPerMinute: 20}
+	prov, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{
+		{KeyHash: sha256Hex(isoKeyA), Metadata: auth.KeyMetadata{Name: "a1", Owner: "tenant-a"}, Quota: quota},
+		{KeyHash: sha256Hex(isoKeyB), Metadata: auth.KeyMetadata{Name: "a2", Owner: "tenant-a"}, Quota: quota},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := make(chan *domain.PendingRequest, 1)
+	h := newB4Handlers(q, serverless(0)) // only the ITPM cap gates
+	e := gin.New()
+	e.POST("/v1/chat/completions", api.AuthMiddleware(prov), h.Passthrough)
+
+	// Each request is ~14 input tokens (40 chars / 4 + 4), against a burst of 20.
+	send := func(key string) int {
+		done := make(chan int, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(textBody(40, 0)))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+key)
+			e.ServeHTTP(w, r)
+			done <- w.Code
+		}()
+		select {
+		case p := <-q:
+			p.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
+		case code := <-done:
+			return code // rejected before queueing
+		case <-time.After(2 * time.Second):
+			t.Fatal("request neither queued nor rejected")
+		}
+		return <-done
+	}
+
+	if code := send(isoKeyA); code != http.StatusOK {
+		t.Fatalf("key a1 first request: %d, want 200", code)
+	}
+	if code := send(isoKeyA); code != http.StatusTooManyRequests {
+		t.Fatalf("key a1 second request: %d, want 429 (its bucket is drained)", code)
+	}
+	if code := send(isoKeyB); code != http.StatusOK {
+		t.Errorf("key a2 after a1 drained its bucket: %d, want 200 (own bucket)", code)
+	}
 }

@@ -88,7 +88,7 @@ The hop count travels inside the token. A request that has already been redirect
 
 - Every router runs with the `--site-id` of its policloud, as the map names it.
 - Every policloud shares the same redirect signing secrets, each at least 32 bytes long.
-- API keys are dynamic keys pushed through `/admin/api-keys`, or the auth mode is `none`. The router refuses to start with cross-site redirect and static `auth.yaml` keys, because static keys have no key ID that a sibling could resolve.
+- API keys are dynamic keys pushed through `/admin/api-keys`, or the auth mode is `none`. The router refuses to start with cross-site redirect and static `auth.yaml` keys, because a sibling resolves a redirect token's key through its dynamic key registry, and a static key is not in it.
 - Every policloud URL in the map is an absolute `https://` origin under one of `--redirect-allowed-domains`. Clients follow a redirect from HTTPS to HTTP, and some keep sending the API key after a host change, so the router rejects `http://` URLs and any host it does not own.
 - Clients follow `307` redirects. Most HTTP clients and the OpenAI and Anthropic SDKs do so by default. Plain `httpx` does not: set `follow_redirects=True`. A client that does not follow receives the `307` with a `model_redirected` error body.
 

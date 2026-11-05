@@ -28,8 +28,8 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 |---|---|---|---|
 | 1.1 | Tenant and key come only from the credential. Headers and body fields cannot override them, on every inference endpoint. | done | `TestIsolation_TenantFromKeyOnly` |
 | 1.2 | Every `/v1` route requires a valid API key; the admin key is not one. | done | `TestIsolation_V1RoutesRequireKey` |
-| 1.3 | Every static `auth.yaml` key has a stable, unique key ID (doc-18 G8). | planned (PR-1) | `TestStaticKeyProvider_DerivesStableKeyID` |
-| 1.4 | Key IDs and owners cannot contain characters that alias another key's counters. | planned (PR-1) | `TestKeyIdentifiers_RejectControlChars` |
+| 1.3 | Every static `auth.yaml` key has a stable, unique key ID; so does every admin key (doc-18 G8). | done | `TestStaticKeyProvider_DerivesStableKeyID`, `TestStaticKeyProvider_RejectsDerivedIDCollision`, `TestStaticAdminKeyProvider_KeyIDPerKey` |
+| 1.4 | Key IDs and owners cannot contain characters that alias another key's counters. | done | `TestKeyIdentifiers_RejectControlChars` |
 | 1.5 | A redirect token resolves to its own key and tenant at the target. | done | `TestRedirect_AtTheTarget` |
 | 1.6 | Concurrent responses are never delivered to the wrong request or tenant, streaming or not. | done | `TestIsolation_ConcurrentResponsesNotCrossWired` |
 | 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP. | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
@@ -39,8 +39,8 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | # | Line | Status | Tests |
 |---|---|---|---|
 | 2.1 | RPM and daily-token counters are per key, checked against that key's own limits. Another key cannot overwrite a key's ceiling. | planned (PR-2) | `TestInMemoryLimiter_PerKeyBucketsWithinTenant`, `TestInMemoryLimiter_KeyCeilingNotOverwrittenByOtherKey` |
-| 2.2 | Input/output tokens-per-minute and occupancy share are per key, static keys included. | planned (PR-1, PR-2) | `TestIsolation_StaticKeysHaveDistinctB4State`, `TestMinute_PerKeyWithinTenant` |
-| 2.3 | A key ID reassigned to another tenant starts from zero. | planned (PR-2) | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated` |
+| 2.2 | Input/output tokens-per-minute and occupancy share are per key, static keys included. | done | `TestIsolation_StaticKeysHaveDistinctB4State` |
+| 2.3 | A key ID reassigned to another tenant starts from zero. | planned (PR-2) | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated`, `TestMinute_PerKeyWithinTenant` |
 | 2.4 | `X-RateLimit-*` headers describe the calling key only. | planned (PR-2) | `TestIsolation_RateLimitHeadersArePerKey` |
 | 2.5 | Tenant A exhausting its quota never causes a 429 for tenant B (end to end). | planned (PR-2) | `TestIsolation_TwoTenantsQuotaE2E` |
 | 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. | planned (PR-3) | `TestIsolation_RequireModelAllowlist` |

@@ -223,7 +223,7 @@ This field is optional and informational.
 
 It can help identify the credential in static configuration and selected operational logs or displays.
 
-The dedicated audit record does not include a `key_preview` field. Static-key audit records normally have an empty `key_id`, while dynamic-key audit records use the registry entry ID.
+The dedicated audit record does not include a `key_preview` field. It identifies the key by `key_id` instead.
 
 The preview is never used to authenticate a request.
 
@@ -246,7 +246,7 @@ metadata:
 | `created_at` | No | Informational creation date |
 | `expires_at` | No | Final valid date in `DD-MM-YYYY` format |
 
-`name` and `owner` must not be empty.
+`name` and `owner` must not be empty. The owner must be valid UTF-8 and must not contain control characters (such as NUL, tab or newline) or DEL; spaces are allowed.
 
 ### Owner identity
 
@@ -474,9 +474,11 @@ These limits do not run for `mode: reserved`, and `0` disables each limit. Their
 
 Provider fallback retains the pre-routing ITPM charge but does not charge provider output to OTPM.
 
-<Warning>
-  Dynamic keys are isolated by their registry key ID. Static-key authentication currently leaves that ID empty, so the handler's `anonymous` fallback makes the serverless token-rate buckets and occupancy controller shared across static keys for the same model. Treat this as a current implementation limitation when choosing static or dynamic authentication.
-</Warning>
+Serverless token-rate buckets and the occupancy controller are isolated per key. Each static key gets a key ID derived one-way from its `key_hash`: `static-` followed by 16 hex characters. The ID is the same across restarts and routers, is not a substring of the hash, and two entries that derive the same ID are rejected at load.
+
+<Note>
+  The key ID appears in metric labels and audit records. Like any value derived from a key, it lets someone who sees it check guesses of a weak, hand-picked key offline. Use keys generated with `hivenet-router keygen`.
+</Note>
 
 ### Cross-config validation
 

@@ -72,7 +72,7 @@ The timestamp and values above are examples.
 | `trace_id` | OpenTelemetry trace ID; empty when no valid trace is active |
 | `request_id` | Valid client-supplied UUID or a generated UUID |
 | `tenant_id` | Authenticated key owner; `default` in no-auth mode; empty for failures before identity resolution |
-| `key_id` | Dynamic key-registry ID; normally empty for static keys and no-auth traffic |
+| `key_id` | Dynamic key-registry ID; `static-` plus 16 hex characters derived from the key hash for static `auth.yaml` keys; `admin-` plus 16 derived hex characters for admin keys; empty for no-auth traffic |
 | `model` | Top-level request model when the handler could read it |
 | `status_code` | Final HTTP response status |
 | `latency_ms` | Time from request entry until the response completes |
@@ -180,7 +180,7 @@ Authentication failures happen before Hivenet Router can resolve a tenant or key
 <Note>
   Audit records and Prometheus labels use different empty-key conventions.
 
-  Static and no-auth audit records normally use an empty `key_id`, while tenant metrics use `key_id="anonymous"` for those requests.
+  No-auth audit records use an empty `key_id`, while tenant metrics use `key_id="anonymous"` for those requests.
 </Note>
 
 ### Agent and provider identity
