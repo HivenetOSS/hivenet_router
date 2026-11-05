@@ -20,6 +20,7 @@ type DecisionRecord struct {
 	TS            time.Time           `json:"ts"`
 	RequestID     string              `json:"request_id,omitempty"`
 	Path          string              `json:"path"`
+	TenantID      string              `json:"tenant_id,omitempty"`
 	KeyID         string              `json:"key_id,omitempty"`
 	Alias         string              `json:"alias"`
 	ResolvedModel string              `json:"resolved_model,omitempty"`

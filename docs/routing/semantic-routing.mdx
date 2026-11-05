@@ -247,7 +247,7 @@ The error message names only models the API key may use.
 
 ### Decision log
 
-Set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision. Each line holds the requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds.
+Set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision. Each line holds the caller's `tenant_id` and `key_id`, the requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds.
 
 A single background writer appends to the file, so logging never blocks a request. When more than `--semantic-decision-log-buffer` records are queued, new records are dropped and counted in `hivenet_semantic_decision_log_dropped_total`. Encode and write failures, such as a full disk, are counted in `hivenet_semantic_decision_log_write_errors_total`.
 
