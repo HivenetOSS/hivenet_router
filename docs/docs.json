@@ -84,7 +84,8 @@
           "security/api-keys",
           "security/auth-yaml-reference",
           "security/model-restrictions",
-          "security/key-rotation"
+          "security/key-rotation",
+          "security/multi-tenant-isolation"
         ]
       },
       {

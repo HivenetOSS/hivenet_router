@@ -21,6 +21,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,6 +234,19 @@ func (s *Salter) Salt(tenantID string) string {
 	mac := hmac.New(sha256.New, s.secret)
 	mac.Write([]byte(saltDomain + tenantID))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// fingerprintDomain separates the secret's fingerprint from the salts.
+const fingerprintDomain = "hivenet-router/cache-salt-fingerprint/v1"
+
+// Fingerprint identifies the secret without revealing it or any salt: 16 hex
+// characters of HMAC-SHA256(secret, a fixed label). The routers of a site
+// compare theirs to find one started with another secret, which would give
+// each tenant two prefix-cache namespaces.
+func (s *Salter) Fingerprint() string {
+	mac := hmac.New(sha256.New, s.secret)
+	mac.Write([]byte(fingerprintDomain))
+	return hex.EncodeToString(mac.Sum(nil)[:8])
 }
 
 // ErrExtraParams: a body's extra_params is neither absent, null nor an

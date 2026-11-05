@@ -319,7 +319,7 @@ The file is opened for append when the router process starts.
 
 ## Fallback to stdout
 
-Hivenet Router opens the audit file at startup. If it cannot create the directory or open the file, the router still starts and writes audit JSON to standard output.
+Hivenet Router opens the audit file at startup. If it cannot create the directory or open the file, the router still starts and writes audit JSON to standard output. A [multi-tenant](/security/multi-tenant-isolation) router refuses to start instead.
 
 It writes an explanatory message to standard error, and logs an error at startup:
 
