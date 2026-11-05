@@ -686,7 +686,7 @@ func (r *Router) Start() error {
 		log.Infof("Quota BadgerLimiter periodic flush started (interval: %v)", r.cfg.UniversalFlushInterval)
 	}
 
-	r.metrics.ServeMetrics(r.cfg.MetricsPort)
+	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
 	go r.healthMonitor()

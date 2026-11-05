@@ -76,7 +76,8 @@ func main() {
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
-	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")
+	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics listen address: \":2112\" (every interface) or host:port such as \"127.0.0.1:2112\" (env: HIVENET_ROUTER_METRICS_PORT)")
+	metricsBearerTokenFile := flag.String("metrics-bearer-token-file", "", "Path to file containing a bearer token that /metrics requires (env: HIVENET_ROUTER_METRICS_BEARER_TOKEN); the series name every tenant and key")
 	maxConcurrentForwards := flag.Int("max-concurrent", cfg.MaxConcurrentForwards, "Max concurrent in-flight request forwards to agents")
 	policyFile := flag.String("policy-file", cfg.PolicyFile, "Path to routing policy YAML file (optional; omit to use built-in default)")
 	policyModelDir := flag.String("policy-model-dir", cfg.PolicyModelDir, "Path to directory of per-model policy YAML files (optional; env: HIVENET_ROUTER_POLICY_MODEL_DIR)")
@@ -164,6 +165,17 @@ func main() {
 		}
 		cfg.KeyStoreSecret = strings.TrimSpace(string(data))
 	}
+	if *metricsBearerTokenFile != "" {
+		data, err := os.ReadFile(*metricsBearerTokenFile)
+		if err != nil {
+			log.Fatalf("cannot read --metrics-bearer-token-file %q: %v", *metricsBearerTokenFile, err)
+		}
+		cfg.MetricsBearerToken = strings.TrimSpace(string(data))
+		if cfg.MetricsBearerToken == "" {
+			// Asked for a token: an empty file must not leave /metrics open.
+			log.Fatalf("--metrics-bearer-token-file %q is empty", *metricsBearerTokenFile)
+		}
+	}
 	if *cacheSaltSecretFile != "" {
 		data, err := os.ReadFile(*cacheSaltSecretFile)
 		if err != nil {
@@ -218,6 +230,9 @@ func main() {
 	}
 	log.Infof("  libp2p max conns/IP: %d", cfg.P2PMaxConnsPerIP)
 	log.Infof("  Metrics (Prometheus):%s", cfg.MetricsPort)
+	if cfg.MetricsBearerToken != "" {
+		log.Info("  Metrics auth:        bearer token required")
+	}
 	log.Info("Queue & Timeouts:")
 	log.Infof("  Queue size:          %d", cfg.QueueSize)
 	log.Infof("  Max concurrent fwd:  %d", cfg.MaxConcurrentForwards)

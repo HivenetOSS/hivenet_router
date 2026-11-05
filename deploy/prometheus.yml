@@ -8,3 +8,8 @@ scrape_configs:
       # "router" resolves to the router container via Docker's internal network.
       # Port 2112 is the Prometheus metrics endpoint (MetricsPort in config.go).
       - targets: ["router:2112"]
+    # When the router requires a metrics bearer token
+    # (HIVENET_ROUTER_METRICS_BEARER_TOKEN), mount the same token here:
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/metrics-token

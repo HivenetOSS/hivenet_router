@@ -239,7 +239,8 @@ tags:
 | --- | --- | --- | --- |
 | `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` | Client, health, and administration HTTP listen address |
 | `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` | Agent-authentication gRPC listen address |
-| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics listen address |
+| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics listen address (`:port` for every interface, or `host:port`) |
+| `--metrics-bearer-token-file` | `HIVENET_ROUTER_METRICS_BEARER_TOKEN` | — | Bearer token `/metrics` requires; empty leaves it open |
 | `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` | Router libp2p TCP port |
 | `--p2p-listen-addr` | — | `127.0.0.1` | IP address used to bind the router’s libp2p host |
 | `--p2p-announce-addr` | — | Empty | Dialable multiaddress advertised to agents |
@@ -747,6 +748,7 @@ The complete current router flag set is:
 | `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` |
 | `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` |
 | `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` |
+| `--metrics-bearer-token-file` | `HIVENET_ROUTER_METRICS_BEARER_TOKEN` | Empty (no token) |
 | `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` |
 | `--p2p-listen-addr` | — | `127.0.0.1` |
 | `--p2p-announce-addr` | — | Empty |
