@@ -187,6 +187,38 @@ func TestWakeHold_WakeReleasesEveryRequest(t *testing.T) {
 	}
 }
 
+// TestWakeHold_ClientRetryCountsOnce checks that held requests resending the
+// same client ID count once in the pending demand, although each gets its
+// own router request ID, and that a request without a client ID counts on
+// its own.
+func TestWakeHold_ClientRetryCountsOnce(t *testing.T) {
+	s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1))
+	retry := map[string]string{"Authorization": "Bearer " + redirectKey, "X-Request-ID": "6f1d3a52-0c4b-4d2e-9a8f-2b7c5e1d9a00"}
+	var dones []chan *httptest.ResponseRecorder
+	for range 3 {
+		dones = append(dones, sendAsync(s.testSite, chatPath, chatBody, retry))
+	}
+	dones = append(dones, sendAsync(s.testSite, chatPath, chatBody, bearer()))
+	s.waitHeld(t, "m", 2)
+	time.Sleep(100 * time.Millisecond) // let any late copy be held too
+	if d := s.holder.Demand()["m"]; d != 2 {
+		t.Fatalf("demand = %d, want 2: three copies of one client request and one other request", d)
+	}
+	s.wakeUp("m")
+	ids := map[string]bool{}
+	for range 4 {
+		ids[serveOne(t, s.testSite).ID] = true
+	}
+	if len(ids) != 4 {
+		t.Errorf("%d distinct request IDs served, want 4: the router mints one per request", len(ids))
+	}
+	for i, d := range dones {
+		if w := result(t, d); w.Code != http.StatusOK {
+			t.Fatalf("request %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+}
+
 // TestWakeHold_BudgetExpires checks the placement's hold_budget and the 503
 // model_waking answer.
 func TestWakeHold_BudgetExpires(t *testing.T) {

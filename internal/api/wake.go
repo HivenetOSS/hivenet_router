@@ -108,7 +108,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 
 		resp := newHeldResponse(c)
 		deadline := time.Now().Add(budget)
-		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), c.GetString("request_id"), wake.Options{
+		outcome := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), demandID(c), wake.Options{
 			Budget:      budget,
 			KeepAlive:   h.wakeCfg.KeepAlive,
 			OnKeepAlive: resp.keepAlive,
@@ -296,3 +296,14 @@ func (w *heldWriter) Write(b []byte) (int, error) {
 }
 
 func (w *heldWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
+
+// demandID is the ID a held request is counted under in the pending demand.
+// A client that resends its own ID on a retry is counted once, so that ID is
+// used when the client sent one. Otherwise the router's request ID: each
+// such request counts on its own.
+func demandID(c *gin.Context) string {
+	if id := c.GetString(ctxKeyClientRequestID); id != "" {
+		return id
+	}
+	return c.GetString("request_id")
+}

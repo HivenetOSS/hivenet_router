@@ -15,6 +15,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -121,25 +122,41 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return gin.Recovery()
 }
 
+// Client request ID headers. A client sends its own ID in
+// X-Client-Request-ID, or in X-Request-ID as before; the router echoes it in
+// X-Client-Request-ID.
+const (
+	headerRequestID       = "X-Request-ID"
+	headerClientRequestID = "X-Client-Request-ID"
+	ctxKeyClientRequestID = "client_request_id"
+)
+
 // RequestIDMiddleware gives every request one ID, used end to end.
-// If the caller provides an X-Request-ID header that is a valid UUID (any
-// version) it is reused in canonical form; otherwise a fresh UUIDv7 is
-// generated. Accepting any version lets callers propagate their own IDs, and
-// reusing the caller's ID means a client retry that resends the same header
-// is recognisable as the same request. Rejecting non-UUID values prevents log
-// poisoning via crafted request IDs.
 //
-// The ID is stored in the Gin context ("request_id"), echoed in the
-// X-Request-ID response header, and written back to the request header so
-// the value forwarded to the agent and backend is the same validated ID.
+// The router always mints the ID, a UUIDv7, so no two requests share one,
+// whatever clients send. It is stored in the Gin context ("request_id"),
+// returned in the X-Request-ID response header and forwarded to the agent
+// and backend in X-Request-ID.
+//
+// A client may also send its own ID: X-Client-Request-ID, or X-Request-ID as
+// before. A valid UUID (any version) is kept in canonical form as the client
+// request ID ("client_request_id" in the context and the audit record) and
+// echoed in X-Client-Request-ID. It labels the request and lets a retry be
+// recognised as the same request. It is never forwarded, and an invalid
+// value is dropped, so crafted text can't reach any log.
+//
 // Applied globally so every response — including 401s — is traceable.
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := normalizeRequestID(c.GetHeader("X-Request-ID"))
-		if id == "" {
-			id = newRequestID()
+		raw := c.GetHeader(headerClientRequestID)
+		if raw == "" {
+			raw = c.GetHeader(headerRequestID)
 		}
-		setRequestID(c, id)
+		c.Request.Header.Del(headerClientRequestID)
+		if id, ok := redirect.CanonicalRequestID(raw); ok {
+			setClientRequestID(c, id)
+		}
+		setRequestID(c, newRequestID())
 		c.Next()
 	}
 }
@@ -150,24 +167,21 @@ func RequestIDMiddleware() gin.HandlerFunc {
 // span (so traces can be correlated with audit logs that carry the same ID).
 func setRequestID(c *gin.Context, id string) {
 	c.Set("request_id", id)
-	c.Request.Header.Set("X-Request-ID", id)
-	c.Header("X-Request-ID", id)
+	c.Request.Header.Set(headerRequestID, id)
+	c.Header(headerRequestID, id)
 	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
 		span.SetAttributes(attribute.String("request.id", id))
 	}
 }
 
-// normalizeRequestID returns the canonical form of a caller-supplied request
-// ID, or "" when it is absent or not a valid UUID.
-func normalizeRequestID(raw string) string {
-	if raw == "" {
-		return ""
+// setClientRequestID stores the client's own ID: the Gin context and the
+// X-Client-Request-ID response header.
+func setClientRequestID(c *gin.Context, id string) {
+	c.Set(ctxKeyClientRequestID, id)
+	c.Header(headerClientRequestID, id)
+	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
+		span.SetAttributes(attribute.String("request.client_id", id))
 	}
-	parsed, err := uuid.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return parsed.String()
 }
 
 // newRequestID mints a UUIDv7: time-ordered, so IDs sort by creation time in
@@ -184,12 +198,14 @@ func newRequestID() string {
 
 // requestIDFrom returns the request ID assigned by RequestIDMiddleware. A
 // handler reached without the middleware (only possible in tests) gets a
-// fresh ID so it never runs with an empty one.
+// fresh ID, stored like the middleware's so every later reader sees it.
 func requestIDFrom(c *gin.Context) string {
 	if id := c.GetString("request_id"); id != "" {
 		return id
 	}
-	return newRequestID()
+	id := newRequestID()
+	setRequestID(c, id)
+	return id
 }
 
 // TraceResponseMiddleware injects the W3C traceparent header into HTTP responses.
