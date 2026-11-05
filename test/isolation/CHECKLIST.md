@@ -43,8 +43,8 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 2.3 | A key ID reassigned to another tenant starts from zero. | done | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated` |
 | 2.4 | `X-RateLimit-*` headers describe the calling key only. | done | `TestIsolation_RateLimitHeadersArePerKey` |
 | 2.5 | A key exhausting its request rate or daily tokens never causes a 429 for another key, of its own tenant or another (end to end, output tokens included). | done | `TestIsolation_TwoTenantsQuotaE2E` |
-| 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. | planned (PR-3) | `TestIsolation_RequireModelAllowlist` |
-| 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | planned (PR-3) | `TestEmbeddings_HonoursEffectiveAllowlist` |
+| 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. The setting cannot be combined with auth mode `none`. | done | `TestIsolation_RequireModelAllowlist`, `TestValidateIsolationConfig`, `TestLoadFromEnv_IsolationSwitches` |
+| 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | done | `TestEmbeddings_HonoursEffectiveAllowlist` |
 | 2.8 | A redirect token's scope cannot be widened by the client. | done | `TestIsolation_RedirectTokenCannotWidenScope`, `TestRedirect_Scope` |
 | 2.9 | A key's `scope_max` caps the scope a request may ask for. | Epic F | `TestIsolation_ScopeMaxCapsKeyScope` (skipped until Epic F) |
 | 2.10 | One quota across all of a customer's keys and sites (a tenant-wide budget). | Epic L | none: limits are per key in Epic G; a tenant budget needs a new limit source and belongs with the regional quota |
