@@ -77,7 +77,7 @@ Retry-After: 30
 }
 ```
 
-The same code is returned when the hold budget runs out, when a [hold limit](#hold-limits) is reached, and when a request released by a wake finds no room before its hold budget ends. `retry_after` repeats the `Retry-After` header, in seconds. Retry with the same `X-Request-ID` so the retry is recognized as the same request.
+The same code is returned when the hold budget runs out, when a [hold limit](#hold-limits) is reached, and when a request released by a wake finds no room before its hold budget ends. `retry_after` repeats the `Retry-After` header, in seconds. Send your own ID in `X-Client-Request-ID` (or `X-Request-ID`) and resend it when you retry, so the retry is recognized as the same request.
 
 A client that disconnects while held is recorded with status `499` in the audit log.
 
@@ -111,7 +111,7 @@ The order among released requests is best effort: waiting requests are woken tog
 
 ## Pending demand and the autoscaler
 
-`hivenet_pending_demand{model}` is the number of distinct requests held now for a model. A client that retries the same request, with the same API key and `X-Request-ID`, counts once. Requests from different keys always count separately, even with the same request ID.
+`hivenet_pending_demand{model}` is the number of distinct requests held now for a model. A client that retries the same request, with the same API key and the same [client request ID](/observability/audit-logging#request-ids) (`X-Client-Request-ID` or `X-Request-ID`), counts once. A request without a client ID counts on its own, and requests from different keys always count separately, even with the same client ID.
 
 The metric has a series, `0` when nothing is held, for every model that the map places on this policloud with `scale_from_zero: true`, so an autoscaler’s query always finds it. A model removed from the map leaves no series behind.
 
@@ -125,7 +125,7 @@ When an agent’s connection to the router drops, the agent leaves the routing p
 
 ### Example: KEDA and a LeaderWorkerSet
 
-This example scales a model served by a [LeaderWorkerSet](https://lws.sigs.k8s.io) (LWS) between 0 and 1 replica. The model wakes when a request is held, and stays awake while it serves traffic:
+This example scales a model served by a [LeaderWorkerSet](https://lws.sigs.k8s.io) (LWS) between 0 and 1 replica. The model wakes when a request is held, stays awake while it serves traffic, and goes back to 0 after 30 minutes without requests:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -147,15 +147,18 @@ spec:
     metadata:
       serverAddress: http://prometheus.monitoring.svc:9090
       query: >-
-        sum(hivenet_pending_demand{model="llama-3-70b"})
-        + (sum(increase(hivenet_routing_requests_routed_total{model="llama-3-70b"}[30m])) or vector(0))
+        clamp_max(
+          sum(hivenet_pending_demand{model="llama-3-70b"})
+          + (sum(increase(hivenet_routing_requests_routed_total{model="llama-3-70b"}[2m])) or vector(0)),
+          1)
       threshold: "1"
       activationValue: "0.5"
 ```
 
 - **Wake.** `hivenet_pending_demand` rises above `0` when a request is held, so the trigger becomes active and KEDA scales the LWS from `0` to `1`.
-- **Stay awake.** `increase(...[30m])` counts the requests routed in the last 30 minutes, so a model that is serving traffic is not scaled down while nothing is held.
-- **Idle.** With no held request and no traffic for 30 minutes, the trigger becomes inactive, and KEDA scales the LWS back to `idleReplicaCount: 0` after `cooldownPeriod`.
+- **Stay awake.** `increase(...[2m])` is above `0` for 2 minutes after each routed request, so the trigger stays active while the model serves traffic.
+- **Idle.** `cooldownPeriod` is the idle window. KEDA starts it when the trigger becomes inactive, about 2 minutes after the last request, and scales the LWS back to `idleReplicaCount: 0` at its end. Keep the `increase` window short: a long window adds its own length to the cooldown, so `[30m]` with a 30-minute cooldown keeps an idle model up for about an hour.
+- **On or off only.** `clamp_max(..., 1)` makes the trigger say only whether the model should run. Without it, KEDA also reads the value as a replica count: with `threshold: "1"`, 30 requests in the window ask for 30 replicas. That does not matter with `maxReplicaCount: 1`, but for a model allowed more replicas, scale beyond 1 with a separate trigger on its load.
 - **No data.** `hivenet_routing_requests_routed_total` has no series before the model’s first request, so `or vector(0)` keeps the query from returning no result.
 
 Use `increase`, not `rate`: a per-second rate of a lightly used model stays below any useful threshold. Give the backend container a readiness probe on its health endpoint, so Kubernetes does not report the pod ready before the model can serve.
