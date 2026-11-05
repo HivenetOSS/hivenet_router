@@ -5,6 +5,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/metrics"
@@ -251,6 +252,19 @@ func (s *Server) registerRoutes() {
 		admin.GET("/sibling-map", s.handlers.GetSiblingMap)
 		admin.POST("/sibling-map", s.handlers.ReplaceSiblingMap)
 	}
+}
+
+// ServeHTTP serves one request through the full middleware chain and route
+// table, exactly as Start does over TCP. Tests use it to exercise the real
+// wiring (auth groups, middleware order) without opening a port.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.engine.ServeHTTP(w, r)
+}
+
+// Routes returns every registered method+path. Tests walk it so that a new
+// route cannot be added outside the expected auth group unnoticed.
+func (s *Server) Routes() gin.RoutesInfo {
+	return s.engine.Routes()
 }
 
 // Start starts the HTTP server
