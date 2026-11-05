@@ -27,6 +27,7 @@ import (
 	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/router"
 )
 
 const (
@@ -737,5 +738,218 @@ func TestIsolation_LogsContentFree(t *testing.T) {
 				t.Errorf("%s contains the %s", filepath.Base(path), what)
 			}
 		}
+	}
+}
+
+const (
+	mtSaltSecret   = "e2e-multi-tenant-salt-secret-0123456789"
+	mtMetricsToken = "e2e-metrics-token"
+)
+
+// multiTenant turns on --multi-tenant with a salt secret and a metrics token.
+func multiTenant(c *config.Config) {
+	c.MultiTenant = true
+	c.CacheSaltSecret = mtSaltSecret
+	c.MetricsBearerToken = mtMetricsToken
+}
+
+// TestRouterNew_MultiTenantRefusesOpenMetrics: in multi-tenant mode the
+// router refuses to start while /metrics listens on every interface without
+// a token; a token (or a private bind address) lets it start.
+func TestRouterNew_MultiTenantRefusesOpenMetrics(t *testing.T) {
+	auth := writeAuthYAML(testKey{Token: isoKeyA, Owner: "tenant-a", Name: "a", Models: []string{"m"}})
+	open := routerConfig(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey, Mutate: func(c *config.Config) {
+		multiTenant(c)
+		c.MetricsBearerToken = ""
+	}})
+	if r, err := router.New(open); err == nil {
+		r.Close() //nolint:errcheck
+		t.Fatal("router started in multi-tenant mode with an open /metrics")
+	} else if !strings.Contains(err.Error(), "metrics") {
+		t.Fatalf("error %q does not name /metrics", err)
+	}
+	for name, mutate := range map[string]func(*config.Config){
+		"token": multiTenant,
+		"private address": func(c *config.Config) {
+			multiTenant(c)
+			c.MetricsBearerToken = ""
+			c.MetricsPort = "127.0.0.1" + c.MetricsPort
+		},
+	} {
+		cfg := routerConfig(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey, Mutate: mutate})
+		r, err := router.New(cfg)
+		if err != nil {
+			t.Fatalf("%s: router.New: %v", name, err)
+		}
+		r.Close() //nolint:errcheck
+	}
+}
+
+// TestIsolation_MultiTenantProductionProfile: a router started with only
+// --multi-tenant (plus its secrets) applies every isolation control at once:
+// keys without an allowlist are refused, vLLM bodies carry per-tenant salts,
+// /v1/models/:model hides agent identity, /metrics needs its token, and
+// tenant keys cannot reach /admin. Run with static auth.yaml keys and with
+// dynamic keys pushed through the admin API, as the key-sync service does in
+// production.
+func TestIsolation_MultiTenantProductionProfile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const keyC = "sk-e2e-tenant-c-no-allowlist"
+	keys := []testKey{
+		{Token: isoKeyA, Owner: "tenant-a", Name: "a", Models: []string{"chat-vllm"}},
+		{Token: isoKeyB, Owner: "tenant-b", Name: "b", Models: []string{"chat-vllm"}},
+		{Token: keyC, Owner: "tenant-c", Name: "c"},
+	}
+	for _, mode := range []string{"static", "dynamic"} {
+		t.Run(mode, func(t *testing.T) {
+			opts := routerOpts{AdminKey: isoAdminKey, Mutate: multiTenant}
+			if mode == "static" {
+				opts.AuthYAML = writeAuthYAML(keys...)
+			} else {
+				opts.Mutate = func(c *config.Config) { multiTenant(c); c.AuthMode = "dynamic" }
+			}
+			base, rcfg := startRouterWith(t, opts)
+			if mode == "dynamic" {
+				for i, k := range keys {
+					h := sha256.Sum256([]byte(k.Token))
+					body, _ := json.Marshal(map[string]any{
+						"version": fmt.Sprintf("v%d", i+1), "key_hash": hex.EncodeToString(h[:]),
+						"owner": k.Owner, "name": k.Name, "enabled": true, "allowed_models": k.Models,
+					})
+					req, _ := http.NewRequest(http.MethodPut, base+"/admin/api-keys/key-"+k.Name, strings.NewReader(string(body)))
+					req.Header.Set("Authorization", "Bearer "+isoAdminKey)
+					req.Header.Set("Content-Type", "application/json")
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					resp.Body.Close()
+					if resp.StatusCode != http.StatusOK {
+						t.Fatalf("push key %s: status %d", k.Name, resp.StatusCode)
+					}
+				}
+			}
+			be := &bodyRecorder{}
+			backend := be.start(t, "chat-vllm")
+			startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "chat-vllm", domain.CapabilityLLM)
+			waitFor(t, 30*time.Second, "agent registered and healthy", func() bool { return modelHealthyAs(base, isoKeyA, "chat-vllm") })
+			chat := `{"model":"chat-vllm","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`
+
+			salts := map[string]string{}
+			for name, key := range map[string]string{"a": isoKeyA, "b": isoKeyB} {
+				if code, body := postAs(t, base, key, chat); code != http.StatusOK {
+					t.Fatalf("tenant %s: %d %s", name, code, body)
+				}
+				var got map[string]any
+				_ = json.Unmarshal(be.last().body, &got)
+				salts[name], _ = got["cache_salt"].(string)
+			}
+			if salts["a"] == "" || salts["a"] == salts["b"] {
+				t.Errorf("salts %v, want one per tenant", salts)
+			}
+			if code, _ := postAs(t, base, keyC, chat); code != http.StatusForbidden {
+				t.Errorf("key without an allowlist: status %d, want 403", code)
+			}
+
+			req, _ := http.NewRequest(http.MethodGet, base+"/v1/models/chat-vllm", nil)
+			req.Header.Set("Authorization", "Bearer "+isoKeyA)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || strings.Contains(string(detail), "peer_id") {
+				t.Errorf("/v1/models/chat-vllm: status %d body %s, want 200 without peer_id", resp.StatusCode, detail)
+			}
+
+			metricsURL := "http://127.0.0.1" + rcfg.MetricsPort + "/metrics"
+			if resp, err := http.Get(metricsURL); err != nil || resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("/metrics without token: %v %v, want 401", resp.StatusCode, err)
+			}
+			mreq, _ := http.NewRequest(http.MethodGet, metricsURL, nil)
+			mreq.Header.Set("Authorization", "Bearer "+mtMetricsToken)
+			if resp, err := http.DefaultClient.Do(mreq); err != nil || resp.StatusCode != http.StatusOK {
+				t.Errorf("/metrics with token: %v %v, want 200", resp.StatusCode, err)
+			}
+
+			areq, _ := http.NewRequest(http.MethodGet, base+"/admin/api-keys", nil)
+			areq.Header.Set("Authorization", "Bearer "+isoKeyA)
+			if resp, err := http.DefaultClient.Do(areq); err != nil || resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("/admin with a tenant key: %v %v, want 401", resp.StatusCode, err)
+			}
+		})
+	}
+}
+
+// TestIsolation_SIGHUPCannotDropToNoAuth: in multi-tenant mode an auth
+// reload (what SIGHUP does) that would switch API auth to mode none is
+// refused, and the previous keys stay in force.
+func TestIsolation_SIGHUPCannotDropToNoAuth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, rcfg, r := startRouterHandle(t, routerOpts{
+		AuthYAML: writeAuthYAML(testKey{Token: isoKeyA, Owner: "tenant-a", Name: "a", Models: []string{stubModel}}),
+		AdminKey: isoAdminKey, Mutate: multiTenant,
+	})
+	startAgentWith(t, rcfg, (&bodyRecorder{}).start(t, stubModel).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool { return modelHealthyAs(base, isoKeyA, stubModel) })
+
+	if err := os.WriteFile(rcfg.AuthConfigFile, []byte("api:\n  mode: none\nadmin:\n  mode: api-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.ReloadAuthProviders()
+
+	chat := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":5}`, stubModel)
+	if code, body := postAs(t, base, "", chat); code != http.StatusUnauthorized {
+		t.Errorf("no key after the rejected reload: status %d %s, want 401", code, body)
+	}
+	if code, body := postAs(t, base, isoKeyA, chat); code != http.StatusOK {
+		t.Errorf("tenant key after the rejected reload: status %d %s, want 200", code, body)
+	}
+}
+
+// TestIsolation_MultiTenantCacheSaltOptOut: on a multi-tenant router,
+// prefix-cache isolation can be switched off only explicitly. The router then
+// forwards bodies byte-identical (no router salt exists that a client salt
+// could imitate), and counts every LLM agent in hivenet_cache_isolation_gaps,
+// so the opt-out is visible.
+func TestIsolation_MultiTenantCacheSaltOptOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, rcfg := startRouterWith(t, routerOpts{
+		AuthYAML: writeAuthYAML(testKey{Token: isoKeyA, Owner: "tenant-a", Name: "a", Models: []string{"chat-vllm"}}),
+		AdminKey: isoAdminKey,
+		Mutate: func(c *config.Config) {
+			multiTenant(c)
+			c.CacheSaltSet, c.CacheSalt = true, false
+		},
+	})
+	be := &bodyRecorder{}
+	backend := be.start(t, "chat-vllm")
+	startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "chat-vllm", domain.CapabilityLLM)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool { return modelHealthyAs(base, isoKeyA, "chat-vllm") })
+
+	sent := `{"model":"chat-vllm","cache_salt":"client-chosen","messages":[{"role":"user","content":"hi"}],"max_tokens":5}`
+	if code, body := postAs(t, base, isoKeyA, sent); code != http.StatusOK {
+		t.Fatalf("status %d %s", code, body)
+	}
+	if got := string(be.last().body); got != sent {
+		t.Errorf("backend got %s, want the client's body unchanged with isolation off", got)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1"+rcfg.MetricsPort+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+mtMetricsToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if want := `hivenet_cache_isolation_gaps{engine="vllm",model="chat-vllm"} 1`; !strings.Contains(string(raw), want) {
+		t.Errorf("metrics lack %s", want)
 	}
 }

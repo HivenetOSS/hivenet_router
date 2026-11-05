@@ -71,6 +71,7 @@ func main() {
 	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
 	cacheSalt := flag.Bool("cache-salt", cfg.CacheSalt, "Set a per-tenant cache_salt on requests to vLLM agents and strip any client-sent one, so tenants never share prefix-cache blocks; requires a salt secret (env: HIVENET_ROUTER_CACHE_SALT)")
 	cacheSaltSecretFile := flag.String("cache-salt-secret-file", "", "Path to file containing the router-only cache-salt secret (env: HIVENET_ROUTER_CACHE_SALT_SECRET; required with --cache-salt, >= 32 bytes, must differ from the JWT secret; the same on every router in front of the same agents)")
+	multiTenant := flag.Bool("multi-tenant", cfg.MultiTenant, "Harden for serving several customers: require model allowlists, isolate the prefix cache per tenant (opt out only with an explicit --cache-salt=false), hide agent identity; refuse auth mode none, insecure admin, an open /metrics, and several routers without --sync-store=valkey and its password (env: HIVENET_ROUTER_MULTI_TENANT)")
 	hideAgentIdentity := flag.Bool("hide-agent-identity", cfg.HideAgentIdentity, "Leave agent peer IDs, organization, machine, version and last-seen time out of GET /v1/models/:model; the admin view keeps them (env: HIVENET_ROUTER_HIDE_AGENT_IDENTITY)")
 	requireModelAllowlist := flag.Bool("require-model-allowlist", cfg.RequireModelAllowlist, "Refuse every model to a key that has no model allowlist (models / allowed_models / quota.per_model), instead of allowing all; for shared multi-tenant routers (env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST)")
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
@@ -136,7 +137,14 @@ func main() {
 	cfg.ResetKeyStore = *resetKeyStore
 	cfg.RequireModelAllowlist = *requireModelAllowlist
 	cfg.CacheSalt = *cacheSalt
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cache-salt" {
+			cfg.CacheSaltSet = true
+		}
+	})
 	cfg.HideAgentIdentity = *hideAgentIdentity
+	cfg.MultiTenant = *multiTenant
+	router.ApplyMultiTenant(cfg) // also applied by router.New; here so the banner shows the effective settings
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
@@ -344,6 +352,11 @@ func main() {
 			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
 		}
 		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
+	if cfg.MultiTenant && cfg.CacheSalt {
+		log.Info("  Multi-tenant:        on (allowlists required, per-tenant cache isolation, agent identity hidden)")
+	} else if cfg.MultiTenant {
+		log.Warn("  Multi-tenant:        on, but prefix-cache isolation is OFF (--cache-salt=false)")
 	}
 	if cfg.CacheSalt {
 		log.Infof("  Prefix-cache salt:   per tenant (vLLM agents)")

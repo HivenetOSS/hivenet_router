@@ -373,8 +373,8 @@ func TestLoadFromEnv_AdmissionQueueDepth(t *testing.T) {
 // off, read booleans from the environment, and an unparsable value stops
 // startup (EnvErrors) instead of silently leaving isolation off.
 func TestLoadFromEnv_IsolationSwitches(t *testing.T) {
-	if c := config.LoadFromEnv(); c.RequireModelAllowlist {
-		t.Error("RequireModelAllowlist defaults on, want off")
+	if c := config.LoadFromEnv(); c.RequireModelAllowlist || c.CacheSaltSet {
+		t.Error("RequireModelAllowlist defaults on, or CacheSalt counts as set with no env, want neither")
 	}
 	t.Setenv("HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", "true")
 	if c := config.LoadFromEnv(); !c.RequireModelAllowlist || len(c.EnvErrors) != 0 {
@@ -386,12 +386,24 @@ func TestLoadFromEnv_IsolationSwitches(t *testing.T) {
 	}
 	t.Setenv("HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", "")
 
+	// An empty HIVENET_ROUTER_CACHE_SALT is not an explicit opt-out.
+	t.Setenv("HIVENET_ROUTER_CACHE_SALT", "")
+	if c := config.LoadFromEnv(); c.CacheSaltSet || c.CacheSalt {
+		t.Errorf("empty HIVENET_ROUTER_CACHE_SALT: set=%v value=%v, want unset", c.CacheSaltSet, c.CacheSalt)
+	}
+	t.Setenv("HIVENET_ROUTER_CACHE_SALT", "false")
+	if c := config.LoadFromEnv(); !c.CacheSaltSet || c.CacheSalt {
+		t.Errorf("HIVENET_ROUTER_CACHE_SALT=false: set=%v value=%v, want an explicit off", c.CacheSaltSet, c.CacheSalt)
+	}
+
 	t.Setenv("HIVENET_ROUTER_CACHE_SALT", "1")
 	t.Setenv("HIVENET_ROUTER_CACHE_SALT_SECRET", "  a-secret  ")
 	t.Setenv("HIVENET_ROUTER_HIDE_AGENT_IDENTITY", "true")
+	t.Setenv("HIVENET_ROUTER_MULTI_TENANT", "true")
+	t.Setenv("HIVENET_ROUTER_METRICS_BEARER_TOKEN", " tok ")
 	c := config.LoadFromEnv()
-	if !c.CacheSalt || c.CacheSaltSecret != "a-secret" || !c.HideAgentIdentity || len(c.EnvErrors) != 0 {
-		t.Errorf("CacheSalt=%v secret=%q HideAgentIdentity=%v errors=%v, want true, trimmed secret, true, none",
-			c.CacheSalt, c.CacheSaltSecret, c.HideAgentIdentity, c.EnvErrors)
+	if !c.CacheSalt || !c.CacheSaltSet || c.CacheSaltSecret != "a-secret" || !c.HideAgentIdentity || !c.MultiTenant || c.MetricsBearerToken != "tok" || len(c.EnvErrors) != 0 {
+		t.Errorf("CacheSalt=%v secret=%q HideAgentIdentity=%v MultiTenant=%v token=%q errors=%v, want all set, trimmed, none",
+			c.CacheSalt, c.CacheSaltSecret, c.HideAgentIdentity, c.MultiTenant, c.MetricsBearerToken, c.EnvErrors)
 	}
 }

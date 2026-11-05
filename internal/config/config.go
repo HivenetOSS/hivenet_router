@@ -269,6 +269,13 @@ type Config struct {
 	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
 
+	// MultiTenant hardens the router for serving several customers: it turns
+	// on RequireModelAllowlist, CacheSalt and HideAgentIdentity, and startup
+	// refuses API or admin auth mode none and an unauthenticated /metrics on
+	// every interface (see router.ApplyMultiTenant, ValidateIsolationConfig).
+	// Flag: --multi-tenant   Env: HIVENET_ROUTER_MULTI_TENANT
+	MultiTenant bool
+
 	// RequireModelAllowlist makes a key with no model allowlist (no `models`
 	// / `allowed_models` and no `quota.per_model`) unable to call or list any
 	// model, instead of every model. For shared multi-tenant routers, where an
@@ -293,6 +300,9 @@ type Config struct {
 	// channel). Requires CacheSaltSecret.
 	// Flag: --cache-salt   Env: HIVENET_ROUTER_CACHE_SALT
 	CacheSalt bool
+	// CacheSaltSet records that CacheSalt was set explicitly (flag or env), so
+	// --multi-tenant turns salting on by default but honours an explicit off.
+	CacheSaltSet bool
 
 	// CacheSaltSecret keys the per-tenant salt HMAC. At least 32 bytes, the same
 	// on every router in front of the same agents, and never given to agents.
@@ -615,8 +625,11 @@ func LoadFromEnv() *Config {
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
 		cfg.KeyStoreSecret = v
 	}
+	envBool(cfg, "HIVENET_ROUTER_MULTI_TENANT", &cfg.MultiTenant)
 	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
-	envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
+	// Only a value that parses counts as set: an empty variable must not opt
+	// a multi-tenant router out of prefix-cache isolation.
+	cfg.CacheSaltSet = envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
 	envBool(cfg, "HIVENET_ROUTER_HIDE_AGENT_IDENTITY", &cfg.HideAgentIdentity)
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_METRICS_BEARER_TOKEN")); v != "" {
 		cfg.MetricsBearerToken = v
@@ -654,18 +667,20 @@ func (c *AgentConfig) RouterList() []string {
 }
 
 // envBool sets *dst from the boolean environment variable name when it is
-// set, collecting an unparsable value in cfg.EnvErrors (which stops startup).
-func envBool(cfg *Config, name string, dst *bool) {
+// set and not empty, collecting an unparsable value in cfg.EnvErrors (which
+// stops startup). It reports whether it assigned a value.
+func envBool(cfg *Config, name string, dst *bool) bool {
 	v := os.Getenv(name)
 	if v == "" {
-		return
+		return false
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
 		cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: %w", name, v, err))
-		return
+		return false
 	}
 	*dst = b
+	return true
 }
 
 // AgentConfig holds configuration specific to agents

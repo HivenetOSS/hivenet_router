@@ -17,7 +17,6 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 **Status values:**
 
 - `done`: the test exists and passes.
-- `planned (PR-n)`: will land in that PR of the Epic G stack.
 - `Epic X`: owned by another epic.
 - `infra`, `platform`: owned outside this repository.
 - `out of scope`: decided not to do; the reason is in the note.
@@ -32,7 +31,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 1.4 | Key IDs and owners cannot contain characters that alias another key's counters. | done | `TestKeyIdentifiers_RejectControlChars` |
 | 1.5 | A redirect token resolves to its own key and tenant at the target. | done | `TestRedirect_AtTheTarget` |
 | 1.6 | Concurrent responses are never delivered to the wrong request or tenant, streaming or not. | done | `TestIsolation_ConcurrentResponsesNotCrossWired` |
-| 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP. | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
+| 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP (the previous keys stay in force). | done | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
 
 ## 2. Per-customer counters, limits and scope
 
@@ -72,7 +71,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.3 | The audit log file is readable by its owner only (0600). | done | `TestIsolation_AuditFileMode` |
 | 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage and limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
 | 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | done | `TestMetricsHandler_BearerToken`, `TestIsWildcardAddr` |
-| 4.6 | Multi-tenant mode refuses to start with an open `/metrics`. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics` |
+| 4.6 | Multi-tenant mode refuses to start with an open `/metrics` (every interface, no token). | done | `TestRouterNew_MultiTenantRefusesOpenMetrics`, `TestValidateIsolationConfig` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |
 
 ## 5. No admin endpoint leaking across customers
@@ -86,16 +85,24 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine, version, last seen); the admin view keeps it. | done | `TestIsolation_ModelDetailHidesAgentIdentity` |
 | 5.6 | Model discovery never names models outside the key's allowlist. | done | `TestIsolation_TenantFromKeyOnly` (identity), `handlers_models_test.go` (filtering) |
 | 5.7 | A per-customer admin role. | out of scope | none: admin stays operator-only |
-| 5.8 | Multi-tenant mode refuses insecure admin. | planned (PR-8) | `TestValidateIsolationConfig` |
+| 5.8 | Multi-tenant mode refuses insecure admin. | done | `TestValidateIsolationConfig` |
 
-## 6. Doc-18 gaps owned elsewhere
+## 6. Multi-tenant mode
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 6.1 | G1: a key reaches only its own dedicated replicas. | Epic N | none |
-| 6.2 | G2: client credentials are stripped before the agent. | done | `TestBackendAPIKeyEndToEnd` |
-| 6.3 | G4: TLS for `/v1` in-process. | out of scope | none: TLS terminates in front of the router |
-| 6.4 | G5: one collision-free request ID end to end. | Epic A | none: branch `feat/single-request-id` |
-| 6.5 | G6: per-agent credentials; agent-reported metadata verified. | out of scope | none |
-| 6.6 | G7: a type that makes body logging impossible. | out of scope | none: 4.2 is the regression test |
-| 6.7 | vLLM ②: GPU memory residue between successive tenants. | platform | none: GPU reset at hand-off (doc 16) |
+| 6.1 | `--multi-tenant` turns on every control above at once; the allowlist and agent-identity settings cannot be turned off. It works with static keys and with dynamic keys pushed by key-sync, as in production. | done | `TestIsolation_MultiTenantProductionProfile`, `TestApplyMultiTenant` |
+| 6.2 | With several routers in a site (`--sync-min-routers` above 1), multi-tenant mode needs shared counters (`--sync-store=valkey`) and a Valkey password, so per-key limits hold site-wide. | done | `TestValidateIsolationConfig`, `TestPerKeyBudgetsSharedAcrossRouters`, `TestTenantUsageSiteWide` |
+| 6.3 | Prefix-cache isolation is on by default in multi-tenant mode and can be switched off only explicitly; the router then warns and counts every LLM agent as a gap. | done | `TestApplyMultiTenant`, `TestIsolation_MultiTenantCacheSaltOptOut` |
+
+## 7. Doc-18 gaps owned elsewhere
+
+| # | Line | Status | Tests |
+|---|---|---|---|
+| 7.1 | G1: a key reaches only its own dedicated replicas. | Epic N | none |
+| 7.2 | G2: client credentials are stripped before the agent. | done | `TestBackendAPIKeyEndToEnd` |
+| 7.3 | G4: TLS for `/v1` in-process. | out of scope | none: TLS terminates in front of the router |
+| 7.4 | G5: one collision-free request ID end to end. | Epic A | none: branch `feat/single-request-id` |
+| 7.5 | G6: per-agent credentials; agent-reported metadata verified. | out of scope | none: agents run only on operator infrastructure; per-agent credentials are tracked separately |
+| 7.6 | G7: a type that makes body logging impossible. | out of scope | none: 4.2 is the regression test |
+| 7.7 | vLLM ②: GPU memory residue between successive tenants. | platform | none: GPU reset at hand-off (doc 16) |
