@@ -43,8 +43,8 @@ type PendingRequest struct {
 	TokensPerDay int
 
 	// QuotaModel selects the limiter bucket for AllowOutputTokens. Empty for
-	// legacy flat keys (one bucket per tenant); set to the requested model
-	// name for per-model keys (one bucket per (tenant, model)). Stamped by the
+	// flat keys (one bucket per key); set to the requested model name for
+	// per-model keys (one bucket per (key, model)). Stamped by the
 	// handler at enqueue time so the processor charges the SAME bucket the
 	// front-door admission charged AllowInputTokens against.
 	QuotaModel string

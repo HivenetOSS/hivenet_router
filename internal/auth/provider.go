@@ -34,7 +34,7 @@ type PerModelQuotaLimits struct {
 	TokensPerDay int
 }
 
-// QuotaLimits defines per-tenant rate limits. Zero means unlimited.
+// QuotaLimits defines one key's rate limits. Zero means unlimited.
 //
 // Two shapes are supported and the loader rejects mixing them on the same key:
 //
@@ -80,6 +80,63 @@ func (q QuotaLimits) ResolvePerModel(model string) (PerModelQuotaLimits, bool) {
 	return entry, ok
 }
 
+// addCeiling sums two per-key ceilings where 0 means unlimited: the sum is
+// unlimited if either is.
+func addCeiling(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	return a + b
+}
+
+// tenantCeilings sums the limits of one tenant's keys into the tenant's total
+// ceiling, for the per-tenant limit gauges. Limits are enforced per key, so a
+// tenant can use up to the sum of its keys' limits; a key with an unlimited
+// (0) value makes that total unlimited. Flat-shape fields are summed over the
+// flat-shape keys only, and each per-model entry over the keys that declare
+// that model (a per-model key cannot call an undeclared model). With one key,
+// the result is that key's limits unchanged.
+func tenantCeilings(keys []QuotaLimits) QuotaLimits {
+	var out QuotaLimits
+	flat := 0
+	for _, q := range keys {
+		if q.PerModel != nil {
+			if out.PerModel == nil {
+				out.PerModel = make(map[string]PerModelQuotaLimits, len(q.PerModel))
+			}
+			for model, e := range q.PerModel {
+				if prev, ok := out.PerModel[model]; ok {
+					e.RequestsPerMinutePerReplica = addCeiling(prev.RequestsPerMinutePerReplica, e.RequestsPerMinutePerReplica)
+					e.TokensPerDay = addCeiling(prev.TokensPerDay, e.TokensPerDay)
+				}
+				out.PerModel[model] = e
+			}
+		}
+		if q.PerModel != nil && q.RequestsPerMinute == 0 && q.TokensPerDay == 0 {
+			// A per-model key has no flat ceiling; it must not turn the
+			// tenant's flat total into "unlimited".
+			continue
+		}
+		if flat == 0 {
+			out.RequestsPerMinute, out.TokensPerDay = q.RequestsPerMinute, q.TokensPerDay
+			out.InputTokensPerMinute, out.OutputTokensPerMinute = q.InputTokensPerMinute, q.OutputTokensPerMinute
+			out.MaxOccupancyShare = q.MaxOccupancyShare
+		} else {
+			out.RequestsPerMinute = addCeiling(out.RequestsPerMinute, q.RequestsPerMinute)
+			out.TokensPerDay = addCeiling(out.TokensPerDay, q.TokensPerDay)
+			out.InputTokensPerMinute = addCeiling(out.InputTokensPerMinute, q.InputTokensPerMinute)
+			out.OutputTokensPerMinute = addCeiling(out.OutputTokensPerMinute, q.OutputTokensPerMinute)
+			if out.MaxOccupancyShare == 0 || q.MaxOccupancyShare == 0 {
+				out.MaxOccupancyShare = 0
+			} else {
+				out.MaxOccupancyShare = min(1, out.MaxOccupancyShare+q.MaxOccupancyShare)
+			}
+		}
+		flat++
+	}
+	return out
+}
+
 // AuthResult is returned by a successful Provider.Authenticate call.
 // It carries the resolved identity, quota limits, and access restrictions
 // for downstream enforcement and audit logging.
@@ -105,8 +162,8 @@ type AuthResult struct {
 	// Checked in the inference handlers after the request body is parsed.
 	AllowedModels []string
 
-	// QuotaLimits holds the rate/token limits for this tenant.
-	// Zero values mean unlimited. Enforcement is planned for Ticket 5.
+	// QuotaLimits holds this key's rate/token limits, enforced per key by
+	// QuotaMiddleware and the handlers. Zero values mean unlimited.
 	QuotaLimits QuotaLimits
 
 	// Redirect is set only for a request authenticated by a cross-site

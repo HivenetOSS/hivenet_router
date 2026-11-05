@@ -60,7 +60,7 @@ type countingLimiter struct {
 	charges int
 }
 
-func (l *countingLimiter) AllowRequest(string, string, int) (bool, int, error) {
+func (l *countingLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
 	l.charges++
 	return true, -1, nil
 }

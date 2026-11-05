@@ -449,17 +449,12 @@ func (r *DynamicKeyProvider) GetKey(keyID string) (DynamicKeyEntry, bool) {
 	return entry, true
 }
 
-// Tenants returns the deduped per-tenant quota limits, used by the router to
-// pre-populate Prometheus quota gauges so the Grafana $tenant_id variable is
-// populated within the first scrape. Mirrors StaticKeyProvider.Tenants().
-//
-// A tenant may have multiple keys with different QuotaLimits — the actual
-// per-request limit is whichever quota is carried by the key the caller
-// authenticates with, applied by QuotaMiddleware on every request. This
-// function only seeds an initial value so the Grafana variable populates
-// before any traffic arrives; the per-request gauge writes will overwrite
-// it. Iterates byID in sorted order so the seeded value is deterministic
-// across restarts (the alphabetically last key ID wins per tenant).
+// Tenants returns every tenant's total ceiling: the limits of its keys
+// summed (see tenantCeilings). Used by the router to pre-populate the
+// per-tenant Prometheus quota gauges so the Grafana $tenant_id variable is
+// populated within the first scrape; re-published on every registry change.
+// Mirrors StaticKeyProvider.Tenants(). Enforcement is per key and never
+// reads this. Iterates byID in sorted order so the result is deterministic.
 func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -468,10 +463,14 @@ func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	out := make(map[string]QuotaLimits, len(ids))
+	byTenant := make(map[string][]QuotaLimits)
 	for _, id := range ids {
 		e := r.byID[id]
-		out[e.Owner] = e.Quota
+		byTenant[e.Owner] = append(byTenant[e.Owner], e.Quota)
+	}
+	out := make(map[string]QuotaLimits, len(byTenant))
+	for tenant, keys := range byTenant {
+		out[tenant] = tenantCeilings(keys)
 	}
 	return out
 }

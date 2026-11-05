@@ -19,7 +19,7 @@ func TestSweepIdle_KeepsDrainedRPMBucket(t *testing.T) {
 	l := auth.NewInMemoryLimiter()
 	// rpm 60 → refilling the deducted token takes a full second; the bucket is
 	// still partial when the sweep runs immediately after.
-	if allowed, _, _ := l.AllowRequest("t1", "", 60); !allowed {
+	if allowed, _, _ := l.AllowRequest("t1", "key", "", 60); !allowed {
 		t.Fatal("first request must pass")
 	}
 	if n := l.SweepIdle(); n != 0 {
@@ -33,7 +33,7 @@ func TestSweepIdle_KeepsDrainedRPMBucket(t *testing.T) {
 func TestSweepIdle_EvictsRefilledRPMBucket(t *testing.T) {
 	l := auth.NewInMemoryLimiter()
 	// rpm 60000 → the single deducted token refills in ~1ms.
-	if allowed, _, _ := l.AllowRequest("t1", "", 60000); !allowed {
+	if allowed, _, _ := l.AllowRequest("t1", "key", "", 60000); !allowed {
 		t.Fatal("first request must pass")
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -41,7 +41,7 @@ func TestSweepIdle_EvictsRefilledRPMBucket(t *testing.T) {
 		t.Fatalf("SweepIdle evicted %d entries, want 1 (bucket refilled to full)", n)
 	}
 	// The next request recreates the bucket transparently.
-	if allowed, _, _ := l.AllowRequest("t1", "", 60000); !allowed {
+	if allowed, _, _ := l.AllowRequest("t1", "key", "", 60000); !allowed {
 		t.Error("request after eviction must pass on a fresh bucket")
 	}
 }
@@ -51,13 +51,13 @@ func TestSweepIdle_EvictsRefilledRPMBucket(t *testing.T) {
 // must live until its day rolls over.
 func TestSweepIdle_KeepsTodaysDailyBucket(t *testing.T) {
 	l := auth.NewInMemoryLimiter()
-	allowed, remaining, _ := l.AllowInputTokens("t1", "", 1000, 400)
+	allowed, remaining, _ := l.AllowInputTokens("t1", "key", "", 1000, 400)
 	if !allowed {
 		t.Fatal("input tokens must be allowed")
 	}
 	l.SweepIdle()
 	// The used count must be intact: a second charge sees the earlier one.
-	allowed, remaining2, _ := l.AllowInputTokens("t1", "", 1000, 100)
+	allowed, remaining2, _ := l.AllowInputTokens("t1", "key", "", 1000, 100)
 	if !allowed {
 		t.Fatal("second charge must be allowed")
 	}

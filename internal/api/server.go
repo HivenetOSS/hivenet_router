@@ -35,7 +35,7 @@ type Server struct {
 	// adminAuth authenticates requests to /admin/* endpoints.
 	adminAuth auth.Provider
 
-	// rateLimiter enforces per-tenant RPM and daily token limits on /v1/* endpoints.
+	// rateLimiter enforces per-key RPM and daily token limits on /v1/* endpoints.
 	rateLimiter auth.RateLimiter
 
 	// routerMetrics provides tenant quota gauge recording.
@@ -48,7 +48,7 @@ type Server struct {
 	// May be nil. A nil counter does NOT disable per-model quota enforcement —
 	// per-model keys remain enforced, but the per-replica multiplication is
 	// skipped and requests_per_minute_per_replica is treated as a flat ceiling
-	// for the (tenant, model) bucket. The "no live backends → skip quota and
+	// for the (key, model) bucket. The "no live backends → skip quota and
 	// let routing surface its own error" behaviour also stops applying when
 	// the counter is nil (with no way to read replica count, we can't detect
 	// the zero-replicas case). Production wiring always passes a non-nil

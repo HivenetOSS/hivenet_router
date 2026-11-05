@@ -29,7 +29,7 @@ const (
 	PrefixUnivHistory      = "universalHistory:"  // lifetime counters + RTT        — Ticket 2b (diskDB)
 	PrefixEngPunctual      = "enginePunctual:"    // engine real-time snapshots    — Ticket 3
 	PrefixHardwareSnapshot = "hardwareSnapshot:"  // latest GPU/CPU/memory reading — HAI-65 (memDB)
-	PrefixQuotaTPD         = "quotaTPD:"          // per-tenant daily token counter — HAI-109 (diskDB)
+	PrefixQuotaTPD         = "quotaTPDk:"         // per-key daily token counter — HAI-109 (diskDB); legacy per-tenant "quotaTPD:" keys expire via TTL
 )
 
 // BadgerStorage implements RoutingStorage using two BadgerDB instances:
@@ -360,7 +360,7 @@ func (s *BadgerStorage) DeleteEnginePunctual(peerID peer.ID) error {
 
 // GetTokensUsed reads the daily token count for the given key from diskDB.
 // Returns (0, nil) if the key does not exist yet (first use of the day).
-// Key format: "quotaTPD:{tenantID}:{dayIndex}"
+// Key format: "quotaTPDk:{bucket}:{dayIndex}" (see auth.badgerTPDKey)
 func (s *BadgerStorage) GetTokensUsed(key string) (int64, error) {
 	var count int64
 	err := s.diskDB.View(func(txn *badger.Txn) error {
@@ -385,7 +385,7 @@ func (s *BadgerStorage) GetTokensUsed(key string) (int64, error) {
 // SetTokensUsed writes the daily token count for the given key to diskDB with
 // the specified TTL. A 48 h TTL is recommended so a counter written late at
 // night remains readable after midnight if the router restarts.
-// Key format: "quotaTPD:{tenantID}:{dayIndex}"
+// Key format: "quotaTPDk:{bucket}:{dayIndex}" (see auth.badgerTPDKey)
 func (s *BadgerStorage) SetTokensUsed(key string, count int64, ttl time.Duration) error {
 	if count < 0 {
 		return fmt.Errorf("SetTokensUsed: count must be non-negative, got %d", count)
@@ -403,7 +403,7 @@ func (s *BadgerStorage) SetTokensUsed(key string, count int64, ttl time.Duration
 
 // ResetUniversalHistory deletes every universalHistory: key from diskDB, clearing
 // all persisted lifetime per-agent counters. DropPrefix is an efficient bulk delete.
-// Only the universalHistory: prefix is removed — quotaTPD: (billing) and all memDB
+// Only the universalHistory: prefix is removed — quotaTPDk: (billing) and all memDB
 // keys are left intact.
 func (s *BadgerStorage) ResetUniversalHistory() error {
 	return s.diskDB.DropPrefix([]byte(PrefixUnivHistory))
