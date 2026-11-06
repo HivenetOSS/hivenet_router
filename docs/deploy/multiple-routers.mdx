@@ -15,7 +15,8 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Requests per minute | Yes | Within one sync interval of usage |
 | Input and output tokens per minute | Yes | Within one sync interval of usage |
 | Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
-| Occupancy budgets (B2, B4) | No | Each router applies its own budget |
+| Occupancy budgets (B2, B4) | No | Each router admits its share: the budget and `max_inflight` divided by the live routers, so the routers together stay within them |
+| Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
 | Dynamic API keys | No | Push key changes to every router |
 
 Requests never wait on the store. Every router keeps deciding in memory, exactly as a single router does.
@@ -79,6 +80,32 @@ hivenet-router \
 <Warning>
   The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
 </Warning>
+
+## Connect agents to every router
+
+Give each agent the gRPC address of every router of the site with `--routers` (or `HIVENET_AGENT_ROUTERS`):
+
+```bash
+HIVENET_ROUTER_JWT_SECRET=<site-secret> hivenet-agent \
+  --engine vllm \
+  --backend-url http://127.0.0.1:8000 \
+  --routers router-0:50051,router-1:50051,router-2:50051
+```
+
+The agent keeps one independent session with each router: authentication, registration, heartbeat, routing signals and re-authentication. It reconnects each session on its own, with exponential backoff from 1 s up to 30 s, with jitter.
+
+- A router that is down or restarting does not affect the agent's sessions with the other routers.
+- A router that comes up later is picked up automatically.
+- The agent polls the engine metrics and checks the backend health once, for all sessions.
+
+Requirements:
+
+- Every router of the site uses the same JWT secret.
+- Each router sends its libp2p address in the authentication response. A router behind NAT must set `--p2p-announce-addr` to an address the agents can reach.
+
+`--router-grpc` still connects an agent to a single router; it is used when `--routers` is empty.
+
+Each agent reports how many requests it has in flight from all routers. Every router ranks agents by the larger of that report and its own in-flight requests, so the routers spread work by the agent's real load.
 
 ## Monitor
 

@@ -283,7 +283,6 @@ On `gpu-eu-1`:
   --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --capacity 32 \
   --region EU-Primary \
   --identity-path /opt/hivenet-router/agent_identity.key
 ```
@@ -298,7 +297,6 @@ On `gpu-eu-2`:
   --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --capacity 32 \
   --region EU-Secondary \
   --identity-path /opt/hivenet-router/agent_identity.key
 ```
@@ -313,18 +311,18 @@ On `gpu-us-1`:
   --jwt-secret-file /opt/hivenet-router/jwt.secret \
   --engine ollama \
   --backend-url http://localhost:11434 \
-  --capacity 5 \
   --region US-Primary \
   --identity-path /opt/hivenet-router/agent_identity.key
 ```
 
-This example gives the Ollama agent a capacity of `5`. Set capacity according to the concurrency your backend can handle.
+The router bounds vLLM agents by the KV-cache size they report. Ollama reports none: to bound the Ollama agent, set `max_inflight` or `admit_budget_tokens` in its model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
-For a multi-machine deployment, these two agent settings are particularly important:
+For a multi-machine deployment, these agent settings are particularly important:
 
 | Setting | Purpose |
 | --- | --- |
 | `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+| `--routers` | Use instead of `--router-grpc` when the site runs several routers: a comma-separated list of every router's gRPC address. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router) |
 | `--identity-path` | Preserves the agent’s peer identity across restarts |
 
 Agents initiate the connection to the router. You do not need to expose an inbound agent port or configure an agent announce address.
@@ -356,7 +354,7 @@ With all three agents healthy, the response should resemble:
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "engine": "vllm",
       "version": "dev",
-      "capacity": 32,
+      "capacity": 0,
       "region": "EU-Primary",
       "is_healthy": true,
       "last_seen": 1760000000
@@ -366,7 +364,7 @@ With all three agents healthy, the response should resemble:
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "engine": "vllm",
       "version": "dev",
-      "capacity": 32,
+      "capacity": 0,
       "region": "EU-Secondary",
       "is_healthy": true,
       "last_seen": 1760000000
@@ -376,7 +374,7 @@ With all three agents healthy, the response should resemble:
       "model": "llama3.1:8b",
       "engine": "ollama",
       "version": "dev",
-      "capacity": 5,
+      "capacity": 0,
       "region": "US-Primary",
       "is_healthy": true,
       "last_seen": 1760000000

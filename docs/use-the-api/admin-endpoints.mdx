@@ -155,7 +155,7 @@ A response resembles:
       "model": "openai/gpt-oss-20b",
       "engine": "vllm",
       "version": "13e0ea7a8298b9b5ec37a826e1b21a99b702d513",
-      "capacity": 20,
+      "capacity": 0,
       "region": "EU",
       "is_healthy": true,
       "last_seen": 1776870991
@@ -175,7 +175,7 @@ A response resembles:
 | `agents[].model` | Model registered by the agent |
 | `agents[].engine` | Backend engine type |
 | `agents[].version` | Version reported by the agent |
-| `agents[].capacity` | Declared maximum concurrent requests |
+| `agents[].capacity` | Declared maximum concurrent requests; `0` for network-registered agents, because routers ignore the agent's `--capacity` |
 | `agents[].region` | Operator-defined region metadata |
 | `agents[].is_healthy` | Current agent health state |
 | `agents[].last_seen` | Unix timestamp of the last heartbeat |
@@ -220,7 +220,7 @@ A shortened response resembles:
         "region": "EU",
         "organization": "ml-team",
         "machine": "gpu-worker-1",
-        "capacity": 20,
+        "capacity": 0,
         "tags": [
           "production"
         ],
@@ -289,8 +289,8 @@ A shortened response resembles:
 
 | Section | Contains |
 | --- | --- |
-| `metadata` | Model, engine, capability, capacity, region, organization, machine, tags, and display metadata |
-| `status` | Router and backend health, active requests, capacity use, and last heartbeat |
+| `metadata` | Model, engine, capability, declared capacity (`0` for network-registered agents), region, organization, machine, tags, and display metadata |
+| `status` | Router and backend health, active requests, capacity use (`0` without a declared capacity), and last heartbeat |
 | `universal` | Success, failure, token, rejection, disconnection, and latency history |
 | `engine` | Backend-specific cache, queue, TTFT, and ITL metrics when available |
 | `hardware` | Latest GPU, CPU, and memory snapshot |

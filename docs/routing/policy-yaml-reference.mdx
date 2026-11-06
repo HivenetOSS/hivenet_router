@@ -67,7 +67,7 @@ fallback_provider:
 | `mode` | String | No | Admission profile: `reserved` (default) or `serverless` |
 | `max_input_tokens` | Integer | No | Model input limit; B1 rejects when the learned prompt estimate exceeds 1.5× this value; `0` disables B1 |
 | `images_max` | Integer | No | Maximum images per request; `0` disables the image check |
-| `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` disables the token budget |
+| `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` or omitted uses the engines' reported KV capacity, or disables the token budget when no engine reports it |
 | `max_inflight` | Integer | No | Per-replica in-flight request backstop; `0` disables the count limit |
 | `shed_if` | Object | No | Front-door thresholds for aggregate healthy-pool engine pressure |
 | `routing_policy` | Object | Yes | Primary local routing step |
@@ -99,7 +99,7 @@ shed_if:
     gt: 20
 ```
 
-All numeric limits default to `0`, which disables the corresponding check. Negative values are rejected. `mode` defaults to `reserved` and accepts only `reserved` or `serverless`.
+All numeric limits default to `0`, which disables the corresponding check. The exception is `admit_budget_tokens`: at `0`, the token budget comes from the engines' reported KV capacity when available. Negative values are rejected. `mode` defaults to `reserved` and accepts only `reserved` or `serverless`.
 
 ### `mode`
 
@@ -120,6 +120,10 @@ effective token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
 
 effective request backstop = max_inflight × healthy_replicas
 ```
+
+When `admit_budget_tokens` is `0`, the token budget is `floor(HIVENET_ROUTER_ADMIT_FRACTION × summed KV capacity of the healthy replicas)`. vLLM and SGLang agents report KV capacity; other engines do not, so set `admit_budget_tokens` or `max_inflight` for them if you want a budget.
+
+With several routers sharing `--sync-store=valkey`, each router admits the effective token budget and request backstop divided by the number of live routers. See [Run several routers](/deploy/multiple-routers).
 
 Over-budget requests may park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` before the router returns `429 concurrency_limit_exceeded`. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
 
@@ -274,7 +278,7 @@ match: {}
 
 or omit `match` when the policy should not restrict agents by metadata.
 
-Model, health, capability, previous failures, and capacity still apply as hard routing constraints.
+Model, health, capability, and previous failures still apply as hard routing constraints.
 
 ## Dynamic metric gates
 
@@ -401,7 +405,7 @@ These gates can apply to any agent once the necessary runtime history exists.
 
 | Field | Range | Meaning |
 | --- | --- | --- |
-| `capacity_utilization` | `0.0`–`1.0` | Active requests divided by declared capacity |
+| `capacity_utilization` | `0.0`–`1.0` | Active requests divided by declared capacity; not available for network-registered agents |
 | `success_rate` | `0.0`–`1.0` | Lifetime fraction of successful forwards |
 | `srtt` | `0+` | Smoothed round-trip time in milliseconds |
 | `consecutive_failures` | `0+` | Forward failures since the last success |
@@ -415,15 +419,7 @@ exclude_if:
     gt: 0.8
 ```
 
-This excludes agents above 80% of their declared capacity.
-
-Hivenet Router also applies a hard capacity gate. An agent is unavailable when:
-
-```text
-active requests >= declared capacity
-```
-
-even when the policy contains no `capacity_utilization` rule.
+This excludes agents above 80% of their declared capacity. Only agents with a declared capacity have this signal. Routers ignore the agent's `--capacity`, so network-registered agents have none, and a rule on a missing signal passes. Use `kv_cache_utilization` and `waiting_requests` to keep work off busy agents.
 
 ### Success rate
 
@@ -562,13 +558,14 @@ The only implemented strategy is:
 strategy: least-loaded
 ```
 
-It ranks candidates by:
+It ranks candidates by load, in requests:
 
 ```text
-active requests / declared capacity
+max(this router's in-flight requests to the agent,
+    agent's reported in-flight requests + requests this router sent since the report)
 ```
 
-The lowest ratio ranks first.
+The agent reports its in-flight requests from all routers about every 500 ms. The lowest load ranks first.
 
 The following names are not currently supported:
 

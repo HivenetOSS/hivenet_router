@@ -1,6 +1,6 @@
 ---
 title: "vLLM agent"
-description: "Connect a vLLM backend to Hivenet Router, configure model discovery and capacity, and expose vLLM metrics for routing and observability."
+description: "Connect a vLLM backend to Hivenet Router, configure model discovery and load bounds, and expose vLLM metrics for routing and observability."
 sidebarTitle: "vLLM"
 ---
 
@@ -180,7 +180,6 @@ The model ID returned here is the value clients must use when sending requests t
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
-      --capacity 256 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -198,7 +197,6 @@ The model ID returned here is the value clients must use when sending requests t
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /opt/hivenet-router/jwt.secret \
-      --capacity 256 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -215,9 +213,8 @@ The agent waits for vLLM to become healthy before registering. If vLLM is still 
 | --- | --- |
 | `--engine vllm` | Selects the vLLM backend integration |
 | `--backend-url` | Base URL of the local vLLM server |
-| `--router-grpc` | Router endpoint used for agent authentication |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests the router may assign to the agent |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -311,34 +308,14 @@ Start the second agent with a different model and identity:
 
 When several agents run on the same host, each one needs a separate `--identity-path` so every process keeps a distinct peer identity.
 
-## Set agent capacity
+## How load is bounded
 
-Set `--capacity` to the number of concurrent requests the backend can safely accept.
+The agent reports vLLM's KV-cache size in tokens, read from `vllm:cache_config_info` (`num_gpu_blocks × block_size`). When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
 
-For vLLM, start by matching it to `--max-num-seqs`:
-
-```bash
-vllm serve ... \
-  --max-num-seqs 256
-```
-
-```bash
-hivenet-agent ... \
-  --capacity 256
-```
-
-You may set the Hivenet Router capacity slightly lower to preserve headroom:
-
-```bash
---capacity 224
-```
-
-When an agent reaches its declared capacity, the router stops assigning new requests to it and considers other matching agents or configured fallback steps.
-
-Capacity does not change vLLM’s own scheduler limit. It tells Hivenet Router how much work the agent is prepared to accept.
+vLLM's own scheduler limit, `--max-num-seqs`, still applies inside the engine.
 
 <Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify vLLM concurrency under sustained streaming load before raising it.
+  `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
 
 ## Verify the connection
@@ -365,7 +342,6 @@ curl http://192.168.1.100:8080/admin/routing-table \
       peer_id,
       model: .metadata.model,
       engine: .metadata.engine,
-      capacity: .metadata.capacity,
       region: .metadata.region,
       healthy: .status.healthy,
       active_requests: .status.active_requests
@@ -522,11 +498,7 @@ See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy 
   </Accordion>
 
   <Accordion title="KV cache utilization remains high">
-    Reduce the amount of work Hivenet Router assigns to the agent:
-
-    ```bash
-    --capacity 128
-    ```
+    Lower the occupancy budget with `admit_budget_tokens` in the model's policy, or lower `HIVENET_ROUTER_ADMIT_FRACTION`.
 
     Or reduce vLLM’s scheduler limit:
 
@@ -542,7 +514,7 @@ See [Policy YAML reference](/routing/policy-yaml-reference) for the full policy 
 
     Reduce:
 
-    - `--capacity` on the Hivenet Router agent
+    - the occupancy budget (`admit_budget_tokens` or `HIVENET_ROUTER_ADMIT_FRACTION`)
     - `--max-num-seqs` on vLLM
     - model context or batch pressure, where appropriate for your workload
   </Accordion>

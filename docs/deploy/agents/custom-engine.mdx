@@ -1,6 +1,6 @@
 ---
 title: "Custom engine agent"
-description: "Connect an OpenAI-compatible chat-completion backend to Hivenet Router using an explicit model name, health endpoint, and declared capacity."
+description: "Connect an OpenAI-compatible chat-completion backend to Hivenet Router using an explicit model name, health endpoint, and policy-based load bounds."
 sidebarTitle: "Custom engine"
 ---
 
@@ -210,7 +210,6 @@ If the backend uses another internal identifier, configure an alias or compatibi
       --model meta-llama/Llama-3.1-8B-Instruct \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
-      --capacity 32 \
       --region EU-Custom \
       --organization ml-team \
       --machine custom-worker-1 \
@@ -230,7 +229,6 @@ If the backend uses another internal identifier, configure an alias or compatibi
       --model meta-llama/Llama-3.1-8B-Instruct \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /opt/hivenet-router/jwt.secret \
-      --capacity 32 \
       --region EU-Custom \
       --organization ml-team \
       --machine custom-worker-1 \
@@ -249,9 +247,8 @@ The agent waits until the configured health endpoint returns HTTP `200`. If the 
 | `--backend-url` | Base URL used for chat-completion requests |
 | `--health-url` | Complete URL used to check backend readiness |
 | `--model` | Explicit model name registered with Hivenet Router |
-| `--router-grpc` | Router endpoint used for agent authentication |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -321,27 +318,14 @@ The agent forwards response chunks as they arrive rather than buffering the full
 
 The backend must provide a valid streaming response. Hivenet Router does not convert a non-streaming backend response into SSE.
 
-## Set agent capacity
+## How load is bounded
 
-`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
+A custom backend does not report a KV-cache size, so the router sets no automatic occupancy budget for this agent. To bound the work Hivenet Router sends, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control).
 
-It does not configure the backend’s own scheduler, worker count, queue, or batch size.
-
-Choose a value based on:
-
-- backend concurrency
-- model size
-- available CPU, RAM, or VRAM
-- context length
-- acceptable response time
-- whether other workloads share the machine
-
-Start conservatively and test with representative traffic.
-
-When the agent reaches capacity, Hivenet Router considers another matching agent, waits if queueing is configured, or moves through the policy’s fallback chain.
+Without a budget, the backend's own queue protects it.
 
 <Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify the custom backend concurrency under sustained streaming load before raising it.
+  `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
 
 ## Verify the connection
@@ -426,7 +410,7 @@ You can filter them using metadata such as:
 - tags
 - GPU model
 
-You can also use universal and hardware signals such as success rate, latency, capacity, GPU pressure, CPU use, and memory use.
+You can also use universal and hardware signals such as success rate, latency, GPU pressure, CPU use, and memory use.
 
 ## Available metrics
 
@@ -437,7 +421,7 @@ The following information is still available:
 ### Routing and request metrics
 
 - routed and failed request counts
-- active requests and declared capacity
+- active requests
 - success and failure history
 - smoothed round-trip time
 - policy and fallback decisions
@@ -552,8 +536,7 @@ curl http://192.168.1.100:2112/metrics \
               model: .metadata.model,
               capability: .metadata.capability,
               healthy: .status.healthy,
-              active_requests: .status.active_requests,
-              capacity: .metadata.capacity
+              active_requests: .status.active_requests
             }'
     ```
   </Accordion>

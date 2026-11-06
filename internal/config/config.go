@@ -471,6 +471,24 @@ func LoadFromEnv() *Config {
 	return cfg
 }
 
+// RouterList returns the routers the agent connects to: Routers, or the
+// single RouterGRPCAddr when Routers is empty. Duplicates are dropped.
+func (c *AgentConfig) RouterList() []string {
+	list := c.Routers
+	if len(list) == 0 && c.RouterGRPCAddr != "" {
+		list = []string{c.RouterGRPCAddr}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range list {
+		if r = strings.TrimSpace(r); r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // AgentConfig holds configuration specific to agents
 type AgentConfig struct {
 	Model          string // Model name override; auto-detected if empty
@@ -483,7 +501,10 @@ type AgentConfig struct {
 	Machine        string // Machine name within the organization
 	RouterGRPCAddr string
 	RouterP2PAddr  string
-	BackendURL     string
+	// Routers lists the gRPC addresses of every router of the site; the agent
+	// keeps one independent session with each. Empty means [RouterGRPCAddr].
+	Routers    []string
+	BackendURL string
 	// BackendAPIKey, when non-empty, is sent on every request the agent makes
 	// to its backend (health checks, model discovery, metrics, inference) as
 	// Authorization: Bearer <key>, replacing the client's credentials; any

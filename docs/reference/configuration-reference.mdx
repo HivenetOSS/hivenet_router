@@ -109,6 +109,7 @@ HIVENET_ROUTER_JWT_SECRET
 HIVENET_ROUTER_GPU_MODEL
 HIVENET_ROUTER_DEPLOYMENT_ID
 HIVENET_ROUTER_REPLICA_ID
+HIVENET_AGENT_ROUTERS
 ```
 
 Other agent environment variables that resemble flag names are not loaded automatically.
@@ -116,14 +117,14 @@ Other agent environment variables that resemble flag names are not loaded automa
 For example, this does not currently configure the agent:
 
 ```bash
-export HIVENET_ROUTER_CAPACITY=20
+export HIVENET_ROUTER_REGION=EU-France
 ```
 
 Use:
 
 ```bash
 ./bin/hivenet-agent \
-  --capacity 20 \
+  --region EU-France \
   ...
 ```
 
@@ -397,7 +398,7 @@ It is separate from:
 
 - the global request-channel size
 - the per-model wait queue
-- each agent’s declared capacity
+- the model's occupancy budget
 
 ### Request deadline
 
@@ -584,7 +585,7 @@ These settings do not have equivalent router command-line flags.
 | `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Empty | Anthropic credential for provider fallback |
 | `HIVENET_ROUTER_AUDIT_LOG_PATH` | `/var/log/hivenet-router/audit.jsonl` | Structured audit-log path |
 | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
-| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of `admit_budget_tokens` available for occupancy admission; valid range `(0, 1]` |
+| `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of the occupancy budget (`admit_budget_tokens`, or the engines' reported KV capacity when unset) available for admission; valid range `(0, 1]` |
 | `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | Maximum time an over-budget request waits for occupancy to free; `0` rejects immediately |
 | `HIVENET_ROUTER_RPM_BURST_SECONDS` | `0` | RPM bucket burst window in seconds; `0` keeps a full minute of burst capacity, valid range `[0, 60)` |
 | `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | `false` | Set to `true` to permit unauthenticated `/admin/*` endpoints when administrator mode is `none`; development and testing only |
@@ -668,7 +669,7 @@ to disable it. A reverse proxy may enforce a smaller limit before the request re
 
 ### Admission environment variables
 
-`HIVENET_ROUTER_ADMIT_FRACTION` scales a policy's `admit_budget_tokens` before the router admits token-weighted occupancy. It defaults to `0.90`; invalid values or values outside `(0, 1]` leave the default unchanged.
+`HIVENET_ROUTER_ADMIT_FRACTION` scales a policy's `admit_budget_tokens`, or the engines' reported KV capacity when the policy sets none, before the router admits token-weighted occupancy. It defaults to `0.90`; invalid values or values outside `(0, 1]` leave the default unchanged.
 
 `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` bounds how long an over-budget request waits for occupancy to free. It uses Go duration syntax, defaults to `250ms`, and accepts `0` for immediate rejection. Negative or invalid values leave the default unchanged.
 
@@ -786,7 +787,7 @@ The complete current router flag set is:
 | `--model` | — | Empty | Public model ID override |
 | `--health-url` | — | Empty | Health endpoint for a custom engine |
 | `--capability` | — | `llm` | `llm`, `embedding`, or `reranker` |
-| `--capacity` | — | `10` | Maximum concurrent requests assigned to the agent |
+| `--capacity` | — | `10` | Deprecated and ignored by routers. Still sent so older routers accept the registration |
 | `--http-timeout` | — | `120s` | Backend HTTP request timeout |
 | `--stream-write-timeout` | — | `60s` | Rolling timeout for writing each stream chunk to the router |
 | `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty | API key sent as `Authorization: Bearer` on every request to the backend (health, model discovery, metrics, inference). The flag reads the key from a file and wins over the environment variable, which holds the raw value. Empty sends no `Authorization` header to the backend. The client's router credentials are never forwarded, with or without a key. See [Backend API key](#backend-api-key) |
@@ -844,11 +845,9 @@ because its integration does not expose the required reranking endpoint.
 
 ### Capacity
 
-Capacity must be positive.
+`--capacity` is deprecated. Routers ignore it and no longer cap requests per agent by a declared count. The agent still sends it so older routers accept the registration.
 
-It is an operator-defined concurrency limit, not a value calculated from GPU memory or model size.
-
-The router rejects agent authentication when the reported capacity is zero or negative.
+The router bounds load instead with the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy). vLLM and SGLang agents report their engine's KV-cache size, from which the router derives that budget when the policy sets no `admit_budget_tokens`. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy.
 
 ### Backend and router timeouts
 
@@ -898,8 +897,9 @@ The agent never forwards the client's router credentials to the backend: `Author
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--router-grpc` | — | `localhost:50051` | Router gRPC authentication address; the response supplies the router’s libp2p connection details |
-| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Deprecated no-op retained for CLI compatibility |
+| `--routers` | `HIVENET_AGENT_ROUTERS` | Empty | Comma-separated gRPC addresses of every router of the site. The agent keeps one session with each. Overrides `--router-grpc` |
+| `--router-grpc` | — | `localhost:50051` | gRPC address of a single router, used when `--routers` is empty; the response supplies the router’s libp2p connection details |
+| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Unused; retained for CLI compatibility |
 | `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
 | `--p2p-listen-port` | — | `0` | Local libp2p port, bound to `127.0.0.1` only (`0` = random). Agents dial the router and need no inbound port |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required | Shared agent-authentication secret |
@@ -916,19 +916,15 @@ The accepted:
 
 flag is not read by the current connection sequence.
 
-Configure:
-
-```text
---router-grpc
-```
-
-and make sure the router advertises a reachable libp2p address through:
+Configure `--routers` with every router of the site, or `--router-grpc` for a single router, and make sure each router advertises a reachable libp2p address through:
 
 ```text
 --p2p-announce-addr
 ```
 
-when necessary.
+when it is behind NAT.
+
+With `--routers`, the agent keeps an independent session with each router and reconnects each one with exponential backoff, from 1 s up to 30 s with jitter. A router that is down does not affect the other sessions, and a router that comes up later is picked up automatically. Every router must use the same JWT secret. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router).
 
 ### Persistent identity
 
@@ -1111,13 +1107,14 @@ The complete current agent flag set is:
 | `--backend-url` | — | `http://localhost:8888` |
 | `--model` | — | Empty |
 | `--health-url` | — | Empty |
-| `--capacity` | — | `10` |
+| `--capacity` | — | `10`; deprecated, ignored by routers |
 | `--version` | — | Build version; commonly `dev` locally |
 | `--region` | — | `UE-France` |
 | `--organization` | — | `Unknown` |
 | `--machine` | — | `Unknown` |
+| `--routers` | `HIVENET_AGENT_ROUTERS` | Empty |
 | `--router-grpc` | — | `localhost:50051` |
-| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000`; deprecated no-op |
+| `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000`; unused |
 | `--tags` | — | `production` |
 | `--http-timeout` | — | `120s` |
 | `--stream-write-timeout` | — | `60s` |
@@ -1292,7 +1289,7 @@ Agent startup or authentication fails for conditions including:
 - Ollama configured as a reranker
 - backend that never becomes ready
 - model discovery that never returns a model
-- non-positive capacity rejected by the router
+- negative capacity rejected by the router
 - JWT secret that does not match the router
 - unreachable router gRPC or libp2p interfaces
 
@@ -1313,7 +1310,7 @@ Agent startup or authentication fails for conditions including:
 | Storage path or TTL | Router restart | Database is opened at startup |
 | Audit-log path | Router restart | File is opened at process initialization |
 | Logging or tracing environment | Process restart | Read during initialization |
-| Agent metadata, backend, capacity, or sampling | Agent restart | Agent flags are parsed at startup |
+| Agent metadata, backend, router list, or sampling | Agent restart | Agent flags are parsed at startup |
 
 Editing a systemd `EnvironmentFile`, Docker `.env` file, or Kubernetes Secret does not modify the environment of an already running process.
 
@@ -1399,9 +1396,8 @@ This example:
   --model \
     hivenet-router-code-model \
   --capability llm \
-  --capacity 20 \
-  --router-grpc \
-    router.example.com:50051 \
+  --routers \
+    router-0.example.com:50051,router-1.example.com:50051 \
   --jwt-secret-file \
     /etc/hivenet-router/jwt.secret \
   --identity-path \
@@ -1413,7 +1409,7 @@ This example:
   --tags production,realtime
 ```
 
-The example does not set `--router-p2p`. The current agent receives the router’s dialable libp2p address during gRPC authentication.
+The example connects the agent to a site with two routers. It does not set `--router-p2p`: the agent receives each router’s dialable libp2p address during gRPC authentication.
 
   </Tab>
 

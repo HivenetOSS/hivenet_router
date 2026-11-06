@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
+
+package agent
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// vLLM's KV capacity is num_gpu_blocks × block_size from cache_config_info;
+// other *_block_size labels of hybrid models are not mistaken for it.
+func TestVLLMKVCapacityFromCacheConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{block_size="1568",cache_dtype="fp8",mamba_block_size="1568",num_gpu_blocks="628",num_cpu_blocks="0"} 1.0
+vllm:kv_cache_usage_perc{model_name="m"} 0.25
+`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	m, err := (&VLLMEngine{}).ScrapeMetrics(context.Background(), srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.KVCapacityTokens == nil || *m.KVCapacityTokens != 628*1568 {
+		t.Fatalf("KV capacity %v, want %d", m.KVCapacityTokens, 628*1568)
+	}
+}
+
+func TestVLLMKVCapacityAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("vllm:num_requests_running 2\n")) //nolint:errcheck
+	}))
+	defer srv.Close()
+	m, err := (&VLLMEngine{}).ScrapeMetrics(context.Background(), srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.KVCapacityTokens != nil {
+		t.Fatalf("KV capacity %v without cache_config_info, want nil", *m.KVCapacityTokens)
+	}
+}

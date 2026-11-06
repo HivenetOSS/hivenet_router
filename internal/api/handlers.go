@@ -238,6 +238,18 @@ type Handlers struct {
 	// it), driving the front-door shed gate. Nil disables the gate (e.g. tests).
 	enginePressure func(model string) (kvUtil, waiting *float64)
 
+	// engineKVCapacity returns the summed KV-cache size, in tokens, that the
+	// healthy agents serving a model report. A policy without
+	// admit_budget_tokens takes its occupancy budget (B2) from it. Nil or 0
+	// leaves the budget to the policy (SetEngineKVCapacity).
+	engineKVCapacity func(model string) int
+
+	// routerShare returns how many routers share this site's backends (1 when
+	// alone). Until occupancy is shared through the store, each router admits
+	// its share of the occupancy budget so the routers together never exceed
+	// it (SetRouterShare).
+	routerShare func() int
+
 	// keyAdmission enforces the serverless per-key occupancy share — a per-key
 	// token-weighted in-flight budget parallel to the global one. Nil disables it.
 	keyAdmission *admission.Controller
@@ -667,12 +679,28 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// Scale the per-replica limits to the live pool size. Recomputed per request,
 	// so the budget tracks replicas joining/leaving; a shrink only affects new
 	// admissions (existing reservations release their recorded weight unchanged).
+	// Without admit_budget_tokens the budget is the KV capacity the engines
+	// report for the healthy replicas.
 	replicas := h.healthyReplicas(req.Model)
 	poolBudget := pol.AdmitBudgetTokens * replicas
+	if poolBudget == 0 && h.engineKVCapacity != nil {
+		poolBudget = h.engineKVCapacity(req.Model)
+	}
 	poolInflight := pol.MaxInflight * replicas
+	// Several routers serve the same backends: each admits its share.
+	if h.routerShare != nil {
+		if n := h.routerShare(); n > 1 {
+			if poolBudget > 0 {
+				poolBudget = max(poolBudget/n, 1)
+			}
+			if poolInflight > 0 {
+				poolInflight = max(poolInflight/n, 1)
+			}
+		}
+	}
 
 	// Global occupancy budget (all replicas).
-	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
+	if h.admission != nil && (poolBudget > 0 || poolInflight > 0) {
 		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, poolBudget, poolInflight)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
@@ -690,7 +718,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// "this fraction of what the pool can hold" as replicas come and go. This is
 	// anti-abuse fairness, not box safety (the global budget above is), so the
 	// shares are intentionally oversubscribed and no admit fraction is applied.
-	if pol.IsServerless() && pol.AdmitBudgetTokens > 0 && h.keyAdmission != nil {
+	if pol.IsServerless() && poolBudget > 0 && h.keyAdmission != nil {
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
@@ -1553,3 +1581,11 @@ func (fw *sseFlushingWriter) Write(p []byte) (n int, err error) {
 	}
 	return
 }
+
+// SetEngineKVCapacity sets where a policy without admit_budget_tokens takes its
+// occupancy budget from: the summed KV capacity of a model's healthy replicas.
+func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCapacity = fn }
+
+// SetRouterShare sets how many routers share the site's backends; each admits
+// that share of the occupancy budget.
+func (h *Handlers) SetRouterShare(fn func() int) { h.routerShare = fn }

@@ -140,7 +140,7 @@ Every agent must still:
 - serve the requested model
 - serve the required capability
 - be healthy
-- have free declared capacity
+- have free declared capacity, when it declares one
 
 A hardware tier does not override the normal routing constraints.
 
@@ -322,17 +322,9 @@ hivenet_agent_gpu_utilization_percent > 95
 ```
 
 <Note>
-  GPU utilization and Hivenet Router capacity are independent signals.
+  GPU utilization and the router's load count are independent signals. A GPU can be highly utilized while the agent has few requests in flight, or lightly utilized while it has many.
 
-  The hard capacity gate uses:
-
-  ```text
-  active requests >= declared capacity
-  ```
-
-  A GPU can be highly utilized before the agent reaches capacity, or lightly utilized while every declared request slot is occupied.
-
-  Streaming requests hold the declared capacity slot until the stream fully drains, so capacity-based gates account for the whole generation. Use engine running and waiting requests, KV-cache pressure, TTFT, and ITL alongside capacity-based gates to catch GPU pressure that declared slots do not reflect.
+  Streaming requests count toward the agent's load until the stream fully drains. Use engine running and waiting requests, KV-cache pressure, TTFT, and ITL to catch GPU pressure that request counts do not reflect.
 </Note>
 
 ## Avoid host CPU and memory pressure
@@ -468,11 +460,7 @@ exclude_if:
 
 removes agents above 80°C.
 
-The remaining agents are still ranked by:
-
-```text
-active requests / declared capacity
-```
+The remaining agents are still ranked by load: their in-flight requests, as described in [Routing concepts](/routing/routing-concepts).
 
 Use fallback steps to express ordered hardware preferences.
 
@@ -727,9 +715,6 @@ routing_policy:
       - high-memory
 
   exclude_if:
-    capacity_utilization:
-      gte: 0.8
-
     kv_cache_utilization:
       gt: 0.85
 
@@ -933,45 +918,13 @@ A practical test sequence is:
 
 Avoid introducing many hardware gates at the same time. When the policy drains, it becomes harder to identify which assumption was wrong.
 
-## Capacity remains operator-defined
+## How load is bounded
 
-Hivenet Router does not derive agent capacity from:
+Hivenet Router does not derive a per-agent request limit from VRAM, GPU count, model parameters, or power limit. The agent's `--capacity` flag is deprecated and ignored by routers.
 
-- total VRAM
-- free VRAM
-- GPU count
-- model parameters
-- KV-cache size
-- power limit
+For vLLM and SGLang, the agent reports the engine's KV-cache size in tokens. When a policy sets no `admit_budget_tokens`, the router derives the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) from it. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy.
 
-The agent’s:
-
-```bash
---capacity
-```
-
-remains an operator-set concurrency limit.
-
-Do not rely on a general formula such as:
-
-```text
-free VRAM / estimated KV cache per request
-```
-
-as the only capacity calculation. Real capacity depends on:
-
-- model architecture
-- quantization
-- context distribution
-- engine implementation
-- batching and scheduler settings
-- tensor parallelism
-- prefix reuse
-- CPU work
-- latency objectives
-- workload mix
-
-Benchmark representative traffic and raise capacity gradually while observing engine queues, cache pressure, TTFT, ITL, hardware use, and failures.
+Benchmark representative traffic and adjust the policy budget while observing engine queues, cache pressure, TTFT, ITL, hardware use, and failures.
 
 ## Design guidance
 
@@ -1083,7 +1036,7 @@ Use thresholds with practical headroom rather than treating a single decimal poi
     - agent health
     - static metadata
     - previous failures
-    - declared capacity
+    - declared capacity, for agents that declare one
 
     A hardware match does not make an agent eligible when it fails one of those checks.
   </Accordion>
