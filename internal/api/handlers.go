@@ -673,16 +673,20 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// Scale the per-replica limits to the live pool size. Recomputed per request,
 	// so the budget tracks replicas joining/leaving; a shrink only affects new
 	// admissions (existing reservations release their recorded weight unchanged).
-	replicas := h.healthyReplicas(req.Model)
-	poolBudget := pol.AdmitBudgetTokens * replicas
-	poolInflight := pol.MaxInflight * replicas
+	pool := func() (int, int) {
+		replicas := h.healthyReplicas(req.Model)
+		return pol.AdmitBudgetTokens * replicas, pol.MaxInflight * replicas
+	}
+	poolBudget, _ := pool()
 
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res := admitOccupancy(c, h.admission, req.Model, footprint, grows, poolBudget, poolInflight)
+		res, fits := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
-			if !rejectReleased(c, req.Model) {
+			// A request too large to ever fit gets the usual 429 even when
+			// released by a wake: retrying after the wake cannot help.
+			if !fits || !rejectReleased(c, req.Model) {
 				c.Header("Retry-After", "1")
 				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
 					"server at capacity for this model, please retry", domain.SourceRouter)
@@ -690,6 +694,8 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 			return nil, false
 		}
 		rs = append(rs, res)
+		// A request released by a wake may have waited while replicas joined.
+		poolBudget, _ = pool()
 	}
 
 	// Per-key occupancy share (serverless replicas only): the key's in-flight
@@ -989,14 +995,27 @@ func (h *Handlers) fireTokenLimited(m reqMeta, model string) {
 	}
 }
 
+// forwardHeaders returns the headers the processor forwards to the agent and
+// backend, the one place both paths build them. clientHeaders keeps the
+// client's own headers (the LLM path: custom headers added by the client
+// library), never its router credentials, which agents and backends must not
+// see; otherwise (embeddings and rerank) only the router's headers are sent.
+// Either way X-Request-ID is the router's request ID.
+func forwardHeaders(c *gin.Context, clientHeaders bool) http.Header {
+	h := http.Header{}
+	if clientHeaders {
+		h = c.Request.Header.Clone()
+		domain.StripClientCredentials(h)
+	}
+	h.Set(headerRequestID, requestIDFrom(c))
+	return h
+}
+
 // captureRawBody stores the original headers and cached body bytes on req so the
 // processor can forward them verbatim. Returns false (after writing the error)
 // when the cached body is missing or malformed.
 func captureRawBody(c *gin.Context, req *domain.ChatRequest, requestID string) bool {
-	// Preserve any custom headers added by the client library, but never the
-	// client's router credentials: agents and backends must not see them.
-	req.HttpHeaders = c.Request.Header.Clone()
-	domain.StripClientCredentials(req.HttpHeaders)
+	req.HttpHeaders = forwardHeaders(c, true)
 
 	cb, ok := c.Get(gin.BodyBytesKey)
 	if !ok {
@@ -1431,14 +1450,10 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	}
 
 	requestID := requestIDFrom(c)
-	// Forward only the request ID, so agent and backend logs carry the same
-	// ID as the router's for embeddings and rerank too.
-	fwdHeaders := http.Header{}
-	fwdHeaders.Set(headerRequestID, requestID)
 	chatReq := &domain.ChatRequest{
 		Model:       req.Model,
 		RawBytes:    rawBytes,
-		HttpHeaders: fwdHeaders,
+		HttpHeaders: forwardHeaders(c, false),
 	}
 	pending := domain.NewPendingRequest(requestID, chatReq, h.timeout)
 	pending.Ctx = c.Request.Context()
@@ -1549,18 +1564,26 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 }
 
 // copyBackendHeaders copies the backend's response headers to the client and
-// keeps the router's request ID as the only X-Request-ID value. Backends that
-// echo the header back (for example vLLM with --enable-request-id-headers)
-// would otherwise add a second copy. An upstream that returns its own ID
-// (a cloud provider, or a backend that ignores ours) keeps it visible in
+// keeps the router's request ID headers as the only values. Backends that
+// echo X-Request-ID (for example vLLM with --enable-request-id-headers)
+// would otherwise add a second copy, and an upstream's own
+// X-Client-Request-ID would sit next to the client's. An upstream that
+// returns its own ID (a cloud provider, or a backend that ignores ours, or a
+// retry's ID: see forwardedRequestID) keeps it visible in
 // X-Upstream-Request-ID.
 func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
-	domain.CopyHttpHeaders(c.Writer.Header(), src)
-	c.Writer.Header().Del(headerUpstreamRequestID)
-	if up := src.Get(headerRequestID); up != "" && up != requestID {
-		c.Header(headerUpstreamRequestID, up)
+	h := c.Writer.Header()
+	clientID := h.Get(headerClientRequestID)
+	domain.CopyHttpHeaders(h, src)
+	h.Del(headerUpstreamRequestID)
+	h.Del(headerClientRequestID)
+	if clientID != "" {
+		h.Set(headerClientRequestID, clientID)
 	}
-	c.Header(headerRequestID, requestID)
+	if up := src.Get(headerRequestID); up != "" && up != requestID {
+		h.Set(headerUpstreamRequestID, up)
+	}
+	h.Set(headerRequestID, requestID)
 }
 
 // headerUpstreamRequestID carries the request ID an upstream returned when it

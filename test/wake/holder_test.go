@@ -388,3 +388,28 @@ func TestHold_WokenCountsUntilReleased(t *testing.T) {
 		t.Errorf("demand after release = %v, want empty", d)
 	}
 }
+
+// TestHold_UnknownCallerHasNoPerCallerLimit checks that requests with no
+// caller (no authentication) are limited per model only, not all together
+// as one caller.
+func TestHold_UnknownCallerHasNoPerCallerLimit(t *testing.T) {
+	f := &fleet{healthy: map[string]int{}}
+	h := wake.NewHolder(wake.Limits{PerModel: 3, PerCaller: 1, Total: 1000}, f.count, nil)
+	h.SetPollInterval(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	long := wake.Options{Budget: time.Minute}
+	for i, id := range []string{"a", "b", "c"} {
+		go holdNow(h, ctx, "m", "", id, long)
+		deadline := time.Now().Add(time.Second)
+		for h.Demand()["m"] != i+1 {
+			if time.Now().After(deadline) {
+				t.Fatalf("request %d with no caller was not held (per-caller limit applied?)", i+1)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if o := holdNow(h, ctx, "m", "", "d", long); o != wake.Full {
+		t.Errorf("fourth request: %s, want full (the per-model limit)", o)
+	}
+}

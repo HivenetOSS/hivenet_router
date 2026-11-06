@@ -120,3 +120,39 @@ func TestSignalCapacity_FreedSlotWakesOneWaiter(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// TestReleasedFromHold_SlotCallsHook checks that a request released by a
+// wake is told when selection gives it an agent slot, which takes it out of
+// the pending demand, and not before.
+func TestReleasedFromHold_SlotCallsHook(t *testing.T) {
+	full := healthyAgent("full", 1)
+	full.TryAcquireSlot() // the only slot is taken
+	lister := &mutableLister{agents: map[string][]*domain.Agent{"m": {full}}}
+	exec := newQueuedExec(lister)
+
+	hooked := make(chan struct{})
+	ctx, cancel := context.WithTimeout(
+		policy.WithReleasedFromHold(context.Background(), func() { close(hooked) }), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := exec.NewSession("m", domain.CapabilityLLM).Select(ctx)
+		done <- err
+	}()
+
+	select {
+	case <-hooked:
+		t.Fatal("hook called while the request still waits for a slot")
+	case <-time.After(50 * time.Millisecond):
+	}
+	full.DecrementLoad()
+	exec.SignalCapacity("m")
+	if err := <-done; err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	select {
+	case <-hooked:
+	case <-time.After(time.Second):
+		t.Fatal("hook not called after the request got a slot")
+	}
+}

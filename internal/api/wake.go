@@ -64,7 +64,7 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 		if n > 0 || h.wake == nil || h.redirect == nil {
 			return n
 		}
-		if kind := endpointKinds[c.Request.URL.Path]; kind != "" {
+		if kind := holdKind(c); kind != "" {
 			if _, ok := h.redirect.Map.Wakeable(model, kind, h.redirect.Self); ok {
 				return 1
 			}
@@ -100,7 +100,7 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 // as the JSON error envelope otherwise.
 func (h *Handlers) WakeHold() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		kind := endpointKinds[c.Request.URL.Path]
+		kind := holdKind(c)
 		if h.wake == nil || h.redirect == nil || h.healthyAgentCount == nil || kind == "" {
 			c.Next()
 			return
@@ -121,7 +121,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 
 		resp := newHeldResponse(c)
 		deadline := time.Now().Add(budget)
-		outcome, release := h.wake.Hold(c.Request.Context(), model, callerIdentity(c), demandID(c), wake.Options{
+		outcome, release := h.wake.Hold(c.Request.Context(), model, holdCaller(c), demandID(c), wake.Options{
 			Budget:      budget,
 			KeepAlive:   h.wakeCfg.KeepAlive,
 			OnKeepAlive: resp.keepAlive,
@@ -132,8 +132,10 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 			// being refused by it: the admission gate lets them wait until
 			// their hold budget ends, and the capacity queue takes them past
 			// its depth (the hold limits already bound how many there are).
+			// The request leaves the pending demand when it gets an agent
+			// slot, or else when its response starts or it ends.
 			c.Set(ctxKeyHoldDeadline, deadline)
-			c.Request = c.Request.WithContext(policy.WithReleasedFromHold(c.Request.Context()))
+			c.Request = c.Request.WithContext(policy.WithReleasedFromHold(c.Request.Context(), release))
 			w := newReleasedWriter(c, resp, release)
 			w.keepAliveUntilStart(c.Request.Context(), h.wakeCfg.KeepAlive)
 			defer w.finish()
@@ -156,16 +158,38 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 // hold budget ends.
 const ctxKeyHoldDeadline = "wake_hold_deadline"
 
-// admitOccupancy admits a request against ctrl. A request released by a wake
-// waits for room until its hold budget ends, not only the short default park:
-// it already waited for the model, and the burst of a wake is expected.
-func admitOccupancy(c *gin.Context, ctrl *admission.Controller, key string, footprint int, grows bool, budgetTokens, maxInflight int) *admission.Reservation {
-	if v, ok := c.Get(ctxKeyHoldDeadline); ok {
-		if wait := time.Until(v.(time.Time)); wait > 0 {
-			return ctrl.AdmitWithin(c.Request.Context(), key, footprint, grows, budgetTokens, maxInflight, wait)
-		}
+// admitRecheck is how often a released request waiting for room in the
+// admission gate recomputes the pool's budget: replicas that join after the
+// wake raise it, and nothing else would tell the waiting request.
+const admitRecheck = time.Second
+
+// admitOccupancy admits a request against ctrl, with the pool's budget and
+// in-flight limit from pool. A request released by a wake waits for room
+// until its hold budget ends, not only the short default park: it already
+// waited for the model, and the burst of a wake is expected. It reports
+// fits=false when the request alone is larger than the budget: it can never
+// be admitted, so waiting or a model_waking answer would be wrong.
+func admitOccupancy(c *gin.Context, ctrl *admission.Controller, key string, footprint int, grows bool, pool func() (budgetTokens, maxInflight int)) (res *admission.Reservation, fits bool) {
+	ctx := c.Request.Context()
+	budget, inflight := pool()
+	v, released := c.Get(ctxKeyHoldDeadline)
+	if !released {
+		return ctrl.Admit(ctx, key, footprint, grows, budget, inflight), ctrl.Fits(footprint, budget)
 	}
-	return ctrl.Admit(c.Request.Context(), key, footprint, grows, budgetTokens, maxInflight)
+	deadline := v.(time.Time)
+	for {
+		if !ctrl.Fits(footprint, budget) {
+			return nil, false
+		}
+		wait := min(time.Until(deadline), admitRecheck)
+		if res := ctrl.AdmitWithin(ctx, key, footprint, grows, budget, inflight, wait); res != nil {
+			return res, true
+		}
+		if ctx.Err() != nil || time.Until(deadline) <= 0 {
+			return nil, true
+		}
+		budget, inflight = pool()
+	}
 }
 
 // rejectReleased answers a request released by a wake that still found no
@@ -191,13 +215,14 @@ func rejectReleased(c *gin.Context, model string) bool {
 // already sent the 200 status, and how to frame an error after that.
 type heldResponse struct {
 	c         *gin.Context
-	stream    bool // the client asked for an SSE stream
-	anthropic bool // Anthropic Messages framing for SSE errors
-	committed bool // the status and headers are sent
+	stream    bool      // the client asked for an SSE stream
+	anthropic bool      // Anthropic Messages framing for SSE errors
+	committed bool      // the status and headers are sent
+	last      time.Time // the last keepalive, or the start of the hold
 }
 
 func newHeldResponse(c *gin.Context) *heldResponse {
-	r := &heldResponse{c: c, anthropic: c.Request.URL.Path == "/v1/messages"}
+	r := &heldResponse{c: c, anthropic: c.Request.URL.Path == "/v1/messages", last: time.Now()}
 	if body, ok := cachedBody(c); ok {
 		var peek struct {
 			Stream bool `json:"stream"`
@@ -241,6 +266,7 @@ func (r *heldResponse) keepAliveOn(w gin.ResponseWriter) (gin.ResponseWriter, er
 		return w, err
 	}
 	w.Flush()
+	r.last = time.Now()
 	return w, nil
 }
 
@@ -320,6 +346,28 @@ func (w *heldWriter) Write(b []byte) (int, error) {
 
 func (w *heldWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
 
+// holdKind is the placement kind that may hold the request's endpoint, or ""
+// when the endpoint is never held. /v1/messages/count_tokens is not held: it
+// is a quick lookup that a client sends just before the real request, which
+// is held and wakes the model; holding it too would count each prompt twice
+// in the pending demand and use up hold slots.
+func holdKind(c *gin.Context) string {
+	if c.Request.URL.Path == "/v1/messages/count_tokens" {
+		return ""
+	}
+	return endpointKinds[c.Request.URL.Path]
+}
+
+// holdCaller is the caller a hold is limited and counted per: the API key,
+// or "" for a request with no key (no authentication), which then has no
+// per-caller limit, only the per-model and total ones.
+func holdCaller(c *gin.Context) string {
+	if c.GetString("key_id") == "" && c.GetString("key_preview") == "" {
+		return ""
+	}
+	return callerIdentity(c)
+}
+
 // demandID is the ID a held request is counted under in the pending demand.
 // A client that resends its own ID on a retry is counted once, so that ID is
 // used when the client sent one. Otherwise the router's request ID: each
@@ -367,13 +415,18 @@ func newReleasedWriter(c *gin.Context, resp *heldResponse, release func()) *rele
 }
 
 // keepAliveUntilStart sends a keepalive every interval until the response
-// starts or ctx ends. An interval of 0 sends none.
+// starts or ctx ends. An interval of 0 sends none. The first one comes an
+// interval after the hold's last keepalive (or its start), so the gap
+// around the release is never longer than the interval.
 func (w *releasedWriter) keepAliveUntilStart(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		return
 	}
+	w.mu.Lock()
+	first := interval - time.Since(w.resp.last)
+	w.mu.Unlock()
 	go func() {
-		t := time.NewTicker(interval)
+		t := time.NewTimer(max(first, 0))
 		defer t.Stop()
 		for {
 			select {
@@ -385,6 +438,7 @@ func (w *releasedWriter) keepAliveUntilStart(ctx context.Context, interval time.
 				if !w.keepAlive() {
 					return
 				}
+				t.Reset(interval)
 			}
 		}
 	}()

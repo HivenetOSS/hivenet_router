@@ -35,8 +35,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const (
@@ -435,7 +433,7 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	if !req.Now.Before(m.hintsExpire) {
 		return cands[0].pc, true // no fresh hints: the session order alone
 	}
-	if m.wakeable(req.Model, req.Kind, req.Self) && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
+	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
 		return Policloud{}, false // every sibling is cold and the model may be woken here: wake it here
 	}
 	firstEligible := -1
@@ -462,10 +460,8 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 func (m *Map) Wakeable(model, kind, policloud string) (budget time.Duration, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, pl := range m.byModel[model] {
-		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
-			return pl.holdBudget, true
-		}
+	if pl, ok := m.wakeable(model, kind, policloud); ok {
+		return pl.holdBudget, true
 	}
 	return 0, false
 }
@@ -485,11 +481,16 @@ func (m *Map) WakeableModels(policloud string) []string {
 	return out
 }
 
-// wakeable is Wakeable without the lock or the budget.
-func (m *Map) wakeable(model, kind, policloud string) bool {
-	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool {
-		return pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero
-	})
+// wakeable is the one "may be held here" rule, used by Wakeable and Target:
+// the placement of model, as kind, on policloud with scale_from_zero. The
+// caller holds m.mu.
+func (m *Map) wakeable(model, kind, policloud string) (Placement, bool) {
+	for _, pl := range m.byModel[model] {
+		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
+			return pl, true
+		}
+	}
+	return Placement{}, false
 }
 
 // score is H(a, model, policloud): the first 8 bytes, big-endian, of
@@ -579,18 +580,6 @@ const jtiLen = 16
 func ValidJTI(jti string) bool {
 	b, err := base64.RawURLEncoding.DecodeString(jti)
 	return err == nil && len(b) == jtiLen
-}
-
-// CanonicalRequestID returns raw in canonical UUID form (lowercase, no
-// prefix or braces) and true, or "" and false when raw is not a UUID. It is
-// the one rule for request IDs: the API middleware applies it to the
-// client's ID and the redirect target to the IDs a token carries.
-func CanonicalRequestID(raw string) (string, bool) {
-	u, err := uuid.Parse(raw)
-	if err != nil {
-		return "", false
-	}
-	return u.String(), true
 }
 
 // Secret is one signing secret and its ID (the token's kid).
@@ -714,7 +703,9 @@ func BodySHA(body []byte) string {
 
 // ReplayGuard makes tokens single-use: a token ID (jti) is accepted once until
 // its token can no longer verify (exp + ClockSkew). It is keyed on the jti,
-// never on the request ID, which the client can choose through X-Request-ID.
+// which identifies the token. The request ID (rid) is minted by the router
+// and identifies the request: one request may be redirected more than once,
+// each time with a new token.
 //
 // ponytail: in memory, so a token can be used once per router of the target
 // policloud, not once per policloud. Contract 3 v2 moves this to the
