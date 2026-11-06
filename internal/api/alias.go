@@ -211,6 +211,7 @@ func (h *Handlers) logDecision(c *gin.Context, path string, d semantic.Decision,
 		TS:            time.Now().UTC(),
 		RequestID:     c.GetString("request_id"),
 		Path:          path,
+		TenantID:      c.GetString("tenant_id"),
 		KeyID:         callerIdentity(c),
 		Alias:         d.Alias,
 		ResolvedModel: d.Model,
@@ -244,9 +245,9 @@ func cachedBody(c *gin.Context) ([]byte, bool) {
 	return b, ok
 }
 
-// callerIdentity scopes task pins and fingerprints to one API key. Dynamic
-// keys carry a key_id; static auth.yaml keys do not, so fall back to the
-// tenant plus the key's masked preview, which distinguishes keys of one tenant.
+// callerIdentity scopes task pins and fingerprints to one API key: its
+// key_id (dynamic keys, and static keys' derived ID). Only in auth mode none
+// is there no key ID; fall back to the tenant plus the key preview.
 func callerIdentity(c *gin.Context) string {
 	if id := c.GetString("key_id"); id != "" {
 		return id

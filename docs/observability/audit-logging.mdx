@@ -74,7 +74,7 @@ The timestamp and values above are examples.
 | `request_id` | The request ID: a UUIDv7 the router generates, unique for every request |
 | `client_request_id` | The client's own ID, when it sent a valid UUID; otherwise empty |
 | `tenant_id` | Authenticated key owner; `default` in no-auth mode; empty for failures before identity resolution |
-| `key_id` | Dynamic key-registry ID; `static-` plus 16 hex characters derived from the key hash for static `auth.yaml` keys; `admin-` plus 16 derived hex characters for admin keys; empty for no-auth traffic |
+| `key_id` | Dynamic key-registry ID; `static-` plus 16 hex characters derived from the key hash for static `auth.yaml` keys; `admin-` plus 16 derived hex characters for admin keys; `anonymous` for no-auth traffic; empty for failures before identity resolution |
 | `model` | Top-level request model when the handler could read it |
 | `status_code` | Final HTTP response status |
 | `latency_ms` | Time from request entry until the response completes |
@@ -171,17 +171,13 @@ In no-auth mode, successful API requests use:
 ```json
 {
   "tenant_id": "default",
-  "key_id": ""
+  "key_id": "anonymous"
 }
 ```
 
 Authentication failures happen before Hivenet Router can resolve a tenant or key, so those fields remain empty.
 
-<Note>
-  Audit records and Prometheus labels use different empty-key conventions.
-
-  No-auth audit records use an empty `key_id`, while tenant metrics use `key_id="anonymous"` for those requests.
-</Note>
+Every authenticated request's record carries a non-empty `key_id`, so one customer's requests can be selected from a shared audit log by `tenant_id` and `key_id`. Audit records and tenant metrics use the same `key_id` values.
 
 ### Agent and provider identity
 
@@ -350,15 +346,7 @@ Set the environment variable in the router service:
 Environment=HIVENET_ROUTER_AUDIT_LOG_PATH=/var/log/hivenet-router/audit.jsonl
 ```
 
-Hivenet Router creates the file when it starts.
-
-Its final permissions are affected by the process umask. With the hardened systemd unit from the bare-metal guide:
-
-```ini
-UMask=0027
-```
-
-the requested file mode is reduced accordingly.
+Hivenet Router creates the file on the first audited request, with mode `0600`: the records name every tenant and key, so only the router's own user can read them. A regular file that already exists with a wider mode is narrowed to `0600`; a non-regular path such as `/dev/stdout` is left as it is. Give a log shipper access by running it as the router's user or by reading the router's standard output instead.
 
 Check the result:
 
