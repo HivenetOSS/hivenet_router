@@ -36,13 +36,15 @@ type fakeLimiter struct {
 	chargedInput int // last token count passed to AllowInputTokens
 }
 
-func (f *fakeLimiter) AllowRequest(string, string, int) (bool, int, error) { return true, -1, nil }
-func (f *fakeLimiter) RemainingTokens(_, _ string, _ int) (int, error)     { return f.remaining, nil }
-func (f *fakeLimiter) AllowOutputTokens(string, string, int, int) (bool, int, error) {
+func (f *fakeLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
+	return true, -1, nil
+}
+func (f *fakeLimiter) RemainingTokens(_, _, _ string, _ int) (int, error) { return f.remaining, nil }
+func (f *fakeLimiter) AllowOutputTokens(string, string, string, int, int) (bool, int, error) {
 	return true, -1, nil
 }
 func (f *fakeLimiter) Reset() {}
-func (f *fakeLimiter) AllowInputTokens(_, _ string, _, count int) (bool, int, error) {
+func (f *fakeLimiter) AllowInputTokens(_, _, _ string, _, count int) (bool, int, error) {
 	f.inputCalls++
 	f.chargedInput = count
 	return f.inAllowed, f.inRemaining, nil

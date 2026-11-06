@@ -22,8 +22,10 @@ type MinuteRateLimiter struct {
 // NewMinuteRateLimiter creates an empty MinuteRateLimiter.
 func NewMinuteRateLimiter() *MinuteRateLimiter { return &MinuteRateLimiter{} }
 
-func inKey(tenantID, model string) string  { return "i\x00" + bucketKey(tenantID, model) }
-func outKey(tenantID, model string) string { return "o\x00" + bucketKey(tenantID, model) }
+// inKey and outKey build the bucket key from the caller's key ID and the
+// model (callers pass the key ID as the first argument of the Allow methods).
+func inKey(keyID, model string) string  { return "i\x00" + keyID + "\x00" + model }
+func outKey(keyID, model string) string { return "o\x00" + keyID + "\x00" + model }
 
 // bucket returns the token bucket for key, sized to limit. Like the RPM bucket
 // it applies the current rate/burst on every call so a reloaded limit takes

@@ -18,7 +18,7 @@ func TestRPM_CertifiedBurstWindow(t *testing.T) {
 
 	admitted := 0
 	for i := 0; i < 20; i++ {
-		if ok, _, _ := l.AllowRequest("t", "m", 60); ok {
+		if ok, _, _ := l.AllowRequest("t", "key", "m", 60); ok {
 			admitted++
 		}
 	}
@@ -30,7 +30,7 @@ func TestRPM_CertifiedBurstWindow(t *testing.T) {
 	def := auth.NewInMemoryLimiter()
 	admittedDef := 0
 	for i := 0; i < 20; i++ {
-		if ok, _, _ := def.AllowRequest("t", "m", 60); ok {
+		if ok, _, _ := def.AllowRequest("t", "key", "m", 60); ok {
 			admittedDef++
 		}
 	}
@@ -48,7 +48,7 @@ func TestTinyFloodStoppedByRPM_NotITPM(t *testing.T) {
 
 	rpmAdmitted, itpmAdmitted := 0, 0
 	for i := 0; i < 300; i++ {
-		if ok, _, _ := rpm.AllowRequest("t", "m", 96); ok {
+		if ok, _, _ := rpm.AllowRequest("t", "key", "m", 96); ok {
 			rpmAdmitted++
 		}
 		if itpm.AllowInputTokens("t", "m", 520_000, 100) {

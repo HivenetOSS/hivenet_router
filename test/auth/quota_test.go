@@ -22,18 +22,18 @@ func TestInMemoryLimiter_PerModelBucketIsolation(t *testing.T) {
 
 	// Burn the entire RPM budget for model A (rpm=2 → burst 2).
 	for i := 0; i < 2; i++ {
-		ok, _, err := lim.AllowRequest("tenant1", "modelA", 2)
+		ok, _, err := lim.AllowRequest("tenant1", "key", "modelA", 2)
 		if err != nil || !ok {
 			t.Fatalf("modelA call %d should be allowed, got ok=%v err=%v", i, ok, err)
 		}
 	}
 	// Next call to modelA must be rejected — bucket is empty.
-	if ok, _, _ := lim.AllowRequest("tenant1", "modelA", 2); ok {
+	if ok, _, _ := lim.AllowRequest("tenant1", "key", "modelA", 2); ok {
 		t.Fatalf("modelA RPM should be exhausted after the burst")
 	}
 
 	// modelB has its own bucket; the rejection above must not have touched it.
-	if ok, _, err := lim.AllowRequest("tenant1", "modelB", 2); err != nil || !ok {
+	if ok, _, err := lim.AllowRequest("tenant1", "key", "modelB", 2); err != nil || !ok {
 		t.Fatalf("modelB bucket must be independent of modelA; got ok=%v err=%v", ok, err)
 	}
 }
@@ -45,19 +45,19 @@ func TestInMemoryLimiter_PerModelTokenBucketIsolation(t *testing.T) {
 	lim := auth.NewInMemoryLimiter()
 
 	// Spend 90/100 from modelA.
-	if ok, rem, _ := lim.AllowInputTokens("tenant1", "modelA", 100, 90); !ok || rem != 10 {
+	if ok, rem, _ := lim.AllowInputTokens("tenant1", "key", "modelA", 100, 90); !ok || rem != 10 {
 		t.Fatalf("modelA: expected ok=true rem=10, got ok=%v rem=%d", ok, rem)
 	}
 	// modelB starts fresh: 100 budget, spending 90 leaves 10.
-	if ok, rem, _ := lim.AllowInputTokens("tenant1", "modelB", 100, 90); !ok || rem != 10 {
+	if ok, rem, _ := lim.AllowInputTokens("tenant1", "key", "modelB", 100, 90); !ok || rem != 10 {
 		t.Fatalf("modelB: bucket must be independent; expected ok=true rem=10, got ok=%v rem=%d", ok, rem)
 	}
 	// modelA: peek shows the right remaining for THIS model, not the other.
-	if rem, _ := lim.RemainingTokens("tenant1", "modelA", 100); rem != 10 {
+	if rem, _ := lim.RemainingTokens("tenant1", "key", "modelA", 100); rem != 10 {
 		t.Fatalf("modelA remaining: expected 10, got %d", rem)
 	}
 	// modelB peek: same.
-	if rem, _ := lim.RemainingTokens("tenant1", "modelB", 100); rem != 10 {
+	if rem, _ := lim.RemainingTokens("tenant1", "key", "modelB", 100); rem != 10 {
 		t.Fatalf("modelB remaining: expected 10, got %d", rem)
 	}
 }
@@ -70,11 +70,11 @@ func TestInMemoryLimiter_LegacyFlatBucketPreserved(t *testing.T) {
 	lim := auth.NewInMemoryLimiter()
 
 	// Spend 60/100 on the umbrella bucket.
-	if ok, _, _ := lim.AllowInputTokens("tenant1", "", 100, 60); !ok {
+	if ok, _, _ := lim.AllowInputTokens("tenant1", "key", "", 100, 60); !ok {
 		t.Fatalf("flat: first call should be allowed")
 	}
 	// A second flat call should see the spend; only 40 left.
-	if rem, _ := lim.RemainingTokens("tenant1", "", 100); rem != 40 {
+	if rem, _ := lim.RemainingTokens("tenant1", "key", "", 100); rem != 40 {
 		t.Fatalf("flat: expected 40 remaining, got %d", rem)
 	}
 }
@@ -98,12 +98,12 @@ func TestInMemoryLimiter_RPMRescaleOnReplicaChange(t *testing.T) {
 	// Seed at rpm=2: a single call exhausts the burst because the second
 	// would race the refill — we want the bucket near-empty before the rescale.
 	for i := 0; i < 2; i++ {
-		if ok, _, _ := lim.AllowRequest("tenant1", "modelA", 2); !ok {
+		if ok, _, _ := lim.AllowRequest("tenant1", "key", "modelA", 2); !ok {
 			t.Fatalf("seed burst should succeed")
 		}
 	}
 	// Bucket empty under the SEED rate.
-	if ok, _, _ := lim.AllowRequest("tenant1", "modelA", 2); ok {
+	if ok, _, _ := lim.AllowRequest("tenant1", "key", "modelA", 2); ok {
 		t.Fatalf("rpm=2 bucket should be exhausted before scale-up")
 	}
 
@@ -111,12 +111,12 @@ func TestInMemoryLimiter_RPMRescaleOnReplicaChange(t *testing.T) {
 	// massively higher rpm. With per-call SetLimit/SetBurst, this primes the
 	// new rate; the call itself may still see a near-empty bucket because the
 	// time elapsed at the OLD rate accrued only ~0 tokens.
-	_, _, _ = lim.AllowRequest("tenant1", "modelA", 60_000)
+	_, _, _ = lim.AllowRequest("tenant1", "key", "modelA", 60_000)
 
 	// Let the NEW rate (1000 tokens/sec) refill the bucket. 15 ms ≈ 15 tokens.
 	// Under the old rate (~0.033/sec), 15 ms would accrue 0.0005 — denied.
 	time.Sleep(15 * time.Millisecond)
-	if ok, _, _ := lim.AllowRequest("tenant1", "modelA", 60_000); !ok {
+	if ok, _, _ := lim.AllowRequest("tenant1", "key", "modelA", 60_000); !ok {
 		t.Fatalf("after replica scale-up the limiter must rescale: a 15 ms wait at the NEW rate should refill the bucket. Old rate refill in 15 ms is ~0.0005 tokens — Allow would fail if SetLimit/SetBurst is not applied per call.")
 	}
 
@@ -124,9 +124,9 @@ func TestInMemoryLimiter_RPMRescaleOnReplicaChange(t *testing.T) {
 	// then verify a request at the lower rpm is denied (proving SetBurst
 	// clamped the bucket capacity).
 	for i := 0; i < 100; i++ {
-		_, _, _ = lim.AllowRequest("tenant1", "modelA", 2)
+		_, _, _ = lim.AllowRequest("tenant1", "key", "modelA", 2)
 	}
-	if ok, _, _ := lim.AllowRequest("tenant1", "modelA", 2); ok {
+	if ok, _, _ := lim.AllowRequest("tenant1", "key", "modelA", 2); ok {
 		t.Fatalf("after scaling rpm back down to 2, the burst cap should shrink (SetBurst lowered the ceiling) — further calls must be denied")
 	}
 }

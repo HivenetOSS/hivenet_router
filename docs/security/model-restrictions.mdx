@@ -602,9 +602,7 @@ keys:
       tokens_per_day: 200000
 ```
 
-Keys with the same owner share quota buckets.
-
-Use one owner only when shared quota accounting is intentional.
+Quota buckets are per key, even when keys share an owner. The owner groups keys into one tenant for metrics and audit records.
 
 ## Update static restrictions
 

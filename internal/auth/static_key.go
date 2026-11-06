@@ -117,15 +117,19 @@ func staticKeyID(keyHash string) string {
 	return derivedKeyID("static-", keyHash)
 }
 
-// Tenants returns a map from tenant ID to QuotaLimits for every key entry,
-// deduplicated by tenant ID. When multiple keys share an owner the last
-// entry's limits win (same owner → same tier in practice).
-// Used at startup and after SIGHUP to pre-populate Prometheus quota gauges
-// so the Grafana $tenant_id variable populates within the first scrape.
+// Tenants returns every tenant's total ceiling: the limits of its keys
+// summed (see tenantCeilings). Used at startup and after SIGHUP to
+// pre-populate the per-tenant Prometheus quota gauges so the Grafana
+// $tenant_id variable populates within the first scrape. Enforcement is per
+// key and never reads this.
 func (s *StaticKeyProvider) Tenants() map[string]QuotaLimits {
-	out := make(map[string]QuotaLimits, len(s.keys))
+	byTenant := make(map[string][]QuotaLimits)
 	for _, e := range s.keys {
-		out[e.result.TenantID] = e.result.QuotaLimits
+		byTenant[e.result.TenantID] = append(byTenant[e.result.TenantID], e.result.QuotaLimits)
+	}
+	out := make(map[string]QuotaLimits, len(byTenant))
+	for tenant, keys := range byTenant {
+		out[tenant] = tenantCeilings(keys)
 	}
 	return out
 }

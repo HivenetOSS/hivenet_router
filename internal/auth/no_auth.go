@@ -20,3 +20,9 @@ func NewNoAuthProvider() *NoAuthProvider {
 func (n *NoAuthProvider) Authenticate(_ *http.Request) (*AuthResult, error) {
 	return &AuthResult{TenantID: "default"}, nil
 }
+
+// Tenants reports the one "default" tenant with no limits, so the per-tenant
+// gauges are seeded in no-auth mode just as for keyed modes.
+func (n *NoAuthProvider) Tenants() map[string]QuotaLimits {
+	return map[string]QuotaLimits{"default": {}}
+}

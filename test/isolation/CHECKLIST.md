@@ -38,11 +38,11 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 2.1 | RPM and daily-token counters are per key, checked against that key's own limits. Another key cannot overwrite a key's ceiling. | planned (PR-2) | `TestInMemoryLimiter_PerKeyBucketsWithinTenant`, `TestInMemoryLimiter_KeyCeilingNotOverwrittenByOtherKey` |
+| 2.1 | RPM and daily-token counters are per key (persisted per key with the Badger backend), checked against that key's own limits. Another key cannot overwrite a key's ceiling. | done | `TestInMemoryLimiter_PerKeyBucketsWithinTenant`, `TestInMemoryLimiter_KeyCeilingNotOverwrittenByOtherKey`, `TestBadgerLimiter_PerKeyPersistence` |
 | 2.2 | Input/output tokens-per-minute and occupancy share are per key, static keys included. | done | `TestIsolation_StaticKeysHaveDistinctB4State` |
-| 2.3 | A key ID reassigned to another tenant starts from zero. | planned (PR-2) | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated`, `TestMinute_PerKeyWithinTenant` |
-| 2.4 | `X-RateLimit-*` headers describe the calling key only. | planned (PR-2) | `TestIsolation_RateLimitHeadersArePerKey` |
-| 2.5 | Tenant A exhausting its quota never causes a 429 for tenant B (end to end). | planned (PR-2) | `TestIsolation_TwoTenantsQuotaE2E` |
+| 2.3 | A key ID reassigned to another tenant starts from zero. | done | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated` |
+| 2.4 | `X-RateLimit-*` headers describe the calling key only. | done | `TestIsolation_RateLimitHeadersArePerKey` |
+| 2.5 | A key exhausting its request rate or daily tokens never causes a 429 for another key, of its own tenant or another (end to end, output tokens included). | done | `TestIsolation_TwoTenantsQuotaE2E` |
 | 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. | planned (PR-3) | `TestIsolation_RequireModelAllowlist` |
 | 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | planned (PR-3) | `TestEmbeddings_HonoursEffectiveAllowlist` |
 | 2.8 | A redirect token's scope cannot be widened by the client. | done | `TestIsolation_RedirectTokenCannotWidenScope`, `TestRedirect_Scope` |
@@ -70,7 +70,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.1 | Every authenticated `/v1` audit and decision-log line carries the caller's `tenant_id` and a non-empty `key_id`. | planned (PR-5) | `TestIsolation_LogsAttributable` |
 | 4.2 | No log contains a prompt, response, credential, salt secret or salt (doc-18 G7, as a regression test). | planned (PR-5) | `TestIsolation_LogsContentFree` |
 | 4.3 | The audit log file is readable by its owner only (0600). | planned (PR-5) | `TestIsolation_AuditFileMode` |
-| 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series. | planned (PR-2) | `TestIsolation_TenantMetricsAttribution` |
+| 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage and limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
 | 4.5 | `/metrics` can require a bearer token (doc-18 G3). | planned (PR-7) | `TestMetricsHandler_BearerToken` |
 | 4.6 | Multi-tenant mode refuses to start with an open `/metrics`. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |

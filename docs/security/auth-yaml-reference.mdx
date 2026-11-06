@@ -264,13 +264,7 @@ It labels and groups:
 - audit records
 - tenant dashboards
 
-Keys with the same owner share quota state.
-
-<Warning>
-  Give keys the same owner only when they belong to the same tenant and should share quota buckets.
-
-  When several keys share an owner, keep their quota configuration consistent. Different limits attached to the same shared bucket can produce confusing behavior.
-</Warning>
+Quota state is per key, even when keys share an owner. Each key is counted against its own limits, so a tenant with several keys can use up to the sum of their limits. Give keys the same owner when they belong to the same tenant, so their metrics and audit records are attributed together.
 
 ### Creation date
 
@@ -380,7 +374,7 @@ This gives per-model quota configuration one source of truth for both access and
 
 ## Flat quotas
 
-The flat quota shape applies one shared budget to every model the owner may call.
+The flat quota shape applies one budget to every model the key may call.
 
 ```yaml
 quota:
@@ -393,7 +387,7 @@ quota:
 | Field | Required | Description |
 | --- | --- | --- |
 | `requests_per_minute` | No | Shared request-rate limit |
-| `tokens_per_day` | No | Shared daily language-model token budget |
+| `tokens_per_day` | No | Daily language-model token budget for this key |
 | `input_tokens_per_minute` | No | Serverless per-key input-token rate, charged before forwarding |
 | `output_tokens_per_minute` | No | Serverless per-key output-token rate, metered after local responses |
 | `0` | Not applicable | Unlimited |
@@ -441,7 +435,8 @@ The daily budget:
 - applies to language-model chat traffic
 - combines input and output tokens
 - resets at midnight UTC
-- is shared by models and keys using the same flat owner bucket
+- belongs to the key: other keys, including keys of the same owner, have their own budgets
+- is shared by all models the key calls with the flat quota shape
 
 A value of `0` disables the token budget.
 

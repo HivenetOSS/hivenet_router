@@ -8,6 +8,8 @@ package e2e
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -174,4 +176,179 @@ func TestIsolation_ConcurrentResponsesNotCrossWired(t *testing.T) {
 	for e := range errs {
 		t.Error(e)
 	}
+}
+
+// postAs sends one raw chat-completions body with the given key and returns
+// the status and response body.
+func postAs(t *testing.T, base, key, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
+
+// TestIsolation_TwoTenantsQuotaE2E: one router, one agent, two tenants with
+// two keys each. A key exhausting its request rate or its daily token budget
+// is refused with 429; the other key of the same tenant and the other
+// tenant's keys keep being served.
+func TestIsolation_TwoTenantsQuotaE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const (
+		rpmA1, rpmA2, rpmB1 = "sk-q-a1", "sk-q-a2", "sk-q-b1"
+		tpdA, tpdB          = "sk-q-a-tpd", "sk-q-b-tpd"
+	)
+	auth := writeAuthYAML(
+		testKey{Token: rpmA1, Owner: "tenant-a", Name: "a1", RPM: 2},
+		testKey{Token: rpmA2, Owner: "tenant-a", Name: "a2", RPM: 2},
+		testKey{Token: rpmB1, Owner: "tenant-b", Name: "b1", RPM: 2},
+		// 170 tokens/day: one request reserving 150 output tokens on a ~14
+		// token prompt fits; after it is charged (prompt + 1 output token)
+		// the next identical request no longer does.
+		testKey{Token: tpdA, Owner: "tenant-a", Name: "a-tpd", TPD: 170},
+		testKey{Token: tpdB, Owner: "tenant-b", Name: "b-tpd", TPD: 170},
+	)
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, rpmB1, stubModel)
+	})
+	small := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":5}`, stubModel)
+
+	t.Run("requests per minute", func(t *testing.T) {
+		for i := range 2 {
+			if code, body := postAs(t, base, rpmA1, small); code != http.StatusOK {
+				t.Fatalf("a1 request %d: %d %s", i, code, body)
+			}
+		}
+		if code, _ := postAs(t, base, rpmA1, small); code != http.StatusTooManyRequests {
+			t.Fatalf("a1 third request: %d, want 429", code)
+		}
+		if code, body := postAs(t, base, rpmA2, small); code != http.StatusOK {
+			t.Errorf("a2 (same tenant, own bucket) after a1 hit its limit: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, rpmB1, small); code != http.StatusOK {
+			t.Errorf("b1 (other tenant) after a1 hit its limit: %d %s", code, body)
+		}
+	})
+
+	t.Run("tokens per day", func(t *testing.T) {
+		big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":150}`,
+			stubModel, strings.Repeat("x", 40))
+		if code, body := postAs(t, base, tpdA, big); code != http.StatusOK {
+			t.Fatalf("a-tpd first request: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, tpdA, big); code != http.StatusTooManyRequests || !strings.Contains(body, "token") {
+			t.Fatalf("a-tpd second request: %d %s, want 429 (daily budget spent)", code, body)
+		}
+		if code, body := postAs(t, base, tpdB, big); code != http.StatusOK {
+			t.Errorf("b-tpd (other tenant) after a-tpd spent its budget: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, rpmA2, small); code != http.StatusOK {
+			t.Errorf("a2 (same tenant, no daily limit) after a-tpd spent its budget: %d %s", code, body)
+		}
+	})
+}
+
+// tenantSeries sums a Prometheus counter's samples per tenant_id and lists
+// the key_id values seen per tenant.
+func tenantSeries(t *testing.T, metricsURL, name string) (sum map[string]float64, keys map[string]map[string]bool) {
+	t.Helper()
+	resp, err := http.Get(metricsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sum, keys = map[string]float64{}, map[string]map[string]bool{}
+	label := func(line, l string) string {
+		m := regexp.MustCompile(l + `="([^"]*)"`).FindStringSubmatch(line)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, name+"{") {
+			continue
+		}
+		var v float64
+		if _, err := fmt.Sscan(line[strings.LastIndex(line, " ")+1:], &v); err != nil {
+			continue
+		}
+		tenant, key := label(line, "tenant_id"), label(line, "key_id")
+		sum[tenant] += v
+		if keys[tenant] == nil {
+			keys[tenant] = map[string]bool{}
+		}
+		keys[tenant][key] = true
+	}
+	return sum, keys
+}
+
+// TestIsolation_TenantMetricsAttribution: a tenant's requests move only that
+// tenant's hivenet_tenant_* series, labelled with its own key ID (a static
+// key's derived ID, not "anonymous").
+func TestIsolation_TenantMetricsAttribution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, isoKeyA, stubModel)
+	})
+	metricsURL := "http://127.0.0.1" + rcfg.MetricsPort + "/metrics"
+	const success = "hivenet_tenant_requests_success_total"
+	small := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":5}`, stubModel)
+
+	for range 3 {
+		if code, body := postAs(t, base, isoKeyA, small); code != http.StatusOK {
+			t.Fatalf("tenant-a request: %d %s", code, body)
+		}
+	}
+	waitFor(t, 5*time.Second, "tenant-a success counter at 3", func() bool {
+		sum, _ := tenantSeries(t, metricsURL, success)
+		return sum["tenant-a"] == 3
+	})
+	if sum, _ := tenantSeries(t, metricsURL, success); sum["tenant-b"] != 0 {
+		t.Errorf("tenant-b success %v after only tenant-a sent requests, want 0", sum["tenant-b"])
+	}
+
+	if code, body := postAs(t, base, isoKeyB, small); code != http.StatusOK {
+		t.Fatalf("tenant-b request: %d %s", code, body)
+	}
+	waitFor(t, 5*time.Second, "tenant-b success counter at 1", func() bool {
+		sum, _ := tenantSeries(t, metricsURL, success)
+		return sum["tenant-b"] == 1
+	})
+	sum, keys := tenantSeries(t, metricsURL, success)
+	if sum["tenant-a"] != 3 {
+		t.Errorf("tenant-a success %v after tenant-b's request, want still 3", sum["tenant-a"])
+	}
+	for tenant, token := range map[string]string{"tenant-a": isoKeyA, "tenant-b": isoKeyB} {
+		want := derivedStaticKeyID(token)
+		if !keys[tenant][want] || keys[tenant]["anonymous"] {
+			t.Errorf("%s key_id labels %v, want only its own %q", tenant, keys[tenant], want)
+		}
+	}
+}
+
+// derivedStaticKeyID is the key ID the router derives for a static key.
+func derivedStaticKeyID(token string) string {
+	h := sha256.Sum256([]byte(token))
+	id := sha256.Sum256([]byte("hivenet-router/key-id/v1\x00" + hex.EncodeToString(h[:])))
+	return "static-" + hex.EncodeToString(id[:8])
 }

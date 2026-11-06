@@ -315,8 +315,8 @@ quota:
 
 | Field | Meaning |
 | --- | --- |
-| `requests_per_minute` | Shared request-rate ceiling |
-| `tokens_per_day` | Shared daily chat-token budget |
+| `requests_per_minute` | Request-rate ceiling for this key |
+| `tokens_per_day` | Daily chat-token budget for this key |
 | `input_tokens_per_minute` | Serverless per-key input-token rate, charged before forwarding |
 | `output_tokens_per_minute` | Serverless per-key output-token rate, metered after local responses |
 | `0` | Unlimited |
@@ -335,19 +335,11 @@ For every reachable serverless model, a nonzero `input_tokens_per_minute` must b
 
 The `auth.DeriveKeyDefaults` helper can calculate suggested values from certified model limits. The current runtime does not load `router_limits.yaml` or apply those defaults automatically.
 
-The flat quota bucket is keyed by:
+Quota buckets are per key: each key is counted against its own limits, even when several keys share a `metadata.owner`. A tenant with several keys can therefore use up to the sum of their limits. The owner groups keys into one tenant for metrics, audit records and dashboards.
 
-```text
-metadata.owner
-```
-
-This has an important consequence:
-
-<Warning>
-  Several keys with the same `metadata.owner` share the same flat request and token budgets.
-
-  Use different owner values when keys require independent quota buckets.
-</Warning>
+<Note>
+  Before per-key buckets, keys of one owner shared one bucket. Upgrading restarts each key's daily token count from zero once (the old per-owner counters are no longer read).
+</Note>
 
 The request-rate limiter uses a token bucket. It begins with up to one minute's configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the burst window; `0` preserves the full-minute capacity.
 
@@ -935,19 +927,10 @@ The router refuses to start with unauthenticated administrator endpoints unless 
     When `quota.per_model` exists, its keys define the effective allowlist and take precedence over `models`.
   </Accordion>
 
-  <Accordion title="Several keys consume one quota unexpectedly">
-    Check their owner values.
+  <Accordion title="A tenant uses more than one key's quota">
+    Quotas are per key, not per owner. A tenant with several keys can use up to the sum of their limits.
 
-    Keys with the same:
-
-    ```yaml
-    metadata:
-      owner: acme-corp
-    ```
-
-    share quota buckets.
-
-    Assign different owners when the limits should remain independent.
+    To cap a tenant at one budget, give it one key, or split the budget across its keys.
   </Accordion>
 
   <Accordion title="The effective per-model RPM is unexpected">
