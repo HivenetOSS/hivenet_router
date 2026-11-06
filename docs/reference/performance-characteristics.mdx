@@ -336,7 +336,7 @@ If the queue is full or the request context expires, the routing session advance
 
 The agent's `--capacity` flag is deprecated and ignored by routers. The router bounds work per model with the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
 
-For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, each router admits its share of the budget.
+For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, the budget is shared across them through occupancy credits.
 
 ## Request and response buffering
 

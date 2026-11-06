@@ -34,6 +34,8 @@ import (
 
 var log = logging.Logger("shared")
 
+var errShortReply = errors.New("shared store: unexpected reply")
+
 // Usage kinds published on the usage stream. They match the limiters' kinds in
 // package auth.
 const (
@@ -58,6 +60,7 @@ type Config struct {
 	TLS            bool          // connect with TLS (system roots)
 	Prefix         string        // key prefix, one per policloud (the site ID)
 	RouterID       string        // stable router identity, e.g. the pod name
+	PeerID         string        // this router's libp2p peer ID, so other routers can ask the agents about it
 	Interval       time.Duration // sync interval
 	DownAfter      time.Duration // unreachable this long → each router enforces its share
 }
@@ -78,6 +81,8 @@ type Store struct {
 	lastOK time.Time // last successful tick
 
 	fleet    atomic.Int32  // live routers, this one included (last known while down)
+	evicted  atomic.Uint64 // times the other routers removed this run from the live set
+	seenLive bool          // this run has been in the live set
 	seq      atomic.Uint64 // successful ticks
 	degraded atomic.Uint64 // 0 while Valkey answers, else the outage number
 	outages  uint64
@@ -131,6 +136,11 @@ func New(cfg Config) (*Store, error) {
 	return s, nil
 }
 
+// SetPeerID records this router's libp2p peer ID, published with its
+// heartbeat so the other routers can ask the agents about it. Call before
+// Start.
+func (s *Store) SetPeerID(id string) { s.cfg.PeerID = id }
+
 // AddApplier registers a receiver for the other routers' usage. Call before Start.
 func (s *Store) AddApplier(a Applier) { s.appliers = append(s.appliers, a) }
 
@@ -167,8 +177,11 @@ func (s *Store) Record(kind byte, bucket string, limit, n int) {
 	s.mu.Unlock()
 }
 
+// key builds a key under this site's prefix. The prefix is a hash tag
+// ({site}), so every key of a site lands in one slot: scripts may touch
+// several of them, and the layout stays valid on a Valkey cluster.
 func (s *Store) key(parts ...string) string {
-	return "hivenet:" + s.cfg.Prefix + ":" + strings.Join(parts, ":")
+	return "hivenet:{" + s.cfg.Prefix + "}:" + strings.Join(parts, ":")
 }
 
 func dayIndex(t time.Time) int { return int(t.UTC().Unix() / 86400) }
@@ -276,12 +289,25 @@ func (s *Store) tick(ctx context.Context) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.Interval)
 	defer cancel()
 
-	live, err := heartbeat.Exec(cctx, c, []string{s.key("routers")},
-		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10)}).AsStrSlice()
-	if err != nil {
+	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers")},
+		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID}).AsStrSlice()
+	if err != nil || len(hb) == 0 {
+		if err == nil {
+			err = errors.New("empty heartbeat reply")
+		}
 		s.failTick(buf, err)
 		return
 	}
+	// hb[0] says whether this run was still in the live set. Once it has
+	// been, missing means the other routers evicted it (they saw it as dead
+	// and took back what it held), so whatever it holds must be re-granted.
+	if hb[0] == "1" {
+		s.seenLive = true
+	} else if s.seenLive {
+		s.evicted.Add(1)
+		log.Warnf("shared counters: this router was evicted from the live set; re-requesting its shares")
+	}
+	live := hb[1:]
 
 	entries := make([]entry, 0, len(buf))
 	daily := map[string]int64{}
@@ -396,14 +422,29 @@ func streamMillis(id string) int64 {
 }
 
 // heartbeat records this run as live (scored with Valkey's own clock, so the
-// routers' clocks do not matter), drops runs silent for 10 minutes, and returns
-// the runs seen within ARGV[2] ms.
+// routers' clocks do not matter) and its libp2p peer ID, drops runs silent for
+// 10 minutes, and returns whether this run was in the live set ("1"/"0")
+// followed by the runs seen within ARGV[2] ms.
+// KEYS: live set, peer-ID hash. ARGV: run, live window (ms), peer ID.
 var heartbeat = valkey.NewLuaScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local present = redis.call('ZSCORE', KEYS[1], ARGV[1])
 redis.call('ZADD', KEYS[1], now, ARGV[1])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 600000)
-return redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]), '+inf')`)
+if ARGV[3] ~= '' then
+  redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
+  redis.call('EXPIRE', KEYS[2], 3600)
+end
+local out = {present and '1' or '0'}
+for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]), '+inf')) do
+  out[#out + 1] = r
+end
+return out`)
+
+// Evictions counts the times the other routers removed this run from the live
+// set; a change means every share this router held was taken back.
+func (s *Store) Evictions() uint64 { return s.evicted.Load() }
 
 // String describes the configuration for the startup banner (no secrets).
 func (c Config) String() string {
@@ -416,4 +457,25 @@ func (c Config) String() string {
 		prefix = "default"
 	}
 	return fmt.Sprintf("Valkey %s (%s), router %s, prefix %s, every %v", strings.Join(c.Addrs, ","), mode, c.RouterID, prefix, c.Interval)
+}
+
+// FirstUse records id until the given time and reports whether this is its
+// first use across every router of the site (SET NX with an expiry). err is
+// set when the store cannot answer.
+func (s *Store) FirstUse(ctx context.Context, id string, until time.Time) (bool, error) {
+	c, err := s.conn()
+	if err != nil {
+		return false, err
+	}
+	ttl := time.Until(until)
+	if ttl < time.Millisecond {
+		ttl = time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	err = c.Do(ctx, c.B().Set().Key(s.key("rt", id)).Value("1").Nx().PxMilliseconds(ttl.Milliseconds()).Build()).Error()
+	if valkey.IsValkeyNil(err) {
+		return false, nil // already set: a replay
+	}
+	return err == nil, err
 }

@@ -59,8 +59,13 @@ type Agent struct {
 	reportedInFlight int
 	sentSinceReport  int
 	hasReport        bool
-	SessionToken     string
-	mu               sync.RWMutex
+
+	// routers is the agent's last list of the routers it is connected to
+	// (libp2p peer ID → requests in flight for it), reported at routersAt.
+	routers      map[string]int64
+	routersAt    time.Time
+	SessionToken string
+	mu           sync.RWMutex
 }
 
 // NewAgent creates a new agent instance
@@ -102,6 +107,25 @@ func (a *Agent) SetReportedLoad(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reportedInFlight, a.sentSinceReport, a.hasReport = max(n, 0), 0, true
+}
+
+// SetRouterReport records which routers the agent is connected to right now.
+func (a *Agent) SetRouterReport(routers map[string]int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.routers, a.routersAt = routers, time.Now()
+}
+
+// ConnectedTo reports whether the agent's report, if it is no older than
+// maxAge, lists the router; fresh is false when there is no such report.
+func (a *Agent) ConnectedTo(routerPeer string, maxAge time.Duration) (fresh, connected bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.routers == nil || time.Since(a.routersAt) > maxAge {
+		return false, false
+	}
+	_, connected = a.routers[routerPeer]
+	return true, connected
 }
 
 // DecrementLoad safely decrements active requests

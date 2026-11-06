@@ -128,7 +128,9 @@ token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
 
 vLLM and SGLang agents report their KV-cache size in tokens. Ollama, llama.cpp, Infinity and custom backends do not, so they get no automatic token budget: set `admit_budget_tokens` or `max_inflight` if you want one. Otherwise the engine's own queue and [B3 shedding](#b3-front-door-shedding) protect them.
 
-With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), each router admits its share of the token budget and of the request backstop: the limit divided by the live routers. Together the routers never exceed it. Occupancy is not yet shared through the store.
+With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), the token budget and the request backstop are shared exactly: each router admits against credits it holds from a site-wide pool, and the routers together never hold more than the budget. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits).
+
+A reservation older than the request timeout plus one minute is released by a periodic check and counted in `hivenet_admission_reaped_total`: a request never lives that long, so it was leaked by an exit path that skipped its release.
 
 The healthy-replica count is recomputed for each request and floored at `1`. This keeps the gate active when no healthy replica is currently reported, while routing can still return the more specific availability error.
 

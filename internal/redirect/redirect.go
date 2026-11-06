@@ -640,13 +640,19 @@ func BodySHA(body []byte) string {
 // its token can no longer verify (exp + ClockSkew). It is keyed on the jti,
 // never on the request ID, which the client can choose through X-Request-ID.
 //
-// ponytail: in memory, so a token can be used once per router of the target
-// policloud, not once per policloud. Contract 3 v2 moves this to the
-// policloud's shared Valkey with Epic A.
+// It is in memory, so on its own a token can be used once per router of the
+// target policloud; with several routers the router wraps it in a guard
+// backed by the shared store (see Replayer).
 type ReplayGuard struct {
 	mu        sync.Mutex
 	seen      map[string]time.Time
 	lastSweep time.Time
+}
+
+// Replayer makes redirect tokens single-use: First records id until the given
+// time and reports whether this is its first use.
+type Replayer interface {
+	First(id string, until, now time.Time) bool
 }
 
 // NewReplayGuard returns an empty guard.

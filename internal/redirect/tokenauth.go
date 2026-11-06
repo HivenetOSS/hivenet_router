@@ -23,7 +23,7 @@ type Redirector struct {
 	Self   string // this policloud's ID (the routers' --site-id)
 	Map    *Map
 	Signer *Signer
-	Replay *ReplayGuard
+	Replay Replayer
 
 	// OnRedirect, if set, is called for every 307 written.
 	OnRedirect func(model, site string, hop int)
