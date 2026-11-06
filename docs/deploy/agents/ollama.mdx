@@ -245,7 +245,7 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
   </Tab>
 </Tabs>
 
-The agent waits until Ollama responds and the selected model is available. If Ollama is still starting or loading its model list, the agent continues polling instead of exiting permanently. It then sends one chat completion with `max_tokens: 1` and registers only once it succeeds: Ollama loads the model into memory on its first request, so this keeps that delay off the first client request.
+The agent waits until Ollama responds and the selected model is available. If Ollama is still starting or loading its model list, the agent continues polling instead of exiting permanently. For a chat model (`--capability llm`), it then sends one chat completion with `max_tokens: 1` and registers only once it succeeds: Ollama loads the model into memory on its first request, so this keeps that delay off the first client request.
 
 ## Understand the agent settings
 
