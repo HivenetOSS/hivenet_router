@@ -1569,7 +1569,7 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 // would otherwise add a second copy, and an upstream's own
 // X-Client-Request-ID would sit next to the client's. An upstream that
 // returns its own ID (a cloud provider, or a backend that ignores ours, or a
-// retry's ID: see forwardedRequestID) keeps it visible in
+// retry's ID: see domain.PendingRequest.ForwardID) keeps it visible in
 // X-Upstream-Request-ID.
 func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
 	h := c.Writer.Header()

@@ -12,6 +12,8 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // mutableLister is an AgentLister whose pool can change while sessions wait.
@@ -199,5 +201,90 @@ func TestQueue_FailedAgentDoesNotKeepWaiting(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("still waiting in the queue for an agent it already failed on")
+	}
+}
+
+// kvStorage serves a KV cache utilisation per agent that a test can change
+// while a session waits.
+type kvStorage struct {
+	stubStorage
+	mu sync.Mutex
+	kv map[peer.ID]float64
+}
+
+func (s *kvStorage) setKV(id string, v float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kv[peer.ID(id)] = v
+}
+
+func (s *kvStorage) GetEnginePunctual(id peer.ID) (*domain.BackendMetrics, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.kv[id]
+	return &domain.BackendMetrics{KVCacheUtilization: &v}, nil
+}
+
+// TestQueue_GatedAgentKeepsWaiting checks the other side of
+// TestQueue_FailedAgentDoesNotKeepWaiting: when the agent left is excluded
+// only by a metric gate, which can clear, a request that already waited in
+// the queue keeps waiting instead of failing at once.
+func TestQueue_GatedAgentKeepsWaiting(t *testing.T) {
+	a, b := healthyAgent("a", 1), healthyAgent("b", 1)
+	a.TryAcquireSlot()
+	b.TryAcquireSlot() // both agents are full
+	lister := &mutableLister{agents: map[string][]*domain.Agent{"m": {a, b}}}
+	stor := &kvStorage{kv: map[peer.ID]float64{}}
+	counters := metrics.NewUniversalCounterStore(stor, nil)
+	pol := &policy.Policy{RoutingPolicy: policy.PolicyStep{
+		Strategy:  "least-loaded",
+		MaxTries:  3,
+		ExcludeIf: map[string]policy.ThresholdRule{"kv_cache_utilization": {GT: f64(0.95)}},
+	}}
+	exec := policy.NewExecutor(lister, policy.NewEvaluator(stor, counters), pol, 3, 30)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session := exec.NewSession("m", domain.CapabilityLLM)
+	got := make(chan *domain.Agent, 1)
+	failed := make(chan error, 1)
+	go func() {
+		ag, err := session.Select(ctx) // waits in the queue: both agents are full
+		if err == nil {
+			session.RecordFailure(ag.ID) // the backend answered with an error
+			ag.DecrementLoad()
+			ag.TryAcquireSlot() // another request takes the slot
+			stor.setKV("b", 0.99)
+			b.DecrementLoad() // b is free but its KV cache is full
+			ag, err = session.Select(ctx)
+		}
+		if err != nil {
+			failed <- err
+			return
+		}
+		got <- ag
+	}()
+	time.Sleep(50 * time.Millisecond)
+	a.DecrementLoad()
+	exec.SignalCapacity("m")
+
+	select {
+	case err := <-failed:
+		t.Fatalf("gave up while the gated agent could still clear: %v", err)
+	case ag := <-got:
+		t.Fatalf("Select returned %q while it was gated", string(ag.ID))
+	case <-time.After(300 * time.Millisecond):
+	}
+	stor.setKV("b", 0.1)
+	exec.SignalCapacity("m")
+	select {
+	case err := <-failed:
+		t.Fatalf("Select: %v", err)
+	case ag := <-got:
+		if string(ag.ID) != "b" {
+			t.Errorf("Select returned %s, want b", ag.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("still waiting after the gate cleared")
 	}
 }

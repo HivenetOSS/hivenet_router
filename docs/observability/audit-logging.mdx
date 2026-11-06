@@ -111,7 +111,7 @@ The client's ID is a label only: it is never forwarded to the agent or backend, 
 
 Invalid values are dropped: they are never stored, returned or forwarded, so arbitrary text cannot be injected into audit, agent, or backend logs.
 
-When the backend or a cloud provider returns its own `X-Request-ID`, different from the router's, it is returned in `X-Upstream-Request-ID`, so the ID a provider's support asks for stays visible.
+When the backend or a cloud provider returns its own `X-Request-ID`, different from the router's, it is returned in `X-Upstream-Request-ID`, so the ID a provider's support asks for stays visible. This also happens on a retry to a backend that echoes the ID, such as vLLM: the retry was sent as `<request_id>-2`, so that value is returned in `X-Upstream-Request-ID`.
 
 ### Trace IDs
 
