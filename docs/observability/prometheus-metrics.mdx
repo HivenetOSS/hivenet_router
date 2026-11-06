@@ -525,6 +525,18 @@ curl -X POST \
   It does not reset tenant quota counters or every router-level metric.
 </Danger>
 
+## Shared counter metrics
+
+Exported only with `--sync-store=valkey`. See [Run several routers](/deploy/multiple-routers).
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `hivenet_sync_up` | gauge | `1` while the shared store answers; `0` while each router enforces its share of every limit |
+| `hivenet_sync_peers` | gauge | Other live routers, as last seen |
+| `hivenet_sync_lag_seconds` | gauge | Age of the latest peer usage when applied |
+| `hivenet_sync_tick_seconds` | histogram | Duration of one sync round |
+| `hivenet_sync_errors_total` | counter | Sync rounds that failed to reach the store |
+
 ## Dynamic key store metrics
 
 Exported only with `--key-store=badger`.

@@ -90,6 +90,14 @@ func main() {
 	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
 	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
 
+	syncStore := flag.String("sync-store", cfg.SyncStore, "Share each key's rate and daily limits with the other routers of this site: none (default) or valkey (env: HIVENET_ROUTER_SYNC_STORE)")
+	syncValkeyAddrs := flag.String("sync-valkey-addrs", cfg.SyncValkeyAddrs, "Comma-separated host:port of Valkey, or of the Sentinels when --sync-valkey-sentinel-master is set (env: HIVENET_ROUTER_SYNC_VALKEY_ADDRS)")
+	syncSentinelMaster := flag.String("sync-valkey-sentinel-master", cfg.SyncSentinelMaster, "Sentinel master set name; empty connects to Valkey directly (env: HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER)")
+	syncPasswordFile := flag.String("sync-valkey-password-file", "", "Path to a file holding the Valkey (and Sentinel) password (env: HIVENET_ROUTER_SYNC_VALKEY_PASSWORD)")
+	syncTLS := flag.Bool("sync-valkey-tls", cfg.SyncValkeyTLS, "Connect to Valkey and Sentinel with TLS (env: HIVENET_ROUTER_SYNC_VALKEY_TLS)")
+	syncInterval := flag.Duration("sync-interval", cfg.SyncInterval, "How often the routers exchange usage, between 100ms and 10s (env: HIVENET_ROUTER_SYNC_INTERVAL)")
+	routerID := flag.String("router-id", cfg.RouterID, "Stable identity of this router among the routers of its site; defaults to the hostname, e.g. the pod name (env: HIVENET_ROUTER_ROUTER_ID)")
+
 	flag.Parse()
 
 	// Apply parsed flag values back into the config struct.
@@ -189,6 +197,45 @@ func main() {
 		if _, err := redirect.ParseDomains(cfg.RedirectAllowedDomains); err != nil {
 			log.Fatalf("cross-site redirect (--site-id) needs valid allowed domains (HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS or --redirect-allowed-domains): %v", err)
 		}
+	}
+
+	// Shared counters: any invalid setting stops startup rather than silently
+	// running each router on its own limits.
+	cfg.SyncStore = strings.TrimSpace(*syncStore)
+	cfg.SyncValkeyAddrs = strings.TrimSpace(*syncValkeyAddrs)
+	cfg.SyncSentinelMaster = strings.TrimSpace(*syncSentinelMaster)
+	cfg.SyncValkeyTLS = *syncTLS
+	cfg.SyncInterval = *syncInterval
+	cfg.RouterID = strings.TrimSpace(*routerID)
+	if *syncPasswordFile != "" {
+		data, err := os.ReadFile(*syncPasswordFile)
+		if err != nil {
+			log.Fatalf("cannot read --sync-valkey-password-file %q: %v", *syncPasswordFile, err)
+		}
+		cfg.SyncValkeyPassword = strings.TrimSpace(string(data))
+	}
+	switch cfg.SyncStore {
+	case "", "none":
+		cfg.SyncStore = "none"
+	case "valkey":
+		if cfg.SyncValkeyAddrs == "" {
+			log.Fatal("--sync-store=valkey needs --sync-valkey-addrs")
+		}
+		if cfg.SyncInterval < 100*time.Millisecond || cfg.SyncInterval > 10*time.Second {
+			log.Fatalf("--sync-interval must be between 100ms and 10s, got %v", cfg.SyncInterval)
+		}
+		if cfg.QuotaBackend == "badger" {
+			log.Fatal("--sync-store=valkey replaces HIVENET_ROUTER_QUOTA_BACKEND=badger: the shared store keeps the daily totals; use one or the other")
+		}
+		if cfg.RouterID == "" {
+			h, err := os.Hostname()
+			if err != nil || h == "" {
+				log.Fatal("--sync-store=valkey needs --router-id (the hostname is not available)")
+			}
+			cfg.RouterID = h
+		}
+	default:
+		log.Fatalf("--sync-store must be none or valkey, got %q", cfg.SyncStore)
 	}
 
 	// Log startup banner with resolved configuration for operator visibility.

@@ -157,6 +157,29 @@ type Config struct {
 	// Env: HIVENET_ROUTER_QUOTA_BACKEND
 	QuotaBackend string
 
+	// Shared counters (router high availability). With SyncStore "valkey" the
+	// routers of one policloud enforce each key's rate and daily limits
+	// together through one Valkey; "" or "none" keeps every counter local to
+	// this router. Excludes QuotaBackend "badger".
+	//   SyncValkeyAddrs     comma-separated host:port list — Sentinel
+	//                       addresses when SyncSentinelMaster is set, else
+	//                       Valkey addresses
+	//   SyncSentinelMaster  Sentinel master set name (empty: direct connection)
+	//   SyncValkeyPassword  password for Valkey and Sentinel (flag: file)
+	//   SyncValkeyTLS       connect with TLS
+	//   SyncInterval        how often usage is published and read (default 1s)
+	//   RouterID            stable identity of this router (default: hostname)
+	// Env: HIVENET_ROUTER_SYNC_STORE, HIVENET_ROUTER_SYNC_VALKEY_ADDRS,
+	// HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER, HIVENET_ROUTER_SYNC_VALKEY_PASSWORD,
+	// HIVENET_ROUTER_SYNC_VALKEY_TLS, HIVENET_ROUTER_SYNC_INTERVAL, HIVENET_ROUTER_ROUTER_ID
+	SyncStore          string
+	SyncValkeyAddrs    string
+	SyncSentinelMaster string
+	SyncValkeyPassword string
+	SyncValkeyTLS      bool
+	SyncInterval       time.Duration
+	RouterID           string
+
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
 	// registry (dynamic auth mode only; static keys live in auth.yaml).
 	//   "memory" (default) — the registry is RAM-only; state is lost on
@@ -251,6 +274,7 @@ func DefaultConfig() *Config {
 		MaxRequestBytes:        10 << 20, // 10 MB
 		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:       250 * time.Millisecond,
+		SyncInterval:           time.Second,
 		RedirectTokenTTL:       60 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
@@ -383,6 +407,26 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_QUOTA_BACKEND"); v != "" {
 		cfg.QuotaBackend = v
+	}
+	cfg.SyncStore = os.Getenv("HIVENET_ROUTER_SYNC_STORE")
+	cfg.SyncValkeyAddrs = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_ADDRS")
+	cfg.SyncSentinelMaster = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER")
+	cfg.SyncValkeyPassword = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_PASSWORD")
+	cfg.RouterID = os.Getenv("HIVENET_ROUTER_ROUTER_ID")
+	if v := os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_TLS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_VALKEY_TLS=%q: %w", v, err))
+		}
+		cfg.SyncValkeyTLS = b
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SYNC_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_INTERVAL=%q: %w", v, err))
+		} else {
+			cfg.SyncInterval = d
+		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {
 		cfg.KeyStoreBackend = v

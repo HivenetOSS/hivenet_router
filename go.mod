@@ -6,8 +6,11 @@ module hivenet_router
 go 1.27.3
 
 // ── Direct dependencies ─────────────────────────────────────────────────────
+//
+// ── Indirect (transitive) dependencies ──────────────────────────────────────
 require (
 	github.com/NVIDIA/go-nvml v0.13.4-1
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/dgraph-io/badger/v4 v4.9.6
 	// Gin is the HTTP framework used to expose the OpenAI-compatible REST API.
 	github.com/gin-gonic/gin v1.12.0
@@ -28,6 +31,7 @@ require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/stretchr/testify v1.12.1
+	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.69.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
@@ -46,7 +50,6 @@ require (
 	google.golang.org/protobuf v1.36.12
 )
 
-// ── Indirect (transitive) dependencies ──────────────────────────────────────
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -80,7 +83,7 @@ require (
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/jbenet/go-temp-err-catcher v0.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/koron/go-ssdp v0.0.6 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
@@ -153,6 +156,7 @@ require (
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

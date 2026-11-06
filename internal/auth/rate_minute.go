@@ -17,6 +17,22 @@ import (
 // second, burst = limit (one minute's capacity). Safe for concurrent use.
 type MinuteRateLimiter struct {
 	buckets sync.Map // direction+bucketKey → *rate.Limiter
+
+	// fleet, when set, shares usage with the other routers (SetFleet).
+	fleet  Fleet
+	leases leases
+}
+
+// SetFleet shares this limiter's usage with the other routers of the
+// policloud. Must be called before the limiter handles any requests.
+func (l *MinuteRateLimiter) SetFleet(f Fleet) { l.fleet = f }
+
+// ApplyPeerUsage takes tokens another router of the policloud admitted.
+func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration) {
+	if (kind != usageITPM && kind != usageOTPM) || limit <= 0 {
+		return
+	}
+	debit(l.bucket(key, limit), decayed(n, age, time.Minute))
 }
 
 // NewMinuteRateLimiter creates an empty MinuteRateLimiter.
@@ -54,7 +70,18 @@ func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, coun
 	if limit <= 0 || count <= 0 {
 		return true
 	}
-	return l.bucket(inKey(tenantID, model), limit).AllowN(time.Now(), count)
+	key := inKey(tenantID, model)
+	lim := l.bucket(key, limit)
+	if l.fleet == nil {
+		return lim.AllowN(time.Now(), count)
+	}
+	// While the store is down this router's share of the limit can be smaller
+	// than one maximum-size prompt; a full share still admits it.
+	if !allowShared(l.fleet, &l.leases, key, lim, count, true) {
+		return false
+	}
+	l.fleet.Record(usageITPM, key, limit, count)
+	return true
 }
 
 // OutputExhausted reports whether the (tenant, model) OTPM bucket has run dry —
@@ -81,13 +108,18 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 	if count > limit {
 		count = limit
 	}
-	l.bucket(outKey(tenantID, model), limit).ReserveN(time.Now(), count)
+	key := outKey(tenantID, model)
+	debit(l.bucket(key, limit), count)
+	if l.fleet != nil {
+		l.fleet.Record(usageOTPM, key, limit, count)
+	}
 }
 
 // Reset clears all buckets so limits reloaded from auth.yaml take effect
 // immediately. Safe to call concurrently with request handling.
 func (l *MinuteRateLimiter) Reset() {
 	l.buckets.Range(func(k, _ any) bool { l.buckets.Delete(k); return true })
+	l.leases.reset()
 }
 
 // SweepIdle evicts every full bucket, bounding memory when keys are minted
@@ -101,6 +133,7 @@ func (l *MinuteRateLimiter) SweepIdle() int {
 		lim := v.(*rate.Limiter)
 		if lim.TokensAt(now) >= float64(lim.Burst()) {
 			l.buckets.Delete(k)
+			l.leases.drop(k.(string))
 			removed++
 		}
 		return true
