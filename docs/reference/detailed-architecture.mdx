@@ -543,7 +543,9 @@ sequenceDiagram
         H-->>C: 307 to the sibling (cross-site redirect)#59; the request ends here
     end
     H->>H: Enforce RPM and token admission
-    H->>H: Hold while the model wakes from zero (hold at zero)
+    opt No healthy local agent, the model may be held here and the key may use it
+        H->>H: Hold while the model wakes from zero (hold at zero)
+    end
     H->>H: Check model access
     H->>Q: Enqueue pending request
     Q->>P: Start routing session
@@ -601,13 +603,9 @@ requests_per_minute_per_replica
 
 When zero healthy replicas exist, quota admission is skipped so routing can return the more accurate availability error. A model that may be [held at zero](/routing/hold-at-zero) on this policloud counts as one replica instead, so held requests are charged.
 
-#### Redirect and hold at zero
+#### Cross-site redirect and hold at zero
 
-With [cross-site redirect](/routing/cross-site-redirect) enabled, a request for a model with no healthy agent here is checked against the sibling map before quota: a sibling that serves it gets a `307`, and nothing is charged here. When the map places the model on this policloud with `scale_from_zero: true` instead, the request passes quota and is then [held](/routing/hold-at-zero) until an agent for the model registers, before the model admission below.
-
-#### Cross-site redirect
-
-With [cross-site redirect](/routing/cross-site-redirect) enabled, a request for a model with no healthy agent here is checked against the sibling map before quota. When a sibling policloud in the request’s scope serves the model, the router answers `307` to it, and nothing is admitted, queued or charged here.
+With [cross-site redirect](/routing/cross-site-redirect) enabled, a request for a model with no healthy agent here is checked against the sibling map before quota. When a sibling policloud in the request’s scope serves the model, the router answers `307` to it, and nothing is admitted, queued or charged here. When the map places the model on this policloud with `scale_from_zero: true` instead, and the key may use the model, the request passes quota and is then [held](/routing/hold-at-zero) until an agent for the model registers, before the model admission below. A request for a model the key may not use is never held.
 
 ### 4. Model authorization and admission
 

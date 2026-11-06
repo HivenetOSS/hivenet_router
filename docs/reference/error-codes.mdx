@@ -130,7 +130,7 @@ Clients should therefore handle:
 | `agent_disconnected` | `503` | `router` | The selected agent could not be reached |
 | `backend_unavailable` | `503` | `backend` | Backend was unreachable, loading, overloaded, or temporarily unavailable |
 | `queue_full` | `503` | `router` | The router’s global pending-request channel remained full |
-| `model_waking` | `503` | `router` | The model is scaled to zero on this policloud and did not wake within the hold budget, or too many requests already wait for it ([Hold at zero](/routing/hold-at-zero)) |
+| `model_waking` | `503` | `router` | A model scaled to zero on this policloud did not wake within the hold budget, too many requests already wait for it, or it woke but the admission gate had no room for a released request before its hold budget ended ([Hold at zero](/routing/hold-at-zero)) |
 | `backend_error` | `500` or `502` | `router` or `backend` | Unexpected internal, backend, provider, or response-format failure |
 | `request_timeout` | `504` | `router` | The router-side request deadline expired |
 | `stream_truncated` | `200` (in-stream frame) | `router` | An upstream stream was cut short mid-generation after the response started |
@@ -382,11 +382,11 @@ HTTP 503
 Retry-After: 30
 ```
 
-Returned only for a model that the sibling map places on this policloud with `scale_from_zero: true` while no healthy agent serves it, when [hold at zero](/routing/hold-at-zero) cannot serve the request:
+Returned only for a request that [hold at zero](/routing/hold-at-zero) held, or refused to hold, for a model that the sibling map places on this policloud with `scale_from_zero: true`:
 
 - the model did not wake within the hold budget;
 - a hold limit is reached: per model, per API key and model, or in total;
-- the model woke, but the request still found no room in the admission gate before its hold budget ended.
+- the model woke, but the request still found no room in the admission gate before its hold budget ended. In this case a healthy agent already serves the model.
 
 The message differs in each case; see [`model_waking`](/routing/hold-at-zero#model_waking) for the three messages. Match on `code`, not on the message.
 
