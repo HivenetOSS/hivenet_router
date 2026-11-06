@@ -133,6 +133,8 @@ Each router counts only the requests it holds itself. With several routers per p
 
 Held requests are released when an agent for the model registers, so the agent must register only when its backend can serve. The Hivenet Router agent checks its backend’s health endpoint before it registers: run it next to the backend, for example as a sidecar container, and start them together.
 
+Some backends report healthy before they can answer quickly: Ollama loads the model on its first request, and SGLang compiles kernels on it, which can take a minute or more. For these two engines the agent sends a one-token chat completion before it registers, and registers only once it succeeds, so the held requests do not pay for the load.
+
 When an agent’s connection to the router drops, the agent leaves the routing pool at once. A model that was just scaled down is therefore held again immediately, rather than receiving requests for the missed-heartbeat timeout.
 
 ### Example: KEDA and a LeaderWorkerSet
