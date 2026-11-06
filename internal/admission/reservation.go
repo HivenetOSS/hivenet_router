@@ -3,7 +3,10 @@
 
 package admission
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Reservation is the budget a request holds for its lifetime. The handler owns
 // it: it holds the footprint charged at admission, grows it as undeclared output
@@ -14,6 +17,8 @@ import "sync"
 type Reservation struct {
 	state *modelState
 	grows bool // only undeclared requests grow; declared reserved max_tokens up front
+
+	at time.Time // when it was admitted, for ReapStale
 
 	mu       sync.Mutex
 	weight   int64
@@ -79,6 +84,7 @@ func (r *Reservation) Release() {
 	r.released = true
 	w := r.weight
 	r.mu.Unlock()
+	r.state.untrack(r)
 	r.state.release(w)
 }
 

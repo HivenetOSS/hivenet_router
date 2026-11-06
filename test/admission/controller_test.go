@@ -491,3 +491,30 @@ func TestSweepIdle_RespectsTTL(t *testing.T) {
 		t.Fatalf("SweepIdle removed %d states inside the TTL, want 0", n)
 	}
 }
+
+// A reservation that outlives any request (an exit path skipped its release)
+// is reaped, and its budget comes back.
+func TestReapStaleReleasesLeakedReservations(t *testing.T) {
+	c := admission.NewController(1, 0)
+	leaked := c.Admit(context.Background(), "m", 60, false, 100, 0)
+	if leaked == nil {
+		t.Fatal("first admission refused")
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) != nil {
+		t.Fatal("budget should be full")
+	}
+	if n := c.ReapStale(time.Hour); n != 0 {
+		t.Fatalf("reaped %d young reservation(s)", n)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := c.ReapStale(10 * time.Millisecond); n != 1 {
+		t.Fatalf("reaped %d, want 1", n)
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) == nil {
+		t.Fatal("budget did not come back after the reap")
+	}
+	leaked.Release() // the late release is a harmless no-op
+	if sumW, _ := c.Occupancy("m"); sumW != 60 {
+		t.Fatalf("occupancy %d after a late release of a reaped reservation, want 60", sumW)
+	}
+}

@@ -79,6 +79,9 @@ type agentRoutingSignalPayload struct {
 	// InFlight is the agent's count of requests in flight from all routers;
 	// absent from older agents.
 	InFlight *int `json:"in_flight,omitempty"`
+	// Routers lists the routers the agent is connected to right now (peer
+	// ID → requests in flight for it); absent from older agents.
+	Routers map[string]int64 `json:"routers,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -159,6 +162,9 @@ type Router struct {
 	// shared publishes and applies limit usage across the routers of this
 	// policloud (nil unless --sync-store=valkey).
 	shared *shared.Store
+	// credits share the occupancy budgets (B2 global, B4 per key) across the
+	// routers of the site (nil unless --sync-store=valkey).
+	credits []*shared.Credits
 
 	// occupancy is the global KV-occupancy admit controller (B2), keyed per
 	// model; keyAdmission is the per-key occupancy-share controller (B4), keyed
@@ -682,7 +688,12 @@ func (r *Router) Start() error {
 	}
 
 	if r.shared != nil {
+		r.shared.SetPeerID(r.p2pHost.ID().String())
 		r.shared.Start(processorCtx)
+		for _, c := range r.credits {
+			c.Start(processorCtx)
+		}
+		go r.reapLeakedReservations(processorCtx)
 	}
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
@@ -729,12 +740,6 @@ func (r *Router) Close() error {
 		bl.Flush()
 	}
 
-	// Publish the usage admitted since the last sync so the other routers
-	// count it, then disconnect from the shared store.
-	if r.shared != nil {
-		r.shared.Close()
-	}
-
 	// 2. Stop processor and periodic-flush goroutines.
 	if r.processorCancel != nil {
 		r.processorCancel()
@@ -748,6 +753,18 @@ func (r *Router) Close() error {
 	// 4. Close libp2p host and all associated streams.
 	if r.p2pHost != nil {
 		r.p2pHost.Close()
+	}
+
+	// No request can reach an agent any more: hand the occupancy credits back
+	// to the other routers, publish the usage admitted since the last sync,
+	// and disconnect from the shared store.
+	if r.shared != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		for _, c := range r.credits {
+			c.ReleaseAll(ctx)
+		}
+		cancel()
+		r.shared.Close()
 	}
 
 	// 5. Flush the semantic decision log (nil-safe). The HTTP server is still
@@ -830,9 +847,6 @@ func (r *Router) startHTTPServer() {
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
 	handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
-	if r.shared != nil {
-		handlers.SetRouterShare(r.shared.Size)
-	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1675,6 +1689,9 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	if payload.InFlight != nil {
 		agent.SetReportedLoad(*payload.InFlight)
 	}
+	if payload.Routers != nil {
+		agent.SetRouterReport(payload.Routers)
+	}
 
 	region := session.Metadata.Region
 	engine := session.Metadata.Engine
@@ -1825,9 +1842,75 @@ func (r *Router) setupShared() error {
 	st.AddApplier(limiter)
 	r.minuteLimiter.SetFleet(st)
 	st.AddApplier(r.minuteLimiter)
+
+	// Occupancy budgets: credits from a site-wide pool. A silent router keeps
+	// its credits until its requests have certainly ended (the request
+	// deadline plus a margin), or until no agent is connected to it.
+	reclaim := cfg.RequestTimeout + 5*time.Second
+	occ := st.NewCredits("occ", reclaim, r.routerReachable)
+	kocc := st.NewCredits("kocc", reclaim, r.routerReachable)
+	r.occupancy.SetPool(occ)
+	r.keyAdmission.SetPool(kocc)
+	r.credits = []*shared.Credits{occ, kocc}
+
+	// Redirect tokens are single-use across the site, not per router.
+	if r.redirect != nil {
+		r.redirect.Replay = &siteReplay{store: st, local: redirect.NewReplayGuard()}
+	}
 	r.metrics.Register(st.Collectors()...)
 	r.shared = st
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
 		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval})
 	return nil
+}
+
+// routerReachable reports whether any agent is connected to the router with
+// the given libp2p peer ID, judging by the agents' reports of the last few
+// seconds; known is false when no agent reported recently.
+func (r *Router) routerReachable(peerID string) (known, reachable bool) {
+	for _, a := range r.agents.List() {
+		fresh, connected := a.ConnectedTo(peerID, 3*time.Second)
+		if connected {
+			return true, true
+		}
+		known = known || fresh
+	}
+	return known, false
+}
+
+// reapLeakedReservations releases occupancy reservations older than any
+// request can live. It should find nothing: each one it finds is an exit path
+// that skipped its release, and is logged and counted.
+func (r *Router) reapLeakedReservations(ctx context.Context) {
+	maxAge := r.cfg.RequestTimeout + time.Minute
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n := r.occupancy.ReapStale(maxAge) + r.keyAdmission.ReapStale(maxAge)
+			if n > 0 {
+				log.Warnf("Released %d occupancy reservation(s) older than %v: a request exit path skipped its release", n, maxAge)
+				r.metrics.AdmissionReaped(n)
+			}
+		}
+	}
+}
+
+// siteReplay makes redirect tokens single-use across every router of the
+// site through the shared store, and falls back to this router's memory when
+// the store cannot answer.
+type siteReplay struct {
+	store *shared.Store
+	local *redirect.ReplayGuard
+}
+
+func (g *siteReplay) First(id string, until, now time.Time) bool {
+	first, err := g.store.FirstUse(context.Background(), id, until)
+	if err != nil {
+		return g.local.First(id, until, now)
+	}
+	return first
 }

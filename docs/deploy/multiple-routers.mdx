@@ -15,8 +15,9 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Requests per minute | Yes | Within one sync interval of usage |
 | Input and output tokens per minute | Yes | Within one sync interval of usage |
 | Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
-| Occupancy budgets (B2, B4) | No | Each router admits its share: the budget and `max_inflight` divided by the live routers, so the routers together stay within them |
+| Occupancy budgets (B2, B4) | Yes | Exact: the routers together never hold more than the budget (see [Occupancy credits](#occupancy-credits)) |
 | Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
+| Redirect tokens | Yes | A cross-site redirect token is accepted once by the whole site, not once per router |
 | Dynamic API keys | No | Push key changes to every router |
 
 Requests never wait on the store. Every router keeps deciding in memory, exactly as a single router does.
@@ -36,6 +37,26 @@ A router that starts or restarts replays the last minute of usage and reads toda
 
 The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router a round is about 36 KB.
 
+## Occupancy credits
+
+The occupancy budgets must never be exceeded, even for a moment, so they are not synced like the rate limits. For each model the store holds a pool: how much of the budget each router holds right now. Each router keeps a wallet of credits in memory and admits against it, so a request never waits on the store.
+
+- When its wallet runs short, a router asks the pool for more. The pool grants only from the part of the budget no router holds, so the routers together never hold more than the budget. A replica acknowledges each grant before it is used, so a failover cannot hand the same capacity out twice.
+- Each round a router keeps what it uses plus a small headroom and hands back the rest. A router that found its wallet empty flags it, and the others then keep no headroom, so the budget follows the traffic.
+- Streamed output that grows a request past its credits is recorded as held on the next round.
+
+The store sees a refill when a wallet runs short and one write per model per round, not one call per request.
+
+**A router that stops** gives its credits back:
+
+| Situation | When its credits come back |
+| --- | --- |
+| Clean shutdown | At once, once it can no longer reach the agents |
+| No agent is connected to it any more (for example, it crashed) | As soon as it misses its heartbeats (about three sync intervals): the agents report which routers they are connected to, and a router no agent reaches cannot be running anything |
+| It lost the store but still reaches the agents | After the request timeout plus 5 s, when the requests it may still be running have ended |
+
+A router that was given up by the others drops the credits it believed it held and asks the pool again.
+
 ## When the store is unreachable
 
 | Situation | Behavior |
@@ -43,6 +64,8 @@ The store load depends on request rate, not on the number of keys: each round ca
 | Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
 | Store back | Routers publish the usage they held back and return to shared limits |
 | A router cannot read today's total for a key with a daily limit (for example, it started while the store was down) | The router refuses that key's requests with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected |
+| Occupancy while the store is unreachable | Each router keeps admitting within the credits it holds, capped at its share of the budget, and asks for no more. A router that holds no credits (for example, it started while the store was down) admits nothing until the store answers |
+| Redirect tokens while the store is unreachable | Each router checks single use on its own |
 
 Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
 
@@ -116,6 +139,10 @@ Each agent reports how many requests it has in flight from all routers. Every ro
 | `hivenet_sync_lag_seconds` | gauge | Age of the latest peer usage when applied |
 | `hivenet_sync_tick_seconds` | histogram | Duration of one sync round |
 | `hivenet_sync_errors_total` | counter | Sync rounds that failed to reach the store |
+| `hivenet_occupancy_credit_seconds` | histogram | Duration of one credit refill (`op="refill"`) |
+| `hivenet_occupancy_credit_errors_total` | counter | Credit calls to the store that failed |
+| `hivenet_occupancy_credit_reclaims_total` | counter | Routers given up early because no agent was connected to them |
+| `hivenet_admission_reaped_total` | counter | Occupancy reservations released because they outlived any request. Should stay at `0`: each one is a request exit path that skipped its release |
 
 Suggested alerts:
 
@@ -124,6 +151,9 @@ Suggested alerts:
   expr: hivenet_sync_up == 0
   for: 1m
   labels: {severity: critical}
+- alert: HivenetOccupancyLeak
+  expr: increase(hivenet_admission_reaped_total[1h]) > 0
+  labels: {severity: warning}
 - alert: HivenetSyncPeersMissing
   expr: hivenet_sync_peers < 2
   for: 5m

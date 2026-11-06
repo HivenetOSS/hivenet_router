@@ -11,6 +11,10 @@ type storeMetrics struct {
 	lag    prometheus.Gauge
 	tick   prometheus.Histogram
 	errors prometheus.Counter
+
+	credit         *prometheus.HistogramVec
+	creditErrors   prometheus.Counter
+	creditReclaims prometheus.Counter
 }
 
 func newStoreMetrics() *storeMetrics {
@@ -37,11 +41,25 @@ func newStoreMetrics() *storeMetrics {
 			Help: "Sync rounds that failed to reach the shared-counter store.",
 		}),
 	}
+	m.credit = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "hivenet_occupancy_credit_seconds",
+		Help:    "Duration of one occupancy credit call to the shared store (refill).",
+		Buckets: []float64{.0001, .00025, .0005, .001, .002, .005, .01, .025, .05, .1},
+	}, []string{"op"})
+	m.creditErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hivenet_occupancy_credit_errors_total",
+		Help: "Occupancy credit calls to the shared store that failed.",
+	})
+	m.creditReclaims = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hivenet_occupancy_credit_reclaims_total",
+		Help: "Routers taken out of the live set early because no agent was connected to them.",
+	})
 	m.up.Set(0)
 	return m
 }
 
 // Collectors returns the store's metrics for registration.
 func (s *Store) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{s.m.up, s.m.peers, s.m.lag, s.m.tick, s.m.errors}
+	return []prometheus.Collector{s.m.up, s.m.peers, s.m.lag, s.m.tick, s.m.errors,
+		s.m.credit, s.m.creditErrors, s.m.creditReclaims}
 }

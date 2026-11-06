@@ -37,6 +37,11 @@ type Controller struct {
 
 	mu     sync.Mutex
 	models map[string]*modelState
+
+	// pool, when set, holds the budget for the whole site: several routers
+	// admit against it, so this controller's own sums are only its share.
+	// Set once at startup (SetPool).
+	pool Pool
 }
 
 // NewController returns a Controller. admitFraction scales every request's
@@ -76,11 +81,12 @@ type modelState struct {
 	c           *Controller
 	model       string
 	mu          sync.Mutex
-	sumW        int64         // Σ footprint over in-flight requests for this model
-	count       int           // number of in-flight requests (the max_inflight backstop)
-	budget      int64         // last effective budget seen, for the utilization gauge
-	maxInflight int           // last max_inflight seen, for the concurrency gauge
-	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
+	sumW        int64                     // Σ footprint over in-flight requests for this model
+	count       int                       // number of in-flight requests (the max_inflight backstop)
+	budget      int64                     // last effective budget seen, for the utilization gauge
+	maxInflight int                       // last max_inflight seen, for the concurrency gauge
+	notify      chan struct{}             // closed-and-replaced on every release to wake parked waiters
+	live        map[*Reservation]struct{} // reservations not yet released, for ReapStale
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
 	// SweepIdle. Atomic so the janitor never contends with the hot path.
@@ -148,8 +154,8 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 	w := int64(footprint)
 	budget := c.effectiveBudget(budgetTokens)
 
-	if s.tryReserve(w, budget, maxInflight) {
-		return &Reservation{state: s, weight: w, grows: grows}
+	if c.tryAdmit(ctx, s, w, budget, maxInflight) {
+		return s.track(&Reservation{state: s, weight: w, grows: grows, at: time.Now()})
 	}
 	// A request whose own footprint exceeds the budget can never fit — releases
 	// only lower the in-flight sum toward zero — so reject it now rather than
@@ -165,16 +171,25 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 
 	timer := time.NewTimer(c.parkFor)
 	defer timer.Stop()
+	// Releases on other routers do not wake this one, so with a site-wide
+	// pool the parked request also re-checks on a short poll.
+	var poll <-chan time.Time
+	if c.pool != nil {
+		t := time.NewTicker(poolPoll)
+		defer t.Stop()
+		poll = t.C
+	}
 	for {
 		// Grab the current wake channel BEFORE re-checking, so a release that
 		// happens between the check and the wait cannot be missed.
 		ch := s.notifyCh()
-		if s.tryReserve(w, budget, maxInflight) {
-			return &Reservation{state: s, weight: w, grows: grows}
+		if c.tryAdmit(ctx, s, w, budget, maxInflight) {
+			return s.track(&Reservation{state: s, weight: w, grows: grows, at: time.Now()})
 		}
 		select {
 		case <-ch:
 			// A request released; loop and retry.
+		case <-poll:
 		case <-timer.C:
 			return nil
 		case <-ctx.Done():
@@ -237,6 +252,9 @@ func (s *modelState) tryReserve(weight, budget int64, maxInflight int) bool {
 // release returns weight to the budget and wakes every parked waiter by closing
 // the current notify channel and installing a fresh one.
 func (s *modelState) release(weight int64) {
+	if p := s.c.pool; p != nil {
+		p.Adjust(s.model, -weight, -1)
+	}
 	s.mu.Lock()
 	s.sumW -= weight
 	if s.sumW < 0 {
@@ -256,6 +274,9 @@ func (s *modelState) release(weight int64) {
 // grow tightens occupancy as an undeclared request produces output. It never
 // frees capacity, so it does not wake waiters.
 func (s *modelState) grow(delta int64) {
+	if p := s.c.pool; p != nil {
+		p.Adjust(s.model, delta, 0)
+	}
 	s.mu.Lock()
 	s.sumW += delta
 	s.mu.Unlock()
@@ -265,6 +286,9 @@ func (s *modelState) grow(delta int64) {
 // adjust applies a signed correction (true-up) to occupancy. A negative delta
 // frees capacity, so it wakes parked waiters like a release does.
 func (s *modelState) adjust(delta int64) {
+	if p := s.c.pool; p != nil {
+		p.Adjust(s.model, delta, 0)
+	}
 	s.mu.Lock()
 	s.sumW += delta
 	if s.sumW < 0 {

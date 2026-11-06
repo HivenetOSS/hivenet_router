@@ -48,6 +48,7 @@ import (
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	p2phttp "github.com/libp2p/go-libp2p/p2p/http"
 	"github.com/multiformats/go-multiaddr"
@@ -107,6 +108,14 @@ type Agent struct {
 	// routers together. It is reported in every routing signal so each router
 	// sees the backend's real load, not only the requests it sent itself.
 	inFlight atomic.Int64
+
+	// node is the shared libp2p host (set once in Run); inFlightBy counts the
+	// requests in flight per router peer, and sessions holds the routers with
+	// a registered session. Together they tell each router which routers this
+	// agent is connected to right now (see routerReport).
+	node       host.Host
+	inFlightBy sync.Map // peer.ID → *atomic.Int64
+	sessions   sync.Map // peer.ID → struct{}
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -214,6 +223,7 @@ func (a *Agent) Run() error {
 		}
 	}
 	defer node.Close()
+	a.node = node
 
 	a.backendHealthy.Store(true) // confirmed by waitForBackend
 	go a.runBackendHealthChecker(nil)
@@ -292,6 +302,8 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 	}
 	rs.peer, rs.client = routerPeer, client
 	defer a.dropRouter(node, routerPeer)
+	a.sessions.Store(routerPeer, struct{}{})
+	defer a.sessions.Delete(routerPeer)
 
 	registerCtx, registerCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	err = a.registerWithRouter(registerCtx, client, node, authResp.SessionToken)
@@ -509,6 +521,10 @@ type routingSignalPayload struct {
 	// InFlight is the number of requests this agent is serving, from all
 	// routers together.
 	InFlight int64 `json:"in_flight"`
+	// Routers maps the libp2p peer ID of every router this agent is
+	// connected to right now to the requests it is serving for that router.
+	// A router missing from every agent's map has no path to the GPUs.
+	Routers map[string]int64 `json:"routers"`
 }
 
 // runRoutingSignalPusher sends fresh engine and hardware snapshots to the router at
@@ -551,6 +567,7 @@ func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 		BackendMetrics: a.engineMetrics.Load(),
 		Hardware:       snap,
 		InFlight:       a.inFlight.Load(),
+		Routers:        a.routerReport(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -765,6 +782,8 @@ func (a *Agent) sendHeartbeat(rs *routerSession) error {
 func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	a.inFlight.Add(1)
 	defer a.inFlight.Add(-1)
+	done := a.countFor(p2phttp.ClientPeerID(r))
+	defer done()
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -949,6 +968,8 @@ func (a *Agent) healthHandler(w http.ResponseWriter, _ *http.Request) {
 func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	a.inFlight.Add(1)
 	defer a.inFlight.Add(-1)
+	done := a.countFor(p2phttp.ClientPeerID(r))
+	defer done()
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 
@@ -1152,5 +1173,37 @@ func (a *Agent) sleepOrStop(d time.Duration) bool {
 func forwardableHeaders(h http.Header) http.Header {
 	out := h.Clone()
 	domain.StripClientCredentials(out)
+	return out
+}
+
+// countFor counts one request in flight for the router it came from and
+// returns the function that ends it.
+func (a *Agent) countFor(router peer.ID) func() {
+	if router == "" {
+		return func() {}
+	}
+	v, _ := a.inFlightBy.LoadOrStore(router, new(atomic.Int64))
+	n := v.(*atomic.Int64)
+	n.Add(1)
+	return func() { n.Add(-1) }
+}
+
+// routerReport lists the routers this agent is connected to right now (a
+// registered session and a live libp2p connection), with the requests it is
+// serving for each.
+func (a *Agent) routerReport() map[string]int64 {
+	out := map[string]int64{}
+	a.sessions.Range(func(k, _ any) bool {
+		p := k.(peer.ID)
+		if a.node != nil && a.node.Network().Connectedness(p) != network.Connected {
+			return true
+		}
+		var n int64
+		if v, ok := a.inFlightBy.Load(p); ok {
+			n = v.(*atomic.Int64).Load()
+		}
+		out[p.String()] = n
+		return true
+	})
 	return out
 }
