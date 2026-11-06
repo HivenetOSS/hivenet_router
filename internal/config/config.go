@@ -198,6 +198,13 @@ type Config struct {
 	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
 
+	// MultiTenant hardens the router for serving several customers: it turns
+	// on RequireModelAllowlist, CacheSalt and HideAgentIdentity, and startup
+	// refuses API or admin auth mode none and an unauthenticated /metrics on
+	// every interface (see router.ApplyMultiTenant, ValidateIsolationConfig).
+	// Flag: --multi-tenant   Env: HIVENET_ROUTER_MULTI_TENANT
+	MultiTenant bool
+
 	// RequireModelAllowlist makes a key with no model allowlist (no `models`
 	// / `allowed_models` and no `quota.per_model`) unable to call or list any
 	// model, instead of every model. For shared multi-tenant routers, where an
@@ -447,6 +454,7 @@ func LoadFromEnv() *Config {
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
 		cfg.KeyStoreSecret = v
 	}
+	envBool(cfg, "HIVENET_ROUTER_MULTI_TENANT", &cfg.MultiTenant)
 	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
 	envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
 	envBool(cfg, "HIVENET_ROUTER_HIDE_AGENT_IDENTITY", &cfg.HideAgentIdentity)

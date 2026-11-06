@@ -1,0 +1,90 @@
+---
+title: "Multi-tenant isolation"
+description: "Run one Hivenet Router for several customers: per-key limits, required model allowlists, a per-tenant prefix-cache salt, protected metrics and admin endpoints, all switched on with --multi-tenant."
+sidebarTitle: "Multi-tenant isolation"
+---
+
+When one Hivenet Router serves several customers, nothing outside the router separates them. The router must make sure one customer cannot use, observe or slow down another through it. This page describes what keeps tenants apart and how to turn it all on.
+
+A **tenant** is the owner of an API key: `metadata.owner` for keys in `auth.yaml`, `owner` for keys pushed through `/admin/api-keys`. One tenant can have several keys.
+
+## Turn on multi-tenant mode
+
+Start the router with `--multi-tenant` (`HIVENET_ROUTER_MULTI_TENANT=true`). It needs a salt secret and a protected metrics endpoint:
+
+```bash
+openssl rand -base64 48 > /etc/hivenet-router/cache-salt.secret
+openssl rand -hex 32 > /etc/hivenet-router/metrics.token
+
+hivenet-router \
+  --multi-tenant \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  --cache-salt-secret-file /etc/hivenet-router/cache-salt.secret \
+  --metrics-bearer-token-file /etc/hivenet-router/metrics.token
+```
+
+`--multi-tenant` turns on these settings, which the individual flags cannot turn back off:
+
+| Setting | Effect |
+| --- | --- |
+| `--require-model-allowlist` | A key with no model allowlist can call and list no model |
+| `--cache-salt` | Each tenant gets its own prefix-cache namespace on vLLM agents |
+| `--hide-agent-identity` | `GET /v1/models/{model}` leaves out agent peer IDs, organization, machine, version and last-seen time |
+
+The router refuses to start in multi-tenant mode when:
+
+- API authentication mode is `none`, because every caller would be the same tenant
+- admin authentication is disabled (`HIVENET_ROUTER_ALLOW_INSECURE_ADMIN`)
+- `/metrics` listens on every interface without a bearer token
+- the cache-salt secret is missing, shorter than 32 bytes, or equal to the JWT or key-store secret
+
+A `SIGHUP` reload that would break one of these rules is rejected, and the previous keys stay in force.
+
+Each setting can also be used on its own, without `--multi-tenant`. See the [configuration reference](/reference/configuration-reference#tenant-isolation-settings).
+
+## What isolates tenants
+
+### Identity comes from the key
+
+The tenant and key of a request come only from its credential. Headers such as `X-Tenant-ID` or body fields such as `user` change nothing. Every key has a key ID: the registry ID for dynamic keys, and an ID derived from `key_hash` for `auth.yaml` keys (`static-` followed by 16 hex characters). Key IDs and owners may not contain control characters.
+
+### Limits are per key
+
+Request-rate, daily-token and serverless token-rate limits are counted per key, against that key's own limits. One key exhausting its budget never causes a `429` for another key, of the same tenant or another. A tenant with several keys can use up to the sum of their limits. See [API keys](/security/api-keys).
+
+### Keys reach only their models
+
+With an allowlist required, a key can only use the models in its `models` / `allowed_models` list or its `quota.per_model` block. This applies to chat, messages, embeddings, reranking, semantic aliases, cross-site redirects and model discovery. See [Model restrictions](/security/model-restrictions).
+
+### The prefix cache is salted per tenant
+
+vLLM shares cached prompt blocks between requests with the same prefix, so a faster first token can reveal that someone else sent the same prompt. The router sets a per-tenant `cache_salt` on every request to a vLLM agent, and removes any `cache_salt` the client sent. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
+
+### Logs and metrics are attributable and protected
+
+- Every authenticated audit record names its `tenant_id` and `key_id`. Records hold metadata only, never prompts, completions or credentials. The audit file is created with mode `0600`. See [Audit logging](/observability/audit-logging).
+- Tenant metrics carry `tenant_id` and `key_id` labels. Require a bearer token on `/metrics` or bind it to a private address. See [Prometheus metrics](/observability/prometheus-metrics).
+
+### The admin API stays with the operator
+
+`/admin/*` uses its own keys, which are not API keys. Tenant keys never reach it, and its responses carry no CORS headers. There is no per-tenant admin role.
+
+## Limits of this isolation
+
+<Warning>
+  Tenants share the router's capacity. Admission budgets, queues and agent slots are shared per model, so a burst from one tenant can make another wait or get a `429` or `503`. A key's `max_occupancy_share` caps how much of a model one key can hold in flight. A dedicated replica removes the sharing entirely.
+</Warning>
+
+- The salt protects only agents started with `--engine vllm`. Other engines get no salt.
+- The operator of the router and of the agents can read prompts and completions. These controls separate tenants from each other, not from the operator.
+- One quota for a whole tenant (across its keys and across policlouds), and a key's maximum scope (`scope_max`), are not part of this release.
+
+## Check the isolation
+
+The repository's isolation checklist maps each control to the test that proves it. Run it with:
+
+```bash
+go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
+```
+
+The checklist itself is `test/isolation/CHECKLIST.md`.

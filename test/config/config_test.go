@@ -294,9 +294,11 @@ func TestLoadFromEnv_IsolationSwitches(t *testing.T) {
 	t.Setenv("HIVENET_ROUTER_CACHE_SALT", "1")
 	t.Setenv("HIVENET_ROUTER_CACHE_SALT_SECRET", "  a-secret  ")
 	t.Setenv("HIVENET_ROUTER_HIDE_AGENT_IDENTITY", "true")
+	t.Setenv("HIVENET_ROUTER_MULTI_TENANT", "true")
+	t.Setenv("HIVENET_ROUTER_METRICS_BEARER_TOKEN", " tok ")
 	c := config.LoadFromEnv()
-	if !c.CacheSalt || c.CacheSaltSecret != "a-secret" || !c.HideAgentIdentity || len(c.EnvErrors) != 0 {
-		t.Errorf("CacheSalt=%v secret=%q HideAgentIdentity=%v errors=%v, want true, trimmed secret, true, none",
-			c.CacheSalt, c.CacheSaltSecret, c.HideAgentIdentity, c.EnvErrors)
+	if !c.CacheSalt || c.CacheSaltSecret != "a-secret" || !c.HideAgentIdentity || !c.MultiTenant || c.MetricsBearerToken != "tok" || len(c.EnvErrors) != 0 {
+		t.Errorf("CacheSalt=%v secret=%q HideAgentIdentity=%v MultiTenant=%v token=%q errors=%v, want all set, trimmed, none",
+			c.CacheSalt, c.CacheSaltSecret, c.HideAgentIdentity, c.MultiTenant, c.MetricsBearerToken, c.EnvErrors)
 	}
 }

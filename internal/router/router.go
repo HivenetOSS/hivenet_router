@@ -289,6 +289,7 @@ func pathsOverlap(a, b string) bool {
 
 // New creates a new Router instance with initialized components.
 func New(cfg *config.Config) (*Router, error) {
+	ApplyMultiTenant(cfg)
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT secret is not configured — set --jwt-secret or HIVENET_ROUTER_JWT_SECRET")
 	}
@@ -377,7 +378,7 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("auth providers: %w", err)
 	}
-	if err := ValidateIsolationConfig(cfg, apiProv); err != nil {
+	if err := ValidateIsolationConfig(cfg, apiProv, adminProv); err != nil {
 		store.Close() //nolint:errcheck
 		return nil, err
 	}
@@ -996,6 +997,11 @@ func (r *Router) publishTenantQuotas() {
 // is preserved while the admin provider is still reloaded.
 // Switching auth modes (static ↔ dynamic) at runtime is rejected — it requires
 // a process restart so the keyRegistry reference and Handlers wiring stay coherent.
+// ReloadAuthProviders re-reads the auth configuration exactly as SIGHUP does
+// (keeping the previous providers when the new ones are invalid). It exists
+// so tests can drive a reload without sending a signal to their process.
+func (r *Router) ReloadAuthProviders() { r.reloadAuthProviders() }
+
 func (r *Router) reloadAuthProviders() {
 	apiProv, adminProv, newKeyRegistry, err := auth.ProvidersFromConfig(r.cfg)
 	if err != nil {
@@ -1008,6 +1014,10 @@ func (r *Router) reloadAuthProviders() {
 	}
 	if r.keyRegistry != nil {
 		// DynamicKeyProvider managed via admin API — preserve it, only reload admin
+		if err := ValidateIsolationConfig(r.cfg, apiProv, adminProv); err != nil {
+			log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+			return
+		}
 		r.adminAuth.Swap(adminProv)
 		log.Info("SIGHUP: admin auth provider reloaded (dynamic API key registry preserved)")
 		return
@@ -1027,7 +1037,7 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
-	if err := ValidateIsolationConfig(r.cfg, apiProv); err != nil {
+	if err := ValidateIsolationConfig(r.cfg, apiProv, adminProv); err != nil {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
