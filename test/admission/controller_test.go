@@ -491,3 +491,30 @@ func TestSweepIdle_RespectsTTL(t *testing.T) {
 		t.Fatalf("SweepIdle removed %d states inside the TTL, want 0", n)
 	}
 }
+
+// TestAdmitWithinWaitsPastTheDefaultPark checks the park duration a caller
+// chooses: a request released by a wake waits longer than the default park
+// and is admitted when room frees, where Admit would have refused it.
+func TestAdmitWithinWaitsPastTheDefaultPark(t *testing.T) {
+	c := admission.NewController(1.0, 20*time.Millisecond)
+	ctx := context.Background()
+	r1 := c.Admit(ctx, model, 0, false, 0, 1) // the only in-flight slot
+	if r1 == nil {
+		t.Fatal("first request must take the slot")
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond) // longer than the 20ms default park
+		r1.Release()
+	}()
+	if r := c.Admit(ctx, model, 0, false, 0, 1); r != nil {
+		t.Fatal("Admit must refuse after its 20ms park")
+	}
+	r2 := c.AdmitWithin(ctx, model, 0, false, 0, 1, time.Second)
+	if r2 == nil {
+		t.Fatal("AdmitWithin must wait for the release at 100ms")
+	}
+	r2.Release()
+	if r := c.AdmitWithin(ctx, model, 0, false, 0, 1, 0); r == nil {
+		t.Fatal("with room, AdmitWithin admits at once even with no park")
+	}
+}

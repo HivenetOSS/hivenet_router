@@ -193,6 +193,20 @@ type RouterMetrics struct {
 	// Labels: reason.
 	redirectRejections *prometheus.CounterVec
 
+	// --- Hold-at-zero metrics (internal/wake) ---
+
+	// wakeHolds counts requests held while a model scaled to zero wakes, by
+	// how the hold ended: woken, expired (503 model_waking), full (503
+	// model_waking at once) or gone (the client left).
+	// Labels: model, outcome.
+	wakeHolds *prometheus.CounterVec
+
+	// wakeHoldSeconds is how long requests released by a wake were held:
+	// the wake time as clients see it. Expired and abandoned holds are not
+	// observed, so the quantiles are not skewed toward the budget.
+	// Labels: model.
+	wakeHoldSeconds *prometheus.HistogramVec
+
 	// admissionOccupancyTokens is the current weighted in-flight token sum (Σw)
 	// for a model — the numerator of the occupancy-vs-budget utilization.
 	admissionOccupancyTokens *prometheus.GaugeVec
@@ -517,6 +531,21 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Refused redirect tokens, by reason (malformed, signature, expired, clock, site, path, scope, replay, key, body).",
 			},
 			[]string{"reason"},
+		),
+		wakeHolds: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_wake_holds_total",
+				Help: "Requests held while a model scaled to zero wakes, by outcome (woken, expired, full, gone).",
+			},
+			[]string{"model", "outcome"},
+		),
+		wakeHoldSeconds: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "hivenet_wake_hold_seconds",
+				Help:    "How long requests released by a model waking were held, in seconds.",
+				Buckets: []float64{1, 5, 10, 30, 60, 120, 180, 240, 300, 450, 600, 900},
+			},
+			[]string{"model"},
 		),
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -936,6 +965,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.admissionRejections,
 		m.redirects,
 		m.redirectRejections,
+		m.wakeHolds,
+		m.wakeHoldSeconds,
 		m.admissionOccupancyTokens,
 		m.admissionBudgetTokens,
 		m.admissionInflightRequests,
@@ -1254,6 +1285,43 @@ func (m *RouterMetrics) RegisterSiblingMap(version, hintsExpired func() float64)
 			Help: "1 when the sibling map's hints are expired or absent and every hint is ignored, else 0.",
 		}, hintsExpired),
 	)
+}
+
+// WakeHoldDone records the end of a hold (see internal/wake): the outcome
+// and, for a request released by a wake, how long it was held.
+func (m *RouterMetrics) WakeHoldDone(model, outcome string, held time.Duration) {
+	m.wakeHolds.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
+	if outcome == "woken" {
+		m.wakeHoldSeconds.With(prometheus.Labels{"model": model}).Observe(held.Seconds())
+	}
+}
+
+// RegisterPendingDemand publishes hivenet_pending_demand{model}: how many
+// distinct requests are held for each model while it wakes. demand is read
+// at every scrape. It must return every model that may be held here, with 0
+// when none is held, so an autoscaler's query always finds a series; a model
+// that is no longer listed simply disappears, so no series is left behind.
+// Call once, only when holding is enabled.
+func (m *RouterMetrics) RegisterPendingDemand(demand func() map[string]int) {
+	m.registry.MustRegister(&pendingDemandCollector{demand: demand})
+}
+
+var pendingDemandDesc = prometheus.NewDesc(
+	"hivenet_pending_demand",
+	"Distinct requests held on this router while the model, scaled to zero here, wakes. 0 for every other model that may be held.",
+	[]string{"model"}, nil,
+)
+
+type pendingDemandCollector struct {
+	demand func() map[string]int
+}
+
+func (c *pendingDemandCollector) Describe(ch chan<- *prometheus.Desc) { ch <- pendingDemandDesc }
+
+func (c *pendingDemandCollector) Collect(ch chan<- prometheus.Metric) {
+	for model, n := range c.demand() {
+		ch <- prometheus.MustNewConstMetric(pendingDemandDesc, prometheus.GaugeValue, float64(n), model)
+	}
 }
 
 // SetAdmissionOccupancy publishes a model's live occupancy: the weighted

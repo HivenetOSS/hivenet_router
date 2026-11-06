@@ -20,6 +20,7 @@ import (
 	"hivenet_router/internal/semantic"
 	"hivenet_router/internal/storage"
 	"hivenet_router/internal/tokenizer"
+	"hivenet_router/internal/wake"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -267,6 +268,11 @@ type Handlers struct {
 	// agent here; nil (the default) disables cross-site redirects. See
 	// RedirectTarget, RedirectDecision and SetRedirect.
 	redirect *redirect.Redirector
+
+	// wake holds requests for a model that is scaled to zero here until it
+	// wakes; nil (the default) disables holding. See WakeHold and SetWake.
+	wake    *wake.Holder
+	wakeCfg WakeConfig
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -667,21 +673,29 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// Scale the per-replica limits to the live pool size. Recomputed per request,
 	// so the budget tracks replicas joining/leaving; a shrink only affects new
 	// admissions (existing reservations release their recorded weight unchanged).
-	replicas := h.healthyReplicas(req.Model)
-	poolBudget := pol.AdmitBudgetTokens * replicas
-	poolInflight := pol.MaxInflight * replicas
+	pool := func() (int, int) {
+		replicas := h.healthyReplicas(req.Model)
+		return pol.AdmitBudgetTokens * replicas, pol.MaxInflight * replicas
+	}
+	poolBudget, _ := pool()
 
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res := h.admission.Admit(c.Request.Context(), req.Model, footprint, grows, poolBudget, poolInflight)
+		res, fits := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
-			c.Header("Retry-After", "1")
-			writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
-				"server at capacity for this model, please retry", domain.SourceRouter)
+			// A request too large to ever fit gets the usual 429 even when
+			// released by a wake: retrying after the wake cannot help.
+			if !fits || !rejectReleased(c, req.Model) {
+				c.Header("Retry-After", "1")
+				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
+					"server at capacity for this model, please retry", domain.SourceRouter)
+			}
 			return nil, false
 		}
 		rs = append(rs, res)
+		// A request released by a wake may have waited while replicas joined.
+		poolBudget, _ = pool()
 	}
 
 	// Per-key occupancy share (serverless replicas only): the key's in-flight
@@ -694,6 +708,9 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
+			// Never waits, even for a request released by a wake: it would
+			// hold the global reservation taken above while it waits. Over
+			// its share is the key's own limit, so the answer stays 429.
 			res := h.keyAdmission.Admit(c.Request.Context(), keyID+"\x00"+req.Model, footprint, grows, budget, 0)
 			if res == nil {
 				rs.Release() // hand back the global reservation already taken
