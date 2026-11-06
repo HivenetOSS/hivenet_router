@@ -147,6 +147,15 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 	return c.AdmitWithin(ctx, model, footprint, grows, budgetTokens, maxInflight, c.parkFor)
 }
 
+// Fits reports whether a request of footprint can ever be admitted against
+// budgetTokens: false when it alone is larger than the budget (after the
+// admit fraction). A request over the budget is refused at once, without
+// parking, because releases never make room for it.
+func (c *Controller) Fits(footprint, budgetTokens int) bool {
+	budget := c.effectiveBudget(budgetTokens)
+	return budget <= 0 || int64(footprint) <= budget
+}
+
 // AdmitWithin is Admit with its own park duration instead of the configured
 // one. A request that already waited for its model to wake from zero uses it
 // to wait for room as long as its hold budget allows, rather than being

@@ -180,7 +180,7 @@ func TestWaitQueue_ReleasedFromHoldPassesTheBound(t *testing.T) {
 	if err := q.Wait(context.Background()); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("a normal request on a full queue = %v, want ErrQueueFull", err)
 	}
-	released := park(t, q, WithReleasedFromHold(context.Background()))
+	released := park(t, q, WithReleasedFromHold(context.Background(), nil))
 	if d := q.Depth(); d != 2 {
 		t.Fatalf("depth = %d, want 2", d)
 	}
@@ -192,30 +192,55 @@ func TestWaitQueue_ReleasedFromHoldPassesTheBound(t *testing.T) {
 	}
 }
 
-// TestWaitQueue_RejoinKeepsItsPlace checks that a waiter woken by Broadcast
-// that finds no free slot parks again at the head, ahead of later arrivals,
-// even when the queue is at its bound.
-func TestWaitQueue_RejoinKeepsItsPlace(t *testing.T) {
-	q := newWaitQueue(1)
-	later := park(t, q, context.Background()) // fills the bound
-
-	rejoined := make(chan error, 1)
-	go func() { rejoined <- q.Rejoin(context.Background()) }()
-	deadline := time.Now().Add(time.Second)
-	for q.Depth() != 2 {
-		if time.Now().After(deadline) {
-			t.Fatal("rejoining waiter was refused or did not enter the queue")
+// TestWaitQueue_ParkAgainKeepsOrder checks that waiters woken by Broadcast
+// that find no free slot park again in their original order, ahead of later
+// arrivals, even when the queue is at its bound.
+func TestWaitQueue_ParkAgainKeepsOrder(t *testing.T) {
+	q := newWaitQueue(3)
+	tickets := make([]uint64, 3)
+	woken := make([]chan error, 3)
+	for i := range tickets {
+		woken[i] = make(chan error, 1)
+		go func(i int) { woken[i] <- q.WaitInLine(context.Background(), &tickets[i]) }(i)
+		waitDepth(t, q, i+1)
+	}
+	q.Broadcast() // new capacity: every waiter retries, none finds a slot here
+	for i := range woken {
+		if err := result(t, woken[i]); err != nil {
+			t.Fatalf("waiter %d: %v", i, err)
 		}
-		time.Sleep(time.Millisecond)
+	}
+	later := park(t, q, context.Background()) // a new arrival, while the others retry
+
+	// The three park again, in reverse order, and the queue is over its bound.
+	again := make([]chan error, 3)
+	for _, i := range []int{2, 1, 0} {
+		again[i] = make(chan error, 1)
+		go func(i int) { again[i] <- q.WaitInLine(context.Background(), &tickets[i]) }(i)
+		waitDepth(t, q, 1+(3-i))
 	}
 
-	q.Signal()
-	if err := result(t, rejoined); err != nil {
-		t.Fatalf("rejoined waiter: %v", err)
+	for i := range again {
+		q.Signal()
+		if err := result(t, again[i]); err != nil {
+			t.Fatalf("waiter %d parked again: %v", i, err)
+		}
 	}
 	stillParked(t, later)
 	q.Signal()
 	if err := result(t, later); err != nil {
 		t.Fatalf("later waiter: %v", err)
+	}
+}
+
+// waitDepth waits until q holds n waiters.
+func waitDepth(t *testing.T, q *WaitQueue, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for q.Depth() != n {
+		if time.Now().After(deadline) {
+			t.Fatalf("depth = %d, want %d", q.Depth(), n)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

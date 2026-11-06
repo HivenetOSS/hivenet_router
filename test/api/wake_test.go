@@ -116,6 +116,7 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 			h.RedirectDecision(), api.QuotaMiddlewareWithReplicas(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)
+	inference.POST("/messages/count_tokens", h.Passthrough)
 	inference.POST("/embeddings", h.Embeddings)
 	s.engine = e
 	return s
@@ -313,6 +314,19 @@ func TestWakeHold_NotHeld(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("count_tokens is never held", func(t *testing.T) {
+		s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1))
+		done := sendAsync(s.testSite, "/v1/messages/count_tokens",
+			[]byte(`{"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":5}`), bearer())
+		serveOne(t, s.testSite) // goes on at once, as before hold at zero
+		if w := result(t, done); w.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body %s", w.Code, w.Body)
+		}
+		if d := s.holder.Demand(); len(d) != 0 {
+			t.Errorf("demand %v, want nothing held", d)
+		}
+	})
 
 	t.Run("model the key may not use", func(t *testing.T) {
 		s := newWakeSite(t, noKeepAlive, 10, fleetDoc(1), "other-model")

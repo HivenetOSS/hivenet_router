@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -127,6 +128,15 @@ type Router struct {
 
 	// Request queue
 	requestQueue chan *domain.PendingRequest
+
+	// connHealthMu orders the health changes that depend on an agent's libp2p
+	// connection: a heartbeat (which checks the connection, then marks the
+	// agent healthy) and a disconnect (which marks it unhealthy). libp2p
+	// removes a connection before it reports the disconnect, so with this
+	// lock a heartbeat either sees the connection gone, or finishes before
+	// the disconnect marks the agent unhealthy: a late heartbeat can never
+	// mark a disconnected agent healthy again.
+	connHealthMu sync.Mutex
 
 	// providers maps engine name to the configured closed-source provider.
 	// Built once at startup from cfg.Providers; read-only after that.
@@ -594,6 +604,7 @@ func (r *Router) Start() error {
 				dep, rep := agent.Metadata.DeploymentID, agent.Metadata.ReplicaID
 				meta := agent.Metadata
 				agent.RUnlock()
+				r.connHealthMu.Lock()
 				if agent.IsHealthy() {
 					agent.SetHealthy(false)
 					if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
@@ -603,6 +614,7 @@ func (r *Router) Start() error {
 						strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
 					log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
 				}
+				r.connHealthMu.Unlock()
 				r.registrationNotifier.Publish(domain.RegistrationEvent{
 					EventType:    domain.RegistrationUnregistered,
 					DeploymentID: dep,
@@ -1630,7 +1642,19 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	organization := session.Metadata.Organization
 	machine := session.Metadata.Machine
 
-	// Always update LastSeen — the agent is alive and reachable regardless of backend state.
+	// A heartbeat handled while the agent's connection closes must change
+	// nothing: not the health (requests would go to a peer with no
+	// connection), nor LastSeen (it would delay the health monitor). See
+	// connHealthMu.
+	r.connHealthMu.Lock()
+	defer r.connHealthMu.Unlock()
+	if !r.peerConnected(session.PeerID) {
+		log.Debugf("handleAgentHeartbeat: %s has no connection — heartbeat ignored", peerIDStr[:8])
+		http.Error(w, "agent not connected", http.StatusConflict)
+		return
+	}
+
+	// Update LastSeen — the agent is alive and reachable regardless of backend state.
 	a.UpdateLastSeen()
 
 	wasHealthy := a.IsHealthy()
@@ -1671,6 +1695,13 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// peerConnected reports whether the router has a live libp2p connection to
+// the peer. Heartbeats only arrive over libp2p, so a router without a libp2p
+// host has no connected peer.
+func (r *Router) peerConnected(id peer.ID) bool {
+	return r.p2pHost != nil && r.p2pHost.Network().Connectedness(id) == libp2pnet.Connected
 }
 
 // handleRoutingSignals receives high-frequency metric pushes from agents (default 500ms).

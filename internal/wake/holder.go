@@ -15,7 +15,6 @@ package wake
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"time"
 )
@@ -49,7 +48,7 @@ type Options struct {
 // Limits bound how many requests a Holder holds at once. Each must be > 0.
 type Limits struct {
 	PerModel  int // per model
-	PerCaller int // per caller (API key) and model, so one caller cannot fill a model's share
+	PerCaller int // per caller (API key) and model, so one caller cannot fill a model's share; not applied to caller ""
 	Total     int // across all models, which bounds the memory held requests use
 }
 
@@ -70,7 +69,7 @@ type modelHold struct {
 	callers map[string]int    // caller → requests held now
 	demand  map[[2]string]int // distinct (caller, request ID) → requests held or released and not yet answered
 	wake    chan struct{}     // closed by Wake, then replaced
-	stop    chan struct{}     // closed when the entry is removed: stops the health poll
+	stop    chan struct{}     // closes the health poll; nil while no request is held
 }
 
 // NewHolder returns a Holder bounded by limits. healthy reports how many
@@ -89,15 +88,16 @@ func NewHolder(limits Limits, healthy func(model string) int, onDone func(model 
 
 // SetPollInterval sets how often the model's health is rechecked between
 // wake-ups. Wake releases holds at once; the poll covers an agent becoming
-// healthy without registering again. There is one poll per model with held
-// requests, not one per request. Call it before the first Hold. For tests.
+// healthy without registering again. There is one poll per model while it
+// has held requests, not one per request. Call it before the first Hold. For tests.
 func (h *Holder) SetPollInterval(d time.Duration) { h.poll = d }
 
 // Hold holds the calling request until the model has a healthy agent
 // (Woken), the budget runs out (Expired), ctx ends (Gone), or OnKeepAlive
 // fails (Gone). It returns Full at once when a limit is reached.
 //
-// caller identifies the client (its API key) and requestID the request: the
+// caller identifies the client (its API key; "" when unknown, which has no
+// per-caller limit) and requestID the request: the
 // client's own ID when it sent one, else the router's. In the pending
 // demand, holds with the same caller and request ID (a client retrying the
 // same request) count once; another caller's request with the same ID
@@ -183,23 +183,11 @@ func (h *Holder) Demand() map[string]int {
 	return out
 }
 
-// Held returns the models with requests in the pending demand, sorted.
-func (h *Holder) Held() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	out := make([]string, 0, len(h.models))
-	for model := range h.models {
-		out = append(out, model)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func (h *Holder) enter(model, caller string, key [2]string) (<-chan struct{}, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	m, ok := h.models[model]
-	if h.total >= h.limits.Total || (ok && (m.holds >= h.limits.PerModel || m.callers[caller] >= h.limits.PerCaller)) {
+	if h.total >= h.limits.Total || (ok && (m.holds >= h.limits.PerModel || (caller != "" && m.callers[caller] >= h.limits.PerCaller))) {
 		return nil, false
 	}
 	if !ok {
@@ -207,9 +195,12 @@ func (h *Holder) enter(model, caller string, key [2]string) (<-chan struct{}, bo
 			callers: make(map[string]int),
 			demand:  make(map[[2]string]int),
 			wake:    make(chan struct{}),
-			stop:    make(chan struct{}),
 		}
 		h.models[model] = m
+	}
+	if m.stop == nil {
+		// The first request held: poll the model's health until none is.
+		m.stop = make(chan struct{})
 		go h.pollHealth(model, m.stop)
 	}
 	h.total++
@@ -228,6 +219,11 @@ func (h *Holder) leave(model, caller string) {
 	m.holds--
 	if m.callers[caller]--; m.callers[caller] == 0 {
 		delete(m.callers, caller)
+	}
+	if m.holds == 0 {
+		// Released requests still in the demand need no health poll.
+		close(m.stop)
+		m.stop = nil
 	}
 	h.removeIfIdle(model, m)
 }
@@ -248,13 +244,12 @@ func (h *Holder) leaveDemand(model string, key [2]string) {
 // held. Called with h.mu held.
 func (h *Holder) removeIfIdle(model string, m *modelHold) {
 	if m.holds == 0 && len(m.demand) == 0 {
-		close(m.stop)
 		delete(h.models, model)
 	}
 }
 
 // pollHealth wakes the model's held requests when an agent for it is
-// healthy, until stop is closed. It covers an agent that becomes healthy
+// healthy, until stop is closed (when no request is held any more). It covers an agent that becomes healthy
 // without registering again, which calls Wake.
 func (h *Holder) pollHealth(model string, stop <-chan struct{}) {
 	t := time.NewTicker(h.poll)

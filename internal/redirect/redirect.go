@@ -433,7 +433,7 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 	if !req.Now.Before(m.hintsExpire) {
 		return cands[0].pc, true // no fresh hints: the session order alone
 	}
-	if m.wakeable(req.Model, req.Kind, req.Self) && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
+	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
 		return Policloud{}, false // every sibling is cold and the model may be woken here: wake it here
 	}
 	firstEligible := -1
@@ -460,10 +460,8 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 func (m *Map) Wakeable(model, kind, policloud string) (budget time.Duration, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, pl := range m.byModel[model] {
-		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
-			return pl.holdBudget, true
-		}
+	if pl, ok := m.wakeable(model, kind, policloud); ok {
+		return pl.holdBudget, true
 	}
 	return 0, false
 }
@@ -483,11 +481,16 @@ func (m *Map) WakeableModels(policloud string) []string {
 	return out
 }
 
-// wakeable is Wakeable without the lock or the budget.
-func (m *Map) wakeable(model, kind, policloud string) bool {
-	return slices.ContainsFunc(m.byModel[model], func(pl Placement) bool {
-		return pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero
-	})
+// wakeable is the one "may be held here" rule, used by Wakeable and Target:
+// the placement of model, as kind, on policloud with scale_from_zero. The
+// caller holds m.mu.
+func (m *Map) wakeable(model, kind, policloud string) (Placement, bool) {
+	for _, pl := range m.byModel[model] {
+		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
+			return pl, true
+		}
+	}
+	return Placement{}, false
 }
 
 // score is H(a, model, policloud): the first 8 bytes, big-endian, of

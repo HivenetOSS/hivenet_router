@@ -673,16 +673,20 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// Scale the per-replica limits to the live pool size. Recomputed per request,
 	// so the budget tracks replicas joining/leaving; a shrink only affects new
 	// admissions (existing reservations release their recorded weight unchanged).
-	replicas := h.healthyReplicas(req.Model)
-	poolBudget := pol.AdmitBudgetTokens * replicas
-	poolInflight := pol.MaxInflight * replicas
+	pool := func() (int, int) {
+		replicas := h.healthyReplicas(req.Model)
+		return pol.AdmitBudgetTokens * replicas, pol.MaxInflight * replicas
+	}
+	poolBudget, _ := pool()
 
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res := admitOccupancy(c, h.admission, req.Model, footprint, grows, poolBudget, poolInflight)
+		res, fits := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
-			if !rejectReleased(c, req.Model) {
+			// A request too large to ever fit gets the usual 429 even when
+			// released by a wake: retrying after the wake cannot help.
+			if !fits || !rejectReleased(c, req.Model) {
 				c.Header("Retry-After", "1")
 				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
 					"server at capacity for this model, please retry", domain.SourceRouter)
@@ -690,6 +694,8 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 			return nil, false
 		}
 		rs = append(rs, res)
+		// A request released by a wake may have waited while replicas joined.
+		poolBudget, _ = pool()
 	}
 
 	// Per-key occupancy share (serverless replicas only): the key's in-flight
