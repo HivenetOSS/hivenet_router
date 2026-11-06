@@ -582,6 +582,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		if pending.Request.HttpHeaders != nil {
 			req.Header = pending.Request.HttpHeaders.Clone()
 		}
+		req.Header.Set("X-Request-ID", pending.ForwardID())
 		req.Header.Set("Content-Type", "application/json")
 		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
@@ -650,6 +651,8 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	if pending.Request.HttpHeaders != nil {
 		req.Header = pending.Request.HttpHeaders.Clone()
 	}
+	// Each attempt its own backend request ID: see ForwardID.
+	req.Header.Set("X-Request-ID", pending.ForwardID())
 
 	// Inject W3C trace context headers so the agent can create child spans.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))

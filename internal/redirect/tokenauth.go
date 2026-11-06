@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/domain"
 
 	logging "github.com/ipfs/go-log/v2"
 )
@@ -154,13 +155,13 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 // request ID is not a UUID, or a client request ID is set and is not one.
 // The signature is already verified, so rewriting the claims is safe.
 func normalizeIDs(c *Claims) bool {
-	rid, ok := CanonicalRequestID(c.RequestID)
+	rid, ok := domain.CanonicalRequestID(c.RequestID)
 	if !ok {
 		return false
 	}
 	c.RequestID = rid
 	if c.ClientRequestID != "" {
-		crid, ok := CanonicalRequestID(c.ClientRequestID)
+		crid, ok := domain.CanonicalRequestID(c.ClientRequestID)
 		if !ok {
 			return false
 		}

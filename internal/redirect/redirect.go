@@ -35,8 +35,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const (
@@ -581,18 +579,6 @@ func ValidJTI(jti string) bool {
 	return err == nil && len(b) == jtiLen
 }
 
-// CanonicalRequestID returns raw in canonical UUID form (lowercase, no
-// prefix or braces) and true, or "" and false when raw is not a UUID. It is
-// the one rule for request IDs: the API middleware applies it to the
-// client's ID and the redirect target to the IDs a token carries.
-func CanonicalRequestID(raw string) (string, bool) {
-	u, err := uuid.Parse(raw)
-	if err != nil {
-		return "", false
-	}
-	return u.String(), true
-}
-
 // Secret is one signing secret and its ID (the token's kid).
 type Secret struct {
 	ID  string
@@ -714,7 +700,9 @@ func BodySHA(body []byte) string {
 
 // ReplayGuard makes tokens single-use: a token ID (jti) is accepted once until
 // its token can no longer verify (exp + ClockSkew). It is keyed on the jti,
-// never on the request ID, which the client can choose through X-Request-ID.
+// which identifies the token. The request ID (rid) is minted by the router
+// and identifies the request: one request may be redirected more than once,
+// each time with a new token.
 //
 // ponytail: in memory, so a token can be used once per router of the target
 // policloud, not once per policloud. Contract 3 v2 moves this to the
