@@ -825,7 +825,10 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
-	handlers.SetIsolation(api.Isolation{RequireModelAllowlist: r.cfg.RequireModelAllowlist})
+	handlers.SetIsolation(api.Isolation{
+		RequireModelAllowlist: r.cfg.RequireModelAllowlist,
+		HideAgentIdentity:     r.cfg.HideAgentIdentity,
+	})
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)

@@ -205,6 +205,12 @@ type Config struct {
 	// Flag: --require-model-allowlist   Env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST
 	RequireModelAllowlist bool
 
+	// HideAgentIdentity leaves the agent's peer ID, organization, machine,
+	// version and last-seen time out of the client-facing GET /v1/models/:model
+	// (the admin view keeps them).
+	// Flag: --hide-agent-identity   Env: HIVENET_ROUTER_HIDE_AGENT_IDENTITY
+	HideAgentIdentity bool
+
 	// CacheSalt sets a per-tenant cache_salt on every request forwarded to an
 	// engine that supports it (vLLM) and strips any client-sent cache_salt, so
 	// tenants never share prefix-cache blocks (prefix-cache timing side
@@ -438,6 +444,7 @@ func LoadFromEnv() *Config {
 	}
 	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
 	envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
+	envBool(cfg, "HIVENET_ROUTER_HIDE_AGENT_IDENTITY", &cfg.HideAgentIdentity)
 	// Trimmed like --cache-salt-secret-file, so either source gives the same salts.
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_CACHE_SALT_SECRET")); v != "" {
 		cfg.CacheSaltSecret = v

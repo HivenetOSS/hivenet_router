@@ -27,6 +27,7 @@ import (
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
+	"hivenet_router/test/testutil"
 
 	"github.com/gin-gonic/gin"
 )
@@ -500,5 +501,78 @@ func TestIsolation_DecisionLogAttributable(t *testing.T) {
 	}
 	if rec["tenant_id"] != "tenant-a" || rec["key_id"] != "key-a1" {
 		t.Errorf("decision record tenant_id %v key_id %v, want tenant-a / key-a1", rec["tenant_id"], rec["key_id"])
+	}
+}
+
+// TestIsolation_CORSNotOnAdmin: /admin responses carry no CORS headers, so a
+// web page on another origin cannot read them, and an admin preflight is not
+// answered. /v1 and /health keep Access-Control-Allow-Origin: *.
+func TestIsolation_CORSNotOnAdmin(t *testing.T) {
+	s := newIsoServer(t)
+	acao := func(w *httptest.ResponseRecorder) string { return w.Header().Get("Access-Control-Allow-Origin") }
+
+	if w := s.do(http.MethodOptions, "/v1/chat/completions", nil, nil); w.Code != http.StatusNoContent || acao(w) != "*" {
+		t.Errorf("/v1 preflight: status %d ACAO %q, want 204 and *", w.Code, acao(w))
+	}
+	if w := s.do(http.MethodGet, "/health", nil, nil); acao(w) != "*" {
+		t.Errorf("/health ACAO %q, want *", acao(w))
+	}
+	if w := s.do(http.MethodOptions, "/admin/api-keys", nil, nil); acao(w) != "" || w.Code == http.StatusNoContent {
+		t.Errorf("/admin preflight: status %d ACAO %q, want no CORS answer", w.Code, acao(w))
+	}
+	for _, hdr := range []map[string]string{nil, bearerOf(isoAdminKey)} {
+		if w := s.do(http.MethodGet, "/admin/api-keys/version", nil, hdr); acao(w) != "" {
+			t.Errorf("/admin response (auth %v) ACAO %q, want none", hdr != nil, acao(w))
+		}
+	}
+}
+
+// identityStorage lists one healthy agent of model "chat" with identifying
+// metadata.
+type identityStorage struct{ testutil.NoopStorage }
+
+func (identityStorage) ListAgents() ([]*domain.AgentRegistration, error) {
+	return []*domain.AgentRegistration{{
+		PeerID: "12D3KooWpeerIDofAgent", Model: "chat", IsHealthy: true, Capacity: 4, LastSeen: time.Unix(1_700_000_000, 0),
+		Metadata: domain.AgentMetadata{Capability: domain.CapabilityLLM, Engine: "vllm", Region: "eu",
+			Version: "v9.9.9", Organization: "org-reserved-customer", Machine: "gpu-node-17"},
+	}}, nil
+}
+
+// TestIsolation_ModelDetailHidesAgentIdentity: with HideAgentIdentity on,
+// GET /v1/models/:model leaves out each agent's peer ID, organization,
+// machine, version and last-seen time (engine, region, capacity and health
+// stay), so a customer cannot map the fleet. The admin view keeps them, and
+// with the switch off the client view is unchanged.
+func TestIsolation_ModelDetailHidesAgentIdentity(t *testing.T) {
+	identifying := []string{"12D3KooWpeerIDofAgent", "org-reserved-customer", "gpu-node-17", "v9.9.9", "last_seen"}
+	for _, hide := range []bool{false, true} {
+		healthy := func(string) int { return 1 }
+		lim := &fakeLimiter{}
+		h := api.NewHandlers(identityStorage{}, nil, make(chan *domain.PendingRequest, 1), time.Second,
+			nil, nil, nil, lim, nil, nil, nil, nil, nil, nil, healthy, nil, nil, nil, nil, nil, nil, nil)
+		h.SetIsolation(api.Isolation{HideAgentIdentity: hide})
+		apiProv, _ := auth.NewStaticKeyProvider([]auth.APIKeyEntry{{KeyHash: sha256Hex(isoKeyA), Metadata: auth.KeyMetadata{Name: "a", Owner: "tenant-a"}}})
+		adminProv, _ := auth.NewStaticAdminKeyProvider([]string{isoAdminKey})
+		s := &isoServer{srv: api.NewServer(h, ":0", apiProv, adminProv, lim, metrics.NewRouterMetrics(), healthy, 1<<20)}
+
+		client := s.do(http.MethodGet, "/v1/models/chat", nil, bearerOf(isoKeyA))
+		admin := s.do(http.MethodGet, "/admin/models/chat", nil, bearerOf(isoAdminKey))
+		if client.Code != http.StatusOK || admin.Code != http.StatusOK {
+			t.Fatalf("hide=%v: client %d admin %d", hide, client.Code, admin.Code)
+		}
+		for _, s := range identifying {
+			if got := strings.Contains(client.Body.String(), s); got == hide {
+				t.Errorf("hide=%v: client view contains %q = %v", hide, s, got)
+			}
+			if !strings.Contains(admin.Body.String(), s) {
+				t.Errorf("hide=%v: admin view lacks %q", hide, s)
+			}
+		}
+		for _, keep := range []string{`"engine":"vllm"`, `"region":"eu"`, `"capacity":4`, `"is_healthy":true`} {
+			if !strings.Contains(client.Body.String(), keep) {
+				t.Errorf("hide=%v: client view lacks %s: %s", hide, keep, client.Body)
+			}
+		}
 	}
 }
