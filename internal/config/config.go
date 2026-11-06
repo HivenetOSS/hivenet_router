@@ -198,6 +198,13 @@ type Config struct {
 	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
 
+	// RequireModelAllowlist makes a key with no model allowlist (no `models`
+	// / `allowed_models` and no `quota.per_model`) unable to call or list any
+	// model, instead of every model. For shared multi-tenant routers, where an
+	// unrestricted key would reach models served for other customers.
+	// Flag: --require-model-allowlist   Env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST
+	RequireModelAllowlist bool
+
 	// EnvErrors collects invalid environment values that LoadFromEnv could
 	// not apply and that must stop startup (see the key-store settings).
 	EnvErrors []error
@@ -417,6 +424,7 @@ func LoadFromEnv() *Config {
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
 		cfg.KeyStoreSecret = v
 	}
+	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})
 	}
@@ -425,6 +433,21 @@ func LoadFromEnv() *Config {
 	}
 
 	return cfg
+}
+
+// envBool sets *dst from the boolean environment variable name when it is
+// set, collecting an unparsable value in cfg.EnvErrors (which stops startup).
+func envBool(cfg *Config, name string, dst *bool) {
+	v := os.Getenv(name)
+	if v == "" {
+		return
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: %w", name, v, err))
+		return
+	}
+	*dst = b
 }
 
 // AgentConfig holds configuration specific to agents

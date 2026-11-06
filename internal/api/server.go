@@ -143,7 +143,7 @@ func (s *Server) registerRoutes() {
 	// quotas (HAI-231). Clients need /models reachable before they can pick a
 	// model to call, which is also how OpenAI / Anthropic expose it.
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.apiAuth))
+	v1.Use(AuthMiddleware(s.apiAuth), s.handlers.IsolationContext())
 	{
 		// GET /v1/models — list all models currently served by registered agents
 		v1.GET("/models", s.handlers.ListModels)

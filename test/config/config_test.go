@@ -273,3 +273,20 @@ func TestLoadFromEnv_Redirect(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadFromEnv_IsolationSwitches: the tenant-isolation switches default
+// off, read booleans from the environment, and an unparsable value stops
+// startup (EnvErrors) instead of silently leaving isolation off.
+func TestLoadFromEnv_IsolationSwitches(t *testing.T) {
+	if c := config.LoadFromEnv(); c.RequireModelAllowlist {
+		t.Error("RequireModelAllowlist defaults on, want off")
+	}
+	t.Setenv("HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", "true")
+	if c := config.LoadFromEnv(); !c.RequireModelAllowlist || len(c.EnvErrors) != 0 {
+		t.Errorf("RequireModelAllowlist=%v errors=%v, want true and none", c.RequireModelAllowlist, c.EnvErrors)
+	}
+	t.Setenv("HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", "yes please")
+	if c := config.LoadFromEnv(); c.RequireModelAllowlist || len(c.EnvErrors) != 1 {
+		t.Errorf("RequireModelAllowlist=%v errors=%v, want false and one error", c.RequireModelAllowlist, c.EnvErrors)
+	}
+}
