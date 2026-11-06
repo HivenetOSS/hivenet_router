@@ -714,11 +714,12 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 			// All healthy, filter-passing agents are either at capacity or were already tried
 			// and failed in this step. Waiting for a slot to free is worthwhile.
 			s.lastReason = ErrNoCapacity
-		case nAtCapacity == 0 && errors.Is(s.lastReason, ErrNoCapacity):
+		case nAtCapacity == 0 && len(gateMiss) == 0 && errors.Is(s.lastReason, ErrNoCapacity):
 			// An earlier wait left ErrNoCapacity, but no agent is at capacity
 			// now: the ones left already failed in this step or are filtered
 			// out. Waiting for a slot cannot help, so the stale reason must not
-			// send the request back to the queue until its deadline.
+			// send the request back to the queue until its deadline. An agent
+			// excluded by a metric gate can clear, so a gate miss keeps the wait.
 			s.lastReason = ErrNoAgentsAvailable
 			// default: mixed reasons (filter exclusions, gate misses) —
 			// leave s.lastReason unchanged so a more specific reason from a prior step survives.

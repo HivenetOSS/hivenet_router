@@ -87,9 +87,8 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 // it has none). When the budget runs out, or the model already holds the
 // maximum number of requests, the answer is 503 model_waking with a
 // Retry-After. Each held request counts once in the pending demand, the
-// signal an autoscaler uses to wake the model, until the model starts
-// answering it: a request released by the wake that still waits for capacity
-// stays counted.
+// signal an autoscaler uses to wake the model, until it gets an agent slot: a
+// request released by the wake that still waits for capacity stays counted.
 //
 // After WakeConfig.KeepAlive the router sends keepalive bytes so clients and
 // proxies do not close an idle connection: an SSE comment for a streaming
