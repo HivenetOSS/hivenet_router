@@ -95,7 +95,7 @@ Every request gets a request ID that Hivenet Router generates: a UUIDv7, time-or
 - stored in the audit record as `request_id`
 - attached to the active trace span
 - used in the router's routing and error logs
-- forwarded to the agent and backend in the `X-Request-ID` header
+- forwarded to the agent and backend in the `X-Request-ID` header. When the router retries a request on a backend, each retry gets the request ID followed by `-2`, `-3` and so on, so a backend never receives the same ID twice and every attempt can still be found by the request ID.
 
 A client can also send its own ID, in `X-Client-Request-ID` or, as before, in `X-Request-ID`:
 
@@ -105,7 +105,7 @@ curl \
   http://localhost:8080/v1/models
 ```
 
-When the value is a valid UUID of any version, it is normalized to its canonical lowercase form, stored in the audit record as `client_request_id` and returned in the `X-Client-Request-ID` response header. `X-Client-Request-ID` is preferred when a client sends both headers. A client that resends the same ID on a retry can find both attempts by `client_request_id`.
+When the value is a valid UUID of any version, it is normalized to its canonical lowercase form, stored in the audit record as `client_request_id` and returned in the `X-Client-Request-ID` response header. When a client sends both headers, the first one that is a valid UUID is kept, `X-Client-Request-ID` first. A client that resends the same ID on a retry can find both attempts by `client_request_id`.
 
 The client's ID is a label only: it is never forwarded to the agent or backend, and two requests with the same client ID are still two requests with two request IDs. Anything that deduplicates audit records, such as a billing pipeline, should key on `request_id`.
 

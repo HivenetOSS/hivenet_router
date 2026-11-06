@@ -15,7 +15,6 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
-	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -104,7 +103,9 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		// Specify which HTTP headers the client is allowed to send.
 		// "Authorization" allows Bearer tokens, API keys.
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Client-Request-ID, X-Request-ID")
+		// Response headers a browser client's JavaScript may read.
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Client-Request-ID, X-Upstream-Request-ID")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -139,8 +140,8 @@ const (
 // and backend in X-Request-ID.
 //
 // A client may also send its own ID: X-Client-Request-ID, or X-Request-ID as
-// before. A valid UUID (any version) is kept in canonical form as the client
-// request ID ("client_request_id" in the context and the audit record) and
+// before. The first of the two that is a valid UUID (any version) is kept
+// in canonical form as the client request ID ("client_request_id" in the context and the audit record) and
 // echoed in X-Client-Request-ID. It labels the request and lets a retry be
 // recognised as the same request. It is never forwarded, and an invalid
 // value is dropped, so crafted text can't reach any log.
@@ -148,14 +149,13 @@ const (
 // Applied globally so every response — including 401s — is traceable.
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		raw := c.GetHeader(headerClientRequestID)
-		if raw == "" {
-			raw = c.GetHeader(headerRequestID)
+		for _, h := range []string{headerClientRequestID, headerRequestID} {
+			if id, ok := domain.CanonicalRequestID(c.GetHeader(h)); ok {
+				setClientRequestID(c, id)
+				break
+			}
 		}
 		c.Request.Header.Del(headerClientRequestID)
-		if id, ok := redirect.CanonicalRequestID(raw); ok {
-			setClientRequestID(c, id)
-		}
 		setRequestID(c, newRequestID())
 		c.Next()
 	}
@@ -197,12 +197,15 @@ func newRequestID() string {
 }
 
 // requestIDFrom returns the request ID assigned by RequestIDMiddleware. A
-// handler reached without the middleware (only possible in tests) gets a
-// fresh ID, stored like the middleware's so every later reader sees it.
+// handler reached without the middleware gets a fresh ID, stored like the
+// middleware's so every later reader sees it, and a logged error: it is a
+// wiring mistake, and readers that ran earlier (the audit log, early spans)
+// saw no ID.
 func requestIDFrom(c *gin.Context) string {
 	if id := c.GetString("request_id"); id != "" {
 		return id
 	}
+	log.Errorf("request_id missing on %s %s: RequestIDMiddleware is not installed on this route", c.Request.Method, c.Request.URL.Path)
 	id := newRequestID()
 	setRequestID(c, id)
 	return id

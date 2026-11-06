@@ -262,3 +262,57 @@ func TestRequestID_UpstreamEchoOfOurID(t *testing.T) {
 		t.Errorf("X-Upstream-Request-ID = %q for an echo of our own ID, want none", got)
 	}
 }
+
+// TestRequestID_InvalidClientHeaderFallsBack checks that an invalid
+// X-Client-Request-ID does not hide a valid X-Request-ID sent with it.
+func TestRequestID_InvalidClientHeaderFallsBack(t *testing.T) {
+	want := uuid.New().String()
+	s := serveWithRequestID(t, map[string]string{"X-Client-Request-ID": "abc123", "X-Request-ID": want})
+	if s.ctxClient != want || s.respClient != want {
+		t.Errorf("client ID = %q, echoed %q; want the valid X-Request-ID value %q", s.ctxClient, s.respClient, want)
+	}
+}
+
+// TestRequestID_UpstreamClientIDNotAppended checks that an upstream's own
+// X-Client-Request-ID never sits next to the client's echoed one.
+func TestRequestID_UpstreamClientIDNotAppended(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	h := newTestHandlers(q, &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000})
+	c, w := newCtx("/v1/embeddings", []byte(`{"model":"embed","input":"hi"}`))
+	c.Set("quota_limits", auth.QuotaLimits{TokensPerDay: 1_000_000})
+	c.Set("request_id", uuid.Must(uuid.NewV7()).String())
+	clientID := uuid.New().String()
+	c.Header("X-Client-Request-ID", clientID) // as RequestIDMiddleware echoes it
+
+	done := make(chan struct{})
+	go func() { h.Embeddings(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`), HttpHeaders: http.Header{"X-Client-Request-Id": {"upstream-own"}}}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+	if got := w.Header().Values("X-Client-Request-ID"); len(got) != 1 || got[0] != clientID {
+		t.Errorf("X-Client-Request-ID = %q, want exactly [%q]", got, clientID)
+	}
+}
+
+// TestRequestID_CORSHeaders checks that browser clients may send their own
+// ID and read the ID headers of the response.
+func TestRequestID_CORSHeaders(t *testing.T) {
+	r := gin.New()
+	r.Use(api.CORSMiddleware())
+	r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodOptions, "/x", nil))
+	if allow := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(allow, "X-Client-Request-ID") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want X-Client-Request-ID", allow)
+	}
+	expose := w.Header().Get("Access-Control-Expose-Headers")
+	for _, h := range []string{"X-Request-ID", "X-Client-Request-ID", "X-Upstream-Request-ID"} {
+		if !strings.Contains(expose, h) {
+			t.Errorf("Access-Control-Expose-Headers = %q, want %s", expose, h)
+		}
+	}
+}
