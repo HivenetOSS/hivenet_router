@@ -19,7 +19,7 @@ Every inference endpoint can redirect: `POST /v1/chat/completions`, `POST /v1/me
 1. If any healthy agent on this policloud serves the model, the request is served here. A redirect never replaces a working local agent.
 2. If the request has already been redirected twice, it is served here as before.
 3. Otherwise, if the sibling map lists another policloud inside the request’s scope that serves the model with the endpoint’s kind, the router answers `307` to it. Nothing is admitted, queued or charged to the key’s quota on this policloud.
-4. Otherwise, the request is handled here as any request for a model with no healthy agent: it normally ends in `model_not_found`.
+4. Otherwise, the request is handled here. When the map places the model on this policloud with `scale_from_zero: true`, it is held until the model wakes (see [Hold at zero](/routing/hold-at-zero)); otherwise it normally ends in `model_not_found`.
 
 A request whose key may not use the model is never redirected: it gets `403 model_forbidden` here. A redirect takes precedence over a policy’s `fallback_provider`: when a sibling serves the model, the request goes to the sibling, not to OpenAI or Anthropic.
 
@@ -30,7 +30,7 @@ Every router computes the same choice from the map, in this order:
 1. **Candidates.** The policlouds with a placement of the model and the endpoint’s kind, inside the request’s [scope](#scope), except this policloud and the policloud where the request first arrived.
 2. **Home set.** The two candidates that rank highest by a hash of the caller’s API-key ID, the model and the policloud ID. One key spreads one model over at most two policlouds, so its rate limits stay meaningful.
 3. **Session order.** The home set is ordered by a hash of the key ID and the optional `X-Session-ID` request header. The same key and session always reach the same policloud, so its prompt cache is reused. When a policloud leaves the map, only the sessions that were on it move.
-4. **Wake here first.** While the map’s hints are fresh, when every home policloud is cold and the map also places the model on this policloud, the request is not redirected: it is handled here, so it stays where it landed. Until the router can hold a request while a model wakes, such a request normally ends in `model_not_found` here, even though a cold sibling that can scale from zero would serve it once awake.
+4. **Wake here first.** While the map’s hints are fresh, when every home policloud is cold and the map also places the model on this policloud, for the endpoint’s kind, with `scale_from_zero: true`, the request is not redirected: it is [held here](/routing/hold-at-zero) while the model wakes. A cold sibling is no faster, and the request stays where it landed.
 5. **Hints.** While the map’s hints are fresh, a target whose hint says `load: full`, or that is cold and cannot scale from zero, is skipped, and a warm target is preferred over a cold one. When every target would be skipped, the first one is used anyway. After `hints_expire_at`, hints are ignored and the session order alone decides.
 
 Send `X-Session-ID` with a stable value per conversation to spread one key’s conversations over its two home policlouds. Without it, every request of a key for one model goes to the same policloud.
@@ -147,7 +147,8 @@ curl -X POST https://pc-fr-1.example.com/admin/sibling-map \
 | `placements[].model` | Required. A model the policloud serves; one placement per model and policloud |
 | `placements[].kind` | Required: `chat`, `embedding` or `rerank` |
 | `placements[].policloud` | Required. The ID of a policloud in `policlouds` |
-| `placements[].scale_from_zero` | Required. Whether the policloud starts the model when a request arrives while it is cold |
+| `placements[].scale_from_zero` | Required. Whether the policloud starts the model when a request arrives while it is cold. On this policloud, `true` also lets the router [hold requests](/routing/hold-at-zero) while the model wakes |
+| `placements[].hold_budget` | Optional. How long this policloud’s routers hold a request while the model wakes, as a Go duration greater than `0` and at most `1h`, such as `240s`. Without it, `--wake-hold-budget` applies |
 | `placements[].hint` | Optional. `warm` (default `true`) and `load`: `ok`, `busy` or `full` |
 | `hints_expire_at` | RFC 3339 time after which every hint is ignored. Required when any placement has a hint |
 

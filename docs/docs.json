@@ -69,6 +69,7 @@
           "routing/fallback-chains",
           "routing/provider-fallback",
           "routing/cross-site-redirect",
+          "routing/hold-at-zero",
           "routing/policy-gates",
           "routing/admission-control",
             "routing/semantic-routing"
