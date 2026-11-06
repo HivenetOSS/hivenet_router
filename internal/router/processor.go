@@ -560,11 +560,14 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
 		}
-		// Forward original client headers (e.g. Authorization, custom headers) then
-		// enforce Content-Type and inject W3C trace context, same as the LLM path.
+		// Forward the headers the handler set (only X-Request-ID: client headers
+		// are not forwarded on this path), then enforce Content-Type and inject
+		// W3C trace context, same as the LLM path. A copy, so one attempt's
+		// headers never leak into the next or into the pending request.
 		if pending.Request.HttpHeaders != nil {
-			req.Header = pending.Request.HttpHeaders
+			req.Header = pending.Request.HttpHeaders.Clone()
 		}
+		req.Header.Set("X-Request-ID", pending.ForwardID())
 		req.Header.Set("Content-Type", "application/json")
 		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
@@ -629,9 +632,12 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
 	// apply original request headers (including any custom headers added by the openAI client library) so they are forwarded to the backend engine.
+	// A copy, so one attempt's headers never leak into the next or into the pending request.
 	if pending.Request.HttpHeaders != nil {
-		req.Header = pending.Request.HttpHeaders
+		req.Header = pending.Request.HttpHeaders.Clone()
 	}
+	// Each attempt its own backend request ID: see ForwardID.
+	req.Header.Set("X-Request-ID", pending.ForwardID())
 
 	// Inject W3C trace context headers so the agent can create child spans.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))

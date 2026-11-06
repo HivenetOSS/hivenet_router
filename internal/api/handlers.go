@@ -444,7 +444,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	}
 	defer reservation.Release()
 
-	m.requestID = generateRequestID()
+	m.requestID = requestIDFrom(c)
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
 	m.tpd, m.quotaModel = quotaBudgetFromContext(c)
 
@@ -978,14 +978,27 @@ func (h *Handlers) fireTokenLimited(m reqMeta, model string) {
 	}
 }
 
+// forwardHeaders returns the headers the processor forwards to the agent and
+// backend, the one place both paths build them. clientHeaders keeps the
+// client's own headers (the LLM path: custom headers added by the client
+// library), never its router credentials, which agents and backends must not
+// see; otherwise (embeddings and rerank) only the router's headers are sent.
+// Either way X-Request-ID is the router's request ID.
+func forwardHeaders(c *gin.Context, clientHeaders bool) http.Header {
+	h := http.Header{}
+	if clientHeaders {
+		h = c.Request.Header.Clone()
+		domain.StripClientCredentials(h)
+	}
+	h.Set(headerRequestID, requestIDFrom(c))
+	return h
+}
+
 // captureRawBody stores the original headers and cached body bytes on req so the
 // processor can forward them verbatim. Returns false (after writing the error)
 // when the cached body is missing or malformed.
 func captureRawBody(c *gin.Context, req *domain.ChatRequest, requestID string) bool {
-	// Preserve any custom headers added by the client library, but never the
-	// client's router credentials: agents and backends must not see them.
-	req.HttpHeaders = c.Request.Header.Clone()
-	domain.StripClientCredentials(req.HttpHeaders)
+	req.HttpHeaders = forwardHeaders(c, true)
 
 	cb, ok := c.Get(gin.BodyBytesKey)
 	if !ok {
@@ -1066,7 +1079,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
-	domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+	copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 	c.Status(http.StatusOK)
 
 	if resp.Body == nil {
@@ -1419,11 +1432,12 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 		h.onRequestReceived(MetricContext{TenantID: tenantID, KeyID: keyID, DeploymentID: deploymentID})
 	}
 
+	requestID := requestIDFrom(c)
 	chatReq := &domain.ChatRequest{
-		Model:    req.Model,
-		RawBytes: rawBytes,
+		Model:       req.Model,
+		RawBytes:    rawBytes,
+		HttpHeaders: forwardHeaders(c, false),
 	}
-	requestID := generateRequestID()
 	pending := domain.NewPendingRequest(requestID, chatReq, h.timeout)
 	pending.Ctx = c.Request.Context()
 	pending.TenantID = tenantID
@@ -1441,7 +1455,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	select {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
-		domain.CopyHttpHeaders(c.Writer.Header(), resp.HttpHeaders)
+		copyBackendHeaders(c, resp.HttpHeaders, requestID)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:
@@ -1532,12 +1546,32 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 	})
 }
 
-// generateRequestID creates a unique request identifier.
-func generateRequestID() string {
-
-	// Use nanosecond timestamp for uniqueness.
-	return fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+// copyBackendHeaders copies the backend's response headers to the client and
+// keeps the router's request ID headers as the only values. Backends that
+// echo X-Request-ID (for example vLLM with --enable-request-id-headers)
+// would otherwise add a second copy, and an upstream's own
+// X-Client-Request-ID would sit next to the client's. An upstream that
+// returns its own ID (a cloud provider, or a backend that ignores ours, or a
+// retry's ID: see domain.PendingRequest.ForwardID) keeps it visible in
+// X-Upstream-Request-ID.
+func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+	h := c.Writer.Header()
+	clientID := h.Get(headerClientRequestID)
+	domain.CopyHttpHeaders(h, src)
+	h.Del(headerUpstreamRequestID)
+	h.Del(headerClientRequestID)
+	if clientID != "" {
+		h.Set(headerClientRequestID, clientID)
+	}
+	if up := src.Get(headerRequestID); up != "" && up != requestID {
+		h.Set(headerUpstreamRequestID, up)
+	}
+	h.Set(headerRequestID, requestID)
 }
+
+// headerUpstreamRequestID carries the request ID an upstream returned when it
+// differs from the router's.
+const headerUpstreamRequestID = "X-Upstream-Request-ID"
 
 // sseFlushingWriter wraps a gin.ResponseWriter and flushes after every Write so
 // SSE chunks reach the client as soon as they arrive from the backend.

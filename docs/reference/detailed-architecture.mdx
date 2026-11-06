@@ -563,11 +563,11 @@ sequenceDiagram
 The router creates or validates:
 
 - the OpenTelemetry trace
-- `X-Request-ID`
+- `X-Request-ID` (created) and `X-Client-Request-ID` (validated)
 - audit context
 - endpoint metrics
 
-A client-provided request ID is preserved only when it is a valid UUID. Otherwise, Hivenet Router generates one.
+Hivenet Router generates every request ID, a UUIDv7. The same ID is used in router logs and traces and is forwarded to the agent and backend; a retry on a backend gets the ID followed by `-2`, `-3` and so on. A valid UUID the client sends as its own ID is kept as a separate client request ID.
 
 ### 2. Client authentication
 

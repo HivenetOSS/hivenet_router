@@ -61,7 +61,7 @@ Cache-Control: no-store
 
 The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin policloud, the target policloud, the request path, the hop count, a SHA-256 hash of the request body, its issue and expiry times, and a random token ID that is new for every token. The target checks, in order:
 
-1. the token is well formed and its signature is valid;
+1. the token is well formed, its signature is valid, and its request ID (and client request ID, when present) is a UUID;
 2. it has not expired, with 5 seconds of grace for clock drift between routers;
 3. it was not issued more than 5 seconds in the future. Such a token means this router’s clock is behind, and it would otherwise stay valid longer than its lifetime;
 4. it names this policloud and this request path;
@@ -70,11 +70,11 @@ The token is an HMAC-SHA256 signature over the key ID, the request ID, the model
 7. the request body is byte-identical to the one the token was issued for. This is checked before any quota is spent;
 8. the token has not been used before: a token works once.
 
-A token is marked used only when it passes every check, so a request refused on any check, such as a leaked URL sent with another body, never uses up the client’s token. Single use is tracked by the token ID, not the request ID: a client that sets its own `X-Request-ID` and retries gets a new token each time, and another key cannot use up its token by sending the same ID.
+A token is marked used only when it passes every check, so a request refused on any check, such as a leaked URL sent with another body, never uses up the client’s token. Single use is tracked by the token ID, not the request ID: a client that sets its own ID and retries gets a new token each time, and another key cannot use up its token by sending the same ID.
 
 When a check fails and the request carries an `Authorization` header that authenticates, the token is ignored and the request is served on that key as a new request. Otherwise a refused token gets `401 unauthorized`, like any other invalid credential.
 
-An accepted request is served on the token’s key. It keeps the first router’s request ID, returned in `X-Request-ID`, so one request can be followed across both policlouds’ logs. It is routed on the token’s model, the concrete model the first router resolved, so an alias such as `model: "auto"` is not resolved again. The key’s quota is charged only here.
+An accepted request is served on the token’s key. It keeps the first router’s request ID, returned in `X-Request-ID`, so one request can be followed across both policlouds’ logs, and the client’s own ID, if it sent one, returned in `X-Client-Request-ID`. It is routed on the token’s model, the concrete model the first router resolved, so an alias such as `model: "auto"` is not resolved again. The key’s quota is charged only here.
 
 <Warning>
   Until it is used or expires, a token works for anyone who has the full URL **and** the same request body. Hivenet Router redacts the token from its own access log. Keep URLs out of other logs, and keep `--redirect-token-ttl` as short as your slowest clients allow.

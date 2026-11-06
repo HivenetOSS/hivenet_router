@@ -494,18 +494,21 @@ func (s Scope) Contains(p Policloud) bool {
 
 // Claims is the body of a redirect token (contract 3 v2 §4).
 type Claims struct {
-	KeyID     string `json:"key"`   // the caller's API-key ID ("" with auth mode none), never the key
-	RequestID string `json:"rid"`   // the first router's request ID; the target adopts it
-	Model     string `json:"model"` // the concrete model the first router routed on
-	Scope     Scope  `json:"scope"` // the effective scope at the first router
-	From      string `json:"from"`  // the first router's policloud ID
-	Site      string `json:"site"`  // the only policloud that accepts this token
-	Path      string `json:"path"`  // the only path the token is valid for
-	Hop       int    `json:"hop"`   // redirects so far, including this one
-	BodySHA   string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
-	IssuedAt  int64  `json:"iat"`   // Unix seconds
-	Exp       int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
-	JTI       string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
+	KeyID     string `json:"key"` // the caller's API-key ID ("" with auth mode none), never the key
+	RequestID string `json:"rid"` // the first router's request ID; the target adopts it
+	// ClientRequestID is the ID the client sent, if any. The target adopts it
+	// too, so a client retry is still recognised after a redirect.
+	ClientRequestID string `json:"crid,omitempty"`
+	Model           string `json:"model"` // the concrete model the first router routed on
+	Scope           Scope  `json:"scope"` // the effective scope at the first router
+	From            string `json:"from"`  // the first router's policloud ID
+	Site            string `json:"site"`  // the only policloud that accepts this token
+	Path            string `json:"path"`  // the only path the token is valid for
+	Hop             int    `json:"hop"`   // redirects so far, including this one
+	BodySHA         string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
+	IssuedAt        int64  `json:"iat"`   // Unix seconds
+	Exp             int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
+	JTI             string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
 }
 
 // jtiLen is the length of a token ID, in random bytes.
@@ -638,7 +641,9 @@ func BodySHA(body []byte) string {
 
 // ReplayGuard makes tokens single-use: a token ID (jti) is accepted once until
 // its token can no longer verify (exp + ClockSkew). It is keyed on the jti,
-// never on the request ID, which the client can choose through X-Request-ID.
+// which identifies the token. The request ID (rid) is minted by the router
+// and identifies the request: one request may be redirected more than once,
+// each time with a new token.
 //
 // ponytail: in memory, so a token can be used once per router of the target
 // policloud, not once per policloud. Contract 3 v2 moves this to the
