@@ -4,9 +4,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -108,4 +110,42 @@ type Engine interface {
 	// ForwardChat sends a chat completion request to the backend after applying original headers if any and returns
 	// the raw JSON response bytes, and the response headers.
 	ForwardChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, req domain.ChatRequest, options ...EngineOption) ([]byte, http.Header, error)
+}
+
+// Warmer is an optional Engine capability, for a backend that reports healthy
+// before it can answer quickly: it loads the model, or compiles kernels, on
+// its first request. The agent calls Warm once the model is known and
+// registers only after it succeeds, so a model woken from zero is released to
+// held requests only when it can serve them, and the first of them does not
+// pay for the load.
+type Warmer interface {
+	Warm(ctx context.Context, baseURL string, httpClient *http.Client, model string) error
+}
+
+// warmChat sends a one-token chat completion for model, the cheapest request
+// that makes an OpenAI-compatible backend load and run the model.
+func warmChat(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+		"max_tokens": 1,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("warm-up request: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("warm-up request: status %d", resp.StatusCode)
+	}
+	return nil
 }

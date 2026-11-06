@@ -156,3 +156,48 @@ func TestReleasedFromHold_SlotCallsHook(t *testing.T) {
 		t.Fatal("hook not called after the request got a slot")
 	}
 }
+
+// TestQueue_FailedAgentDoesNotKeepWaiting checks that a request that waited
+// for a slot, got it and failed on that agent does not park again for an
+// agent it can no longer use: with the only agent excluded and nothing at
+// capacity, it must give up at once, not at its deadline.
+func TestQueue_FailedAgentDoesNotKeepWaiting(t *testing.T) {
+	only := healthyAgent("only", 1)
+	only.TryAcquireSlot() // another request holds the only slot
+	lister := &mutableLister{agents: map[string][]*domain.Agent{"m": {only}}}
+	stor := &stubStorage{}
+	counters := metrics.NewUniversalCounterStore(stor, nil)
+	pol := &policy.Policy{RoutingPolicy: policy.PolicyStep{Strategy: "least-loaded", MaxTries: 3}}
+	exec := policy.NewExecutor(lister, policy.NewEvaluator(stor, counters), pol, 3, 30)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session := exec.NewSession("m", domain.CapabilityLLM)
+	got := make(chan error, 1)
+	go func() {
+		a, err := session.Select(ctx) // waits in the queue: the agent is full
+		if err == nil {
+			session.RecordFailure(a.ID) // the backend answered with an error
+			a.DecrementLoad()           // the processor frees the slot...
+			only.TryAcquireSlot()       // ...and another request takes it
+			_, err = session.Select(ctx)
+		}
+		got <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	only.DecrementLoad()
+	exec.SignalCapacity("m")
+
+	start := time.Now()
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Fatal("Select returned the agent that already failed")
+		}
+		if waited := time.Since(start); waited > time.Second {
+			t.Errorf("gave up after %v, want at once", waited)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("still waiting in the queue for an agent it already failed on")
+	}
+}
