@@ -94,3 +94,37 @@ func eventually(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestInstallAgent_DisconnectedAgentIsUnhealthy checks that an agent whose
+// registration is handled after its connection closed is installed out of
+// the routing pool, and one still connected is installed healthy.
+func TestInstallAgent_DisconnectedAgentIsUnhealthy(t *testing.T) {
+	routerHost := newTestHost(t)
+	agentHost := newTestHost(t)
+	r := &Router{agents: NewAgentRegistry(), p2pHost: routerHost}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := agentHost.Connect(ctx, peer.AddrInfo{ID: routerHost.ID(), Addrs: routerHost.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "router sees the connection", func() bool { return r.peerConnected(agentHost.ID()) })
+
+	a := domain.NewAgent(agentHost.ID(), domain.AgentMetadata{Model: "m", Capacity: 1}, "t1")
+	if !r.installAgent(a) || !a.IsHealthy() {
+		t.Fatal("a connected agent was not installed healthy")
+	}
+
+	if err := routerHost.Network().ClosePeer(agentHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "router sees the disconnect", func() bool { return !r.peerConnected(agentHost.ID()) })
+
+	b := domain.NewAgent(agentHost.ID(), domain.AgentMetadata{Model: "m", Capacity: 1}, "t2")
+	if r.installAgent(b) {
+		t.Error("installAgent reported a closed connection as up")
+	}
+	if got := r.agents.Get(agentHost.ID()); got != b || got.IsHealthy() {
+		t.Error("an agent registered after its disconnect is in the routing pool")
+	}
+}

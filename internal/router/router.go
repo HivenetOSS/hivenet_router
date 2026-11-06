@@ -1559,8 +1559,12 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 	}
 
 	agent := domain.NewAgent(peerID, metadata, payload.SessionToken)
-	r.agents.Register(agent)
+	connected := r.installAgent(agent)
 	r.storage.RegisterAgent(peerID, metadata, payload.SessionToken) //nolint:errcheck // best-effort persistence; in-memory registry is authoritative
+	if !connected {
+		r.storage.UpdateAgentStatus(peerID, false, time.Now()) //nolint:errcheck // best-effort, as above
+		log.Warnf("Agent %s registered after its connection closed — out of the routing pool until it reconnects", shortID(peerID))
+	}
 	r.counters.Bootstrap(peerID, metadata.Model, metadata.Engine, metadata.Organization, metadata.Machine)
 	r.metrics.AgentRegistered(peerID.String(), metadata.Region, metadata.Engine, metadata.Model, strconv.Itoa(metadata.Capacity), metadata.Organization, metadata.Machine)
 	// Fan out the settled "registered" event to every SSE subscriber on
@@ -1575,10 +1579,13 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 	})
 	// A new agent brings several slots at once: wake every request waiting
 	// for capacity on this model, not just one, and release every request
-	// held while the model was scaled to zero.
-	r.executor.BroadcastCapacity(metadata.Model)
-	if r.wake != nil {
-		r.wake.Wake(metadata.Model)
+	// held while the model was scaled to zero. An agent without a connection
+	// cannot serve them, so it wakes nothing.
+	if connected {
+		r.executor.BroadcastCapacity(metadata.Model)
+		if r.wake != nil {
+			r.wake.Wake(metadata.Model)
+		}
 	}
 
 	// Delete the old session only after the new agent is fully registered.
@@ -1695,6 +1702,24 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// installAgent puts a newly registered agent in the registry and reports
+// whether its connection is still up. It holds connHealthMu, so it is ordered
+// with the disconnect handler: if the connection closed before, the agent is
+// installed unhealthy; if it closes after, the handler finds this agent and
+// marks it unhealthy. Either way an agent with no connection never stays in
+// the routing pool until UnhealthyAfter. Its next heartbeat on a new
+// connection marks it healthy.
+func (r *Router) installAgent(a *domain.Agent) bool {
+	r.connHealthMu.Lock()
+	defer r.connHealthMu.Unlock()
+	connected := r.peerConnected(a.ID)
+	if !connected {
+		a.SetHealthy(false)
+	}
+	r.agents.Register(a)
+	return connected
 }
 
 // peerConnected reports whether the router has a live libp2p connection to
