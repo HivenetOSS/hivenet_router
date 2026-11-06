@@ -126,7 +126,7 @@ Clients should therefore handle:
 | `token_limit_exceeded` | `429` | `router` | Daily token admission or output accounting rejected the request |
 | `concurrency_limit_exceeded` | `429` | `router` | Model occupancy or in-flight budget remained full, or the healthy serving pool breached `shed_if` |
 | `no_agents_available` | `503` | `router` | The policy chain found no eligible agent |
-| `no_capacity` | `503` | `router` | Eligible agents exist but their declared request slots are full |
+| `no_capacity` | `503` | `router` | Eligible agents exist but are full or busy |
 | `agent_disconnected` | `503` | `router` | The selected agent could not be reached |
 | `backend_unavailable` | `503` | `backend` | Backend was unreachable, loading, overloaded, or temporarily unavailable |
 | `queue_full` | `503` | `router` | The router’s global pending-request channel remained full |
@@ -659,7 +659,10 @@ A policy or capability mismatch requires configuration changes instead.
 HTTP 503
 ```
 
-Healthy, filter-compatible agents exist, but every eligible agent has reached its declared concurrency capacity.
+Healthy, filter-compatible agents exist, but none could take the request. This happens when:
+
+- every eligible agent has reached its declared capacity. Only agents with a declared capacity, such as in embedded or test setups, have one; routers ignore the agent's `--capacity` flag.
+- the forward hit a libp2p resource limit on the agent connection. The router treats the agent as busy and retries on another agent; `no_capacity` is returned when no other agent takes the request.
 
 ```json
 {
@@ -681,7 +684,6 @@ Retry after a short randomized delay.
 
 A sustained rate indicates that you should investigate:
 
-- agent `--capacity`
 - fleet size
 - request duration
 - engine queues

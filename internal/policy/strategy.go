@@ -26,7 +26,7 @@ func Get(name string) Strategy {
 	return registry[name]
 }
 
-// leastLoadedStrategy picks the candidate with the lowest active_requests/capacity ratio.
+// leastLoadedStrategy picks the candidate with the lowest load (see loadRatio).
 // It is the default strategy and the only one implemented in v1.
 // Ties are broken by iteration order (non-deterministic for equal load).
 type leastLoadedStrategy struct{}
@@ -49,11 +49,14 @@ func (leastLoadedStrategy) Select(candidates []ScoredCandidate) *domain.Agent {
 	return best
 }
 
-// loadRatio returns active_requests/capacity.
-// Agents with capacity ≤ 0 are ranked last (ratio = 1.0).
+// loadRatio ranks an agent for least-loaded: load/capacity when the agent
+// declares a capacity, else its load in requests (replicas of one model are
+// alike, so the absolute count compares them fairly). The load is the larger
+// of this router's in-flight requests and the agent's own report, so several
+// routers spread work by the agent's real load.
 func loadRatio(a *domain.Agent) float64 {
-	if a.Metadata.Capacity <= 0 {
-		return 1.0
+	if a.Metadata.Capacity > 0 {
+		return float64(a.GetLoad()) / float64(a.Metadata.Capacity)
 	}
-	return float64(a.GetLoad()) / float64(a.Metadata.Capacity)
+	return float64(a.GetLoad())
 }

@@ -64,6 +64,11 @@ func NewHost(identity crypto.PrivKey, listenPort int, gater connmgr.ConnectionGa
 	if gater != nil {
 		opts = append(opts, libp2p.ConnectionGater(gater))
 	}
+	rm, err := agentResourceManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create libp2p resource manager: %w", err)
+	}
+	opts = append(opts, libp2p.ResourceManager(rm))
 	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)

@@ -64,13 +64,14 @@ func main() {
 	healthURL := flag.String("health-url", "", "Health check URL (required for --engine custom)")
 
 	// Standard agent flags
-	capacity := flag.Int("capacity", cfg.Capacity, "Maximum concurrent requests")
+	capacity := flag.Int("capacity", cfg.Capacity, "Deprecated: routers ignore it and admit by the engine's KV capacity and live load. Still sent so older routers accept the agent")
 	version := flag.String("version", cfg.Version, "Agent version")
 	region := flag.String("region", cfg.Region, "Deployment region")
 	organization := flag.String("organization", cfg.Organization, "Cloud/compute provider hosting this agent (e.g. AWS, OVH, Hivenet Compute)")
 	machine := flag.String("machine", cfg.Machine, "Machine name within the organization")
-	routerGRPC := flag.String("router-grpc", cfg.RouterGRPCAddr, "Router gRPC address")
-	routerP2P := flag.String("router-p2p", cfg.RouterP2PAddr, "Router libp2p address")
+	routerGRPC := flag.String("router-grpc", cfg.RouterGRPCAddr, "Router gRPC address (one router); see --routers")
+	routers := flag.String("routers", os.Getenv("HIVENET_AGENT_ROUTERS"), "Comma-separated gRPC addresses of every router of the site; the agent keeps a session with each. Overrides --router-grpc (env: HIVENET_AGENT_ROUTERS)")
+	routerP2P := flag.String("router-p2p", cfg.RouterP2PAddr, "Unused: each router sends its libp2p address in the auth response")
 	tagsStr := flag.String("tags", strings.Join(cfg.Tags, ","), "Comma-separated tags")
 	httpTimeout := flag.Duration("http-timeout", cfg.HTTPTimeout, "HTTP timeout for backend requests")
 	streamWriteTimeout := flag.Duration("stream-write-timeout", cfg.StreamWriteIdleTimeout, "Rolling per-chunk deadline for writing a streaming response back to the router; bounds how long a stalled write may block before the stream is released (0 disables)")
@@ -102,6 +103,12 @@ func main() {
 	cfg.Organization = *organization
 	cfg.Machine = *machine
 	cfg.RouterGRPCAddr = *routerGRPC
+	if *routers != "" {
+		cfg.Routers = strings.Split(*routers, ",")
+	}
+	if len(cfg.RouterList()) == 0 {
+		log.Fatal("no router: set --routers or --router-grpc")
+	}
 	cfg.RouterP2PAddr = *routerP2P
 	cfg.HTTPTimeout = *httpTimeout
 	cfg.StreamWriteIdleTimeout = *streamWriteTimeout

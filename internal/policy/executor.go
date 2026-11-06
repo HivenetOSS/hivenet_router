@@ -669,8 +669,10 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 			nPrevFailed++
 			continue
 		}
-		// Capacity hard gate — agent is full.
-		if agent.GetLoad() >= agent.Metadata.Capacity {
+		// Capacity hard gate — agent is full. Only an agent with a declared
+		// capacity has one; network-registered agents are bounded by the
+		// occupancy budget (B2) and the engine signals instead.
+		if agent.Metadata.Capacity > 0 && agent.GetLoad() >= agent.Metadata.Capacity {
 			nAtCapacity++
 			continue
 		}

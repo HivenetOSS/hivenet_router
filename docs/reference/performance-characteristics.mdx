@@ -121,22 +121,22 @@ Measure all four separately when the user experience depends on progressive outp
 
 ## Current streaming-capacity behavior
 
-Hivenet Router holds the selected agent’s declared capacity slot for the complete generation in both response modes:
+Hivenet Router counts a request in the selected agent’s load for the complete generation in both response modes:
 
 - For a non-streaming response, the slot is held until the complete response has been received and parsed.
 - For a streaming response, the slot is held until the stream fully drains. Hivenet Router releases it when the stream ends normally or when the client disconnects.
 
-As a result, `active_requests`, `hivenet_agent_capacity_utilization`, the hard capacity gate, `capacity_utilization` policy gates, and `least-loaded` ranking cover the whole streaming generation. This matches how inference engines count running sequences, such as vLLM’s `--max-num-seqs`.
+As a result, `active_requests`, the load the agent reports, and `least-loaded` ranking cover the whole streaming generation. This matches how inference engines count running sequences, such as vLLM’s `--max-num-seqs`.
 
 The router’s `--max-concurrent` forwarding slot behaves differently. For a streaming request, Hivenet Router releases it after response headers arrive and streaming begins. The global forwarding semaphore therefore limits concurrent dispatches, not concurrent active streams.
 
 <Note>
-  Long streams now occupy agent capacity for their full duration. A fleet dominated by long streams reaches its declared agent capacity sooner than it did when slots were released at stream start. Requests that find every eligible agent full wait in the per-model capacity queue.
+  Long streams count toward the agent's load and the model's occupancy budget for their full duration.
 </Note>
 
 For streaming-heavy workloads:
 
-- size agent `--capacity` to the number of concurrent sequences the engine can run well, for example close to vLLM’s `--max-num-seqs`
+- for vLLM and SGLang, let the router derive the occupancy budget from the engine's KV capacity, or set `admit_budget_tokens`; for other engines, set `admit_budget_tokens` or `max_inflight` in the policy
 - monitor engine-level running and waiting requests
 - monitor KV-cache pressure, TTFT, ITL, GPU use, and preemptions
 - test sustained streams rather than only short request bursts
@@ -195,15 +195,11 @@ This is a reasoning model rather than a precise runtime formula. Constant costs 
 
 ### Stable tie behavior
 
-The `least-loaded` strategy compares:
-
-```text
-active requests / declared capacity
-```
+The `least-loaded` strategy compares each agent's load in requests: the larger of this router's in-flight requests to the agent and the agent's own reported count from all routers.
 
 Agents returned by the registry are sorted by peer ID.
 
-When several agents have the same load ratio, the first one in that stable peer-ID order wins.
+When several agents have the same load, the first one in that stable peer-ID order wins.
 
 This is deterministic, but it is not round-robin fairness.
 
@@ -219,7 +215,7 @@ For non-streaming local inference, the number of simultaneous forwards is bounde
 minimum of:
 
 router --max-concurrent
-sum of declared capacity across eligible agents
+model occupancy budget (B2) and max_inflight
 backend concurrency and scheduler capacity
 ```
 
@@ -230,7 +226,6 @@ The default values are:
 | Router global request channel | `100` |
 | Router simultaneous forwards | `50` |
 | Per-model capacity waiters | `30` |
-| Declared capacity per agent | `10` |
 | Attempts per policy step | `3` |
 | Router request deadline | `60s` |
 
@@ -259,7 +254,7 @@ For example, doubling concurrent capacity does not double throughput when:
 - memory pressure causes preemption
 - the router or network path becomes the bottleneck
 
-Use measured throughput and latency distributions rather than calculating capacity from declared slots alone.
+Use measured throughput and latency distributions rather than calculating capacity from budgets alone.
 
 ## Backpressure layers
 
@@ -337,25 +332,11 @@ A waiter wakes when:
 
 If the queue is full or the request context expires, the routing session advances to its next fallback step.
 
-### Agent capacity
+### Occupancy budget
 
-Each agent advertises:
+The agent's `--capacity` flag is deprecated and ignored by routers. The router bounds work per model with the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
 
-```text
---capacity
-```
-
-The router atomically acquires one slot before forwarding a request.
-
-The value is operator-defined. It is not derived from:
-
-- GPU count
-- VRAM
-- KV-cache size
-- model parameters
-- engine scheduler limits
-
-Set it through representative load testing.
+For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, each router admits its share of the budget.
 
 ## Request and response buffering
 
@@ -518,7 +499,8 @@ Routing decisions can use live values, sampled values, or values that are tempor
 | Signal | Normal freshness |
 | --- | --- |
 | Active request count | Live atomic value |
-| Declared capacity | Agent registration value |
+| Agent-reported in-flight requests | Every `500ms` by default, with the routing-signal push |
+| Engine KV capacity | Sampled with the engine snapshot |
 | Success rate | Updated after completed outcomes |
 | SRTT and RTTVAR | Updated after recorded request outcomes |
 | Engine snapshot | Sampled every `500ms` by default |
@@ -1087,10 +1069,10 @@ For streaming, also vary:
 A practical tuning order is:
 
 1. Benchmark one backend directly.
-2. Set a conservative agent capacity.
-3. Run one Hivenet Router agent with concurrency below that value.
-4. Increase concurrency until engine queueing or latency deteriorates.
-5. Reduce capacity to leave operational headroom.
+2. Run one Hivenet Router agent with the default occupancy budget (vLLM, SGLang) or a conservative `max_inflight` or `admit_budget_tokens` (other engines).
+3. Increase concurrency until engine queueing or latency deteriorates.
+4. Lower `HIVENET_ROUTER_ADMIT_FRACTION` or the policy budget to leave operational headroom.
+5. Add `shed_if` thresholds for pool pressure.
 6. Add more agents and test routing distribution.
 7. Tune `--max-concurrent`.
 8. Tune per-model `--queue-depth`.
@@ -1100,7 +1082,7 @@ A practical tuning order is:
 Monitor:
 
 ```text
-hivenet_agent_capacity_utilization
+hivenet_admission_budget_tokens
 hivenet_agent_engine_running_requests
 hivenet_agent_engine_waiting_requests
 hivenet_agent_engine_kv_cache_utilization
@@ -1112,7 +1094,7 @@ hivenet_policy_fallback_routed_total
 hivenet_policy_exhausted_total
 ```
 
-For streaming workloads, compare Hivenet Router’s agent active-request count with engine-level running and waiting requests. Both cover the full generation, so a persistent gap usually points to a capacity mismatch or to traffic that bypasses the router.
+For streaming workloads, compare Hivenet Router’s agent active-request count with engine-level running and waiting requests. Both cover the full generation, so a persistent gap usually points to traffic that bypasses the router.
 
 ## Useful performance queries
 
@@ -1217,12 +1199,12 @@ sum by (model) (
 | --- | --- | --- |
 | High client latency and high backend span | TTFT, ITL, engine queue, GPU | Model or inference engine |
 | High client latency but low backend span | Trace phases, network, audit filesystem | Router-agent path or ingress |
-| High per-model queue wait | Agent capacity and engine scheduler | Insufficient eligible capacity |
+| High per-model queue wait | Occupancy budget and engine scheduler | Insufficient eligible capacity |
 | High goroutine count with low request-channel length | Forwarding semaphore and request deadlines | Accepted requests waiting outside the channel |
 | Increasing `queue_full` | Request channel, processor load, CPU | Router admission pressure |
 | High policy-evaluation time | Agents per model, fallback steps, dynamic gates | Candidate-selection cost |
 | Uneven traffic at equal load | Peer-ID tie behavior and short sequential requests | `least-loaded` tie handling |
-| Low Hivenet Router capacity use but high engine running requests | Agent `--capacity` versus engine limits, direct engine traffic | Capacity mismatch or traffic outside the router |
+| Low Hivenet Router active requests but high engine running requests | Direct engine traffic | Traffic outside the router |
 | Memory growth under large prompts | Request sizes and concurrent buffered bodies | Router or agent request buffering |
 | Memory growth with stable traffic | Metric cardinality, dynamic keys, goroutines | Control-plane state |
 | Streaming ends at about the same duration | Router request timeout | Deadline truncation |
@@ -1243,7 +1225,7 @@ agent and backend hardware
 model and quantization
 inference-engine version and flags
 number of agents
-agent capacity
+occupancy budget settings
 router concurrency and queue settings
 routing policy
 prompt and output distributions

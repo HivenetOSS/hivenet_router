@@ -33,7 +33,7 @@ If a gate removes every remaining agent, that policy step is exhausted. The capa
 | 3 | `capability` | Agent serves `llm`, `embedding`, or `reranker` as required |
 | 4 | `match` | Agent metadata satisfies the step’s static filters |
 | 5 | `prev_failures` | Agent has not already failed in the current policy step |
-| 6 | `capacity` | Active requests are below declared capacity |
+| 6 | `capacity` | Load is below declared capacity (agents with a declared capacity only) |
 | 7 | `exclude_if` | Live metrics do not violate configured thresholds |
 
 The first six gates always apply.
@@ -375,31 +375,21 @@ Also check whether later fallback steps overlap completely with the current step
 
 ## Gate 6: Capacity
 
-The capacity gate compares the agent’s active request count with its declared capacity.
+The capacity gate applies only to agents with a declared capacity, such as agents in embedded or test setups. Routers ignore the agent's `--capacity` flag, so agents that register over the network declare none and always pass this gate.
 
-An agent passes when:
+For an agent with a declared capacity, it passes when:
 
 ```text
-active requests < declared capacity
+load < declared capacity
 ```
 
 It fails when:
 
 ```text
-active requests >= declared capacity
+load >= declared capacity
 ```
 
-Capacity is configured on the agent:
-
-```bash
---capacity 32
-```
-
-### When the gate drains the pool
-
-Gate 6 fails when every remaining agent has used all its declared slots.
-
-This does not necessarily mean the backend is broken. It may be healthy and serving its current workload normally.
+Network-registered agents are bounded instead by the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy), the `exclude_if` engine gates, and [front-door shedding](/routing/admission-control#b3-front-door-shedding).
 
 ### Queue behavior
 
@@ -425,42 +415,11 @@ Disable it for immediate fallback:
 
 ### Diagnose it
 
-Inspect active requests and capacity:
-
-```bash
-curl \
-  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
-  http://localhost:8080/admin/routing-table \
-  | jq '.agents[] | {
-      model: .metadata.model,
-      peer_id,
-      active_requests: .status.active_requests,
-      capacity: .metadata.capacity,
-      capacity_utilization: .status.capacity_utilization
-    }'
-```
-
 The exhaustion log may contain:
 
 ```text
 gate[6] capacity [at_capacity=3]
 ```
-
-### Fix it
-
-- Add more agents for the model.
-- Increase `--capacity` only when the backend and hardware can support more concurrency.
-- Lower request duration or backend queue pressure.
-- Configure a fallback step with additional infrastructure.
-- Disable or reduce queueing when fast failover is preferable.
-
-<Warning>
-  Agents must declare a positive capacity. The router rejects agent authentication when capacity is zero or negative.
-</Warning>
-
-<Note>
-  For streaming responses, Hivenet Router holds the capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. Gate 6 therefore applies for the complete lifetime of active streams.
-</Note>
 
 ## Gate 7: Dynamic metric thresholds
 
@@ -514,7 +473,7 @@ Unknown fields and rules with zero or several operators are rejected when the po
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
-| `capacity_utilization` | Fraction `0.0`–`1.0` | Active requests divided by capacity |
+| `capacity_utilization` | Fraction `0.0`–`1.0` | Active requests divided by declared capacity; not available for network-registered agents |
 | `success_rate` | Fraction `0.0`–`1.0` | Successful forwards divided by all completed forwards |
 | `srtt` | Milliseconds | Smoothed router-agent request time |
 | `consecutive_failures` | Count | Failures since the last successful forward |
@@ -615,17 +574,21 @@ Use static tags, staged rollout, or a separate policy when new agents need a con
 
 ### Preserve headroom
 
-Use the live capacity ratio before the hard capacity limit:
+Use engine pressure to stop assigning work before an agent is saturated:
 
 ```yaml
 exclude_if:
-  capacity_utilization:
+  kv_cache_utilization:
     gte: 0.8
 ```
 
-This stops assigning new work after 80% of declared capacity is in use.
+This stops assigning new work once 80% of the agent's KV cache is in use.
 
 It preserves headroom but may increase queueing or fallback activity.
+
+<Note>
+  `capacity_utilization` exists only for agents with a declared capacity. Network-registered agents have none, so a rule on it passes.
+</Note>
 
 ### Avoid backend queues
 

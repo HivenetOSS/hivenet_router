@@ -1,6 +1,6 @@
 ---
 title: "SGLang agent"
-description: "Connect an SGLang backend to Hivenet Router, declare model and capacity, and expose cache, queue, and time-to-first-token metrics for routing."
+description: "Connect an SGLang backend to Hivenet Router, declare the model, bound load by KV capacity, and expose cache, queue, and time-to-first-token metrics for routing."
 sidebarTitle: "SGLang"
 ---
 
@@ -200,7 +200,6 @@ The model ID returned here is the value clients must use when sending requests t
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
-      --capacity 20 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -218,7 +217,6 @@ The model ID returned here is the value clients must use when sending requests t
       --backend-url http://localhost:3000 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /opt/hivenet-router/jwt.secret \
-      --capacity 20 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -235,9 +233,8 @@ The agent waits for SGLang to become healthy and expose a model before registeri
 | --- | --- |
 | `--engine sglang` | Selects the SGLang backend integration |
 | `--backend-url` | Base URL of the local SGLang server |
-| `--router-grpc` | Router endpoint used for agent authentication |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -301,33 +298,14 @@ The agent then sends `Authorization: Bearer <key>` on every request to SGLang: r
 The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
 </Note>
 
-## Set agent capacity
+## How load is bounded
 
-`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
+The agent reports SGLang's KV-cache size in tokens, read from `sglang:max_total_num_tokens`. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
 
-It does not change SGLang’s own scheduler or memory configuration.
-
-Start with a conservative value based on:
-
-- available VRAM
-- model size
-- tensor-parallel configuration
-- expected context length
-- request concurrency
-- acceptable latency
-
-For example:
-
-```bash
---capacity 20
-```
-
-When the agent reaches its declared capacity, Hivenet Router stops assigning new requests to it and considers other matching agents or configured fallback steps.
-
-Test the backend under representative load before increasing capacity.
+SGLang's own scheduler and memory settings still apply inside the engine.
 
 <Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify SGLang concurrency under sustained streaming load before raising it.
+  `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
 
 ## Verify the connection
@@ -611,7 +589,7 @@ This allocates a larger fraction of GPU memory to SGLang’s static memory pool.
     --http-timeout 10m
     ```
 
-    Also check SGLang’s queue length, cache pressure, and the capacity declared by the agent.
+    Also check SGLang’s queue length, cache pressure, and the model's occupancy budget.
   </Accordion>
 
   <Accordion title="GPU metrics are missing">

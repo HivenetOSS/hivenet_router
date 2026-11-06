@@ -386,10 +386,10 @@ active requests / declared capacity
 For non-streaming requests, the slot remains occupied until the response completes. For streaming requests, the slot remains occupied until the stream fully drains, whether the stream ends normally or the client disconnects. The metric therefore covers the whole generation in both response modes.
 
 <Note>
-  `hivenet_agent_capacity_utilization` counts only requests routed through Hivenet Router against the agent’s declared `--capacity`. Compare it with engine running and waiting requests, KV-cache pressure, TTFT, and ITL to confirm that the declared capacity matches what the engine can sustain.
+  The metric reads `0` for agents without a declared capacity. Routers ignore the agent's `--capacity` flag, so this is the case for every network-registered agent. Watch engine running and waiting requests, KV-cache pressure, TTFT, and ITL instead.
 </Note>
 
-Show agents above 80%:
+For agents with a declared capacity, show those above 80%:
 
 ```promql
 hivenet_agent_capacity_utilization > 0.8
@@ -422,7 +422,7 @@ sum by (model) (
 hivenet_agent_rejected_requests_total
 ```
 
-This increases when Hivenet Router tries to acquire a capacity slot and the agent is already full.
+This increases when Hivenet Router tries to acquire a capacity slot and the agent is already at its declared capacity. Agents without a declared capacity never reject a slot.
 
 ```promql
 sum by (peer_id, model) (
@@ -1076,7 +1076,7 @@ Registered only when `--semantic-decision-log` is set. Dropped records were not 
 
 ## Queue metrics
 
-These metrics describe the per-model queue used when eligible agents exist but all declared capacity slots are occupied. They do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
+These metrics describe the per-model queue used when eligible agents exist but all declared capacity slots are occupied (agents with a declared capacity only). They do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
 
 ### Current queue depth
 
@@ -1383,7 +1383,7 @@ The LLM admission gates publish one rejection counter and four live pool gauges:
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
 | `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
-| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling |
+| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling (or from the engines' KV capacity), and after the per-router share |
 | `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
 | `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
 

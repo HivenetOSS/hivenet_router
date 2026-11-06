@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/libp2p/go-libp2p/core/network"
 	"sync"
 	"time"
 
@@ -181,6 +183,15 @@ func isConnectionLevelError(err error) bool {
 		return re.Code == domain.ErrCodeAgentDisconnected
 	}
 	return false
+}
+
+// isResourceLimit reports whether a forward failed because a libp2p resource
+// limit (streams or memory) was reached. The connection is healthy, the agent
+// is just full: the request goes to another agent and the connection is not
+// dropped, which would cut every other stream on it.
+func isResourceLimit(err error) bool {
+	return errors.Is(err, network.ErrResourceLimitExceeded) ||
+		strings.Contains(err.Error(), network.ErrResourceLimitExceeded.Error())
 }
 
 // requestDeadlinePassed reports whether the request's own deadline has expired,
@@ -579,6 +590,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			if requestDeadlinePassed(ctx) {
 				return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
 			}
+			if isResourceLimit(err) {
+				return nil, rttMs, domain.NewRouterError(domain.ErrCodeNoCapacity, fmt.Sprintf("Agent busy: %v", err), domain.SourceRouter)
+			}
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
 		}
 		defer resp.Body.Close()
@@ -646,6 +660,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		p.metrics.RequestFailed(region, engine, model, pending.TenantID)
 		if requestDeadlinePassed(ctx) {
 			return nil, rttMs, domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request deadline exceeded while contacting agent", domain.SourceRouter)
+		}
+		if isResourceLimit(err) {
+			return nil, rttMs, domain.NewRouterError(domain.ErrCodeNoCapacity, fmt.Sprintf("Agent busy: %v", err), domain.SourceRouter)
 		}
 		return nil, rttMs, domain.NewRouterError(domain.ErrCodeAgentDisconnected, fmt.Sprintf("Agent unreachable: %v", err), domain.SourceRouter)
 	}

@@ -99,6 +99,7 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 
 	m := &domain.BackendMetrics{}
 	m.KVCacheUtilization = metricVal(scalars, "vllm:kv_cache_usage_perc")
+	m.KVCapacityTokens = metricVal(scalars, kvCapacityScalar)
 	m.RunningRequests = metricVal(scalars, "vllm:num_requests_running")
 	m.WaitingRequests = metricVal(scalars, "vllm:num_requests_waiting")
 	m.PreemptionsTotal = metricVal(scalars, "vllm:num_preemptions_total")
@@ -277,6 +278,14 @@ func parsePrometheusTextFull(r io.Reader) (
 			}
 		}
 
+		// vLLM publishes its KV-cache geometry as labels of an info metric.
+		if name == "vllm:cache_config_info" {
+			if t, ok := kvCapacityFromLabels(labelSet); ok {
+				scalars[kvCapacityScalar] = t
+			}
+			continue
+		}
+
 		// Scalar metric: keep only the first occurrence per name.
 		if _, seen := scalars[name]; !seen {
 			scalars[name] = v
@@ -290,6 +299,44 @@ func parsePrometheusTextFull(r io.Reader) (
 		buckets[base] = pts
 	}
 	return
+}
+
+// kvCapacityScalar is the synthetic scalar name under which the parser stores
+// the KV-cache size in tokens derived from vllm:cache_config_info.
+const kvCapacityScalar = "vllm:kv_capacity_tokens"
+
+// kvCapacityFromLabels returns num_gpu_blocks × block_size from the label set
+// of vllm:cache_config_info, matching label names exactly (hybrid models also
+// carry other *_block_size labels).
+func kvCapacityFromLabels(labelSet string) (float64, bool) {
+	labels := parseLabels(labelSet)
+	blocks, err1 := strconv.ParseFloat(labels["num_gpu_blocks"], 64)
+	size, err2 := strconv.ParseFloat(labels["block_size"], 64)
+	if err1 != nil || err2 != nil || blocks <= 0 || size <= 0 {
+		return 0, false
+	}
+	return blocks * size, true
+}
+
+// parseLabels splits a Prometheus label set (`a="1",b="x"`) into a map.
+// Values with escaped quotes are not needed here and are kept verbatim.
+func parseLabels(labelSet string) map[string]string {
+	out := map[string]string{}
+	for labelSet != "" {
+		eq := strings.IndexByte(labelSet, '=')
+		if eq <= 0 || eq+1 >= len(labelSet) || labelSet[eq+1] != '"' {
+			break
+		}
+		key := strings.TrimSpace(labelSet[:eq])
+		rest := labelSet[eq+2:]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			break
+		}
+		out[key] = rest[:end]
+		labelSet = strings.TrimPrefix(rest[end+1:], ",")
+	}
+	return out
 }
 
 // extractFinishedReason extracts the finished_reason label value from a

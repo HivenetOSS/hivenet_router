@@ -76,6 +76,9 @@ type agentRoutingSignalPayload struct {
 	SessionToken   string                   `json:"session_token"`
 	BackendMetrics *domain.BackendMetrics   `json:"backend_metrics,omitempty"`
 	Hardware       *domain.HardwareSnapshot `json:"hardware,omitempty"`
+	// InFlight is the agent's count of requests in flight from all routers;
+	// absent from older agents.
+	InFlight *int `json:"in_flight,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -546,7 +549,7 @@ func (r *Router) Start() error {
 	rcMgrLimits := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&rcMgrLimits)
 	resourceManager, err := rcmgr.NewResourceManager(
-		rcmgr.NewFixedLimiter(rcMgrLimits.AutoScale()),
+		rcmgr.NewFixedLimiter(p2p.UnlimitedStreams(rcMgrLimits.AutoScale())),
 		rcmgr.WithLimitPerSubnet(
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 32, ConnCount: r.cfg.P2PMaxConnsPerIP}},
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 56, ConnCount: r.cfg.P2PMaxConnsPerIP}},
@@ -612,6 +615,10 @@ func (r *Router) Start() error {
 	// All agent management endpoints are registered under a single protocol so
 	// that agents can use one NamespacedClient for both /register and /heartbeat.
 	r.httpHost = &p2phttp.Host{StreamHost: r.p2pHost}
+	// libp2p creates its peer-metadata cache lazily and without a lock on the
+	// first NamespacedClient call, so concurrent first requests to a new agent
+	// race on it. Create it here, before any request.
+	r.httpHost.SetPeerMetadata(r.p2pHost.ID(), p2phttp.PeerMeta{})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", r.handleAgentRegister)
@@ -822,6 +829,10 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
+	handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
+	if r.shared != nil {
+		handlers.SetRouterShare(r.shared.Size)
+	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1285,6 +1296,21 @@ func (r *Router) EnginePressureForModel(model string) (kvUtil, waiting *float64)
 	return MeanEnginePressure(metrics)
 }
 
+// EngineKVCapacityForModel sums the KV-cache size, in tokens, that the healthy
+// agents serving model report (0 when none reports it).
+func (r *Router) EngineKVCapacityForModel(model string) int {
+	total := 0.0
+	for _, agent := range r.agents.ListByModel(model) {
+		if !agent.IsHealthy() {
+			continue
+		}
+		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil {
+			total += *ep.KVCapacityTokens
+		}
+	}
+	return int(total)
+}
+
 // MeanEnginePressure averages the KV-cache utilization and waiting-request count
 // over the given per-agent engine snapshots, ignoring nil metrics. A dimension
 // that no snapshot reports is returned as nil (not zero), so the shed gate skips
@@ -1479,8 +1505,10 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		capability = domain.CapabilityLLM
 	}
 	metadata := domain.AgentMetadata{
-		Model:         session.Metadata.Model,
-		Capacity:      int(session.Metadata.Capacity),
+		Model: session.Metadata.Model,
+		// The agent's declared capacity is ignored: the router admits by the
+		// engine's KV capacity (B2) and live load, never by a request count.
+		Capacity:      0,
 		Version:       session.Metadata.Version,
 		Region:        session.Metadata.Region,
 		Tags:          session.Metadata.Tags,
@@ -1639,9 +1667,13 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 
 	// O(1) lookup: session.PeerID was set by LinkPeerID during /register.
 	// Verify the agent is still in the registry (may have been removed by the health monitor).
-	if r.agents.Get(session.PeerID) == nil {
+	agent := r.agents.Get(session.PeerID)
+	if agent == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
+	}
+	if payload.InFlight != nil {
+		agent.SetReportedLoad(*payload.InFlight)
 	}
 
 	region := session.Metadata.Region
