@@ -1,0 +1,106 @@
+---
+title: "Run several routers"
+description: "Run two or more Hivenet Router instances behind one load balancer and enforce each API key's request and token limits across all of them through a shared Valkey store."
+sidebarTitle: "Several routers"
+---
+
+You can run several routers behind one load balancer, so the site keeps serving when one router stops. Each router counts the requests and tokens it admits. Without a shared store every router enforces every limit on its own, so a key spread over three routers gets up to three times its limit.
+
+With `--sync-store=valkey` the routers of one site share their usage through a [Valkey](https://valkey.io) store and enforce each limit together.
+
+## What is shared
+
+| Limit | Shared | How it holds |
+| --- | --- | --- |
+| Requests per minute | Yes | Within one sync interval of usage |
+| Input and output tokens per minute | Yes | Within one sync interval of usage |
+| Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
+| Occupancy budgets (B2, B4) | No | Each router applies its own budget |
+| Dynamic API keys | No | Push key changes to every router |
+
+Requests never wait on the store. Every router keeps deciding in memory, exactly as a single router does.
+
+## How it works
+
+Every `--sync-interval` (default `1s`) each router:
+
+1. publishes the usage it admitted since the last round as one entry on a stream in Valkey;
+2. reads the entries the other routers published and subtracts them from its own buckets;
+3. adds its daily token usage to today's totals;
+4. records a heartbeat, which tells every router how many routers are live.
+
+Between two rounds a router cannot see the others' latest usage. To keep the routers together within a limit, each router admits at most its share of what was left at the last round: the remainder divided by the number of live routers. The first request of each round always passes if the limit has room, so a request larger than the share is not starved.
+
+A router that starts or restarts replays the last minute of usage and reads today's totals, so it does not hand out a fresh budget.
+
+The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router a round is about 36 KB.
+
+## When the store is unreachable
+
+| Situation | Behavior |
+| --- | --- |
+| Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
+| Store back | Routers publish the usage they held back and return to shared limits |
+| A router cannot read today's total for a key with a daily limit (for example, it started while the store was down) | The router refuses that key's requests with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected |
+
+Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
+
+## Deploy Valkey
+
+Use one Valkey per site, reachable only from the routers. For high availability run one primary, two replicas and three Sentinels on separate hosts. Sentinel promotes a replica when the primary fails; routers ask the Sentinels for the current primary.
+
+The store holds only recent usage and today's totals. Persistence is optional: after a total loss the routers rebuild from what they hold in memory.
+
+## Configure the routers
+
+Give every router of the site the same `--site-id` (it prefixes every key in the store) and a stable `--router-id`. In Kubernetes, a StatefulSet pod name works; the default is the hostname.
+
+```bash
+hivenet-router \
+  --site-id site-a \
+  --sync-store valkey \
+  --sync-valkey-addrs sentinel-0:26379,sentinel-1:26379,sentinel-2:26379 \
+  --sync-valkey-sentinel-master hivenet \
+  --sync-valkey-password-file /run/secrets/valkey-password
+```
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--sync-store` | `HIVENET_ROUTER_SYNC_STORE` | `none` | `none` or `valkey` |
+| `--sync-valkey-addrs` | `HIVENET_ROUTER_SYNC_VALKEY_ADDRS` | Empty | Comma-separated `host:port` of the Sentinels, or of Valkey without Sentinel |
+| `--sync-valkey-sentinel-master` | `HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER` | Empty | Sentinel master set name; empty connects to Valkey directly |
+| `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | Password for Valkey and Sentinel |
+| `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` | Connect with TLS |
+| `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` | Between `100ms` and `10s`. Shorter intervals make limits stricter between rounds and cost more round trips |
+| `--router-id` | `HIVENET_ROUTER_ROUTER_ID` | Hostname | Stable identity of this router |
+
+`--sync-store=valkey` replaces `HIVENET_ROUTER_QUOTA_BACKEND=badger`: the store keeps today's totals. The router refuses to start with both.
+
+<Warning>
+  The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
+</Warning>
+
+## Monitor
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `hivenet_sync_up` | gauge | `1` while the store answers; `0` while each router enforces its share |
+| `hivenet_sync_peers` | gauge | Other live routers, as last seen |
+| `hivenet_sync_lag_seconds` | gauge | Age of the latest peer usage when applied |
+| `hivenet_sync_tick_seconds` | histogram | Duration of one sync round |
+| `hivenet_sync_errors_total` | counter | Sync rounds that failed to reach the store |
+
+Suggested alerts:
+
+```yaml
+- alert: HivenetSyncDown
+  expr: hivenet_sync_up == 0
+  for: 1m
+  labels: {severity: critical}
+- alert: HivenetSyncPeersMissing
+  expr: hivenet_sync_peers < 2
+  for: 5m
+  labels: {severity: warning}
+```
+
+Adjust `hivenet_sync_peers` to the number of routers you run minus one.

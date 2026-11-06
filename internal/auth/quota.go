@@ -102,6 +102,25 @@ type dailyBucket struct {
 	mu   sync.Mutex
 	used int
 	day  int // UTC days since Unix epoch
+
+	// Shared counters only. loadedDay is the day the policloud total was read
+	// from the fleet; epoch/base snapshot the usage when an outage began, so
+	// during it this router spends only its share of what was left.
+	loadedDay int
+	epoch     uint64
+	base      int
+
+	// Admission lease (shared counters only): between two syncs this router
+	// may admit at most its share of what was left at the last sync.
+	leaseSeq   uint64
+	leaseSpent int
+	leaseCap   int
+
+	// Peer usage applied during the last sync (peerSeq is the sync it was
+	// applied in). The lease assumes the other routers keep spending at that
+	// rate until the next sync, which their usage has not reached us yet for.
+	peerSeq  uint64
+	peerLast int
 }
 
 // InMemoryLimiter enforces quotas entirely in process memory.
@@ -122,7 +141,16 @@ type InMemoryLimiter struct {
 	// hole where a tenant could spend its entire minute's quota in one instant.
 	// Set once at startup via SetRPMBurstWindow before any request is handled.
 	rpmBurstSeconds int
+
+	// fleet, when set, shares usage with the other routers of the policloud.
+	// Set once at startup via SetFleet.
+	fleet  Fleet
+	leases leases
 }
+
+// SetFleet shares this limiter's usage with the other routers of the
+// policloud. Must be called before the limiter handles any requests.
+func (l *InMemoryLimiter) SetFleet(f Fleet) { l.fleet = f }
 
 // SetRPMBurstWindow sets the RPM burst window in seconds (see rpmBurstSeconds).
 // Must be called before the limiter handles any requests.
@@ -168,8 +196,14 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 	if rpm <= 0 {
 		return true, -1, nil
 	}
-	lim := l.getOrCreateRPM(bucketKey(tenantID, model), rpm)
-	if !lim.Allow() {
+	bucket := bucketKey(tenantID, model)
+	lim := l.getOrCreateRPM(bucket, rpm)
+	if l.fleet != nil {
+		if !allowShared(l.fleet, &l.leases, bucket, lim, 1, false) {
+			return false, 0, nil
+		}
+		l.fleet.Record(usageRPM, bucket, rpm, 1)
+	} else if !lim.Allow() {
 		return false, 0, nil
 	}
 	remaining := int(lim.Tokens())
@@ -180,7 +214,7 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 }
 
 func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n)
+	return l.allowTokens(tenantID, model, tpd, n, true)
 }
 
 // AllowOutputTokens shares the same deduction logic as AllowInputTokens — the
@@ -189,7 +223,7 @@ func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (
 // behaves. Both delegate to allowTokens so the daily-counter semantics stay in
 // exactly one place.
 func (l *InMemoryLimiter) AllowOutputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n)
+	return l.allowTokens(tenantID, model, tpd, n, false)
 }
 
 // RemainingTokens reports the remaining daily budget for (tenant, model) without
@@ -201,6 +235,9 @@ func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int,
 		return -1, nil
 	}
 	b := l.getOrCreateDaily(bucketKey(tenantID, model))
+	if !l.loadFleetDaily(bucketKey(tenantID, model), b) {
+		return 0, nil // policloud total unknown: refuse until the store answers
+	}
 	today := utcDayIndex()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -208,19 +245,26 @@ func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int,
 		b.day = today
 		b.used = 0
 	}
-	rem := tpd - b.used
+	rem := l.dailyAllowance(b, tpd) - b.used
 	if rem < 0 {
 		rem = 0
 	}
 	return rem, nil
 }
 
-func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int) (bool, int, error) {
+// admission marks the pre-forward input charge. Only admission is held to this
+// router's share of the budget (outage allowance, per-sync lease): output is
+// charged after the response exists, so it is judged against the policloud
+// total alone and never rejected because of this router's share.
+func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admission bool) (bool, int, error) {
 	if tpd <= 0 || n <= 0 {
 		return true, -1, nil
 	}
 	bucket := bucketKey(tenantID, model)
 	b := l.getOrCreateDaily(bucket)
+	if !l.loadFleetDaily(bucket, b) {
+		return false, 0, nil // policloud total unknown: refuse until the store answers
+	}
 	today := utcDayIndex()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -228,6 +272,14 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int) (bool,
 		// New calendar day — reset the counter.
 		b.day = today
 		b.used = 0
+	}
+	if admission {
+		if allowance := l.dailyAllowance(b, tpd); allowance < tpd && b.used+n > allowance {
+			return false, 0, nil // outage: this router's share of the rest is spent
+		}
+		if !l.dailyLease(b, tpd, n) {
+			return false, 0, nil // this router's share since the last sync is spent
+		}
 	}
 	if b.used+n > tpd {
 		// Clamp to the limit so the gauge reaches 100% and all subsequent
@@ -239,8 +291,127 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int) (bool,
 		return false, 0, nil
 	}
 	b.used += n
+	if admission {
+		b.leaseSpent += n
+	}
+	if l.fleet != nil {
+		l.fleet.Record(usageDaily, bucket, tpd, n)
+	}
 	l.reportUsage(tenantID, b.used)
 	return true, tpd - b.used, nil
+}
+
+// loadFleetDaily reads the policloud's usage today for a daily bucket the
+// first time this router touches it each day. It reports false when the total
+// cannot be read: the router does not know how much is left, so it refuses
+// (fail closed) rather than grant a full day's budget on top of the others'.
+func (l *InMemoryLimiter) loadFleetDaily(bucket string, b *dailyBucket) bool {
+	if l.fleet == nil {
+		return true
+	}
+	today := utcDayIndex()
+	b.mu.Lock()
+	loaded := b.loadedDay == today
+	b.mu.Unlock()
+	if loaded {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	total, err := l.fleet.DailyTotal(ctx, bucket)
+	if err != nil {
+		return false
+	}
+	b.mu.Lock()
+	if b.day != today {
+		b.day = today
+		b.used = 0
+	}
+	b.used = max(b.used, total)
+	b.loadedDay = today
+	b.mu.Unlock()
+	return true
+}
+
+// dailyAllowance is the daily limit this router may spend up to. While the
+// shared store is down it is the usage when the outage began plus this
+// router's share of what was left, so the routers together stay within tpd.
+// Caller holds b.mu.
+func (l *InMemoryLimiter) dailyAllowance(b *dailyBucket, tpd int) int {
+	if l.fleet == nil {
+		return tpd
+	}
+	e := l.fleet.DegradedEpoch()
+	if e == 0 {
+		return tpd
+	}
+	if b.epoch != e {
+		b.epoch, b.base = e, b.used
+	}
+	n := l.fleet.Size()
+	if n <= 1 || b.base >= tpd {
+		return tpd
+	}
+	return b.base + (tpd-b.base)/n
+}
+
+// dailyLease applies the per-sync share to a daily budget: until the next
+// sync this router may admit at most (what was left at the last sync) ÷ live
+// routers, so routers that cannot see each other's latest spend still stay
+// within the budget together. The first admission in a window always passes
+// if the budget has room, so a request larger than the share is not starved.
+// Caller holds b.mu.
+func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
+	if l.fleet == nil || l.fleet.DegradedEpoch() != 0 {
+		return true
+	}
+	nr := l.fleet.Size()
+	if nr <= 1 {
+		return true
+	}
+	if seq := l.fleet.SyncSeq(); b.leaseSeq != seq {
+		// What is left, minus what the others are likely spending right now
+		// (as much as they spent in the last sync window), split evenly.
+		inFlight := 0
+		if b.peerSeq+1 == seq {
+			inFlight = b.peerLast
+		}
+		b.leaseSeq, b.leaseSpent = seq, 0
+		b.leaseCap = max(1, (tpd-b.used-inFlight)/nr)
+	}
+	return b.leaseSpent == 0 || b.leaseSpent+n <= b.leaseCap
+}
+
+// ApplyPeerUsage takes usage another router of the policloud admitted.
+func (l *InMemoryLimiter) ApplyPeerUsage(kind byte, bucket string, limit, n int, age time.Duration) {
+	switch kind {
+	case usageRPM:
+		if limit <= 0 {
+			return
+		}
+		lim := l.getOrCreateRPM(bucket, limit)
+		window := time.Duration(float64(lim.Burst()) / float64(lim.Limit()) * float64(time.Second))
+		debit(lim, decayed(n, age, window))
+	case usageDaily:
+		if age > time.Hour {
+			return
+		}
+		b := l.getOrCreateDaily(bucket)
+		today := utcDayIndex()
+		b.mu.Lock()
+		if b.day != today {
+			b.day = today
+			b.used = 0
+		}
+		b.used += n
+		if l.fleet != nil {
+			if seq := l.fleet.SyncSeq(); b.peerSeq != seq {
+				b.peerSeq, b.peerLast = seq, 0
+			}
+			b.peerLast += n
+		}
+		b.mu.Unlock()
+	}
 }
 
 func (l *InMemoryLimiter) getOrCreateRPM(bucket string, rpm int) *rate.Limiter {
@@ -279,6 +450,7 @@ func (l *InMemoryLimiter) getOrCreateDaily(tenantID string) *dailyBucket {
 // effect immediately on the next request.
 func (l *InMemoryLimiter) Reset() {
 	l.rpmLimiters.Range(func(k, _ any) bool { l.rpmLimiters.Delete(k); return true })
+	l.leases.reset()
 	l.dailyBuckets.Range(func(k, _ any) bool { l.dailyBuckets.Delete(k); return true })
 }
 
@@ -305,6 +477,7 @@ func (l *InMemoryLimiter) SweepIdle() int {
 		lim := v.(*rate.Limiter)
 		if lim.TokensAt(now) >= float64(lim.Burst()) {
 			l.rpmLimiters.Delete(k)
+			l.leases.drop(k.(string))
 			removed++
 		}
 		return true

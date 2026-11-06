@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"hivenet_router/internal/shared"
 	"net/http"
 	"os"
 	"os/signal"
@@ -151,6 +152,10 @@ type Router struct {
 	// (ITPM/OTPM). Reset alongside rateLimiter on auth reload so updated caps
 	// take effect immediately.
 	minuteLimiter *auth.MinuteRateLimiter
+
+	// shared publishes and applies limit usage across the routers of this
+	// policloud (nil unless --sync-store=valkey).
+	shared *shared.Store
 
 	// occupancy is the global KV-occupancy admit controller (B2), keyed per
 	// model; keyAdmission is the per-key occupancy-share controller (B4), keyed
@@ -478,6 +483,10 @@ func New(cfg *config.Config) (*Router, error) {
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
 	}
+	if err := r.setupShared(); err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
 	// waiting for the first request from each tenant.
@@ -665,6 +674,9 @@ func (r *Router) Start() error {
 		log.Infof("Quota BadgerLimiter periodic flush started (interval: %v)", r.cfg.UniversalFlushInterval)
 	}
 
+	if r.shared != nil {
+		r.shared.Start(processorCtx)
+	}
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
@@ -708,6 +720,12 @@ func (r *Router) Close() error {
 	if bl, ok := r.rateLimiter.(*auth.BadgerLimiter); ok {
 		log.Info("Flushing quota counters to diskDB...")
 		bl.Flush()
+	}
+
+	// Publish the usage admitted since the last sync so the other routers
+	// count it, then disconnect from the shared store.
+	if r.shared != nil {
+		r.shared.Close()
 	}
 
 	// 2. Stop processor and periodic-flush goroutines.
@@ -1740,4 +1758,44 @@ func (r *Router) healthMonitor() {
 			log.Infof("Active agents: %d", r.agents.Count())
 		}
 	}
+}
+
+// setupShared connects the rate and daily limiters to the other routers of
+// the policloud through Valkey when --sync-store=valkey.
+func (r *Router) setupShared() error {
+	cfg := r.cfg
+	if cfg.SyncStore != "valkey" {
+		return nil
+	}
+	limiter, ok := r.rateLimiter.(*auth.InMemoryLimiter)
+	if !ok {
+		return fmt.Errorf("shared counters need the in-memory quota backend, got %q", cfg.QuotaBackend)
+	}
+	var addrs []string
+	for _, a := range strings.Split(cfg.SyncValkeyAddrs, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	st, err := shared.New(shared.Config{
+		Addrs:          addrs,
+		SentinelMaster: cfg.SyncSentinelMaster,
+		Password:       cfg.SyncValkeyPassword,
+		TLS:            cfg.SyncValkeyTLS,
+		Prefix:         cfg.SiteID,
+		RouterID:       cfg.RouterID,
+		Interval:       cfg.SyncInterval,
+	})
+	if err != nil {
+		return fmt.Errorf("shared counters: %w", err)
+	}
+	limiter.SetFleet(st)
+	st.AddApplier(limiter)
+	r.minuteLimiter.SetFleet(st)
+	st.AddApplier(r.minuteLimiter)
+	r.metrics.Register(st.Collectors()...)
+	r.shared = st
+	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
+		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval})
+	return nil
 }
