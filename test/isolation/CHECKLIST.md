@@ -54,12 +54,12 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 3.1 | vLLM agents get a per-tenant `cache_salt` on chat (streaming and not), `/v1/messages`, embeddings and rerank. Keys of one tenant share it; tenants never do. | planned (PR-4) | `TestIsolation_CacheSaltPerTenant` |
-| 3.2 | The salt is an HMAC of the tenant under a dedicated secret: 43 base64url characters, unguessable. | planned (PR-4) | `TestSalt_FormatAndStability` |
-| 3.3 | A `cache_salt` sent by the client is always removed (duplicates and escaped spellings included). | planned (PR-4) | `TestSetTopLevel`, `FuzzSetTopLevel` |
-| 3.4 | Engines without salt support get no salt, and no client salt either. | planned (PR-4) | `TestApply_EngineCapabilities` |
-| 3.5 | The salt never reaches the OpenAI/Anthropic fallback providers. | planned (PR-4) | `TestProviderFallback_NeverSendsCacheSalt` |
-| 3.6 | Salting requires its own secret (at least 32 bytes, not the agents' JWT secret). | planned (PR-4) | `TestValidateIsolationConfig` |
+| 3.1 | vLLM agents get a per-tenant `cache_salt` on chat (streaming and not), `/v1/messages`, embeddings and rerank. Keys of one tenant share it; tenants never do. | done | `TestIsolation_CacheSaltPerTenant` |
+| 3.2 | The salt is an HMAC of the tenant under a dedicated secret: 43 base64url characters, unguessable. | done | `TestSalt_FormatAndStability` |
+| 3.3 | A `cache_salt` sent by the client is always removed (duplicates and escaped spellings included). | done | `TestSetTopLevel`, `TestRemoveTopLevel`, `FuzzSetTopLevel`, `TestIsolation_CacheSaltPerTenant` |
+| 3.4 | Engines without salt support get no salt, and no client salt either. | done | `TestApply_EngineCapabilities` |
+| 3.5 | The salt never reaches the OpenAI/Anthropic fallback providers. | done | `TestProviderFallback_NeverSendsCacheSalt` |
+| 3.6 | Salting requires its own secret (at least 32 bytes, not the agents' JWT secret). | done | `TestValidateIsolationConfig`, `TestNew_RejectsShortSecret` |
 | 3.7 | With salting off, bodies are forwarded byte-identical. | done | `TestSemanticAliasEndToEnd` |
 | 3.8 | vLLM runs with the `sha256` prefix hash, at a patched version (≥ 0.11.1, vLLM ③). | infra | none: vLLM launch flags |
 

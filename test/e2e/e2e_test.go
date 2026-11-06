@@ -246,6 +246,13 @@ func startAgent(t *testing.T, routerCfg *config.Config, backendURL, identityPath
 // startAgentWith is startAgent with a hook to edit the agent config.
 func startAgentWith(t *testing.T, routerCfg *config.Config, backendURL, identityPath string, mutate func(*config.AgentConfig)) *agent.Agent {
 	t.Helper()
+	return startAgentWithEngine(t, routerCfg, backendURL, identityPath, nil, mutate)
+}
+
+// startAgentWithEngine is startAgentWith for a given engine (nil = the
+// custom engine on backendURL/health).
+func startAgentWithEngine(t *testing.T, routerCfg *config.Config, backendURL, identityPath string, engine agent.Engine, mutate func(*config.AgentConfig)) *agent.Agent {
+	t.Helper()
 	cfg := config.DefaultAgentConfig()
 	cfg.JWTSecret = jwtSecret
 	cfg.Model = stubModel
@@ -257,11 +264,15 @@ func startAgentWith(t *testing.T, routerCfg *config.Config, backendURL, identity
 	cfg.IdentityPath = identityPath
 	cfg.Capacity = 2
 	cfg.Region = "e2e"
+	if engine == nil {
+		engine = &agent.CustomEngine{HealthURL: cfg.HealthURL}
+	}
+	cfg.Engine = engine.Name()
 	if mutate != nil {
 		mutate(cfg)
 	}
 
-	a := agent.NewAgent(cfg, &agent.CustomEngine{HealthURL: cfg.HealthURL})
+	a := agent.NewAgent(cfg, engine)
 	go a.Run() //nolint:errcheck // exits via Stop; failures surface as readiness timeout in callers
 	t.Cleanup(a.Stop)
 	return a
