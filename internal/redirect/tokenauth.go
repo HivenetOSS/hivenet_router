@@ -71,11 +71,12 @@ func Wrap(rd *Redirector, next auth.Provider, keys *auth.DynamicKeyProvider) aut
 }
 
 // CheckAuthMode rejects cross-site redirect (a non-empty siteID) with static
-// auth.yaml keys: they carry no key ID, so a sibling policloud could not
-// resolve a token to its key. Dynamic keys and auth mode none both work.
+// auth.yaml keys: a sibling policloud resolves a token's key ID through its
+// dynamic key registry, and a static key's derived ID is not in it. Dynamic
+// keys and auth mode none both work.
 func CheckAuthMode(siteID string, apiProv auth.Provider) error {
 	if _, static := apiProv.(*auth.StaticKeyProvider); static && siteID != "" {
-		return fmt.Errorf("cross-site redirect (site ID %q) requires dynamic API keys or auth mode none; static auth.yaml keys have no key ID", siteID)
+		return fmt.Errorf("cross-site redirect (site ID %q) requires dynamic API keys or auth mode none; a sibling policloud cannot resolve a static auth.yaml key from a redirect token", siteID)
 	}
 	return nil
 }

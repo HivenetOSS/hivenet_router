@@ -198,9 +198,7 @@ The key limits are fairness and anti-abuse controls and may be deliberately over
 
 The input and output buckets are independent for each key-and-model combination. A zero value disables the corresponding cap. B4 rejections return `429 rate_limit_exceeded` with `Retry-After: 1`. The ordinary request-per-minute limiter uses the same error code but does not set `Retry-After`.
 
-<Warning>
-  Dynamic keys have a stable key ID, so the three serverless controls are isolated per key. Static-key authentication does not currently populate a key ID; the handler falls back to `anonymous`. As a result, static keys share these B4 token buckets and occupancy state for a model in the audited source. Do not describe them as isolated per-static-key controls until the runtime supplies a distinct static key ID.
-</Warning>
+The three serverless controls are isolated per key. Dynamic keys use their registry ID. Static keys use an ID derived one-way from `key_hash` (`static-` plus 16 hex characters). No-auth traffic shares one `anonymous` key.
 
 ## Validation and derived defaults
 

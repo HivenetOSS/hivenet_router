@@ -981,6 +981,7 @@ The operation:
 - validates every entry before applying changes
 - rejects duplicate IDs
 - rejects duplicate key hashes
+- rejects an `id` or `owner` that is not valid UTF-8 or contains control characters (such as NUL, tab or newline) or DEL
 - replaces the registry atomically
 - accepts request bodies up to 16 MiB (`16777216` bytes)
 
