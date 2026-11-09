@@ -315,7 +315,7 @@ On `gpu-us-1`:
   --identity-path /opt/hivenet-router/agent_identity.key
 ```
 
-The router bounds vLLM agents by the KV-cache size they report. Ollama reports none: to bound the Ollama agent, set `max_inflight` or `admit_budget_tokens` in its model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
+The router bounds vLLM agents by the KV-cache size they report. Ollama reports none, so the router allows `8` requests in flight per Ollama replica by default. To choose your own bound, set `max_inflight` or `admit_budget_tokens` in its model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
 For a multi-machine deployment, these agent settings are particularly important:
 

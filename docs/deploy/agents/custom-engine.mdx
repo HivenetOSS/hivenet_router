@@ -320,9 +320,9 @@ The backend must provide a valid streaming response. Hivenet Router does not con
 
 ## How load is bounded
 
-A custom backend does not report a KV-cache size, so the router sets no automatic occupancy budget for this agent. To bound the work Hivenet Router sends, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control).
+A custom backend does not report a KV-cache size, so the router sets no automatic token budget for this agent. Instead, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica of the model. To choose your own bound, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
-Without a budget, the backend's own queue protects it.
+With `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=0` and no policy bound, the backend's own queue protects it.
 
 <Note>
   `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.

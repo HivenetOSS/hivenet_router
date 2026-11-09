@@ -75,7 +75,7 @@ Different observability signals cover different parts of this path.
 | Audit `latency_ms` | Router middleware entry to handler completion | Yes |
 | `http_server_request_duration_seconds` | Complete router HTTP handling | Yes |
 | `hivenet_tenant_request_duration_seconds` | Successful tenant request through the router | Yes |
-| `queue_wait` trace span | Time in the per-model capacity queue | No |
+| `queue_wait` trace span | Time in the per-model capacity queue (agents with a declared capacity only) | No |
 | `dispatch` trace span | Policy selection and router-to-agent forwarding until the processor receives a response | Depends on response mode |
 | `forward_to_agent` trace span | Router request to agent response headers or completed non-streaming body | Depends on response mode |
 | `forward_to_backend` trace span | Agent request to backend response completion | Yes |
@@ -136,11 +136,11 @@ The router’s `--max-concurrent` forwarding slot behaves differently. For a str
 
 For streaming-heavy workloads:
 
-- for vLLM and SGLang, let the router derive the occupancy budget from the engine's KV capacity, or set `admit_budget_tokens`; for other engines, set `admit_budget_tokens` or `max_inflight` in the policy
+- for vLLM and SGLang, let the router derive the occupancy budget from the engine's KV capacity, or set `admit_budget_tokens`; other engines get `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per replica unless the policy sets `admit_budget_tokens` or `max_inflight`
 - monitor engine-level running and waiting requests
 - monitor KV-cache pressure, TTFT, ITL, GPU use, and preemptions
 - test sustained streams rather than only short request bursts
-- size the per-model capacity queue (`--queue-depth`) and router request timeout for the longer slot hold times of streaming requests
+- size the per-model wait queue (`--queue-depth`) and router request timeout for the longer slot hold times of streaming requests
 
 The inference engine’s own scheduler metrics remain the authoritative view of backend work, including traffic that does not pass through Hivenet Router.
 
@@ -313,9 +313,9 @@ For non-streaming requests, the slot normally remains occupied until the respons
 
 For streaming requests, it is released when streaming begins. The selected agent’s capacity slot is held separately until the stream fully drains.
 
-### Per-model capacity queue
+### Per-model wait queue
 
-When eligible agents exist but all declared slots are full, a request can wait in a model-specific FIFO queue.
+When a request does not fit the model's occupancy budget, it waits in a model-specific queue before routing starts.
 
 The default depth is:
 
@@ -323,20 +323,15 @@ The default depth is:
 30
 ```
 
-This queue is separate for every model.
+This queue is separate for every model. A queued request waits up to the request timeout (`--request-timeout`). Requests beyond the depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`. `hivenet_queue_depth` shows the requests waiting.
 
-A waiter wakes when:
-
-- an agent frees a slot
-- a new agent registers for the model
-
-If the queue is full or the request context expires, the routing session advances to its next fallback step.
+Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free slot between fallback steps. If that wait ends without a slot, the routing session advances to its next fallback step.
 
 ### Occupancy budget
 
 The agent's `--capacity` flag is deprecated and ignored by routers. The router bounds work per model with the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
 
-For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, each router admits its share of the budget.
+For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica; set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, each router admits its share of the budget.
 
 ## Request and response buffering
 
@@ -855,7 +850,7 @@ It is not the same as the explicit `queue_wait` trace span or:
 hivenet_queue_wait_seconds
 ```
 
-Those represent the per-model capacity queue specifically.
+Those represent the per-model capacity queue for agents with a declared capacity specifically.
 
 <Warning>
   Keep the benchmark’s derived phase names and their actual measurement boundaries together when publishing results.
@@ -1069,7 +1064,7 @@ For streaming, also vary:
 A practical tuning order is:
 
 1. Benchmark one backend directly.
-2. Run one Hivenet Router agent with the default occupancy budget (vLLM, SGLang) or a conservative `max_inflight` or `admit_budget_tokens` (other engines).
+2. Run one Hivenet Router agent with the default occupancy budget (vLLM, SGLang) or the default of `8` in flight per replica, or a conservative `max_inflight` or `admit_budget_tokens` (other engines).
 3. Increase concurrency until engine queueing or latency deteriorates.
 4. Lower `HIVENET_ROUTER_ADMIT_FRACTION` or the policy budget to leave operational headroom.
 5. Add `shed_if` thresholds for pool pressure.

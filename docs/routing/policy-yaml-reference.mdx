@@ -67,8 +67,8 @@ fallback_provider:
 | `mode` | String | No | Admission profile: `reserved` (default) or `serverless` |
 | `max_input_tokens` | Integer | No | Model input limit; B1 rejects when the learned prompt estimate exceeds 1.5× this value; `0` disables B1 |
 | `images_max` | Integer | No | Maximum images per request; `0` disables the image check |
-| `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` or omitted uses the engines' reported KV capacity, or disables the token budget when no engine reports it |
-| `max_inflight` | Integer | No | Per-replica in-flight request backstop; `0` disables the count limit |
+| `admit_budget_tokens` | Integer | No | Per-replica token-weighted occupancy capacity; `0` or omitted uses the engines' reported KV capacity (unless `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false`), or disables the token budget when no engine reports it |
+| `max_inflight` | Integer | No | Per-replica in-flight request backstop; `0` disables the count limit, except that a model with no other occupancy bound gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) |
 | `shed_if` | Object | No | Front-door thresholds for aggregate healthy-pool engine pressure |
 | `routing_policy` | Object | Yes | Primary local routing step |
 | `fallback_chain` | Array | No | Ordered local fallback steps |
@@ -99,7 +99,7 @@ shed_if:
     gt: 20
 ```
 
-All numeric limits default to `0`, which disables the corresponding check. The exception is `admit_budget_tokens`: at `0`, the token budget comes from the engines' reported KV capacity when available. Negative values are rejected. `mode` defaults to `reserved` and accepts only `reserved` or `serverless`.
+All numeric limits default to `0`, which disables the corresponding check. The exceptions are `admit_budget_tokens`: at `0`, the token budget comes from the engines' reported KV capacity when available; and `max_inflight`: when no token budget applies either, the router uses `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`). Negative values are rejected. `mode` defaults to `reserved` and accepts only `reserved` or `serverless`.
 
 ### `mode`
 
@@ -121,11 +121,11 @@ effective token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
 effective request backstop = max_inflight × healthy_replicas
 ```
 
-When `admit_budget_tokens` is `0`, the token budget is `floor(HIVENET_ROUTER_ADMIT_FRACTION × summed KV capacity of the healthy replicas)`. vLLM and SGLang agents report KV capacity; other engines do not, so set `admit_budget_tokens` or `max_inflight` for them if you want a budget.
+When `admit_budget_tokens` is `0`, the token budget is `floor(HIVENET_ROUTER_ADMIT_FRACTION × summed KV capacity of the healthy replicas)`. vLLM and SGLang agents report KV capacity; set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` to ignore it. Other engines do not report it. A model with no token budget and no `max_inflight` gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica; `0` disables that default.
 
 With several routers sharing `--sync-store=valkey`, each router admits the effective token budget and request backstop divided by the number of live routers. See [Run several routers](/deploy/multiple-routers).
 
-Over-budget requests may park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` before the router returns `429 concurrency_limit_exceeded`. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
+Over-budget requests wait in the per-model wait queue, up to `--queue-depth` requests for up to the request timeout; requests beyond it park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. If no room frees, the router returns `429 concurrency_limit_exceeded`. A request larger than the whole token budget is admitted when nothing else of that model is in flight on this router. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
 
 Benchmark-derived values are not loaded automatically from `router_limits.yaml`. Operators or provisioning tooling must copy the certified per-model values into the policy.
 

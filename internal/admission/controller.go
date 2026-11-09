@@ -29,6 +29,12 @@ type Controller struct {
 	admitFraction float64       // scales the caller's budget tokens; (0,1]
 	parkFor       time.Duration // how long an over-budget request waits for room before 429
 
+	// Wait queue (SetQueue): up to queueDepth over-budget requests per model
+	// wait up to queueWait for room instead of parkFor.
+	queueDepth int
+	queueWait  time.Duration
+	onQueue    func(model string, waiting int)
+
 	// observer, when set, is called after every occupancy change (admit, release,
 	// grow) with the model's current sum, count, effective budget, and max-inflight
 	// limit — the hook the router uses to publish the occupancy gauges. Set once at
@@ -52,6 +58,14 @@ func NewController(admitFraction float64, parkFor time.Duration) *Controller {
 		parkFor:       parkFor,
 		models:        make(map[string]*modelState),
 	}
+}
+
+// SetQueue lets up to depth over-budget requests per model wait up to wait
+// for room (the request's own context still ends the wait first); the others
+// wait parkFor. onDepth, if set, receives the number waiting on each change.
+// Call once at startup before any request is admitted.
+func (c *Controller) SetQueue(depth int, wait time.Duration, onDepth func(model string, waiting int)) {
+	c.queueDepth, c.queueWait, c.onQueue = depth, wait, onDepth
 }
 
 // SetObserver registers the occupancy-change callback (see observer). Call once
@@ -81,6 +95,7 @@ type modelState struct {
 	budget      int64         // last effective budget seen, for the utilization gauge
 	maxInflight int           // last max_inflight seen, for the concurrency gauge
 	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
+	waiting     atomic.Int32  // requests in the wait queue
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
 	// SweepIdle. Atomic so the janitor never contends with the hot path.
@@ -147,23 +162,31 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 	s := c.stateFor(model)
 	w := int64(footprint)
 	budget := c.effectiveBudget(budgetTokens)
+	// A request larger than the whole budget is held to the budget: it is
+	// admitted when nothing else is in flight. Its footprint is an upper bound
+	// (max_tokens), and the engine preempts if it really runs out.
+	if budget > 0 && w > budget {
+		w = budget
+	}
 
 	if s.tryReserve(w, budget, maxInflight) {
 		return &Reservation{state: s, weight: w, grows: grows}
 	}
-	// A request whose own footprint exceeds the budget can never fit — releases
-	// only lower the in-flight sum toward zero — so reject it now rather than
-	// parking a doomed request for the full window. The max_inflight dimension is
-	// deliberately not short-circuited: a release frees a count slot, so parking
-	// for one is worthwhile.
-	if budget > 0 && w > budget {
-		return nil
+	park := c.parkFor
+	if c.queueDepth > 0 && c.queueWait > park {
+		if n := s.waiting.Add(1); n <= int32(c.queueDepth) {
+			park = c.queueWait
+			c.queueChanged(s, int(n))
+			defer func() { c.queueChanged(s, int(s.waiting.Add(-1))) }()
+		} else {
+			s.waiting.Add(-1) // queue full: a short park only
+		}
 	}
-	if c.parkFor <= 0 {
+	if park <= 0 {
 		return nil
 	}
 
-	timer := time.NewTimer(c.parkFor)
+	timer := time.NewTimer(park)
 	defer timer.Stop()
 	for {
 		// Grab the current wake channel BEFORE re-checking, so a release that
@@ -180,6 +203,12 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+func (c *Controller) queueChanged(s *modelState, waiting int) {
+	if c.onQueue != nil {
+		c.onQueue(s.model, waiting)
 	}
 }
 

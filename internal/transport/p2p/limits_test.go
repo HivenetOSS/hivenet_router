@@ -13,7 +13,7 @@ import (
 func TestUnlimitedStreamsKeepsConnLimits(t *testing.T) {
 	limits := rcmgr.DefaultLimits
 	base := limits.AutoScale()
-	got := UnlimitedStreams(base).ToPartialLimitConfig()
+	got := UnlimitedStreams(base, true).ToPartialLimitConfig()
 	for name, l := range map[string]rcmgr.ResourceLimits{
 		"system": got.System, "protocol": got.ProtocolDefault,
 		"protocol-peer": got.ProtocolPeerDefault, "peer": got.PeerDefault,
@@ -24,5 +24,25 @@ func TestUnlimitedStreamsKeepsConnLimits(t *testing.T) {
 	}
 	if got.System.Conns != base.ToPartialLimitConfig().System.Conns {
 		t.Errorf("system connection limit changed: %v → %v", base.ToPartialLimitConfig().System.Conns, got.System.Conns)
+	}
+}
+
+// The router lifts only the streams it opens: a peer that has not
+// authenticated yet still meets libp2p's inbound limits.
+func TestRouterKeepsInboundStreamLimits(t *testing.T) {
+	limits := rcmgr.DefaultLimits
+	base := limits.AutoScale()
+	got := UnlimitedStreams(base, false).ToPartialLimitConfig()
+	want := base.ToPartialLimitConfig()
+	for name, pair := range map[string][2]rcmgr.ResourceLimits{
+		"system": {got.System, want.System}, "transient": {got.Transient, want.Transient},
+		"peer": {got.PeerDefault, want.PeerDefault}, "protocol-peer": {got.ProtocolPeerDefault, want.ProtocolPeerDefault},
+	} {
+		if pair[0].StreamsInbound != pair[1].StreamsInbound || pair[0].StreamsInbound == rcmgr.Unlimited {
+			t.Errorf("%s inbound streams changed: %v → %v", name, pair[1].StreamsInbound, pair[0].StreamsInbound)
+		}
+		if pair[0].StreamsOutbound != rcmgr.Unlimited {
+			t.Errorf("%s outbound streams still limited: %v", name, pair[0].StreamsOutbound)
+		}
 	}
 }

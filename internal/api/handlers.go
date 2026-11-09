@@ -250,6 +250,10 @@ type Handlers struct {
 	// it (SetRouterShare).
 	routerShare func() int
 
+	// defaultMaxInflight bounds requests in flight per healthy replica of a
+	// model with no occupancy budget (SetDefaultMaxInflight). 0 disables it.
+	defaultMaxInflight int
+
 	// keyAdmission enforces the serverless per-key occupancy share — a per-key
 	// token-weighted in-flight budget parallel to the global one. Nil disables it.
 	keyAdmission *admission.Controller
@@ -687,6 +691,11 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		poolBudget = h.engineKVCapacity(req.Model)
 	}
 	poolInflight := pol.MaxInflight * replicas
+	// Nothing bounds this model (no policy budget, no KV size reported, e.g.
+	// Ollama or llama.cpp): fall back to a per-replica request cap.
+	if poolBudget == 0 && poolInflight == 0 && h.defaultMaxInflight > 0 {
+		poolInflight = h.defaultMaxInflight * max(replicas, 1)
+	}
 	// Several routers serve the same backends: each admits its share.
 	if h.routerShare != nil {
 		if n := h.routerShare(); n > 1 {
@@ -1585,6 +1594,10 @@ func (fw *sseFlushingWriter) Write(p []byte) (n int, err error) {
 // SetEngineKVCapacity sets where a policy without admit_budget_tokens takes its
 // occupancy budget from: the summed KV capacity of a model's healthy replicas.
 func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCapacity = fn }
+
+// SetDefaultMaxInflight sets the requests in flight allowed per healthy
+// replica of a model nothing else bounds; 0 leaves such models unbounded.
+func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }
 
 // SetRouterShare sets how many routers share the site's backends; each admits
 // that share of the occupancy budget.

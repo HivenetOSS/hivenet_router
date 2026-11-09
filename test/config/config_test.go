@@ -306,3 +306,23 @@ func TestSyncIntervalDefault(t *testing.T) {
 		t.Fatalf("defaults: interval %v store %q", cfg.SyncInterval, cfg.SyncStore)
 	}
 }
+
+// Admission defaults: the occupancy budget follows the engine's KV size, and
+// models nothing bounds get 8 requests in flight per replica. Both can be
+// changed from the environment.
+func TestAdmissionDefaultsFromEnv(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if !cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 8 {
+		t.Fatalf("defaults: from engine KV %v, max in flight %d", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica)
+	}
+	t.Setenv("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV", "false")
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "0")
+	cfg = config.LoadFromEnv()
+	if cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 0 || len(cfg.EnvErrors) != 0 {
+		t.Fatalf("not read from the environment: %v %d %v", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica, cfg.EnvErrors)
+	}
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "-1")
+	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 1 {
+		t.Fatalf("want 1 env error for a negative cap, got %v", cfg.EnvErrors)
+	}
+}

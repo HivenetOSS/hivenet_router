@@ -467,7 +467,7 @@ A sustained increase may indicate repeated network interruption or agent reconne
 
 ## Capacity wait queue
 
-When healthy, policy-matching agents exist but all of them are at capacity, Hivenet Router can place the request in a per-model wait queue.
+When a request does not fit the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), Hivenet Router places it in a per-model wait queue before routing starts. Requests beyond the queue depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`.
 
 Defaults:
 
@@ -495,9 +495,9 @@ Change the request timeout:
 --request-timeout 2m
 ```
 
-While waiting, the request resumes when an agent releases a capacity slot.
+While waiting, the request resumes when an in-flight request of the model finishes and frees room in the budget. It does not reserve a particular agent while it waits.
 
-Hivenet Router then evaluates the candidates again. The request does not reserve a particular agent while it waits.
+Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free capacity slot between fallback steps. Routers ignore the `--capacity` of network agents.
 
 If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step.
 
@@ -764,9 +764,9 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
   </Accordion>
 
   <Accordion title="Requests wait instead of falling back">
-    Matching agents may exist but be at capacity.
+    The model's occupancy budget may be full.
 
-    Hivenet Router waits in the per-model queue before advancing to fallback. Reduce or disable the queue when immediate fallback is more appropriate:
+    Hivenet Router waits in the per-model queue before routing starts. Reduce or disable the queue when a fast `429` is more appropriate:
 
     ```bash
     --queue-depth 0
