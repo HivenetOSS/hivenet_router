@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,10 +116,31 @@ type Store struct {
 	// data, or the eviction itself), so occupancy stays at this router's share
 	// until each one is back or known to be gone.
 	liveMu   sync.Mutex
-	others   []string          // other live runs at the last successful tick
-	peerOf   map[string]string // run → libp2p peer ID, as last seen
+	others   []string            // other live runs at the last successful tick
+	peerOf   map[string]string   // run → libp2p peer ID, as last seen
+	agentsOf map[string][]string // run → agents it published, as last seen
+	agentVer map[string]string   // run → version of agentsOf[run]
 	pending  map[string]*PendingRun
 	pendingN atomic.Int32
+
+	// epoch is the token this run's grants must present (see heartbeat). It
+	// changes when the store lost this run (an eviction or lost data), so a
+	// grant made before this router noticed is refused.
+	epoch atomic.Pointer[string]
+
+	// The agents this router serves, published with its heartbeat so the
+	// other routers can ask exactly those agents whether it is gone.
+	agentsFn    func() []string
+	agentsSent  string // list last published
+	agentsVer   int64
+	agentsForce bool         // publish the list on the next tick even if unchanged
+	publishedAt atomic.Int64 // unix ns the published list was taken at
+	joinedAt    atomic.Int64 // unix ns an agent last became usable here
+
+	// unreplicated is set when no replica acknowledged a grant: a failover
+	// could lose it, so occupancy stays at this router's share until a
+	// replica acknowledges again.
+	unreplicated atomic.Bool
 
 	m *storeMetrics
 }
@@ -204,6 +226,54 @@ func New(cfg Config) (*Store, error) {
 // Start.
 func (s *Store) SetPeerID(id string) { s.cfg.PeerID = id }
 
+// SetAgents sets how the router lists the agents it serves (their libp2p
+// peer IDs). The list is published with the heartbeat. Call before Start.
+func (s *Store) SetAgents(fn func() []string) { s.agentsFn = fn }
+
+// AgentJoined records that an agent became usable on this router: it
+// connected, or connected again after a drop.
+func (s *Store) AgentJoined() { s.joinedAt.Store(time.Now().UnixNano()) }
+
+// Fenced reports whether this router must admit nothing: it has not reached
+// the store for two intervals, and an agent joined after the agent list it
+// last published. The other routers may then have taken its credits back,
+// after the agents they asked reported no connection to it, and the agent
+// that joined may be one of them coming back. It ends with the next
+// successful tick, which tells this router whether it was evicted.
+func (s *Store) Fenced() bool {
+	j := s.joinedAt.Load()
+	return j != 0 && j >= s.publishedAt.Load() && time.Since(time.UnixMilli(s.okAt.Load())) > 2*s.cfg.Interval
+}
+
+// Unreplicated reports whether the last grant no replica acknowledged has
+// not been followed by an acknowledged one yet.
+func (s *Store) Unreplicated() bool { return s.unreplicated.Load() }
+
+func (s *Store) setUnreplicated(v bool) {
+	if s.unreplicated.Swap(v) != v {
+		if v {
+			log.Warnf("shared occupancy: no Valkey replica acknowledges grants; each router stays at its share of the budget")
+		} else {
+			log.Infof("shared occupancy: a Valkey replica acknowledges grants again")
+		}
+	}
+}
+
+func (s *Store) currentEpoch() string {
+	if e := s.epoch.Load(); e != nil {
+		return *e
+	}
+	return ""
+}
+
+// AgentsOf returns the agents run published, as this router last saw them.
+func (s *Store) AgentsOf(run string) ([]string, bool) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	a, ok := s.agentsOf[run]
+	return a, ok
+}
+
 // AddApplier registers a receiver for the other routers' usage. Call before Start.
 func (s *Store) AddApplier(a Applier) { s.appliers = append(s.appliers, a) }
 
@@ -283,6 +353,10 @@ func (s *Store) conn() (valkey.Client, error) {
 	}
 	if s.cfg.TLS {
 		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if s.cfg.SentinelMaster == "" {
+		// One Valkey without Sentinel: never guessed as a cluster.
+		opt.ForceSingleClient = true
 	}
 	if s.cfg.SentinelMaster != "" {
 		opt.Sentinel = valkey.SentinelOption{MasterSet: s.cfg.SentinelMaster, Password: s.cfg.Password}
@@ -442,15 +516,23 @@ func (s *Store) tick(ctx context.Context) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.Interval)
 	defer cancel()
 
-	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers")},
-		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID}).AsStrSlice()
-	if err != nil || len(hb) == 0 {
+	snap := time.Now()
+	agentsPayload, agentsList := s.agentsPayload()
+	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers"), s.key("epochs"), s.key("agents")},
+		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID, agentsPayload}).AsStrSlice()
+	if err != nil || len(hb) < 2 {
 		if err == nil {
 			err = errShortReply
 		}
+		s.agentsForce = true
 		s.failTick(buf, err)
 		return
 	}
+	s.agentsSent = agentsList
+	// Missing from the live set means the store lost this run: publish the
+	// list again, in case the store lost it too.
+	s.agentsForce = hb[0] != "1"
+	epoch := hb[1]
 	// hb[0] says whether this run was still in the live set. Once it has
 	// been, missing means the other routers evicted it (they saw it as gone
 	// and took back what it held), so whatever it holds must be re-granted.
@@ -463,10 +545,16 @@ func (s *Store) tick(ctx context.Context) {
 		log.Warnf("shared counters: this router was evicted from the live set; re-requesting its shares")
 	}
 	var live, livePeers []string
-	for i := 1; i+1 < len(hb); i += 2 {
+	var fetch []string // runs whose agent list changed
+	s.liveMu.Lock()
+	for i := 2; i+2 < len(hb); i += 3 {
 		live = append(live, hb[i])
 		livePeers = append(livePeers, hb[i+1])
+		if hb[i] != s.inc && hb[i+2] != "" && hb[i+2] != s.agentVer[hb[i]] {
+			fetch = append(fetch, hb[i])
+		}
 	}
+	s.liveMu.Unlock()
 
 	// Daily totals first, then the stream entry: see DailyTotal.
 	var cmds valkey.Commands
@@ -475,6 +563,9 @@ func (s *Store) tick(ctx context.Context) {
 		cmds = append(cmds,
 			c.B().Hset().Key(k).FieldValue().FieldValue(s.inc, strconv.FormatInt(n, 10)).Build(),
 			c.B().Expire().Key(k).Seconds(int64((48 * time.Hour).Seconds())).Build())
+	}
+	if len(fetch) > 0 {
+		cmds = append(cmds, c.B().Hmget().Key(s.key("agents")).Field(fetch...).Build())
 	}
 	entries := make([]entry, 0, len(buf))
 	for k, v := range buf {
@@ -498,6 +589,30 @@ func (s *Store) tick(ctx context.Context) {
 	if full {
 		s.lastFull = time.Now()
 	}
+	if len(fetch) > 0 {
+		if vals, err := res[len(res)-3].ToArray(); err == nil {
+			s.liveMu.Lock()
+			if s.agentsOf == nil {
+				s.agentsOf, s.agentVer = map[string][]string{}, map[string]string{}
+			}
+			for i, v := range vals {
+				if i >= len(fetch) {
+					break
+				}
+				str, err := v.ToString()
+				if err != nil {
+					continue
+				}
+				ver, list, ok := strings.Cut(str, "|")
+				if !ok {
+					continue
+				}
+				s.agentVer[fetch[i]] = ver
+				s.agentsOf[fetch[i]] = splitList(list)
+			}
+			s.liveMu.Unlock()
+		}
+	}
 	msgs, err := res[len(res)-1].AsXRange()
 	if err != nil {
 		s.failTick(nil, err) // usage is published; only the read failed
@@ -511,8 +626,12 @@ func (s *Store) tick(ctx context.Context) {
 	case s.degraded.Load() != 0:
 		log.Infof("shared counters: Valkey reachable again; enforcing policloud-wide limits")
 	}
+	// Only once a lost run is tracked as such: until then a grant presents
+	// the old epoch and is refused.
+	s.epoch.Store(&epoch)
 	s.degraded.Store(0)
 	s.lastOK = time.Now()
+	s.publishedAt.Store(snap.UnixNano())
 	s.okAt.Store(s.lastOK.UnixMilli())
 	s.m.up.Set(1)
 
@@ -600,26 +719,66 @@ func streamMillis(id string) int64 {
 }
 
 // heartbeat records this run as live (scored with Valkey's own clock, so the
-// routers' clocks do not matter) and its libp2p peer ID, drops runs silent for
-// an hour, and returns whether this run was in the live set ("1"/"0")
-// followed by each run seen within ARGV[2] ms and its peer ID.
-// KEYS: live set, peer-ID hash. ARGV: run, live window (ms), peer ID.
+// routers' clocks do not matter), its libp2p peer ID and, when ARGV[4] is
+// set, the agents it serves ("version|id,id,…"). It drops runs silent for an
+// hour, with what was recorded about them.
+//
+// It returns whether this run was in the live set ("1"/"0"), this run's
+// epoch, then for each run seen within ARGV[2] ms: run, peer ID, version of
+// its agent list. The epoch is new whenever this run was missing from the
+// live set (first heartbeat, eviction, or lost data); grants must present it.
+// KEYS: live set, peer-ID hash, epoch hash, agent-list hash.
+// ARGV: run, live window (ms), peer ID, agent list.
 var heartbeat = valkey.NewLuaScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local present = redis.call('ZSCORE', KEYS[1], ARGV[1])
-redis.call('ZADD', KEYS[1], now, ARGV[1])
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)
-if ARGV[3] ~= '' then
-  redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
-  redis.call('EXPIRE', KEYS[2], 3600)
+local ep = redis.call('HGET', KEYS[3], ARGV[1])
+if not present or not ep then
+  ep = tostring(now)
+  redis.call('HSET', KEYS[3], ARGV[1], ep)
 end
-local out = {present and '1' or '0'}
+redis.call('ZADD', KEYS[1], now, ARGV[1])
+for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)) do
+  redis.call('HDEL', KEYS[2], r)
+  redis.call('HDEL', KEYS[3], r)
+  redis.call('HDEL', KEYS[4], r)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)
+if ARGV[3] ~= '' then redis.call('HSET', KEYS[2], ARGV[1], ARGV[3]) end
+if ARGV[4] ~= '' then redis.call('HSET', KEYS[4], ARGV[1], ARGV[4]) end
+for i = 2, 4 do redis.call('EXPIRE', KEYS[i], 3600) end
+local out = {present and '1' or '0', ep}
 for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]), '+inf')) do
   out[#out + 1] = r
   out[#out + 1] = redis.call('HGET', KEYS[2], r) or ''
+  out[#out + 1] = string.match(redis.call('HGET', KEYS[4], r) or '', '^(%d+)|') or ''
 end
 return out`)
+
+// agentsPayload returns the agent list to publish ("" when unchanged since
+// the last publish) and the list itself.
+func (s *Store) agentsPayload() (payload, list string) {
+	if s.agentsFn == nil {
+		list = ""
+	} else {
+		ids := s.agentsFn()
+		sort.Strings(ids)
+		list = strings.Join(ids, ",")
+	}
+	if list == s.agentsSent && !s.agentsForce && s.agentsVer > 0 {
+		return "", list
+	}
+	s.agentsVer++
+	return strconv.FormatInt(s.agentsVer, 10) + "|" + list, list
+}
+
+func splitList(list string) []string {
+	if list == "" {
+		return []string{}
+	}
+	return strings.Split(list, ",")
+}
 
 // PendingRun is a run seen live before an outage or eviction and not back yet.
 type PendingRun struct {
@@ -719,6 +878,12 @@ func (s *Store) trackLive(live, peers []string, lost bool) {
 	for r := range s.peerOf {
 		if !isLive[r] && s.pending[r] == nil {
 			delete(s.peerOf, r)
+		}
+	}
+	for r := range s.agentsOf {
+		if !isLive[r] && s.pending[r] == nil {
+			delete(s.agentsOf, r)
+			delete(s.agentVer, r)
 		}
 	}
 	s.pendingN.Store(int32(len(s.pending)))

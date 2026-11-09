@@ -603,6 +603,12 @@ func (r *Router) Start() error {
 	// stale scope is still open, causing every reconnect attempt to be rejected
 	// with an immediate TCP FIN before the Noise handshake.
 	r.p2pHost.Network().Notify(&libp2pnet.NotifyBundle{
+		// A new connection from an agent: see agentJoined.
+		ConnectedF: func(_ libp2pnet.Network, conn libp2pnet.Conn) {
+			if r.agents.Get(conn.RemotePeer()) != nil {
+				r.agentJoined()
+			}
+		},
 		DisconnectedF: func(n libp2pnet.Network, conn libp2pnet.Conn) {
 			peerID := conn.RemotePeer()
 			if len(n.ConnsToPeer(peerID)) != 0 {
@@ -1725,6 +1731,7 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		if !wasHealthy || !prevBackendHealthy {
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
+			r.agentJoined()
 			r.executor.BroadcastCapacity(model)
 			if r.wake != nil {
 				r.wake.Wake(model)
@@ -1804,7 +1811,33 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 		a.SetHealthy(false)
 	}
 	r.agents.Register(a)
+	if connected {
+		r.agentJoined()
+	}
 	return connected
+}
+
+// agentJoined tells the shared store that an agent became usable here (it
+// registered, connected again, or came back healthy). A router cut off from
+// the store then stops admitting from the credits it holds: the agent may
+// have told the other routers it had no connection to this one, and they may
+// have taken those credits back.
+func (r *Router) agentJoined() {
+	if r.shared != nil {
+		r.shared.AgentJoined()
+	}
+}
+
+// servedAgents lists the healthy agents connected to this router, published
+// with its heartbeat so the other routers know which agents to ask about it.
+func (r *Router) servedAgents() []string {
+	var ids []string
+	for _, a := range r.agents.List() {
+		if a.IsHealthy() && r.peerConnected(a.ID) {
+			ids = append(ids, a.ID.String())
+		}
+	}
+	return ids
 }
 
 // peerConnected reports whether the router has a live libp2p connection to
@@ -2000,11 +2033,11 @@ func (r *Router) setupShared() error {
 	st.AddApplier(r.minuteLimiter)
 
 	// Occupancy budgets: credits from a site-wide pool. A silent router keeps
-	// its credits until its requests have certainly ended (the request
-	// deadline plus a margin), or until no agent is connected to it.
-	reclaim := cfg.RequestTimeout + 5*time.Second
-	occ := st.NewCredits("occ", reclaim, r.routerReachable)
-	kocc := st.NewCredits("kocc", reclaim, r.routerReachable)
+	// its credits until a newer run replaces it, or until every agent it
+	// served reports no connection to it.
+	st.SetAgents(r.servedAgents)
+	occ := st.NewCredits("occ", r.agentsLeftRouter)
+	kocc := st.NewCredits("kocc", r.agentsLeftRouter)
 	r.occupancy.SetPool(occ)
 	r.keyAdmission.SetPool(kocc)
 	r.credits = []*shared.Credits{occ, kocc}
@@ -2020,18 +2053,26 @@ func (r *Router) setupShared() error {
 	return nil
 }
 
-// routerReachable reports whether any agent is connected to the router with
-// the given libp2p peer ID, judging by the agents' reports of the last few
-// seconds; known is false when no agent reported recently.
-func (r *Router) routerReachable(peerID string) (known, reachable bool) {
-	for _, a := range r.agents.List() {
-		fresh, connected := a.ConnectedTo(peerID, 3*time.Second)
-		if connected {
-			return true, true
+// agentsLeftRouter reports whether every agent in agents reported to this
+// router, within the last few seconds, that it has no connection to the
+// router with libp2p peer ID routerPeer. An agent this router does not know,
+// or that has not reported recently, may still serve that router: the answer
+// is then false. With no agents the router served nothing.
+func (r *Router) agentsLeftRouter(routerPeer string, agents []string) bool {
+	for _, id := range agents {
+		pid, err := peer.Decode(id)
+		if err != nil {
+			return false
 		}
-		known = known || fresh
+		a := r.agents.Get(pid)
+		if a == nil {
+			return false
+		}
+		if fresh, connected := a.ConnectedTo(routerPeer, 3*time.Second); !fresh || connected {
+			return false
+		}
 	}
-	return known, false
+	return true
 }
 
 // reapLeakedReservations releases occupancy reservations older than any
