@@ -6,6 +6,7 @@ package shared_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func newFleet(t *testing.T, mr *miniredis.Miniredis, n int) []*router {
 	}
 	waitFor(t, 5*time.Second, "routers to see each other", func() bool {
 		for _, r := range rs {
-			if r.store.Size() != n {
+			if r.store.SyncSeq() == 0 || r.store.Size() != n {
 				return false
 			}
 		}
@@ -126,7 +127,9 @@ func TestDailySharedAcrossRouters(t *testing.T) {
 			time.Sleep(interval + interval/2)
 		}
 	}
-	if spent > tpd+3*cost {
+	// The first admission of each round always passes, so a round can end a
+	// few requests past the budget; 2% bounds that.
+	if spent > tpd+tpd/50 {
 		t.Fatalf("spent %d tokens against a shared daily budget of %d", spent, tpd)
 	}
 	if spent < tpd*3/4 {
@@ -248,4 +251,172 @@ func TestFleetSizeFollowsLiveRouters(t *testing.T) {
 	waitFor(t, 3*time.Second, "r0 to drop the stopped router", func() bool {
 		return rs[0].store.Size() == 2
 	})
+}
+
+// A router that starts while Valkey is down does not know how many routers
+// run: it assumes --sync-min-routers and enforces that share, so routers
+// restarted during an outage do not each hand out the full limit.
+func TestStartWithStoreDownUsesMinRouters(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr := mr.Addr()
+	mr.Close()
+	st, err := shared.New(shared.Config{Addrs: []string{addr}, Prefix: "pc", RouterID: "r0", Interval: interval, MinRouters: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lim := auth.NewInMemoryLimiter()
+	lim.SetFleet(st)
+	st.AddApplier(lim)
+	ctx, cancel := context.WithCancel(context.Background())
+	st.Start(ctx)
+	t.Cleanup(func() { cancel(); st.Close() })
+	const rpm = 90
+	allowed := 0
+	for i := 0; i < rpm; i++ {
+		if ok, _, _ := lim.AllowRequest("t", "", rpm); ok {
+			allowed++
+		}
+	}
+	if allowed > rpm/3+1 {
+		t.Fatalf("admitted %d of %d at startup with Valkey down, want its share of about %d", allowed, rpm, rpm/3)
+	}
+}
+
+// A daily-limited request never waits for Valkey: with Valkey unreachable it
+// is refused at once.
+func TestDailyNeverWaitsForStore(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr := mr.Addr()
+	mr.Close()
+	r := newRouter(t, addr, "r0")
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		r.rate.AllowInputTokens("t", "", 1000, 10)
+	}
+	if d := time.Since(start); d > 50*time.Millisecond {
+		t.Fatalf("five daily checks took %v with Valkey down", d)
+	}
+}
+
+// Today's total read by a router already holds the usage it then replays from
+// the stream: each token counts once.
+func TestDailyTotalNotCountedTwice(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 2)
+	const tpd = 1000
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 400); !ok {
+		t.Fatal("first admission refused")
+	}
+	time.Sleep(3 * interval) // published, and replayed by r1's next ticks
+	if ok, _, _ := rs[1].rate.AllowInputTokens("t", "", tpd, 1); !ok {
+		t.Fatal("r1 refused")
+	}
+	time.Sleep(3 * interval)
+	rem, _ := rs[1].rate.RemainingTokens("t", "", tpd)
+	if rem < 590 || rem > 600 {
+		t.Fatalf("r1 sees %d left, want 599 (1000 - 400 - 1)", rem)
+	}
+}
+
+// A late joiner replays the stream of the last minute; the usage in it is
+// already in today's total and must not be added again.
+func TestLateJoinerDoesNotCountReplayTwice(t *testing.T) {
+	mr := miniredis.RunT(t)
+	a := newFleet(t, mr, 1)[0]
+	const tpd = 2000
+	if ok, _, _ := a.rate.AllowInputTokens("t", "", tpd, 1000); !ok {
+		t.Fatal("first admission refused")
+	}
+	time.Sleep(3 * interval)
+	b := newRouter(t, mr.Addr(), "r1")
+	waitFor(t, 2*time.Second, "r1 to sync", func() bool { return b.store.SyncSeq() > 1 })
+	if ok, _, _ := b.rate.AllowInputTokens("t", "", tpd, 900); !ok {
+		t.Fatal("r1 refused 900 of the 1000 left: the replayed usage was counted twice")
+	}
+}
+
+// Usage held back during an outage is published with its admission time: once
+// a rate bucket has refilled, the other routers do not charge it again.
+func TestHeldBackUsageAgesFromAdmission(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 2)
+	const rpm = 600 // 10 per second
+	mr.SetError("down")
+	time.Sleep(4 * interval)
+	for i := 0; i < 20; i++ {
+		rs[0].rate.AllowRequest("t", "", rpm)
+	}
+	time.Sleep(2500 * time.Millisecond) // the 20 requests have refilled
+	mr.SetError("")
+	waitFor(t, 3*time.Second, "Valkey back", func() bool { return rs[1].store.DegradedEpoch() == 0 && rs[0].store.DegradedEpoch() == 0 })
+	time.Sleep(3 * interval)
+	allowed := 0
+	for i := 0; i < 50; i++ {
+		if ok, _, _ := rs[1].rate.AllowRequest("t", "", rpm); ok {
+			allowed++
+		}
+	}
+	if allowed < 20 {
+		t.Fatalf("r1 admitted %d after the outage: usage admitted before it was charged as fresh", allowed)
+	}
+}
+
+// Reloading auth.yaml during an outage keeps today's usage: daily keys are
+// neither refused nor handed a fresh budget.
+func TestResetDuringOutageKeepsDaily(t *testing.T) {
+	mr := miniredis.RunT(t)
+	r := newFleet(t, mr, 1)[0]
+	const tpd = 1000
+	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 600); !ok {
+		t.Fatal("first admission refused")
+	}
+	mr.SetError("down")
+	waitFor(t, 2*time.Second, "outage", func() bool { return r.store.DegradedEpoch() != 0 })
+	r.rate.Reset()
+	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 100); !ok {
+		t.Fatal("daily key refused after a reload during an outage")
+	}
+	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 500); ok {
+		t.Fatal("reload during an outage handed out a fresh daily budget")
+	}
+}
+
+// Closing stops the sync loop before the final publish, and leaves no
+// connection behind.
+func TestCloseStopsLoop(t *testing.T) {
+	mr := miniredis.RunT(t)
+	r := newFleet(t, mr, 1)[0]
+	r.rate.AllowRequest("t", "", 60)
+	r.store.Close()
+	seq := r.store.SyncSeq()
+	time.Sleep(3 * interval)
+	if r.store.SyncSeq() != seq {
+		t.Fatal("the sync loop kept running after Close")
+	}
+}
+
+// A failover that loses recent writes loses today's totals with them. Each
+// router writes its own totals again after a failed round, so they come back.
+func TestDailyTotalsRewrittenAfterFailover(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 2)
+	const tpd = 1000
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 700); !ok {
+		t.Fatal("first admission refused")
+	}
+	time.Sleep(3 * interval)
+	for _, k := range mr.Keys() {
+		if strings.Contains(k, ":tpd:") {
+			mr.Del(k) // the new primary never got the write
+		}
+	}
+	mr.SetError("failover")
+	time.Sleep(2 * interval)
+	mr.SetError("")
+	time.Sleep(3 * interval)
+	late := newRouter(t, mr.Addr(), "r2")
+	waitFor(t, 2*time.Second, "r2 to sync", func() bool { return late.store.SyncSeq() > 0 })
+	if ok, _, _ := late.rate.AllowInputTokens("t", "", tpd, 400); ok {
+		t.Fatal("a router joining after the failover saw today's 700 tokens as unspent")
+	}
 }

@@ -492,6 +492,9 @@ func New(cfg *config.Config) (*Router, error) {
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
 	}
+	// Over-budget requests wait in a per-model queue (--queue-depth) for room,
+	// up to the request timeout, before a 429.
+	r.occupancy.SetQueue(cfg.QueueDepth, cfg.RequestTimeout, routerMetrics.QueueDepthUpdated)
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck
 		return nil, err
@@ -555,7 +558,7 @@ func (r *Router) Start() error {
 	rcMgrLimits := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&rcMgrLimits)
 	resourceManager, err := rcmgr.NewResourceManager(
-		rcmgr.NewFixedLimiter(p2p.UnlimitedStreams(rcMgrLimits.AutoScale())),
+		rcmgr.NewFixedLimiter(p2p.UnlimitedStreams(rcMgrLimits.AutoScale(), false)),
 		rcmgr.WithLimitPerSubnet(
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 32, ConnCount: r.cfg.P2PMaxConnsPerIP}},
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 56, ConnCount: r.cfg.P2PMaxConnsPerIP}},
@@ -846,7 +849,10 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
-	handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
+	if r.cfg.AdmitFromEngineKV {
+		handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
+	}
+	handlers.SetDefaultMaxInflight(r.cfg.DefaultMaxInflightPerReplica)
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1621,7 +1627,9 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	region := session.Metadata.Region
 	engine := session.Metadata.Engine
 	model := session.Metadata.Model
-	capacity := strconv.Itoa(int(session.Metadata.Capacity))
+	// The registered agent's capacity (0: routers ignore the declared one), so
+	// the series matches the one registration created.
+	capacity := strconv.Itoa(a.Metadata.Capacity)
 	organization := session.Metadata.Organization
 	machine := session.Metadata.Machine
 
@@ -1834,6 +1842,7 @@ func (r *Router) setupShared() error {
 		Prefix:         cfg.SiteID,
 		RouterID:       cfg.RouterID,
 		Interval:       cfg.SyncInterval,
+		MinRouters:     cfg.SyncMinRouters,
 	})
 	if err != nil {
 		return fmt.Errorf("shared counters: %w", err)
@@ -1860,7 +1869,7 @@ func (r *Router) setupShared() error {
 	r.metrics.Register(st.Collectors()...)
 	r.shared = st
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
-		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval})
+		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
 	return nil
 }
 

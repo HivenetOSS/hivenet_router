@@ -816,7 +816,7 @@ A healthy heartbeat does not guarantee that the most recent hardware sample succ
 
 ## Capacity planning
 
-Hardware metrics help you observe a workload, but they do not calculate a safe occupancy budget automatically. vLLM and SGLang agents report their KV-cache size, from which the router derives the [occupancy budget](/routing/admission-control#b2-pool-occupancy) when the policy sets none; for other engines, set `admit_budget_tokens` or `max_inflight` in the policy.
+Hardware metrics help you observe a workload, but they do not calculate a safe occupancy budget automatically. vLLM and SGLang agents report their KV-cache size, from which the router derives the [occupancy budget](/routing/admission-control#b2-pool-occupancy) when the policy sets none; other engines get `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per replica unless the policy sets `admit_budget_tokens` or `max_inflight`.
 
 Capacity depends on:
 

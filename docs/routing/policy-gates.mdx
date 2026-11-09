@@ -18,7 +18,7 @@ The gates answer a series of increasingly specific questions:
 
 ![Policy](/images/Policy.png "Policy")
 
-If a gate removes every remaining agent, that policy step is exhausted. The capacity gate is the exception: when otherwise eligible agents exist but are full, Hivenet Router can wait in the per-model capacity queue before advancing to the next fallback step.
+If a gate removes every remaining agent, that policy step is exhausted. The capacity gate is the exception: when otherwise eligible agents with a declared capacity exist but are full, Hivenet Router can wait in the per-model queue before advancing to the next fallback step. Network agents declare no capacity, so this wait does not happen for them.
 
 <Note>
   Ranking happens after the seven gates. The current `least-loaded` strategy orders only the agents that survive the entire funnel.
@@ -393,7 +393,7 @@ Network-registered agents are bounded instead by the model's [occupancy budget](
 
 ### Queue behavior
 
-When eligible agents exist but are full, Hivenet Router can place the request in the per-model capacity queue before advancing to a fallback step.
+When eligible agents with a declared capacity exist but are full, Hivenet Router can place the request in the per-model queue before advancing to a fallback step. For network agents, `--queue-depth` sizes the wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead, before routing starts.
 
 The default queue depth is:
 

@@ -585,7 +585,7 @@ Retry-After: 1
 
 This response is used when either:
 
-- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available within `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`; or
+- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available while it waited: up to the request timeout in the per-model wait queue (`--queue-depth`), or up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` when that queue is full or disabled; or
 - aggregate healthy-pool engine pressure breached a configured `shed_if` threshold before queueing.
 
 ```json
@@ -676,7 +676,7 @@ Healthy, filter-compatible agents exist, but none could take the request. This h
 
 Before returning the error, Hivenet Router may:
 
-- wait in the per-model capacity queue
+- wait in the per-model capacity queue (agents with a declared capacity only)
 - retry selection after a slot becomes available
 - advance through fallback steps
 
@@ -745,9 +745,9 @@ This is controlled by:
 --queue-size
 ```
 
-It is distinct from the per-model capacity wait queue.
+It is distinct from the per-model wait queues.
 
-When the per-model queue is full, the routing session advances through fallback steps. That condition does not directly return `queue_full`; the final response is normally `no_capacity` or `no_agents_available`.
+When the per-model capacity queue of agents with a declared capacity is full, the routing session advances through fallback steps. That condition does not directly return `queue_full`; the final response is normally `no_capacity` or `no_agents_available`.
 
 Retry with exponential backoff and investigate:
 
@@ -769,7 +769,7 @@ The router’s end-to-end deadline expired.
 The deadline can include:
 
 - waiting for processor concurrency
-- waiting in the per-model capacity queue
+- waiting in a per-model wait queue
 - policy selection
 - retries
 - agent redial

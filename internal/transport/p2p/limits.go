@@ -11,19 +11,24 @@ import (
 // UnlimitedStreams lifts libp2p's stream counts from base while keeping its
 // connection, memory and file-descriptor limits.
 //
-// Every request the router forwards is one stream to an agent. libp2p's
-// defaults cap streams per protocol (about 2,000 outbound across all peers)
-// and per peer (a few hundred), which would cap a router at a few thousand
-// requests in flight and an agent at a few hundred, below what a site of
-// GPUs serves. Both ends only accept peers they authenticated (the router
-// checks the agent's JWT session, the agent's gater allows only its routers),
-// and occupancy admission bounds the work a router forwards, so the stream
-// counts are left to those limits.
-func UnlimitedStreams(base rcmgr.ConcreteLimitConfig) rcmgr.ConcreteLimitConfig {
+// Every request the router forwards is one stream it opens to an agent.
+// libp2p's defaults cap streams per protocol (about 2,000 outbound across all
+// peers) and per peer (a few hundred), which would cap a router at a few
+// thousand requests in flight and an agent at a few hundred, below what a site
+// of GPUs serves. Occupancy admission bounds the work a router forwards.
+//
+// inbound lifts the streams other peers open too. Only a host that accepts
+// nothing but authenticated peers may lift them: the agent, whose gater lets
+// in only its routers. The router accepts any peer before it checks the
+// agent's session, so it lifts outbound streams only and keeps libp2p's
+// inbound limits.
+func UnlimitedStreams(base rcmgr.ConcreteLimitConfig, inbound bool) rcmgr.ConcreteLimitConfig {
 	open := rcmgr.ResourceLimits{
 		Streams:         rcmgr.Unlimited,
-		StreamsInbound:  rcmgr.Unlimited,
 		StreamsOutbound: rcmgr.Unlimited,
+	}
+	if inbound {
+		open.StreamsInbound = rcmgr.Unlimited
 	}
 	return rcmgr.PartialLimitConfig{
 		System:              open,
@@ -40,5 +45,5 @@ func UnlimitedStreams(base rcmgr.ConcreteLimitConfig) rcmgr.ConcreteLimitConfig 
 // limits with the stream counts lifted (see UnlimitedStreams).
 func agentResourceManager() (network.ResourceManager, error) {
 	limits := rcmgr.DefaultLimits
-	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(UnlimitedStreams(limits.AutoScale())))
+	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(UnlimitedStreams(limits.AutoScale(), true)))
 }

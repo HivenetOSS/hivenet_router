@@ -453,7 +453,12 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// Forward failed. forwardToAgent already called DecrementLoad via its defer —
 		// do NOT call it again here. Pass the measured RTT (0 for pre-send failures,
 		// real value for post-send failures) so SRTT stays accurate on failure paths.
-		p.counters.RecordFailure(agent, rttMs)
+		// An agent that is only full (a libp2p resource limit) is not unhealthy:
+		// the request moves on without marking the agent down.
+		var busy *domain.RouterError
+		if !errors.As(fwdErr, &busy) || busy.Code != domain.ErrCodeNoCapacity {
+			p.counters.RecordFailure(agent, rttMs)
+		}
 
 		advanced := session.RecordFailure(agent.ID)
 		if advanced {

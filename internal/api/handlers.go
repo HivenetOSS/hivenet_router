@@ -244,11 +244,9 @@ type Handlers struct {
 	// leaves the budget to the policy (SetEngineKVCapacity).
 	engineKVCapacity func(model string) int
 
-	// routerShare returns how many routers share this site's backends (1 when
-	// alone). Until occupancy is shared through the store, each router admits
-	// its share of the occupancy budget so the routers together never exceed
-	// it (SetRouterShare).
-	routerShare func() int
+	// defaultMaxInflight bounds requests in flight per healthy replica of a
+	// model with no occupancy budget (SetDefaultMaxInflight). 0 disables it.
+	defaultMaxInflight int
 
 	// keyAdmission enforces the serverless per-key occupancy share — a per-key
 	// token-weighted in-flight budget parallel to the global one. Nil disables it.
@@ -687,16 +685,10 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		poolBudget = h.engineKVCapacity(req.Model)
 	}
 	poolInflight := pol.MaxInflight * replicas
-	// Several routers serve the same backends: each admits its share.
-	if h.routerShare != nil {
-		if n := h.routerShare(); n > 1 {
-			if poolBudget > 0 {
-				poolBudget = max(poolBudget/n, 1)
-			}
-			if poolInflight > 0 {
-				poolInflight = max(poolInflight/n, 1)
-			}
-		}
+	// Nothing bounds this model (no policy budget, no KV size reported, e.g.
+	// Ollama or llama.cpp): fall back to a per-replica request cap.
+	if poolBudget == 0 && poolInflight == 0 && h.defaultMaxInflight > 0 {
+		poolInflight = h.defaultMaxInflight * max(replicas, 1)
 	}
 
 	// Global occupancy budget (all replicas).
@@ -1586,6 +1578,6 @@ func (fw *sseFlushingWriter) Write(p []byte) (n int, err error) {
 // occupancy budget from: the summed KV capacity of a model's healthy replicas.
 func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCapacity = fn }
 
-// SetRouterShare sets how many routers share the site's backends; each admits
-// that share of the occupancy budget.
-func (h *Handlers) SetRouterShare(fn func() int) { h.routerShare = fn }
+// SetDefaultMaxInflight sets the requests in flight allowed per healthy
+// replica of a model nothing else bounds; 0 leaves such models unbounded.
+func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }

@@ -127,6 +127,19 @@ type Config struct {
 	// Env: HIVENET_ROUTER_ADMIT_FRACTION
 	AdmitFraction float64
 
+	// AdmitFromEngineKV takes a model's occupancy budget (B2) from the KV-cache
+	// size its engines report when the policy sets no admit_budget_tokens.
+	// false leaves B2 off unless the policy sets it.
+	// Env: HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV (default true)
+	AdmitFromEngineKV bool
+
+	// DefaultMaxInflightPerReplica bounds the requests in flight per healthy
+	// replica of a model that has no occupancy budget: its policy sets neither
+	// admit_budget_tokens nor max_inflight and its engines report no KV-cache
+	// size (Ollama, llama.cpp, custom). 0 leaves such models unbounded.
+	// Env: HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA (default 8)
+	DefaultMaxInflightPerReplica int
+
 	// AdmitParkTimeout bounds how long an over-budget request waits for occupancy
 	// to free before it is rejected with 429. 0 rejects immediately.
 	// Env: HIVENET_ROUTER_ADMIT_PARK_TIMEOUT (a Go duration, e.g. "250ms").
@@ -168,16 +181,21 @@ type Config struct {
 	//   SyncValkeyPassword  password for Valkey and Sentinel (flag: file)
 	//   SyncValkeyTLS       connect with TLS
 	//   SyncInterval        how often usage is published and read (default 1s)
+	//   SyncMinRouters      routers assumed while the store is unreachable or
+	//                       before it first answers (default 1; set it to the
+	//                       number of routers of the site)
 	//   RouterID            stable identity of this router (default: hostname)
 	// Env: HIVENET_ROUTER_SYNC_STORE, HIVENET_ROUTER_SYNC_VALKEY_ADDRS,
 	// HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER, HIVENET_ROUTER_SYNC_VALKEY_PASSWORD,
-	// HIVENET_ROUTER_SYNC_VALKEY_TLS, HIVENET_ROUTER_SYNC_INTERVAL, HIVENET_ROUTER_ROUTER_ID
+	// HIVENET_ROUTER_SYNC_VALKEY_TLS, HIVENET_ROUTER_SYNC_INTERVAL, HIVENET_ROUTER_SYNC_MIN_ROUTERS,
+	// HIVENET_ROUTER_ROUTER_ID
 	SyncStore          string
 	SyncValkeyAddrs    string
 	SyncSentinelMaster string
 	SyncValkeyPassword string
 	SyncValkeyTLS      bool
 	SyncInterval       time.Duration
+	SyncMinRouters     int
 	RouterID           string
 
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
@@ -251,31 +269,33 @@ func DefaultConfig() *Config {
 		P2PListenAddr:    "127.0.0.1",
 		P2PMaxConnsPerIP: 32, // > libp2p's default of 8; see field doc for the >= 2x fleet-size rule
 
-		RequestTimeout:         60 * time.Second,
-		HealthCheckInterval:    5 * time.Second,
-		UnhealthyAfter:         15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
-		RemoveAfter:            30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
-		HeartbeatInterval:      5 * time.Second,
-		QueueSize:              100,
-		MaxConcurrentForwards:  50,
-		DiskDBPath:             "./badger_disk",
-		KeyStoreBackend:        "memory",
-		KeyStorePath:           "./badger_keystore",
-		KeyStoreMaxAge:         15 * time.Minute,
-		FlushPeriod:            5 * time.Second,
-		DiskDBTTLDays:          30,
-		UniversalFlushInterval: 30 * time.Second,
-		SessionTTL:             1 * time.Hour,
-		ProtocolID:             "/hivenet_router/1.0.0",
-		MaxTriesPerStep:        3,
-		SemanticPinMax:         100_000,
-		SemanticPinMaxPerKey:   10_000,
-		QueueDepth:             30,
-		MaxRequestBytes:        10 << 20, // 10 MB
-		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
-		AdmitParkTimeout:       250 * time.Millisecond,
-		SyncInterval:           time.Second,
-		RedirectTokenTTL:       60 * time.Second,
+		RequestTimeout:               60 * time.Second,
+		HealthCheckInterval:          5 * time.Second,
+		UnhealthyAfter:               15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
+		RemoveAfter:                  30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
+		HeartbeatInterval:            5 * time.Second,
+		QueueSize:                    100,
+		MaxConcurrentForwards:        50,
+		DiskDBPath:                   "./badger_disk",
+		KeyStoreBackend:              "memory",
+		KeyStorePath:                 "./badger_keystore",
+		KeyStoreMaxAge:               15 * time.Minute,
+		FlushPeriod:                  5 * time.Second,
+		DiskDBTTLDays:                30,
+		UniversalFlushInterval:       30 * time.Second,
+		SessionTTL:                   1 * time.Hour,
+		ProtocolID:                   "/hivenet_router/1.0.0",
+		MaxTriesPerStep:              3,
+		SemanticPinMax:               100_000,
+		SemanticPinMaxPerKey:         10_000,
+		QueueDepth:                   30,
+		MaxRequestBytes:              10 << 20, // 10 MB
+		AdmitFraction:                0.90,     // learned estimator + true-up now cover the token-estimate error
+		AdmitParkTimeout:             250 * time.Millisecond,
+		AdmitFromEngineKV:            true,
+		DefaultMaxInflightPerReplica: 8,
+		SyncInterval:                 time.Second,
+		RedirectTokenTTL:             60 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -352,6 +372,22 @@ func LoadFromEnv() *Config {
 			cfg.AdmitFraction = f
 		}
 	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=%q: %w", v, err))
+		} else {
+			cfg.AdmitFromEngineKV = b
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=%q: must be 0 or more", v))
+		} else {
+			cfg.DefaultMaxInflightPerReplica = n
+		}
+	}
 	if v := os.Getenv("HIVENET_ROUTER_ADMIT_PARK_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
 			cfg.AdmitParkTimeout = d
@@ -426,6 +462,14 @@ func LoadFromEnv() *Config {
 			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_INTERVAL=%q: %w", v, err))
 		} else {
 			cfg.SyncInterval = d
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_MIN_ROUTERS=%q: must be a positive integer", v))
+		} else {
+			cfg.SyncMinRouters = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {

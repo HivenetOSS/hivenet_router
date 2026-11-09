@@ -702,6 +702,8 @@ It compares each agent's load in requests: the larger of this router's in-flight
 
 ### 8. Capacity wait queue
 
+This queue applies only to agents with a declared capacity, such as agents in embedded or test setups. Routers ignore the `--capacity` of network agents; for them, `--queue-depth` sizes the wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
+
 When eligible agents exist but all are at capacity, the request can enter a bounded per-model FIFO queue.
 
 The default maximum is:
@@ -836,8 +838,8 @@ Hivenet Router has several independent limits.
 | HTTP enqueue wait | `5s` | Prevents handlers from blocking indefinitely on a full queue |
 | Global request queue | `100` | Bounds pending processor work |
 | Concurrent forwards | `50` | Bounds router forwarding goroutines |
-| Per-model capacity queue | `30` | Bounds requests waiting for model capacity |
-| Occupancy budget (B2) | Engine KV capacity × `0.90` for vLLM and SGLang; none otherwise | Bounds token-weighted work per model |
+| Per-model wait queue | `30` | Bounds requests waiting for room in the occupancy budget |
+| Occupancy budget (B2) | Engine KV capacity × `0.90` for vLLM and SGLang; `8` requests in flight per replica otherwise | Bounds work per model |
 | Policy step attempts | `3` | Bounds backend retries within one step |
 | Request deadline | `60s` | Bounds the complete router-side operation |
 | Agent backend HTTP timeout | `120s` | Bounds an agent’s backend request |

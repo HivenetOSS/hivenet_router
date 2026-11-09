@@ -319,9 +319,14 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 }
 
 // dropRouter forgets a router whose session ended: it is no longer allowed
-// through the gater and its connection is closed. A new session adds it back.
+// through the gater and its connection is closed, unless another session
+// (another address of the same router) still uses it. A new session adds it
+// back.
 func (a *Agent) dropRouter(node host.Host, routerPeer peer.ID) {
 	a.gater.RemoveRouter(routerPeer)
+	if a.gater.Allowed(routerPeer) {
+		return
+	}
 	node.ConnManager().Unprotect(routerPeer, "router")
 	_ = node.Network().ClosePeer(routerPeer)
 }
@@ -488,10 +493,14 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 		sessionTTL = time.Hour // fallback: zero (old router) or too-short value from misconfigured router
 	}
 
-	// pushDone is closed when this session ends, stopping all session-scoped goroutines.
+	// pushDone is closed when this session ends, stopping all session-scoped
+	// goroutines; they have exited before the next session reuses rs.
 	pushDone := make(chan struct{})
-	go a.runRoutingSignalPusher(rs, pushDone)
-	go a.runReAuth(rs, node, pushDone, sessionTTL)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); a.runRoutingSignalPusher(rs, pushDone) }()
+	go func() { defer wg.Done(); a.runReAuth(rs, node, pushDone, sessionTTL) }()
+	defer wg.Wait()
 	defer close(pushDone)
 
 	ticker := time.NewTicker(interval)

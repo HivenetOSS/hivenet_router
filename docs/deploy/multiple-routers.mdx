@@ -28,12 +28,12 @@ Every `--sync-interval` (default `1s`) each router:
 
 1. publishes the usage it admitted since the last round as one entry on a stream in Valkey;
 2. reads the entries the other routers published and subtracts them from its own buckets;
-3. adds its daily token usage to today's totals;
+3. writes its own running total of today's tokens for each daily bucket it used (a bucket's total is the sum over routers, so a write lost in a failover is healed by the next one);
 4. records a heartbeat, which tells every router how many routers are live.
 
 Between two rounds a router cannot see the others' latest usage. To keep the routers together within a limit, each router admits at most its share of what was left at the last round: the remainder divided by the number of live routers. The first request of each round always passes if the limit has room, so a request larger than the share is not starved.
 
-A router that starts or restarts replays the last minute of usage and reads today's totals, so it does not hand out a fresh budget.
+A router that starts or restarts replays the last minute of usage and reads today's totals, so it does not hand out a fresh budget. Usage already in the totals it reads is not counted again.
 
 The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router a round is about 36 KB.
 
@@ -61,10 +61,14 @@ A router that was given up by the others drops the credits it believed it held a
 
 | Situation | Behavior |
 | --- | --- |
-| Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
-| Store back | Routers publish the usage they held back and return to shared limits |
-| A router cannot read today's total for a key with a daily limit (for example, it started while the store was down) | The router refuses that key's requests with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected |
+| Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen, never fewer than `--sync-min-routers`), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
+| Router starts while the store is unreachable | Same as above: it enforces its share with `--sync-min-routers` routers until the store answers |
+| Store back | Routers publish the usage they held back, with the time it was admitted, and return to shared limits. Usage a rate bucket has refilled since is not charged again |
+| A router cannot read today's total for a key with a daily limit (it never saw the key today and the store is unreachable) | The router refuses that key's requests at once with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected. A request never waits for the store |
+| Midnight UTC, or `auth.yaml` reloaded, while the store is unreachable | Keys the router already knew keep working: a new day starts at zero for every router, and a reload keeps today's usage. Each router spends at most its share |
+| The store is unreachable for ten sync intervals | The router reconnects from the configured addresses, in case Valkey or the Sentinels came back at new addresses |
 | Occupancy while the store is unreachable | Each router keeps admitting within the credits it holds, capped at its share of the budget, and asks for no more. A router that holds no credits (for example, it started while the store was down) admits nothing until the store answers |
+| Occupancy after the store comes back | A router stays at its share of each budget until every router it saw before the outage is back or known to be gone, since the store may have lost what they hold |
 | Redirect tokens while the store is unreachable | Each router checks single use on its own |
 
 Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
@@ -77,7 +81,7 @@ The store holds only recent usage and today's totals. Persistence is optional: a
 
 ## Configure the routers
 
-Give every router of the site the same `--site-id` (it prefixes every key in the store) and a stable `--router-id`. In Kubernetes, a StatefulSet pod name works; the default is the hostname.
+Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`) and a stable `--router-id`. Set `--sync-min-routers` to the number of routers. In Kubernetes, a StatefulSet pod name works; the default is the hostname.
 
 ```bash
 hivenet-router \
@@ -85,7 +89,8 @@ hivenet-router \
   --sync-store valkey \
   --sync-valkey-addrs sentinel-0:26379,sentinel-1:26379,sentinel-2:26379 \
   --sync-valkey-sentinel-master hivenet \
-  --sync-valkey-password-file /run/secrets/valkey-password
+  --sync-valkey-password-file /run/secrets/valkey-password \
+  --sync-min-routers 3
 ```
 
 | Flag | Environment variable | Default | Description |
@@ -96,6 +101,7 @@ hivenet-router \
 | `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | Password for Valkey and Sentinel |
 | `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` | Connect with TLS |
 | `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` | Between `100ms` and `10s`. Shorter intervals make limits stricter between rounds and cost more round trips |
+| `--sync-min-routers` | `HIVENET_ROUTER_SYNC_MIN_ROUTERS` | `1` | Routers of the site assumed while the store is unreachable or before it first answers. Set it to the number of routers you run |
 | `--router-id` | `HIVENET_ROUTER_ROUTER_ID` | Hostname | Stable identity of this router |
 
 `--sync-store=valkey` replaces `HIVENET_ROUTER_QUOTA_BACKEND=badger`: the store keeps today's totals. The router refuses to start with both.

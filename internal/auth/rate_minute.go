@@ -28,11 +28,18 @@ type MinuteRateLimiter struct {
 func (l *MinuteRateLimiter) SetFleet(f Fleet) { l.fleet = f }
 
 // ApplyPeerUsage takes tokens another router of the policloud admitted.
-func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration) {
+func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration, _ int, _ string) {
 	if (kind != usageITPM && kind != usageOTPM) || limit <= 0 {
 		return
 	}
-	debit(l.bucket(key, limit), decayed(n, age, time.Minute))
+	// An existing bucket keeps this router's limit (see InMemoryLimiter.peerRPM).
+	var lim *rate.Limiter
+	if v, ok := l.buckets.Load(key); ok {
+		lim = v.(*rate.Limiter)
+	} else {
+		lim = l.bucket(key, limit)
+	}
+	debit(lim, decayed(n, age, time.Minute))
 }
 
 // NewMinuteRateLimiter creates an empty MinuteRateLimiter.
@@ -118,8 +125,11 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 // Reset clears all buckets so limits reloaded from auth.yaml take effect
 // immediately. Safe to call concurrently with request handling.
 func (l *MinuteRateLimiter) Reset() {
-	l.buckets.Range(func(k, _ any) bool { l.buckets.Delete(k); return true })
 	l.leases.reset()
+	if l.fleet != nil {
+		return // kept with shared counters, as InMemoryLimiter.Reset
+	}
+	l.buckets.Range(func(k, _ any) bool { l.buckets.Delete(k); return true })
 }
 
 // SweepIdle evicts every full bucket, bounding memory when keys are minted

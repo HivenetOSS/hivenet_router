@@ -922,7 +922,7 @@ Avoid introducing many hardware gates at the same time. When the policy drains, 
 
 Hivenet Router does not derive a per-agent request limit from VRAM, GPU count, model parameters, or power limit. The agent's `--capacity` flag is deprecated and ignored by routers.
 
-For vLLM and SGLang, the agent reports the engine's KV-cache size in tokens. When a policy sets no `admit_budget_tokens`, the router derives the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) from it. For other engines, set `admit_budget_tokens` or `max_inflight` in the policy.
+For vLLM and SGLang, the agent reports the engine's KV-cache size in tokens. When a policy sets no `admit_budget_tokens`, the router derives the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) from it. Other engines get `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per replica; set `admit_budget_tokens` or `max_inflight` in the policy to choose your own bound.
 
 Benchmark representative traffic and adjust the policy budget while observing engine queues, cache pressure, TTFT, ITL, hardware use, and failures.
 

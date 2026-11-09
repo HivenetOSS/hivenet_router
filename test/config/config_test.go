@@ -282,10 +282,11 @@ func TestSyncSettingsFromEnv(t *testing.T) {
 	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER", "hivenet")
 	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_TLS", "true")
 	t.Setenv("HIVENET_ROUTER_SYNC_INTERVAL", "500ms")
+	t.Setenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS", "3")
 	t.Setenv("HIVENET_ROUTER_ROUTER_ID", "router-0")
 	cfg := config.LoadFromEnv()
 	if cfg.SyncStore != "valkey" || cfg.SyncValkeyAddrs != "s0:26379,s1:26379" || cfg.SyncSentinelMaster != "hivenet" ||
-		!cfg.SyncValkeyTLS || cfg.SyncInterval != 500*time.Millisecond || cfg.RouterID != "router-0" {
+		!cfg.SyncValkeyTLS || cfg.SyncInterval != 500*time.Millisecond || cfg.SyncMinRouters != 3 || cfg.RouterID != "router-0" {
 		t.Fatalf("sync settings not read from the environment: %+v", cfg)
 	}
 	if len(cfg.EnvErrors) != 0 {
@@ -294,13 +295,34 @@ func TestSyncSettingsFromEnv(t *testing.T) {
 
 	t.Setenv("HIVENET_ROUTER_SYNC_INTERVAL", "1sec")
 	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_TLS", "maybe")
-	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 2 {
-		t.Fatalf("want 2 env errors for a bad interval and TLS flag, got %v", cfg.EnvErrors)
+	t.Setenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS", "0")
+	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 3 {
+		t.Fatalf("want 3 env errors for a bad interval, TLS flag and router count, got %v", cfg.EnvErrors)
 	}
 }
 
 func TestSyncIntervalDefault(t *testing.T) {
 	if cfg := config.LoadFromEnv(); cfg.SyncInterval != time.Second || cfg.SyncStore != "" {
 		t.Fatalf("defaults: interval %v store %q", cfg.SyncInterval, cfg.SyncStore)
+	}
+}
+
+// Admission defaults: the occupancy budget follows the engine's KV size, and
+// models nothing bounds get 8 requests in flight per replica. Both can be
+// changed from the environment.
+func TestAdmissionDefaultsFromEnv(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if !cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 8 {
+		t.Fatalf("defaults: from engine KV %v, max in flight %d", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica)
+	}
+	t.Setenv("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV", "false")
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "0")
+	cfg = config.LoadFromEnv()
+	if cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 0 || len(cfg.EnvErrors) != 0 {
+		t.Fatalf("not read from the environment: %v %d %v", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica, cfg.EnvErrors)
+	}
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "-1")
+	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 1 {
+		t.Fatalf("want 1 env error for a negative cap, got %v", cfg.EnvErrors)
 	}
 }

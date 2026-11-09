@@ -65,14 +65,14 @@ routing_policy:
   strategy: least-loaded
 ```
 
-All four numeric limits are optional. `0` or an omitted field disables that check, except that an omitted `admit_budget_tokens` takes the token budget from the engines' KV capacity when they report it (see [B2](#b2-pool-occupancy)). Negative values make policy validation fail. `admit_budget_tokens` and `max_inflight` are **per-replica** limits that the router scales to the number of healthy replicas serving the model.
+All four numeric limits are optional. `0` or an omitted field disables that check, except that an omitted `admit_budget_tokens` takes the token budget from the engines' KV capacity when they report it, and a model with no occupancy bound at all gets a default `max_inflight` (see [B2](#b2-pool-occupancy)). Negative values make policy validation fail. `admit_budget_tokens` and `max_inflight` are **per-replica** limits that the router scales to the number of healthy replicas serving the model.
 
 | Field | Current behavior |
 | --- | --- |
 | `max_input_tokens` | Rejects a request when the learned prompt estimate exceeds 1.5× the limit |
 | `images_max` | Rejects a request carrying more images than the limit |
 | `admit_budget_tokens` | Per-replica token-weighted occupancy capacity; when omitted, the engines' reported KV capacity is used |
-| `max_inflight` | Per-replica in-flight request-count backstop |
+| `max_inflight` | Per-replica in-flight request-count backstop; when omitted and no token budget applies, `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) is used |
 
 ## One input estimate
 
@@ -126,7 +126,19 @@ token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
                      × summed KV capacity of the healthy replicas)
 ```
 
-vLLM and SGLang agents report their KV-cache size in tokens. Ollama, llama.cpp, Infinity and custom backends do not, so they get no automatic token budget: set `admit_budget_tokens` or `max_inflight` if you want one. Otherwise the engine's own queue and [B3 shedding](#b3-front-door-shedding) protect them.
+vLLM and SGLang agents report their KV-cache size in tokens. Set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` to turn this off: B2 then applies only when the policy sets `admit_budget_tokens`.
+
+Ollama, llama.cpp, Infinity and custom backends report no KV-cache size, so they get no automatic token budget. A model with no occupancy bound at all gets a default request backstop instead:
+
+```text
+request backstop = HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA × healthy_replicas
+```
+
+This applies when the policy sets neither `admit_budget_tokens` nor `max_inflight` and the engines report no KV-cache size, or B2 from the engine KV is turned off. The default is `8` requests in flight per healthy replica; `0` disables it. Set `admit_budget_tokens` or `max_inflight` in the policy to choose your own bound.
+
+<Warning>
+  **Upgrading.** B2 now turns on by itself for vLLM and SGLang, from the KV-cache size they report. Models whose engines report no KV-cache size get `8` requests in flight per replica by default. A single-router deployment that had no occupancy bound before may now see `429 concurrency_limit_exceeded` or queued requests. To keep the old behavior, set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` and `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=0`.
+</Warning>
 
 With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), the token budget and the request backstop are shared exactly: each router admits against credits it holds from a site-wide pool, and the routers together never hold more than the budget. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits).
 
@@ -146,7 +158,18 @@ estimated input tokens + declared maximum output tokens
 
 If output is undeclared, the reservation starts with the input estimate and grows as output streams. When the backend reports exact input usage, the router replaces the estimated input portion with the exact count. Success, error, timeout, and client disconnect all release the reservation.
 
-When a request does not fit, it waits for up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. The default is `250ms`; `0` rejects immediately. If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded`:
+A request whose footprint is larger than the whole token budget is not rejected. It is held to the whole budget and admitted when nothing else of that model is in flight on this router.
+
+When a request does not fit, it waits in the model's wait queue:
+
+| Waiting requests | How long a request waits |
+| --- | --- |
+| Up to `--queue-depth` per model (default `30`) | Until room frees, up to the request timeout (`--request-timeout`) |
+| Beyond `--queue-depth` | Up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) |
+
+`--queue-depth 0` disables the queue, so every request that does not fit waits only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. With that timeout at `0`, a request outside the queue is rejected at once. The `hivenet_queue_depth` gauge shows the requests waiting in this queue.
+
+If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded`:
 
 ```json
 {
