@@ -77,6 +77,11 @@ type Config struct {
 	Interval       time.Duration // sync interval
 	DownAfter      time.Duration // unreachable this long → each router enforces its share
 	MinRouters     int           // routers assumed while the live count is unknown or Valkey is down
+	// SettleAfter is how long after the store's data was created (a new
+	// site, or Valkey lost its data) a router that had not seen a pool before
+	// takes no new credits: long enough for a router cut off from the store
+	// to reconnect, or for the requests it admitted to end. 0 disables it.
+	SettleAfter time.Duration
 
 	tlsRoots *x509.CertPool
 }
@@ -149,9 +154,17 @@ type Store struct {
 	// Routers the agents report a connection to that the store does not know:
 	// alive, but the store lost them (lost data), so what they hold is
 	// unknown. While there is one, no router takes new credits.
-	reportsFn   func() []string
-	knownSince  map[string]time.Time // router peer → first tick the store listed it
-	unknownPeer atomic.Pointer[string]
+	reportsFn    func() []string
+	knownSince   map[string]time.Time // router peer → first tick the store listed it
+	unknownSince map[string]time.Time // router peer → first tick it was reported but not listed
+	unknownPeer  atomic.Pointer[string]
+	unknownN     atomic.Int32 // unknown routers reported for less than the settle window
+
+	// The store's data was created at youngSince (unix ns, this router's
+	// clock); until youngUntil a pool this router had not read before then
+	// gets no new credits. See Config.SettleAfter.
+	youngSince atomic.Int64
+	youngUntil atomic.Int64
 
 	// unreplicated is set when no replica acknowledged a grant: a failover
 	// could lose it, so occupancy stays at this router's share until a
@@ -262,9 +275,10 @@ func (s *Store) SetRouterReports(fn func() []string) { s.reportsFn = fn }
 
 // UnknownRouter returns a router the agents report a connection to that the
 // store has not listed for two intervals, or "" when there is none. Such a
-// router is serving, but the store does not know what it holds: it lost its
-// data while that router was cut off from it. A router that just started is
-// unknown for about one interval too.
+// router may be serving with credits the store does not know: the store lost
+// its data while it was cut off. A router that just started is unknown for
+// about one interval too, and a misconfigured one (wrong password, another
+// site) for as long as it runs.
 func (s *Store) UnknownRouter() string {
 	if p := s.unknownPeer.Load(); p != nil {
 		return *p
@@ -272,11 +286,37 @@ func (s *Store) UnknownRouter() string {
 	return ""
 }
 
+// UnknownRouters counts the unknown routers reported for less than the
+// settle window: each holds the others to their share of a budget. After the
+// window it no longer counts (it is logged and in hivenet_sync_unknown_routers):
+// a router cut off that long has ended the requests it admitted before.
+func (s *Store) UnknownRouters() int { return int(s.unknownN.Load()) }
+
+// Young reports whether the store's data is younger than the settle window,
+// and since when (this router's clock).
+func (s *Store) Young() (since time.Time, young bool) {
+	until := s.youngUntil.Load()
+	if until == 0 || time.Now().UnixNano() >= until {
+		return time.Time{}, false
+	}
+	return time.Unix(0, s.youngSince.Load()), true
+}
+
+func (s *Store) settle() time.Duration {
+	if s.cfg.SettleAfter > 0 {
+		return s.cfg.SettleAfter
+	}
+	return reconnectAfter * s.cfg.Interval
+}
+
 // trackRouters records the routers the store lists (peers) and compares
 // them with the routers the agents report.
 func (s *Store) trackRouters(peers []string) {
 	if s.reportsFn == nil {
 		return
+	}
+	if s.knownSince == nil {
+		s.knownSince, s.unknownSince = map[string]time.Time{}, map[string]time.Time{}
 	}
 	now := time.Now()
 	listed := map[string]bool{}
@@ -291,24 +331,40 @@ func (s *Store) trackRouters(peers []string) {
 			delete(s.knownSince, p)
 		}
 	}
-	unknown := ""
+	reported := map[string]bool{}
+	unknown, counted := "", 0
 	for _, p := range s.reportsFn() {
-		if p == s.cfg.PeerID || p == "" {
+		if p == s.cfg.PeerID || p == "" || reported[p] {
 			continue
 		}
-		if since, ok := s.knownSince[p]; !ok || now.Sub(since) < 2*s.cfg.Interval {
+		reported[p] = true
+		if since, ok := s.knownSince[p]; ok && now.Sub(since) >= 2*s.cfg.Interval {
+			delete(s.unknownSince, p)
+			continue
+		}
+		first, ok := s.unknownSince[p]
+		if !ok {
+			first = now
+			s.unknownSince[p] = now
+			log.Warnf("shared occupancy: agents report router %s, which the store does not list; the others keep to their share for %v", p, s.settle())
+		}
+		if unknown == "" {
 			unknown = p
-			break
+		}
+		if now.Sub(first) < s.settle() {
+			counted++
+		} else if now.Sub(first) < s.settle()+s.cfg.Interval {
+			log.Warnf("shared occupancy: router %s is still unknown to the store after %v; check its store settings (address, password, --sync-site)", p, s.settle())
 		}
 	}
-	if old := s.UnknownRouter(); old != unknown {
-		if unknown != "" {
-			log.Warnf("shared occupancy: agents report router %s, which the store does not know; no router takes new credits until it is known", unknown)
-		} else {
-			log.Infof("shared occupancy: every router the agents report is known again")
+	for p := range s.unknownSince {
+		if !reported[p] {
+			delete(s.unknownSince, p)
 		}
 	}
 	s.unknownPeer.Store(&unknown)
+	s.unknownN.Store(int32(counted))
+	s.m.unknown.Set(float64(len(s.unknownSince)))
 }
 
 // AgentJoined records that an agent became usable on this router: it
@@ -631,12 +687,11 @@ func (s *Store) tick(ctx context.Context) {
 		s.cursor = strconv.FormatInt(vNow-time.Minute.Milliseconds(), 10) + "-0"
 	}
 
-
 	snap := time.Now()
 	agentsPayload, agentsList := s.agentsPayload()
-	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers"), s.key("epochs"), s.key("agents")},
+	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers"), s.key("epochs"), s.key("agents"), s.key("born")},
 		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID, agentsPayload}).AsStrSlice()
-	if err != nil || len(hb) < 2 {
+	if err != nil || len(hb) < 4 {
 		if err == nil {
 			err = errShortReply
 		}
@@ -649,6 +704,16 @@ func (s *Store) tick(ctx context.Context) {
 	// list again, in case the store lost it too.
 	s.agentsForce = hb[0] != "1"
 	epoch := hb[1]
+	if born, err1 := strconv.ParseInt(hb[2], 10, 64); err1 == nil {
+		if vnow, err2 := strconv.ParseInt(hb[3], 10, 64); err2 == nil {
+			since := time.Now().Add(-time.Duration(vnow-born) * time.Millisecond)
+			s.youngSince.Store(since.UnixNano())
+			s.youngUntil.Store(since.Add(s.cfg.SettleAfter).UnixNano())
+			if s.cfg.SettleAfter == 0 {
+				s.youngUntil.Store(0)
+			}
+		}
+	}
 	// hb[0] says whether this run was still in the live set. Once it has
 	// been, missing means the other routers evicted it (they saw it as gone
 	// and took back what it held), so whatever it holds must be re-granted.
@@ -668,7 +733,7 @@ func (s *Store) tick(ctx context.Context) {
 	var live, livePeers []string
 	var fetch []string // runs whose agent list changed
 	s.liveMu.Lock()
-	for i := 2; i+2 < len(hb); i += 3 {
+	for i := 4; i+2 < len(hb); i += 3 {
 		live = append(live, hb[i])
 		livePeers = append(livePeers, hb[i+1])
 		if hb[i] != s.inc && hb[i+2] != "" && hb[i+2] != s.agentVer[hb[i]] {
@@ -715,9 +780,6 @@ func (s *Store) tick(ctx context.Context) {
 		s.lastFull = time.Now()
 	}
 	if peers, err := res[len(res)-3].AsStrSlice(); err == nil {
-		if s.knownSince == nil {
-			s.knownSince = map[string]time.Time{}
-		}
 		s.trackRouters(peers)
 	}
 	if len(fetch) > 0 {
@@ -878,10 +940,11 @@ func streamMillis(id string) int64 {
 // hour, with what was recorded about them.
 //
 // It returns whether this run was in the live set ("1"/"0"), this run's
-// epoch, then for each run seen within ARGV[2] ms: run, peer ID, version of
-// its agent list. The epoch is new whenever this run was missing from the
+// epoch, when the store's data was created (KEYS[5], set on the first
+// heartbeat after it was lost) and Valkey's time, both in ms, then for each
+// run seen within ARGV[2] ms: run, peer ID, version of its agent list. The epoch is new whenever this run was missing from the
 // live set (first heartbeat, eviction, or lost data); grants must present it.
-// KEYS: live set, peer-ID hash, epoch hash, agent-list hash.
+// KEYS: live set, peer-ID hash, epoch hash, agent-list hash, birth key.
 // ARGV: run, live window (ms), peer ID, agent list.
 var heartbeat = valkey.NewLuaScript(`
 local t = redis.call('TIME')
@@ -902,7 +965,9 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)
 if ARGV[3] ~= '' then redis.call('HSET', KEYS[2], ARGV[1], ARGV[3]) end
 if ARGV[4] ~= '' then redis.call('HSET', KEYS[4], ARGV[1], ARGV[4]) end
 for i = 2, 4 do redis.call('EXPIRE', KEYS[i], 3600) end
-local out = {present and '1' or '0', ep}
+redis.call('SET', KEYS[5], now, 'NX')
+redis.call('EXPIRE', KEYS[5], 3600)
+local out = {present and '1' or '0', ep, redis.call('GET', KEYS[5]), tostring(now)}
 for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]), '+inf')) do
   out[#out + 1] = r
   out[#out + 1] = redis.call('HGET', KEYS[2], r) or ''

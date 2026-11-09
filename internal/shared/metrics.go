@@ -15,6 +15,7 @@ type storeMetrics struct {
 	credit         *prometheus.HistogramVec
 	creditErrors   prometheus.Counter
 	creditReclaims prometheus.Counter
+	unknown        prometheus.Gauge
 }
 
 func newStoreMetrics() *storeMetrics {
@@ -54,6 +55,10 @@ func newStoreMetrics() *storeMetrics {
 		Name: "hivenet_occupancy_credit_reclaims_total",
 		Help: "Routers taken out of the live set early because no agent was connected to them.",
 	})
+	m.unknown = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hivenet_sync_unknown_routers",
+		Help: "Routers the agents report a connection to that the shared store does not list.",
+	})
 	m.up.Set(0)
 	return m
 }
@@ -61,5 +66,5 @@ func newStoreMetrics() *storeMetrics {
 // Collectors returns the store's metrics for registration.
 func (s *Store) Collectors() []prometheus.Collector {
 	return []prometheus.Collector{s.m.up, s.m.peers, s.m.lag, s.m.tick, s.m.errors,
-		s.m.credit, s.m.creditErrors, s.m.creditReclaims}
+		s.m.credit, s.m.creditErrors, s.m.creditReclaims, s.m.unknown}
 }

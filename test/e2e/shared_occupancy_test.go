@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,8 @@ import (
 // other at once.
 func TestOccupancySharedAcrossRouters(t *testing.T) {
 	mr := miniredis.RunT(t)
+	// An existing site: its store's data is older than the settle window.
+	mr.Set("hivenet:{default}:born", strconv.FormatInt(time.Now().Add(-time.Hour).UnixMilli(), 10)) //nolint:errcheck
 	var cur, peak atomic.Int64
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/health") || strings.HasSuffix(r.URL.Path, "/models") {

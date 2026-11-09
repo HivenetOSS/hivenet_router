@@ -75,7 +75,7 @@ A router that was given up by the others drops the credits it believed it held a
 | Midnight UTC, or `auth.yaml` reloaded, while the store is unreachable | Keys the router already knew keep working: a new day starts at zero for every router, and a reload keeps today's usage. Each router spends at most its share |
 | The store is unreachable for ten sync intervals | The router reconnects from the configured addresses, in case Valkey or the Sentinels came back at new addresses |
 | Occupancy while the store is unreachable | Each router keeps admitting within the credits it holds, capped at its share of the budget, and asks for no more. A router that holds no credits (for example, it started while the store was down) admits nothing until the store answers |
-| Occupancy after the store comes back, or after it lost its data | A grant made before a router noticed the loss is refused. Until every router seen before is back or known to be gone, each router holds at most the budget minus what those routers held when it last saw them (nothing more than it holds, for a budget it had not seen). While the agents report a connection to a router the store does not list, for example a router cut off from the store when it lost its data, no router takes new credits: what that router holds is unknown. A router that just started is unknown for about one sync interval |
+| Occupancy after the store comes back, or after it lost its data | A grant made before a router noticed the loss is refused. Until every router seen before is back or known to be gone, each router holds at most the budget minus what those routers held when it last saw them. For a settle window after the store lost its data (the request timeout plus ten sync intervals plus 5 s), a router takes no new credits for a budget it had not seen before the loss, for example a router that started since: a router cut off from the store when it lost its data may still run requests no one else knows of, and they end within the window. The first deployment of a site waits the same window before it admits. While the agents report a connection to a router the store does not list, the others keep to their share, counting that router, for the same window; `hivenet_sync_unknown_routers` counts such routers, and a router that stays unknown usually has wrong store settings |
 | Redirect tokens while the store is unreachable | Each router checks single use on its own |
 
 Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
@@ -84,7 +84,7 @@ Output tokens are counted after the response, so they are never refused because 
 
 Use one Valkey per site, reachable only from the routers. For high availability run one primary, two replicas and three Sentinels on separate hosts. Sentinel promotes a replica when the primary fails; routers ask the Sentinels for the current primary.
 
-The store holds only recent usage and today's totals. Persistence is optional: after a total loss the routers rebuild from what they hold in memory, and stay within the budget while they do.
+The store holds only recent usage and today's totals. Persistence is optional: after a total loss the routers rebuild from what they hold in memory. They stay within the budget as long as a router cut off from the store when it lost its data comes back, or ends its requests, within the settle window. One that stays cut off longer, and whose agents no other router hears from, can add up to its own share of the budget. Grants are acknowledged by a replica; the per-round rewrites of what each router holds are not, and are healed by the next round.
 
 ## Configure the routers
 
@@ -159,6 +159,7 @@ Each agent reports how many requests it has in flight from all routers. Every ro
 | `hivenet_occupancy_credit_seconds` | histogram | Duration of one credit refill (`op="refill"`) |
 | `hivenet_occupancy_credit_errors_total` | counter | Credit calls to the store that failed |
 | `hivenet_occupancy_credit_reclaims_total` | counter | Routers given up early because no agent was connected to them |
+| `hivenet_sync_unknown_routers` | gauge | Routers the agents report a connection to that the store does not list; one that stays above `0` usually has wrong store settings |
 | `hivenet_admission_reaped_total` | counter | Occupancy reservations released because they outlived any request. Should stay at `0`: each one is a request exit path that skipped its release |
 
 Suggested alerts:

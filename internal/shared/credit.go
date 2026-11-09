@@ -84,6 +84,7 @@ type wallet struct {
 	// this router started waiting for that run.
 	peerHeld  map[string][2]int64
 	firstRead time.Time
+	dead      bool // dropped as idle: take a fresh wallet for this key
 
 	refill sync.Mutex // one refill (or rewrite) in flight per wallet
 }
@@ -132,50 +133,77 @@ func (c *Credits) wallet(key string) *wallet {
 	return w
 }
 
+// lockWallet returns key's wallet, locked. A wallet dropped as idle between
+// the lookup and the lock is not used: its credits are gone from the pool.
+func (c *Credits) lockWallet(key string) *wallet {
+	for {
+		wl := c.wallet(key)
+		wl.mu.Lock()
+		if !wl.dead {
+			return wl
+		}
+		wl.mu.Unlock()
+	}
+}
+
 func (c *Credits) degraded() bool { return c.s.DegradedEpoch() != 0 }
 
-// limits returns the most this wallet may hold. Caller holds wl.mu.
+// limits returns the most this wallet may hold (-1: no limit). Caller holds
+// wl.mu.
 //   - Store unreachable, or grants not replicated: this router's share of the
 //     budget, so the site stays within it even if every router holds its share.
-//   - The agents report a router the store does not know (it lost its data
-//     while that router was cut off): nothing more than it holds.
+//   - The store's data is younger than the settle window (a new site, or
+//     Valkey lost its data) and this router had not read this pool before:
+//     nothing more than it holds. A router cut off from the store when it
+//     lost its data may still be running requests no one else knows of; the
+//     window is long enough for them to end or for it to come back.
 //   - Back after an outage or an eviction: the budget minus what the routers
-//     not back yet held when this router last saw them (the pool may have lost
-//     it); nothing more than it holds for a wallet whose pool it did not read
-//     before the loss.
+//     not back yet held when this router last saw them.
+//   - The agents report a router the store does not list: at most this
+//     router's share, counting that router, for the settle window.
 func (c *Credits) limits(wl *wallet) (capW, capC int64) {
-	capW, capC = -1, -1 // no limit
-	if c.s.UnknownRouter() != "" {
-		// A router the store lost is serving: nothing more than held.
-		return wl.grantW, wl.grantC
-	}
-	if c.degraded() || c.s.Unreplicated() {
-		n := int64(c.s.Size())
+	capW, capC = -1, -1
+	share := func(n int64) {
+		n = max(n, int64(c.s.cfg.MinRouters), 1)
 		if wl.budget > 0 {
 			capW = wl.budget / n
 		}
 		if wl.maxIn > 0 {
 			capC = max(wl.maxIn/n, 1)
 		}
+	}
+	if c.degraded() || c.s.Unreplicated() {
+		share(int64(c.s.Size()))
 		return
 	}
-	if c.s.PendingCount() == 0 {
-		return
+	if since, young := c.s.Young(); young && (wl.firstRead.IsZero() || !wl.firstRead.Before(since)) {
+		return wl.grantW, wl.grantC
 	}
-	pending := c.s.Pending()
-	var heldW, heldC int64
-	for run, p := range pending {
-		if wl.firstRead.IsZero() || !wl.firstRead.Before(p.Since) {
-			return wl.grantW, wl.grantC
+	if c.s.PendingCount() > 0 {
+		var heldW, heldC int64
+		for run, p := range c.s.Pending() {
+			if wl.firstRead.IsZero() || !wl.firstRead.Before(p.Since) {
+				return wl.grantW, wl.grantC
+			}
+			heldW += wl.peerHeld[run][0]
+			heldC += wl.peerHeld[run][1]
 		}
-		heldW += wl.peerHeld[run][0]
-		heldC += wl.peerHeld[run][1]
+		if wl.budget > 0 {
+			capW = max(wl.budget-heldW, 0)
+		}
+		if wl.maxIn > 0 {
+			capC = max(wl.maxIn-heldC, 0)
+		}
 	}
-	if wl.budget > 0 {
-		capW = max(wl.budget-heldW, 0)
-	}
-	if wl.maxIn > 0 {
-		capC = max(wl.maxIn-heldC, 0)
+	if u := c.s.UnknownRouters(); u > 0 {
+		pw, pc := capW, capC
+		share(int64(c.s.Size() + u))
+		if pw >= 0 && (capW < 0 || pw < capW) {
+			capW = pw
+		}
+		if pc >= 0 && (capC < 0 || pc < capC) {
+			capC = pc
+		}
 	}
 	return
 }
@@ -212,8 +240,7 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 		return false
 	}
 	c.checkEvicted()
-	wl := c.wallet(key)
-	wl.mu.Lock()
+	wl := c.lockWallet(key)
 	wl.budget, wl.maxIn, wl.lastActive = budget, int64(maxInflight), time.Now()
 	if c.fits(wl, w) {
 		wl.take(w)
@@ -288,8 +315,7 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 // Adjust implements admission.Pool: a release, streamed growth or a true-up.
 // Credits stay in the wallet; the tick hands back what is not needed.
 func (c *Credits) Adjust(key string, dw int64, dc int) {
-	wl := c.wallet(key)
-	wl.mu.Lock()
+	wl := c.lockWallet(key)
 	wl.usedW = max(wl.usedW+dw, 0)
 	wl.usedC = max(wl.usedC+int64(dc), 0)
 	wl.lastActive = time.Now()
@@ -429,10 +455,11 @@ func (c *Credits) tick(ctx context.Context) {
 	for k, wl := range c.wallets {
 		wl.mu.Lock()
 		idle := wl.usedW == 0 && wl.usedC == 0 && wl.grantW == 0 && wl.grantC == 0 && time.Since(wl.lastActive) > c.idleAfter
+		wl.dead = idle
 		wl.mu.Unlock()
 		if idle {
 			delete(c.wallets, k)
-			drops = append(drops, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc).Build())
+			drops = append(drops, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc, "b|"+c.s.inc, "m|"+c.s.inc).Build())
 			continue
 		}
 		ws = append(ws, wl)
@@ -543,6 +570,7 @@ func (c *Credits) tick(ctx context.Context) {
 		}
 		gW, gC := wl.grantW, wl.grantC
 		uW, uC := wl.usedW, wl.usedC
+		bW, bC := wl.budget, wl.maxIn
 		starved := "0"
 		if wl.starved {
 			starved = "1"
@@ -550,7 +578,7 @@ func (c *Credits) tick(ctx context.Context) {
 		wl.starved = false
 		wl.mu.Unlock()
 
-		rw := []string{c.s.inc, c.s.currentEpoch(), itoa(gW), itoa(gC), itoa(uW), itoa(uC), starved, itoa(now)}
+		rw := []string{c.s.inc, c.s.currentEpoch(), itoa(gW), itoa(gC), itoa(uW), itoa(uC), starved, itoa(now), itoa(bW), itoa(bC)}
 		writes = append(writes, cl.B().Evalsha().Sha1(rewriteSHA).Numkeys(2).
 			Key(c.poolKey(wl.key), c.s.key("epochs")).Arg(rw...).Build())
 		evals = append(evals, cl.B().Eval().Script(rewriteScript).Numkeys(2).
@@ -667,7 +695,7 @@ func (c *Credits) ReleaseAll(ctx context.Context) {
 	c.mu.Lock()
 	var cmds valkey.Commands
 	for k := range c.wallets {
-		cmds = append(cmds, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc).Build())
+		cmds = append(cmds, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc, "b|"+c.s.inc, "m|"+c.s.inc).Build())
 	}
 	c.wallets = map[string]*wallet{}
 	c.mu.Unlock()
@@ -686,8 +714,9 @@ func (c *Credits) Stats() (refills, returned, reclaims int64) {
 // ARGV: run, needW, wantW, needC, wantC, budget, maxIn, epoch.
 // A run whose epoch does not match gets {-1, -1}: the store lost it since it
 // last looked. What routers no longer in the live set held (evicted) is
-// dropped first. Grants min(want, free) when free covers need, else nothing.
-// Returns {weight, requests} granted.
+// dropped first. The budget is the smallest the live routers report (each
+// records its own, b|run and m|run). Grants min(want, free) when free covers
+// need, else nothing. Returns {weight, requests} granted.
 const grantScript = `
 local me = ARGV[1]
 if redis.call('HGET', KEYS[3], me) ~= ARGV[8] then return {-1, -1} end
@@ -704,12 +733,25 @@ for i = 1, #h, 2 do
     else
       redis.call('HDEL', KEYS[1], h[i])
     end
+  elseif (string.sub(h[i], 1, 2) == 'b|' or string.sub(h[i], 1, 2) == 'm|') and not live[string.sub(h[i], 3)] then
+    redis.call('HDEL', KEYS[1], h[i])
   elseif string.sub(h[i], 1, 5) == 'want|' and not live[string.sub(h[i], 6)] then
     redis.call('HDEL', KEYS[1], h[i])
   end
 end
 local needW, wantW, needC, wantC = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5])
 local budget, maxin = tonumber(ARGV[6]), tonumber(ARGV[7])
+redis.call('HSET', KEYS[1], 'b|' .. me, budget, 'm|' .. me, maxin)
+-- The routers may see different budgets for a moment (replicas joining or
+-- leaving): grant against the smallest one.
+for i = 1, #h, 2 do
+  local kind, inst = string.match(h[i], '^([bm])|(.+)$')
+  if kind and inst ~= me and live[inst] then
+    local v = tonumber(h[i+1])
+    if kind == 'b' and budget > 0 and v > 0 and v < budget then budget = v end
+    if kind == 'm' and maxin > 0 and v > 0 and v < maxin then maxin = v end
+  end
+end
 local gw, gc = 0, 0
 if budget > 0 then
   local free = budget - sw
@@ -745,12 +787,13 @@ func noScript(err error) bool {
 // (the store lost this run and it has not noticed yet) it writes only what is
 // in use: credits it was granted before may have gone to another router.
 // KEYS: pool hash, epoch hash.
-// ARGV: run, epoch, grantW, grantC, usedW, usedC, starved ("1"/"0"), now ms.
+// ARGV: run, epoch, grantW, grantC, usedW, usedC, starved ("1"/"0"), now ms,
+// the budget and the request limit this run sees.
 const rewriteScript = `
 local me = ARGV[1]
 local w, c = ARGV[3], ARGV[4]
 if redis.call('HGET', KEYS[2], me) ~= ARGV[2] then w, c = ARGV[5], ARGV[6] end
-redis.call('HSET', KEYS[1], 'g|' .. me .. '|w', w, 'g|' .. me .. '|c', c)
+redis.call('HSET', KEYS[1], 'g|' .. me .. '|w', w, 'g|' .. me .. '|c', c, 'b|' .. me, ARGV[9], 'm|' .. me, ARGV[10])
 if ARGV[7] == '1' then
   redis.call('HSET', KEYS[1], 'want|' .. me, ARGV[8])
 else

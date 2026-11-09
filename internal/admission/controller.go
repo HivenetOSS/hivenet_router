@@ -8,8 +8,8 @@
 // request is admitted only while the running weighted sum plus its own footprint
 // stays within the budget, so a burst of large requests degrades to a clean 429
 // rather than overcommitting the engine's KV cache and inflating everyone's
-// latency. The budget is the engine's per-replica token capacity scaled by an
-// operator admit fraction; both are supplied by the caller per request.
+// latency. The budget is the token capacity of the model's pool (all its healthy
+// replicas) scaled by an operator admit fraction; both are supplied by the caller per request.
 //
 // The accounting is pure and engine-agnostic: it counts tokens the router
 // already estimates and never reads engine internals. All state is per model
@@ -157,7 +157,7 @@ func (c *Controller) SweepIdle(ttl time.Duration) int {
 //     declared request, or just input for an undeclared one.
 //   - grows marks an undeclared request whose reservation is grown via
 //     Reservation.Grow as output streams; a declared request passes false.
-//   - budgetTokens is the model's per-replica KV token capacity; the admit
+//   - budgetTokens is the KV token capacity of the model's pool; the admit
 //     fraction is applied here. budgetTokens <= 0 disables the budget check.
 //   - maxInflight caps concurrent in-flight requests; <= 0 disables the backstop.
 //

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,14 +32,28 @@ type valkeyBackend struct {
 	mr     *miniredis.Miniredis
 }
 
+// newBackend returns the store of an existing site: its data is older than
+// the settle window. Losing it (flush) makes it new again.
 func newBackend(t *testing.T) *valkeyBackend {
 	t.Helper()
+	old := strconv.FormatInt(time.Now().Add(-time.Hour).UnixMilli(), 10)
 	if addr := os.Getenv("HIVENET_TEST_VALKEY_ADDR"); addr != "" {
-		return &valkeyBackend{addr: addr, prefix: fmt.Sprintf("t%d", time.Now().UnixNano())}
+		b := &valkeyBackend{addr: addr, prefix: fmt.Sprintf("t%d", time.Now().UnixNano())}
+		cl, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{addr}, DisableCache: true, ForceSingleClient: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cl.Close()
+		cl.Do(context.Background(), cl.B().Set().Key("hivenet:{"+b.prefix+"}:born").Value(old).Build())
+		return b
 	}
 	mr := miniredis.RunT(t)
+	mr.Set("hivenet:{pc}:born", old) //nolint:errcheck
 	return &valkeyBackend{addr: mr.Addr(), prefix: "pc", mr: mr}
 }
+
+// settle is the settle window of the test routers.
+const settle = 1500 * time.Millisecond
 
 // flush drops every key of the site, as a Valkey restart without persistence
 // or a FLUSHALL does.
@@ -257,7 +272,7 @@ func startOccRouter(t *testing.T, b *valkeyBackend, ag *agents, id, peer string)
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	px := newProxy(t, b.addr)
-	st, err := shared.New(shared.Config{Addrs: []string{px.ln.Addr().String()}, Prefix: b.prefix, RouterID: id, Interval: interval})
+	st, err := shared.New(shared.Config{Addrs: []string{px.ln.Addr().String()}, Prefix: b.prefix, RouterID: id, Interval: interval, SettleAfter: settle})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +628,51 @@ func TestFreshRouterAfterDataLossTakesNothing(t *testing.T) {
 	}
 }
 
+// A router the agents report but the store never lists (wrong password,
+// another site) holds the others to their share for the settle window, never
+// to nothing, and no longer counts after it.
+func TestUnknownRouterHoldsOthersToShareThenExpires(t *testing.T) {
+	b, ag := newBackend(t), newAgents()
+	rs := newOccFleet(t, b, ag, 2)
+	ag.set("a0", "peer-x", true) // connected to a router the store never sees
+	const budget, w = 1000, 100
+	waitFor(t, 3*time.Second, "the unknown router to be seen", func() bool { return rs[0].store.UnknownRouters() > 0 })
+	got := fill(rs[0], w, budget, 10)
+	if len(got) == 0 || len(got)*w > budget/3 {
+		t.Fatalf("r0 admitted %d with an unknown router: want its share (1..%d)", len(got), budget/3/w)
+	}
+	time.Sleep(settle + 3*interval)
+	got = append(got, fill(rs[0], w, budget, 10)...)
+	if len(got) < 9 {
+		t.Fatalf("r0 admitted %d after the settle window: the unknown router still holds it back", len(got))
+	}
+}
+
+// Valkey loses its data while r0, cut off from it, runs 900. r2 starts
+// after the loss and none of its agents is connected to r0, so nothing
+// tells it about r0: during the settle window it takes no new credits.
+func TestFreshRouterWithOtherAgentsAfterDataLoss(t *testing.T) {
+	b, ag := newBackend(t), newAgents()
+	rs := newOccFleet(t, b, ag, 2)
+	const budget, w = 1000, 100
+	a := fill(rs[0], w, budget, 9)
+	time.Sleep(3 * interval)
+	rs[0].proxy.setCut(true)
+	b.flush(t)
+	ag.set("a2", "peer-2", true) // r2's own agent, never connected to r0
+	c := startOccRouter(t, b, ag, "r2", "peer-2")
+	waitFor(t, 3*time.Second, "r2 up", func() bool { return c.store.DegradedEpoch() == 0 })
+	var got []*admission.Reservation
+	end := time.Now().Add(settle / 2)
+	for time.Now().Before(end) {
+		got = append(got, fill(c, w, budget, 10-len(got))...)
+		if site := (len(a) + len(got)) * w; site > budget {
+			t.Fatalf("site holds %d > budget %d", site, budget)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // A router that just started has no agent reports yet: it never takes the
 // credits of a silent router that may still be serving.
 func TestNewRouterDoesNotReclaimLiveRouter(t *testing.T) {
@@ -721,9 +781,15 @@ func TestNothingAdmittedAfterReleaseAll(t *testing.T) {
 }
 
 // With Sentinel, a grant waits for a replica to acknowledge it. Without any
-// replica the routers still admit, each within its share; with one, a router
-// may use the whole budget. Runs only against a real Sentinel
-// (HIVENET_TEST_SENTINEL_ADDR, master set HIVENET_TEST_SENTINEL_MASTER).
+// replica, or with a replica that does not acknowledge (paused), the routers
+// still admit, each within its share; with a replica that follows, a router
+// may use the whole budget. Runs only against a real Sentinel:
+//
+//	HIVENET_TEST_SENTINEL_ADDR=host:26379 HIVENET_TEST_SENTINEL_MASTER=name \
+//	  go test ./test/shared/ -run TestCreditsWithSentinel
+//
+// Run it once with the master alone, once with a replica, and once with the
+// replica paused (docker pause), to cover the three cases.
 func TestCreditsWithSentinel(t *testing.T) {
 	addr, master := os.Getenv("HIVENET_TEST_SENTINEL_ADDR"), os.Getenv("HIVENET_TEST_SENTINEL_MASTER")
 	if addr == "" || master == "" {

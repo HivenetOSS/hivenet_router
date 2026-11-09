@@ -2036,6 +2036,9 @@ func (r *Router) setupShared() error {
 		RouterID:       cfg.RouterID,
 		Interval:       cfg.SyncInterval,
 		MinRouters:     cfg.SyncMinRouters,
+		// A router cut off when the store lost its data reconnects within
+		// ten rounds, and its requests end within the request timeout.
+		SettleAfter: cfg.RequestTimeout + 10*cfg.SyncInterval + 5*time.Second,
 	})
 	if err != nil {
 		return fmt.Errorf("shared counters: %w", err)
