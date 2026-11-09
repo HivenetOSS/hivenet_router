@@ -217,6 +217,7 @@ type Config struct {
 	SyncSentinelMaster string
 	SyncValkeyPassword string
 	SyncValkeyTLS      bool
+	SyncValkeyTLSCA    string // PEM CA bundle for Valkey/Sentinel TLS; empty = system roots
 	SyncInterval       time.Duration
 	SyncMinRouters     int
 	RouterID           string
@@ -514,6 +515,7 @@ func LoadFromEnv() *Config {
 	cfg.SyncSentinelMaster = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER")
 	cfg.SyncValkeyPassword = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_PASSWORD")
 	cfg.RouterID = os.Getenv("HIVENET_ROUTER_ROUTER_ID")
+	cfg.SyncValkeyTLSCA = os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE")
 	if v := os.Getenv("HIVENET_ROUTER_SYNC_VALKEY_TLS"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {

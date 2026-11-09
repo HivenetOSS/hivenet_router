@@ -24,10 +24,13 @@ package shared
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,14 +69,20 @@ type Config struct {
 	Addrs          []string      // Valkey addresses, or Sentinel addresses with SentinelMaster
 	SentinelMaster string        // Sentinel master set name; empty for a direct connection
 	Password       string        // Valkey (and Sentinel) password; empty for none
-	TLS            bool          // connect with TLS (system roots)
+	TLS            bool          // connect with TLS
+	TLSCAFile      string        // PEM CA bundle to verify Valkey and Sentinel; empty for the system roots
 	Prefix         string        // key prefix, one per policloud (the site ID)
 	RouterID       string        // stable router identity, e.g. the pod name
 	PeerID         string        // this router's libp2p peer ID, so other routers can ask the agents about it
 	Interval       time.Duration // sync interval
 	DownAfter      time.Duration // unreachable this long → each router enforces its share
 	MinRouters     int           // routers assumed while the live count is unknown or Valkey is down
+
+	tlsRoots *x509.CertPool
 }
+
+// validSiteID keeps the site ID usable inside a key's hash tag.
+var validSiteID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // ErrNotConnected is returned by the calls made on a request's path when the
 // store has no working connection: they never connect or wait for one.
@@ -198,8 +207,18 @@ func New(cfg Config) (*Store, error) {
 	if cfg.RouterID == "" {
 		return nil, errors.New("shared counters need a router ID")
 	}
-	if strings.ContainsAny(cfg.Prefix, "{}") {
-		return nil, fmt.Errorf("shared counters: site ID %q must not contain braces", cfg.Prefix)
+	if cfg.Prefix != "" && !validSiteID.MatchString(cfg.Prefix) {
+		return nil, fmt.Errorf("shared counters: site ID %q must be 1-64 letters, digits, '.', '_' or '-'", cfg.Prefix)
+	}
+	if cfg.TLSCAFile != "" {
+		pem, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("shared counters: TLS CA file: %w", err)
+		}
+		cfg.tlsRoots = x509.NewCertPool()
+		if !cfg.tlsRoots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("shared counters: TLS CA file %q holds no PEM certificate", cfg.TLSCAFile)
+		}
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Second
@@ -414,7 +433,7 @@ func (s *Store) conn() (valkey.Client, error) {
 		Dialer:           net.Dialer{Timeout: s.cfg.Interval},
 	}
 	if s.cfg.TLS {
-		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: s.cfg.tlsRoots}
 	}
 	if s.cfg.SentinelMaster == "" {
 		// One Valkey without Sentinel: never guessed as a cluster.
@@ -473,31 +492,36 @@ func (s *Store) DailyTotal(ctx context.Context, bucket string) (int, string, err
 	if err != nil {
 		return 0, "", err
 	}
-	// The stream position is read first. Each router writes its totals
-	// before it adds the stream entry, so every entry up to that position is
-	// in the totals read next.
-	res := c.DoMulti(ctx,
-		c.B().Xrevrange().Key(s.key("usage")).End("+").Start("-").Count(1).Build(),
-		c.B().Hvals().Key(s.dailyKey(dayIndex(time.Now()), bucket)).Build())
-	mark := "0-0"
-	msgs, err := res[0].AsXRange()
+	// One script, so the stream position and the totals are read at the
+	// same instant: each router writes its totals before it adds the stream
+	// entry, so every entry up to that position is in the totals.
+	v, err := dailyTotal.Exec(ctx, c, []string{s.key("usage"), s.dailyKey(dayIndex(time.Now()), bucket)}, nil).ToArray()
+	if err != nil || len(v) != 2 {
+		if err == nil {
+			err = errShortReply
+		}
+		return 0, "", err
+	}
+	mark, err := v[0].ToString()
 	if err != nil {
 		return 0, "", err
 	}
-	if len(msgs) > 0 {
-		mark = msgs[0].ID
-	}
-	vals, err := res[1].AsStrSlice()
+	total, err := v[1].AsInt64()
 	if err != nil {
 		return 0, "", err
 	}
-	total := 0
-	for _, v := range vals {
-		n, _ := strconv.Atoi(v)
-		total += n
-	}
-	return total, mark, nil
+	return int(total), mark, nil
 }
+
+// dailyTotal returns the last stream entry and a daily bucket's total.
+// KEYS: usage stream, daily key.
+var dailyTotal = valkey.NewLuaScript(`
+local m = redis.call('XREVRANGE', KEYS[1], '+', '-', 'COUNT', 1)
+local mark = '0-0'
+if #m > 0 then mark = m[1][1] end
+local total = 0
+for _, v in ipairs(redis.call('HVALS', KEYS[2])) do total = total + tonumber(v) end
+return {mark, total}`)
 
 // Start runs the sync loop until ctx is done or Close is called. The first
 // tick replays the last minute of the usage stream, so a restarted router
@@ -507,17 +531,21 @@ func (s *Store) Start(ctx context.Context) {
 	s.done = make(chan struct{})
 	s.cursor = strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + "-0"
 	s.lastOK = time.Now()
+	// The first tick runs before the router serves (at most one interval),
+	// so daily-limited keys are not refused while a healthy Valkey has not
+	// been read yet.
+	s.tick(ctx)
 	go func() {
 		defer close(s.done)
 		t := time.NewTicker(s.cfg.Interval)
 		defer t.Stop()
 		for {
-			s.tick(ctx)
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
 			}
+			s.tick(ctx)
 		}
 	}()
 }
@@ -562,7 +590,9 @@ func (s *Store) tick(ctx context.Context) {
 		switch {
 		case db.day < today-1:
 			delete(s.own, db) // past yesterday: its key has expired or will
-		case full || s.dirty[db]:
+		case s.dirty[db] || (full && db.day == today):
+			// Yesterday is rewritten only if it changed, so its key keeps
+			// the expiry set on its last write.
 			totals[db] = n
 		}
 	}

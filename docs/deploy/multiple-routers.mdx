@@ -88,7 +88,7 @@ The store holds only recent usage and today's totals. Persistence is optional: a
 
 ## Configure the routers
 
-Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
+Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`; up to 64 letters, digits, `.`, `_` or `-`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
 
 ```bash
 hivenet-router \
@@ -107,6 +107,7 @@ hivenet-router \
 | `--sync-valkey-sentinel-master` | `HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER` | Empty | Sentinel master set name; empty connects to Valkey directly |
 | `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | Password for Valkey and Sentinel |
 | `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` | Connect with TLS |
+| `--sync-valkey-tls-ca-file` | `HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE` | Empty | PEM CA bundle that verifies Valkey and the Sentinels with TLS; empty uses the system roots |
 | `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` | Between `100ms` and `10s`. Shorter intervals make limits stricter between rounds and cost more round trips |
 | `--sync-min-routers` | `HIVENET_ROUTER_SYNC_MIN_ROUTERS` | `1` | Routers of the site assumed while the store is unreachable or before it first answers. Set it to the number of routers you run |
 | `--router-id` | `HIVENET_ROUTER_ROUTER_ID` | Hostname | Stable identity of this router |

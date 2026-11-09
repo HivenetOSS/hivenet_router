@@ -125,7 +125,7 @@ When `admit_budget_tokens` is `0`, the token budget is `floor(HIVENET_ROUTER_ADM
 
 With several routers sharing `--sync-store=valkey`, each router admits the effective token budget and request backstop divided by the number of live routers. See [Run several routers](/deploy/multiple-routers).
 
-Over-budget requests wait in the per-model wait queue, up to `--queue-depth` requests for up to the request timeout; requests beyond it park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. If no room frees, the router returns `429 concurrency_limit_exceeded`. A request larger than the whole token budget is admitted when nothing else of that model is in flight on this router. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
+Over-budget requests wait in the per-model wait queue, up to `--queue-depth` requests for up to half the request timeout; requests beyond it park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. If no room frees, the router returns `429 concurrency_limit_exceeded`. A request larger than the whole token budget is admitted when nothing else of that model is in flight on this router. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
 
 Benchmark-derived values are not loaded automatically from `router_limits.yaml`. Operators or provisioning tooling must copy the certified per-model values into the policy.
 

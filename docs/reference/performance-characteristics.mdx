@@ -323,7 +323,7 @@ The default depth is:
 30
 ```
 
-This queue is separate for every model. A queued request waits up to the request timeout (`--request-timeout`). Requests beyond the depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`. `hivenet_queue_depth` shows the requests waiting.
+This queue is separate for every model. A queued request waits up to half the request timeout (`--request-timeout`). Requests beyond the depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`. `hivenet_admission_queue_depth` shows the requests waiting.
 
 Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free slot between fallback steps. If that wait ends without a slot, the routing session advances to its next fallback step.
 
@@ -1083,6 +1083,7 @@ hivenet_agent_engine_waiting_requests
 hivenet_agent_engine_kv_cache_utilization
 hivenet_agent_engine_p90_ttft_seconds
 hivenet_agent_engine_p90_itl_seconds
+hivenet_admission_queue_depth
 hivenet_queue_depth
 hivenet_queue_wait_seconds
 hivenet_policy_fallback_routed_total
