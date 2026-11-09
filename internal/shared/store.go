@@ -369,14 +369,16 @@ return {mark, total}`)
 func (s *Store) Start(ctx context.Context) {
 	ctx, s.stop = context.WithCancel(ctx)
 	s.done = make(chan struct{})
-	s.cursor = strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + "-0"
+	s.cursor = "" // the first tick starts one minute back, by Valkey's clock
 	s.lastOK = time.Now()
-	// The first tick runs before the router serves (at most one interval),
-	// so daily-limited keys are not refused while a healthy Valkey has not
-	// been read yet.
-	s.tick(ctx)
+	// The router waits for the first tick, at most two intervals, so a
+	// healthy Valkey is read before daily-limited keys are admitted; an
+	// unreachable one does not hold startup longer than that.
+	first := make(chan struct{})
 	go func() {
 		defer close(s.done)
+		s.tick(ctx)
+		close(first)
 		t := time.NewTicker(s.cfg.Interval)
 		defer t.Stop()
 		for {
@@ -388,6 +390,10 @@ func (s *Store) Start(ctx context.Context) {
 			s.tick(ctx)
 		}
 	}()
+	select {
+	case <-first:
+	case <-time.After(2 * s.cfg.Interval):
+	}
 }
 
 // Close stops the sync loop, publishes the usage admitted since the last tick
@@ -448,6 +454,23 @@ func (s *Store) tick(ctx context.Context) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.Interval)
 	defer cancel()
 
+	// Stream IDs carry Valkey's clock: ages, trimming and the first read
+	// position are taken from it, never from this router's clock.
+	vt, err := c.Do(cctx, c.B().Time().Build()).AsStrSlice()
+	if err != nil || len(vt) != 2 {
+		if err == nil {
+			err = errShortReply
+		}
+		s.failTick(buf, err)
+		return
+	}
+	sec, _ := strconv.ParseInt(vt[0], 10, 64)
+	usec, _ := strconv.ParseInt(vt[1], 10, 64)
+	vNow, vAt := sec*1000+usec/1000, time.Now()
+	if s.cursor == "" {
+		s.cursor = strconv.FormatInt(vNow-time.Minute.Milliseconds(), 10) + "-0"
+	}
+
 	live, err := heartbeat.Exec(cctx, c, []string{s.key("routers")},
 		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10)}).AsStrSlice()
 	if err != nil {
@@ -455,8 +478,11 @@ func (s *Store) tick(ctx context.Context) {
 		return
 	}
 
-	// Daily totals first, then the stream entry: see DailyTotal.
-	var cmds valkey.Commands
+	// The newest entry first: after a failover the new primary may not have
+	// the entries this router read last, and then the read position moves
+	// back to what it has. Daily totals next, then the stream entry: see
+	// DailyTotal.
+	cmds := valkey.Commands{c.B().Xrevrange().Key(s.key("usage")).End("+").Start("-").Count(1).Build()}
 	for db, n := range totals {
 		k := s.dailyKey(db.day, db.bucket)
 		cmds = append(cmds,
@@ -470,7 +496,7 @@ func (s *Store) tick(ctx context.Context) {
 	}
 	payload, _ := json.Marshal(entries)
 	stream := s.key("usage")
-	minID := strconv.FormatInt(time.Now().Add(-2*time.Minute).UnixMilli(), 10)
+	minID := strconv.FormatInt(vNow-(2*time.Minute).Milliseconds(), 10)
 	cmds = append(cmds,
 		c.B().Xadd().Key(stream).Minid().Almost().Threshold(minID).Id("*").
 			FieldValue().FieldValue("r", s.inc).FieldValue("u", string(payload)).Build(),
@@ -489,6 +515,12 @@ func (s *Store) tick(ctx context.Context) {
 	if err != nil {
 		s.failTick(nil, err) // usage is published; only the read failed
 		return
+	}
+	if newest, err := res[0].AsXRange(); err == nil && len(newest) > 0 && streamBefore(newest[0].ID, s.cursor) {
+		// Entries past the newest one were lost (a failover); new ones
+		// will follow it.
+		log.Infof("shared counters: the usage stream is behind this router's read position (failover?); reading from %s", newest[0].ID)
+		s.cursor = newest[0].ID
 	}
 
 	switch {
@@ -514,7 +546,7 @@ func (s *Store) tick(ctx context.Context) {
 	s.fleet.Store(int32(n))
 	s.m.peers.Set(float64(n - 1))
 
-	now := time.Now()
+	now := vNow + time.Since(vAt).Milliseconds() // Valkey's clock, now
 	for _, msg := range msgs {
 		s.cursor = msg.ID
 		if msg.FieldValues["r"] == s.inc {
@@ -524,7 +556,7 @@ func (s *Store) tick(ctx context.Context) {
 		if json.Unmarshal([]byte(msg.FieldValues["u"]), &es) != nil {
 			continue
 		}
-		lag := now.Sub(time.UnixMilli(streamMillis(msg.ID)))
+		lag := time.Duration(now-streamMillis(msg.ID)) * time.Millisecond
 		s.m.lag.Set(lag.Seconds())
 		for _, e := range es {
 			if len(e.K) != 1 || e.N <= 0 {
@@ -574,6 +606,23 @@ func (s *Store) failTick(buf map[usageKey]*usageVal, err error) {
 		log.Infof("shared counters: Valkey unreachable for %v; reconnecting from the configured addresses",
 			time.Since(s.lastOK).Round(time.Second))
 	}
+}
+
+// streamBefore reports whether stream ID a is before b.
+func streamBefore(a, b string) bool {
+	am, bm := streamMillis(a), streamMillis(b)
+	if am != bm {
+		return am < bm
+	}
+	return streamSeq(a) < streamSeq(b)
+}
+
+func streamSeq(id string) int64 {
+	if i := strings.IndexByte(id, '-'); i > 0 {
+		n, _ := strconv.ParseInt(id[i+1:], 10, 64)
+		return n
+	}
+	return 0
 }
 
 func streamMillis(id string) int64 {
