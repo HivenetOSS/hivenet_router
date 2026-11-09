@@ -305,11 +305,17 @@ func parsePrometheusTextFull(r io.Reader) (
 // the KV-cache size in tokens derived from vllm:cache_config_info.
 const kvCapacityScalar = "vllm:kv_capacity_tokens"
 
-// kvCapacityFromLabels returns num_gpu_blocks × block_size from the label set
-// of vllm:cache_config_info, matching label names exactly (hybrid models also
-// carry other *_block_size labels).
+// kvCapacityFromLabels returns the KV-cache size in tokens from the label set
+// of vllm:cache_config_info. Recent vLLM reports it as kv_cache_size_tokens;
+// for hybrid models (attention + mamba) that is the attention KV only, well
+// below num_gpu_blocks × block_size, whose blocks also hold mamba state.
+// Older vLLM lacks it: then num_gpu_blocks × block_size, matching label names
+// exactly (hybrid models also carry other *_block_size labels).
 func kvCapacityFromLabels(labelSet string) (float64, bool) {
 	labels := parseLabels(labelSet)
+	if t, err := strconv.ParseFloat(labels["kv_cache_size_tokens"], 64); err == nil && t > 0 {
+		return t, true
+	}
 	blocks, err1 := strconv.ParseFloat(labels["num_gpu_blocks"], 64)
 	size, err2 := strconv.ParseFloat(labels["block_size"], 64)
 	if err1 != nil || err2 != nil || blocks <= 0 || size <= 0 {
