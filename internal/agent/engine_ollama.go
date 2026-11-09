@@ -83,3 +83,9 @@ func (e *OllamaEngine) ForwardChat(ctx context.Context, baseURL string, httpClie
 	}
 	return forwardOpenAIChatCompletion(ctx, baseURL, httpClient, model, req.RawBytes, e.Name(), options...)
 }
+
+// Warm loads the model: Ollama starts with no model in memory and loads it
+// on its first request, which can take a minute or more.
+func (e *OllamaEngine) Warm(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
+	return warmChat(ctx, baseURL, httpClient, model)
+}

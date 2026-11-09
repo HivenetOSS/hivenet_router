@@ -328,8 +328,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// fallback step that had capacity). The slot is already acquired; release
 		// it cleanly before returning so the next waiter can use it immediately.
 		if pending.IsExpired() {
-			agent.DecrementLoad()
-			p.executor.SignalCapacity(agent.Metadata.Model)
+			p.slotRelease(agent)()
 			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
 			pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out waiting for an available agent", domain.SourceRouter)
 			return
@@ -357,9 +356,10 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 			stepName, shortID(agent.ID), session.StepStrategy(),
 			session.StepTries()+1, session.StepMaxTries())
 
+		// forwardToAgent releases the slot and wakes one waiter when the slot is
+		// actually free: on return for errors and non-streaming responses, at
+		// the end of the stream for streaming ones.
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
-		// DecrementLoad was called inside forwardToAgent on all paths — wake one waiter.
-		p.executor.SignalCapacity(agent.Metadata.Model)
 
 		if fwdErr == nil {
 			if stepName == "routing_policy" {
@@ -459,6 +459,21 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 	}
 }
 
+// slotRelease returns the function that frees agent's in-flight slot. It runs
+// at most once, and it wakes one request waiting for capacity on the agent's
+// model, so a waiter is only woken when the slot is really free.
+func (p *RequestProcessor) slotRelease(agent *domain.Agent) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			agent.DecrementLoad()
+			if p.executor != nil {
+				p.executor.SignalCapacity(agent.Metadata.Model)
+			}
+		})
+	}
+}
+
 // forwardToAgent forwards a request to an agent via libp2p HTTP and returns the response
 // along with the measured RTT in milliseconds.
 //
@@ -470,8 +485,9 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 // via a sync.Once: by the deferred release on error paths, explicitly before
 // RecordSuccess on the non-streaming success path, and by drainStream when a
 // streamed response fully drains (the slot must cover the whole generation so
-// least-loaded sees the agent's real concurrent load). The caller must NEVER
-// call DecrementLoad.
+// least-loaded sees the agent's real concurrent load). The same release wakes
+// one request waiting for capacity on the model, so a waiter is only woken
+// once the slot is really free. The caller must NEVER call DecrementLoad.
 //
 // NamespacedClient fetches the agent's /.well-known/libp2p document, resolves the path
 // prefix for inferenceProtocolID, and prepends it to every outbound request URL — so
@@ -483,9 +499,8 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// on completion. Streaming success sets releaseOnReturn = false and hands
 	// the release to the drainStream goroutine (see below), so the slot stays
 	// held for the whole generation instead of just the TTFT window.
-	var once sync.Once
 	releaseOnReturn := true
-	decrement := func() { once.Do(agent.DecrementLoad) }
+	decrement := p.slotRelease(agent)
 	defer func() {
 		if releaseOnReturn {
 			decrement()
@@ -560,11 +575,14 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
 		}
-		// Forward original client headers (e.g. Authorization, custom headers) then
-		// enforce Content-Type and inject W3C trace context, same as the LLM path.
+		// Forward the headers the handler set (only X-Request-ID: client headers
+		// are not forwarded on this path), then enforce Content-Type and inject
+		// W3C trace context, same as the LLM path. A copy, so one attempt's
+		// headers never leak into the next or into the pending request.
 		if pending.Request.HttpHeaders != nil {
-			req.Header = pending.Request.HttpHeaders
+			req.Header = pending.Request.HttpHeaders.Clone()
 		}
+		req.Header.Set("X-Request-ID", pending.ForwardID())
 		req.Header.Set("Content-Type", "application/json")
 		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
@@ -629,9 +647,12 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
 	// apply original request headers (including any custom headers added by the openAI client library) so they are forwarded to the backend engine.
+	// A copy, so one attempt's headers never leak into the next or into the pending request.
 	if pending.Request.HttpHeaders != nil {
-		req.Header = pending.Request.HttpHeaders
+		req.Header = pending.Request.HttpHeaders.Clone()
 	}
+	// Each attempt its own backend request ID: see ForwardID.
+	req.Header.Set("X-Request-ID", pending.ForwardID())
 
 	// Inject W3C trace context headers so the agent can create child spans.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))

@@ -6,6 +6,7 @@ package domain
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,7 @@ import (
 // PendingRequest represents a queued request waiting for processing
 type PendingRequest struct {
 	ID       string
+	attempts atomic.Int32 // forward attempts so far: see ForwardID
 	Request  *ChatRequest
 	Response chan *ChatResponse
 	Error    chan error
@@ -149,4 +151,18 @@ func CopyHttpHeaders(dst, src http.Header) {
 func IsStreamingResponse(headers http.Header) bool {
 	// OpenAI and vLLM both use "text/event-stream" for streaming responses.
 	return strings.Contains(headers.Get("Content-Type"), "text/event-stream")
+}
+
+// ForwardID returns the request ID to send to the backend for the next
+// forward attempt: the request ID for the first one, then the request ID
+// with "-2", "-3", ... A backend such as vLLM uses the header as its own
+// request ID and may still be running an earlier attempt (a same-agent
+// retry after a dropped stream), so each attempt gets its own ID; the
+// prefix keeps every attempt findable by the request ID.
+func (p *PendingRequest) ForwardID() string {
+	n := p.attempts.Add(1)
+	if n == 1 {
+		return p.ID
+	}
+	return p.ID + "-" + strconv.Itoa(int(n))
 }

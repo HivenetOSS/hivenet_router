@@ -227,7 +227,7 @@ The model ID returned here is the value clients must use when sending requests t
   </Tab>
 </Tabs>
 
-The agent waits for SGLang to become healthy and expose a model before registering with the router. If SGLang is still loading, the agent continues polling rather than exiting permanently.
+The agent waits for SGLang to become healthy and expose a model before registering with the router. If SGLang is still loading, the agent continues polling rather than exiting permanently. For a chat model (`--capability llm`), it then sends one chat completion with `max_tokens: 1` and registers only once it succeeds: SGLang compiles kernels on its first request, so this keeps that delay off the first client request.
 
 ## Understand the agent settings
 

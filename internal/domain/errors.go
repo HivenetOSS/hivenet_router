@@ -29,6 +29,10 @@ const (
 	// ErrCodeModelRedirected is the body of a 307 to a sibling site
 	// (internal/redirect); clients that follow redirects never see it.
 	ErrCodeModelRedirected ErrorCode = "model_redirected"
+	// ErrCodeModelWaking: the model is scaled to zero here and is waking, but
+	// it did not wake within the hold budget, or too many requests already
+	// wait for it. RouterError.RetryAfter says when to retry.
+	ErrCodeModelWaking ErrorCode = "model_waking"
 )
 
 // ErrorSource identifies which layer produced the error.
@@ -51,6 +55,9 @@ type RouterError struct {
 	Code    ErrorCode   `json:"code"`
 	Message string      `json:"message"`
 	Source  ErrorSource `json:"source"`
+	// RetryAfter, in seconds, is set on errors the client should retry later
+	// (model_waking); it repeats the Retry-After header in the body.
+	RetryAfter int `json:"retry_after,omitempty"`
 
 	// Audit metadata — not sent to clients.
 	Usage   *Usage `json:"-"`
@@ -87,7 +94,7 @@ func HTTPStatusFor(code ErrorCode) int {
 	case ErrCodeModelNotFound:
 		return http.StatusNotFound
 	case ErrCodeNoAgentsAvailable, ErrCodeNoCapacity, ErrCodeAgentDisconnected,
-		ErrCodeBackendUnavailable, ErrCodeQueueFull:
+		ErrCodeBackendUnavailable, ErrCodeQueueFull, ErrCodeModelWaking:
 		return http.StatusServiceUnavailable
 	case ErrCodeBackendError:
 		return http.StatusBadGateway

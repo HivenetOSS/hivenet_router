@@ -96,6 +96,11 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 		}},
 		{"hint without hints_expire_at", func(d *redirect.MapDoc) { d.Placements[0].Hint = &redirect.Hint{Load: "ok"} }},
 		{"unparsable hints_expire_at", func(d *redirect.MapDoc) { d.HintsExpireAt = "soon" }},
+		{"unparsable hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "4 minutes" }},
+		{"hold_budget without a unit", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "240" }},
+		{"zero hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "0s" }},
+		{"negative hold_budget", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "-1m" }},
+		{"hold_budget over the maximum", func(d *redirect.MapDoc) { d.Placements[0].HoldBudget = "61m" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,13 +336,13 @@ func TestTarget_Hints(t *testing.T) {
 }
 
 // TestTarget_WakeHereBeforeColdSibling: while the hints are fresh, no
-// redirect when every candidate is cold and the model is placed here (it is
-// woken here instead); otherwise the cold sibling is still used.
+// redirect when every candidate is cold and the model may be woken here (it
+// is held and woken here instead); otherwise the cold sibling is still used.
 func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	const key, session = "key-1", "s"
 	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
 	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
-	build := func(hereKind string, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
+	build := func(hereKind string, hereWakes *bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
 			Schema: 2, Version: u64(1), Region: "eu",
 			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
@@ -348,7 +353,7 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 			HintsExpireAt: expire.UTC().Format(time.RFC3339),
 		}
 		if hereKind != "" {
-			d.Placements = append(d.Placements, place("m", hereKind, "self", yes, cold))
+			d.Placements = append(d.Placements, place("m", hereKind, "self", hereWakes, cold))
 		}
 		m := redirect.NewMap(domains)
 		if err := m.Replace(d); err != nil {
@@ -357,27 +362,73 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 		return m
 	}
 	cases := []struct {
-		name     string
-		hereKind string // kind of the model's placement here ("" = none)
-		ha, hb   *redirect.Hint
-		expire   time.Time
-		redirect bool
+		name      string
+		hereKind  string // kind of the model's placement here ("" = none)
+		hereWakes *bool  // its scale_from_zero
+		ha, hb    *redirect.Hint
+		expire    time.Time
+		redirect  bool
 	}{
-		{"all cold, placed here: wake here", redirect.KindChat, cold, cold, fresh, false},
-		{"all cold, not placed here: cold sibling", "", cold, cold, fresh, true},
-		{"all cold, placed here as another kind: cold sibling", redirect.KindEmbedding, cold, cold, fresh, true},
-		{"one warm sibling: redirect", redirect.KindChat, cold, warm, fresh, true},
-		{"no hint means warm: redirect", redirect.KindChat, cold, nil, fresh, true},
-		{"hints expired: redirect", redirect.KindChat, cold, cold, stale, true},
+		{"all cold, wakeable here: wake here", redirect.KindChat, yes, cold, cold, fresh, false},
+		{"all cold, not placed here: cold sibling", "", yes, cold, cold, fresh, true},
+		{"all cold, placed here as another kind: cold sibling", redirect.KindEmbedding, yes, cold, cold, fresh, true},
+		// Not held here, so the request must go where it can wake.
+		{"all cold, placed here without scale_from_zero: cold sibling", redirect.KindChat, no, cold, cold, fresh, true},
+		{"one warm sibling: redirect", redirect.KindChat, yes, cold, warm, fresh, true},
+		{"no hint means warm: redirect", redirect.KindChat, yes, cold, nil, fresh, true},
+		{"hints expired: redirect", redirect.KindChat, yes, cold, cold, stale, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := target(t, build(tc.hereKind, tc.ha, tc.hb, tc.expire),
+			got := target(t, build(tc.hereKind, tc.hereWakes, tc.ha, tc.hb, tc.expire),
 				redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "self", From: "self", KeyID: key, Session: session})
 			if (got != "") != tc.redirect {
 				t.Fatalf("target %q, want a redirect: %v", got, tc.redirect)
 			}
 		})
+	}
+}
+
+// TestWakeable: which requests a policloud may hold while a model wakes,
+// and with which budget.
+func TestWakeable(t *testing.T) {
+	d := doc(1)
+	d.Placements[0].HoldBudget = "4m"                                                   // m on fr-2
+	d.Placements = append(d.Placements, place("n", redirect.KindChat, "fr-2", no, nil)) // never wakes from zero
+	m := redirect.NewMap(domains)
+	if err := m.Replace(d); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		model, kind, policloud string
+		budget                 time.Duration
+		ok                     bool
+	}{
+		{"m", redirect.KindChat, "fr-2", 4 * time.Minute, true},
+		{"m", redirect.KindChat, "de-1", 0, true}, // no hold_budget: the router's default applies
+		{"m", redirect.KindEmbedding, "fr-2", 0, false},
+		{"m", redirect.KindChat, "fr-1", 0, false}, // not placed there
+		{"n", redirect.KindChat, "fr-2", 0, false}, // scale_from_zero: false
+		{"unknown", redirect.KindChat, "fr-2", 0, false},
+	}
+	for _, tc := range cases {
+		budget, ok := m.Wakeable(tc.model, tc.kind, tc.policloud)
+		if budget != tc.budget || ok != tc.ok {
+			t.Errorf("Wakeable(%s, %s, %s) = %v, %v; want %v, %v", tc.model, tc.kind, tc.policloud, budget, ok, tc.budget, tc.ok)
+		}
+	}
+	if got := m.WakeableModels("fr-2"); len(got) != 1 || got[0] != "m" {
+		t.Errorf("WakeableModels(fr-2) = %v, want [m]", got)
+	}
+	if got := m.WakeableModels("de-1"); len(got) != 2 || got[0] != "e" || got[1] != "m" {
+		t.Errorf("WakeableModels(de-1) = %v, want [e m]", got)
+	}
+	if got := m.WakeableModels("fr-1"); len(got) != 0 {
+		t.Errorf("WakeableModels(fr-1) = %v, want none", got)
+	}
+	// The budget is kept as pushed in the map's snapshot.
+	if hb := m.Snapshot().Placements[0].HoldBudget; hb != "4m" {
+		t.Errorf("snapshot hold_budget %q, want 4m", hb)
 	}
 }
 
@@ -457,7 +508,7 @@ func signer(t *testing.T, ttl time.Duration, secrets ...redirect.Secret) *redire
 func TestSigner(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	s := signer(t, 60*time.Second, secretA)
-	claims := redirect.Claims{KeyID: "k-1", RequestID: "r-1", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "ab"}
+	claims := redirect.Claims{KeyID: "k-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000001", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "ab"}
 	tok := s.Sign(claims, now)
 	if !strings.HasPrefix(tok, "v2.k1.") || strings.Count(tok, ".") != 3 {
 		t.Fatalf("token %q is not v2.<kid>.<claims>.<sig>", tok)
@@ -652,7 +703,7 @@ func request(token, bearer string) *http.Request {
 func TestTokenAuth(t *testing.T) {
 	now := time.Now()
 	past := now.Add(-time.Hour)
-	valid := redirect.Claims{KeyID: "key-1", RequestID: "rid-1", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "bh"}
+	valid := redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000002", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1, BodySHA: "bh"}
 	sign := func(mod func(*redirect.Claims)) string {
 		c := valid
 		if mod != nil {
@@ -696,6 +747,9 @@ func TestTokenAuth(t *testing.T) {
 		{"EU scope at an EU policloud", request(sign(func(c *redirect.Claims) { c.Scope = "EU" }), ""), registry(t, true, nil), &recorder{}, false, true, "key-1", ""},
 		{"malformed scope", request(sign(func(c *redirect.Claims) { c.Scope = "world" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
 		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.RequestID = "evil'; DROP--" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"request ID with a line break", request(sign(func(c *redirect.Claims) { c.RequestID = "0190f3a2-7c4e-7b1a-9f3d-000000000002\nfake=1" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
+		{"client request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.ClientRequestID = "evil\nfake=1" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"no jti", request(rawToken(secretA, noJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"short jti", request(rawToken(secretA, shortJTI), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"expired token", request(signer(t, time.Second, secretA).Sign(valid, now.Add(-time.Minute)), ""), registry(t, true, nil), &recorder{}, true, false, "", "expired"},
@@ -731,13 +785,33 @@ func TestTokenAuth(t *testing.T) {
 				t.Fatalf("redirect info %+v, want present=%v", res.Redirect, tc.wantRedirect)
 			}
 			if res.Redirect != nil {
-				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "rid-1", Model: "m", Scope: res.Redirect.Scope, From: "fr-1",
+				want := auth.RedirectInfo{Hop: 1, BodySHA: "bh", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000002", Model: "m", Scope: res.Redirect.Scope, From: "fr-1",
 					TokenID: res.Redirect.TokenID, Exp: now.Add(time.Minute).Unix()}
 				if *res.Redirect != want || !redirect.ValidJTI(want.TokenID) {
 					t.Errorf("redirect info %+v, want %+v", *res.Redirect, want)
 				}
 			}
 		})
+	}
+}
+
+// TestTokenAuth_NormalizesIDs: a token whose request IDs are UUIDs in another
+// spelling (uppercase, urn:uuid:) is accepted, and the IDs are passed on in
+// canonical form.
+func TestTokenAuth_NormalizesIDs(t *testing.T) {
+	var rejects []string
+	rd := newRedirector(t, &rejects)
+	keys := registry(t, true, nil)
+	p := redirect.Wrap(rd, keys, keys)
+	const rid, crid = "0190f3a2-7c4e-7b1a-9f3d-000000000002", "6f1d3a52-0c4b-4d2e-9a8f-2b7c5e1d9a00"
+	claims := redirect.Claims{KeyID: "key-1", RequestID: strings.ToUpper(rid), ClientRequestID: "urn:uuid:" + crid,
+		Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
+	res, err := p.Authenticate(request(rd.Signer.Sign(claims, time.Now()), ""))
+	if err != nil || res.Redirect == nil {
+		t.Fatalf("token with non-canonical IDs refused: err %v, rejects %v", err, rejects)
+	}
+	if res.Redirect.RequestID != rid || res.Redirect.ClientRequestID != crid {
+		t.Errorf("IDs passed on as %q / %q, want %q / %q", res.Redirect.RequestID, res.Redirect.ClientRequestID, rid, crid)
 	}
 }
 
@@ -749,7 +823,7 @@ func TestTokenAuth_SingleUseIsLast(t *testing.T) {
 	rd := newRedirector(t, &rejects)
 	keys := registry(t, true, nil)
 	p := redirect.Wrap(rd, keys, keys)
-	claims := redirect.Claims{KeyID: "key-1", RequestID: "rid-9", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
+	claims := redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000009", Model: "m", Scope: "all", From: "fr-1", Site: "de-1", Path: "/v1/chat/completions", Hop: 1}
 	now := time.Now()
 	tok, sameRID := rd.Signer.Sign(claims, now), rd.Signer.Sign(claims, now)
 
@@ -780,7 +854,7 @@ func TestTokenAuth_ScopeNeedsOwnCountry(t *testing.T) {
 	rd := newRedirector(t, &rejects)
 	rd.Self = "xx-1" // not in the map
 	keys := registry(t, true, nil)
-	tok := rd.Signer.Sign(redirect.Claims{KeyID: "key-1", RequestID: "r", Scope: "EU", Site: "xx-1", Path: "/v1/chat/completions", Hop: 1}, time.Now())
+	tok := rd.Signer.Sign(redirect.Claims{KeyID: "key-1", RequestID: "0190f3a2-7c4e-7b1a-9f3d-000000000003", Scope: "EU", Site: "xx-1", Path: "/v1/chat/completions", Hop: 1}, time.Now())
 	if _, err := redirect.Wrap(rd, keys, keys).Authenticate(request(tok, "")); err == nil || strings.Join(rejects, ",") != "scope" {
 		t.Fatalf("got %v %v, want a 401 for scope", err, rejects)
 	}
