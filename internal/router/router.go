@@ -505,7 +505,9 @@ func New(cfg *config.Config) (*Router, error) {
 	}
 	// Over-budget requests wait in a per-model queue (--queue-depth) for room,
 	// up to the request timeout, before a 429.
-	r.occupancy.SetQueue(cfg.QueueDepth, cfg.RequestTimeout, routerMetrics.QueueDepthUpdated)
+	// Half the request timeout at most, so an admitted request keeps at least
+	// the other half to run instead of a 504 right after a long wait.
+	r.occupancy.SetQueue(cfg.QueueDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck
 		return nil, err

@@ -1077,11 +1077,12 @@ Registered only when `--semantic-decision-log` is set. Dropped records were not 
 
 ## Queue metrics
 
-`hivenet_queue_depth` counts the requests waiting in the per-model wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--queue-depth`. It also counts requests waiting for a declared capacity slot (agents with a declared capacity only). `hivenet_queue_wait_seconds` records only the declared-capacity wait. These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
+`hivenet_admission_queue_depth` counts the requests waiting in the per-model wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--queue-depth`. `hivenet_queue_depth` and `hivenet_queue_wait_seconds` count the requests waiting for a declared capacity slot (agents with a declared capacity only). These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
 
 ### Current queue depth
 
 ```promql
+hivenet_admission_queue_depth
 hivenet_queue_depth
 ```
 

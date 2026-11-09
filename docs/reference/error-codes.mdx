@@ -614,7 +614,7 @@ Retry-After: 1
 
 This response is used when either:
 
-- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available while it waited: up to the request timeout in the per-model wait queue (`--queue-depth`), or up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` when that queue is full or disabled; or
+- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available while it waited: up to half the request timeout in the per-model wait queue (`--queue-depth`), or up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` when that queue is full or disabled; or
 - aggregate healthy-pool engine pressure breached a configured `shed_if` threshold before queueing.
 
 ```json
