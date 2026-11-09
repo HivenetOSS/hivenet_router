@@ -168,16 +168,21 @@ type Config struct {
 	//   SyncValkeyPassword  password for Valkey and Sentinel (flag: file)
 	//   SyncValkeyTLS       connect with TLS
 	//   SyncInterval        how often usage is published and read (default 1s)
+	//   SyncMinRouters      routers assumed while the store is unreachable or
+	//                       before it first answers (default 1; set it to the
+	//                       number of routers of the site)
 	//   RouterID            stable identity of this router (default: hostname)
 	// Env: HIVENET_ROUTER_SYNC_STORE, HIVENET_ROUTER_SYNC_VALKEY_ADDRS,
 	// HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER, HIVENET_ROUTER_SYNC_VALKEY_PASSWORD,
-	// HIVENET_ROUTER_SYNC_VALKEY_TLS, HIVENET_ROUTER_SYNC_INTERVAL, HIVENET_ROUTER_ROUTER_ID
+	// HIVENET_ROUTER_SYNC_VALKEY_TLS, HIVENET_ROUTER_SYNC_INTERVAL, HIVENET_ROUTER_SYNC_MIN_ROUTERS,
+	// HIVENET_ROUTER_ROUTER_ID
 	SyncStore          string
 	SyncValkeyAddrs    string
 	SyncSentinelMaster string
 	SyncValkeyPassword string
 	SyncValkeyTLS      bool
 	SyncInterval       time.Duration
+	SyncMinRouters     int
 	RouterID           string
 
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
@@ -426,6 +431,14 @@ func LoadFromEnv() *Config {
 			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_INTERVAL=%q: %w", v, err))
 		} else {
 			cfg.SyncInterval = d
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_SYNC_MIN_ROUTERS=%q: must be a positive integer", v))
+		} else {
+			cfg.SyncMinRouters = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_KEY_STORE"); v != "" {
