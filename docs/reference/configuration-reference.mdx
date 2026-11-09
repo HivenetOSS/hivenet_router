@@ -382,7 +382,7 @@ Use a positive value.
 
 ### Per-model wait queue
 
-`--queue-depth` controls how many requests per model can wait for room in the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2). A queued request waits up to the request timeout (`--request-timeout`). Requests beyond the depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` and then get `429 concurrency_limit_exceeded`.
+`--queue-depth` controls how many requests per model can wait for room in the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2). A queued request waits up to the request timeout (`--request-timeout`), and the wait counts toward that timeout. Requests beyond the depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` and then get `429 concurrency_limit_exceeded`.
 
 ```bash
 --queue-depth 0
@@ -602,7 +602,7 @@ These settings do not have equivalent router command-line flags.
 | `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of the occupancy budget (`admit_budget_tokens`, or the engines' reported KV capacity when unset) available for admission; valid range `(0, 1]` |
 | `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` | Maximum time an over-budget request outside the `--queue-depth` wait queue waits for occupancy to free; `0` rejects it immediately |
 | `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV` | `true` | When a policy sets no `admit_budget_tokens`, take the occupancy budget from the KV-cache size the engines report (vLLM, SGLang); `false` applies the budget only when the policy sets it |
-| `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` | `8` | Requests in flight per healthy replica for a model with no occupancy bound (no `admit_budget_tokens`, no `max_inflight`, no engine KV-cache size); `0` disables it |
+| `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` | `8` | Requests in flight per healthy replica for a model with no occupancy bound (no `admit_budget_tokens`, no `max_inflight`, no engine KV-cache size) served by agents; a model served only by a provider is not limited. `0` disables it |
 | `HIVENET_ROUTER_RPM_BURST_SECONDS` | `0` | RPM bucket burst window in seconds; `0` keeps a full minute of burst capacity, valid range `[0, 60)` |
 | `HIVENET_ROUTER_ALLOW_INSECURE_ADMIN` | `false` | Set to `true` to permit unauthenticated `/admin/*` endpoints when administrator mode is `none`; development and testing only |
 
@@ -691,7 +691,7 @@ to disable it. A reverse proxy may enforce a smaller limit before the request re
 
 `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV` defaults to `true`. When a model's policy sets no `admit_budget_tokens`, the occupancy budget is the KV-cache size the engines report (vLLM, SGLang) × `HIVENET_ROUTER_ADMIT_FRACTION`. Set it to `false` to apply the budget only when the policy sets `admit_budget_tokens`.
 
-`HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` defaults to `8`. A model whose policy sets neither `admit_budget_tokens` nor `max_inflight`, and whose engines report no KV-cache size (Ollama, llama.cpp, custom engines, or `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false`), is limited to this many requests in flight per healthy replica. `0` disables the limit.
+`HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` defaults to `8`. A model whose policy sets neither `admit_budget_tokens` nor `max_inflight`, and whose engines report no KV-cache size (Ollama, llama.cpp, custom engines, or `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false`), is limited to this many requests in flight per healthy replica. A model with no healthy agent, such as one served only by a provider, is not limited. `0` disables the limit.
 
 `HIVENET_ROUTER_RPM_BURST_SECONDS` changes the burst capacity of both flat and per-model RPM buckets. With a value from `1` through `59`, burst capacity is `floor(effective RPM × seconds / 60)`, with a minimum of `1`. The default `0` preserves the legacy full-minute burst. Invalid values and values outside `[0, 60)` leave that default unchanged.
 

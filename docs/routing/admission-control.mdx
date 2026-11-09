@@ -165,6 +165,8 @@ When a request does not fit, it waits in the model's wait queue:
 | Up to `--queue-depth` per model (default `30`) | Until room frees, up to the request timeout (`--request-timeout`) |
 | Beyond `--queue-depth` | Up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) |
 
+The wait counts toward the request timeout: a request that waited 20 s has 40 s left with the default `60s`.
+
 `--queue-depth 0` disables the queue, so every request that does not fit waits only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. With that timeout at `0`, a request outside the queue is rejected at once. The `hivenet_queue_depth` gauge shows the requests waiting in this queue.
 
 If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-After: 1`, and uses `concurrency_limit_exceeded`:

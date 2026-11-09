@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -42,12 +43,20 @@ const stubModel = "stub-model"
 // freePort asks the kernel for an unused TCP port on 127.0.0.1.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
+	// Below the ephemeral range (32768 and up on Linux): a port taken from
+	// that range can be handed to an outgoing connection before the router
+	// binds it.
+	for i := 0; i < 200; i++ {
+		port := 20000 + rand.IntN(12000)
+		l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			continue
+		}
+		l.Close() //nolint:errcheck
+		return port
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("freePort: no free port")
+	return 0
 }
 
 // startStubBackend serves an OpenAI-compatible chat endpoint. Non-streaming
