@@ -1276,6 +1276,8 @@ func (a *Agent) cancelFrom(router peer.ID) {
 		delete(rr.cancels, id)
 	}
 	rr.mu.Unlock()
+	// Requests still ending hold rr; a router that comes back starts afresh.
+	a.inFlightBy.Delete(router)
 	if n > 0 {
 		log.Warnf("Router %s lost: stopped %d request(s) in flight from it", router, n)
 	}

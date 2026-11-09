@@ -1830,12 +1830,14 @@ func (r *Router) agentJoined() {
 	}
 }
 
-// servedAgents lists the healthy agents connected to this router, published
-// with its heartbeat so the other routers know which agents to ask about it.
+// servedAgents lists the agents connected to this router, published with its
+// heartbeat so the other routers know which agents to ask about it. An agent
+// whose backend is unhealthy is listed too: it may still be running this
+// router's requests.
 func (r *Router) servedAgents() []string {
 	var ids []string
 	for _, a := range r.agents.List() {
-		if a.IsHealthy() && r.peerConnected(a.ID) {
+		if r.peerConnected(a.ID) {
 			ids = append(ids, a.ID.String())
 		}
 	}

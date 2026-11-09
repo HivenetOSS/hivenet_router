@@ -719,3 +719,47 @@ func TestNothingAdmittedAfterReleaseAll(t *testing.T) {
 		t.Fatal("admitted after ReleaseAll")
 	}
 }
+
+// With Sentinel, a grant waits for a replica to acknowledge it. Without any
+// replica the routers still admit, each within its share; with one, a router
+// may use the whole budget. Runs only against a real Sentinel
+// (HIVENET_TEST_SENTINEL_ADDR, master set HIVENET_TEST_SENTINEL_MASTER).
+func TestCreditsWithSentinel(t *testing.T) {
+	addr, master := os.Getenv("HIVENET_TEST_SENTINEL_ADDR"), os.Getenv("HIVENET_TEST_SENTINEL_MASTER")
+	if addr == "" || master == "" {
+		t.Skip("needs HIVENET_TEST_SENTINEL_ADDR and HIVENET_TEST_SENTINEL_MASTER")
+	}
+	prefix := fmt.Sprintf("s%d", time.Now().UnixNano())
+	var rs []*occRouter
+	for _, id := range []string{"r0", "r1"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		st, err := shared.New(shared.Config{Addrs: []string{addr}, SentinelMaster: master, Prefix: prefix, RouterID: id, Interval: interval})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.SetPeerID("peer-" + id)
+		cr := st.NewCredits("occ", nil)
+		c := admission.NewController(1, 300*time.Millisecond)
+		c.SetPool(cr)
+		st.Start(ctx)
+		cr.Start(ctx)
+		t.Cleanup(func() { cancel(); st.Close() })
+		rs = append(rs, &occRouter{store: st, credits: cr, occ: c})
+	}
+	waitFor(t, 5*time.Second, "routers to see each other", func() bool {
+		return rs[0].store.Size() == 2 && rs[1].store.Size() == 2
+	})
+	const budget, w = 1000, 100
+	a := fill(rs[0], w, budget, 10)
+	b := fill(rs[1], w, budget, 10)
+	if len(a) == 0 {
+		t.Fatal("admission stalled")
+	}
+	if site := (len(a) + len(b)) * w; site > budget {
+		t.Fatalf("site holds %d > budget %d", site, budget)
+	}
+	if share := budget / 2 / w; rs[0].store.Unreplicated() && (len(a) > share || len(b) > share) {
+		t.Fatalf("unreplicated grants past the share: r0 %d, r1 %d", len(a), len(b))
+	}
+	t.Logf("r0 %d, r1 %d, unreplicated %v", len(a), len(b), rs[0].store.Unreplicated())
+}

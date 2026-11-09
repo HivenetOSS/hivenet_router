@@ -5,6 +5,8 @@ package shared
 
 import (
 	"context"
+	"crypto/sha1" //nolint:gosec // script cache key, as Valkey computes it
+	"encoding/hex"
 	"errors"
 	"strconv"
 	"strings"
@@ -49,7 +51,7 @@ type Credits struct {
 
 	mu      sync.Mutex
 	wallets map[string]*wallet
-	evicted uint64
+	evicted atomic.Uint64
 
 	refills  atomic.Int64
 	returned atomic.Int64
@@ -319,13 +321,23 @@ func (c *Credits) grant(ctx context.Context, key string, needW, wantW, needC, wa
 	defer cancel()
 	start := time.Now()
 	args := []string{c.s.inc, itoa(needW), itoa(wantW), itoa(needC), itoa(wantC), itoa(budget), itoa(maxIn), epoch}
-	cmds := valkey.Commands{cl.B().Eval().Script(grantScript).Numkeys(3).
-		Key(c.poolKey(key), c.s.key("routers"), c.s.key("epochs")).Arg(args...).Build()}
+	keys := []string{c.poolKey(key), c.s.key("routers"), c.s.key("epochs")}
 	replicated := c.s.cfg.SentinelMaster != ""
-	if replicated {
-		cmds = append(cmds, cl.B().Wait().Numreplicas(1).Timeout(20).Build())
+	build := func(sha bool) valkey.Commands {
+		cmd := cl.B().Evalsha().Sha1(grantSHA).Numkeys(3).Key(keys...).Arg(args...).Build()
+		if !sha {
+			cmd = cl.B().Eval().Script(grantScript).Numkeys(3).Key(keys...).Arg(args...).Build()
+		}
+		cmds := valkey.Commands{cmd}
+		if replicated {
+			cmds = append(cmds, cl.B().Wait().Numreplicas(1).Timeout(20).Build())
+		}
+		return cmds
 	}
-	res := cl.DoMulti(ctx, cmds...)
+	res := cl.DoMulti(ctx, build(true)...)
+	if noScript(res[0].Error()) { // first use, or after a restart or a failover
+		res = cl.DoMulti(ctx, build(false)...)
+	}
 	c.s.m.credit.WithLabelValues("refill").Observe(time.Since(start).Seconds())
 	v, err := res[0].AsIntSlice()
 	if err != nil || len(v) != 2 {
@@ -370,12 +382,15 @@ func (c *Credits) Start(ctx context.Context) {
 // once they are granted afresh. What is in use stays recorded as held.
 func (c *Credits) checkEvicted() {
 	ev := c.s.Evictions()
+	if c.evicted.Load() == ev {
+		return // the common case: no lock
+	}
 	c.mu.Lock()
-	if ev == c.evicted {
+	if c.evicted.Load() == ev {
 		c.mu.Unlock()
 		return
 	}
-	c.evicted = ev
+	c.evicted.Store(ev)
 	ws := make([]*wallet, 0, len(c.wallets))
 	for _, wl := range c.wallets {
 		ws = append(ws, wl)
@@ -444,7 +459,7 @@ func (c *Credits) tick(ctx context.Context) {
 	now := time.Now().UnixMilli()
 	window := 2*c.s.cfg.Interval.Milliseconds() + 500
 
-	var writes valkey.Commands
+	var writes, evals valkey.Commands // the same rewrites, by SHA and in full
 	var locked []*wallet
 	for i, wl := range ws {
 		// Hold the refill lock until the rewrite has landed, so a grant can
@@ -535,12 +550,18 @@ func (c *Credits) tick(ctx context.Context) {
 		wl.starved = false
 		wl.mu.Unlock()
 
-		writes = append(writes, cl.B().Eval().Script(rewriteScript).Numkeys(2).
-			Key(c.poolKey(wl.key), c.s.key("epochs")).
-			Arg(c.s.inc, c.s.currentEpoch(), itoa(gW), itoa(gC), itoa(uW), itoa(uC), starved, itoa(now)).Build())
+		rw := []string{c.s.inc, c.s.currentEpoch(), itoa(gW), itoa(gC), itoa(uW), itoa(uC), starved, itoa(now)}
+		writes = append(writes, cl.B().Evalsha().Sha1(rewriteSHA).Numkeys(2).
+			Key(c.poolKey(wl.key), c.s.key("epochs")).Arg(rw...).Build())
+		evals = append(evals, cl.B().Eval().Script(rewriteScript).Numkeys(2).
+			Key(c.poolKey(wl.key), c.s.key("epochs")).Arg(rw...).Build())
 	}
 	if len(writes) > 0 {
-		for _, r := range cl.DoMulti(cctx, writes...) {
+		res := cl.DoMulti(cctx, writes...)
+		if noScript(res[0].Error()) {
+			res = cl.DoMulti(cctx, evals...)
+		}
+		for _, r := range res {
 			if r.Error() != nil {
 				c.s.m.creditErrors.Inc()
 				break
@@ -704,6 +725,21 @@ if gw > 0 then redis.call('HINCRBY', KEYS[1], 'g|' .. me .. '|w', gw) end
 if gc > 0 then redis.call('HINCRBY', KEYS[1], 'g|' .. me .. '|c', gc) end
 redis.call('EXPIRE', KEYS[1], 3600)
 return {gw, gc}`
+
+var (
+	grantSHA   = sha1Hex(grantScript)
+	rewriteSHA = sha1Hex(rewriteScript)
+)
+
+func sha1Hex(s string) string {
+	h := sha1.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// noScript reports a script the server does not have cached (EVALSHA).
+func noScript(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "NOSCRIPT")
+}
 
 // rewriteScript writes what this run holds in a pool. With a stale epoch
 // (the store lost this run and it has not noticed yet) it writes only what is
