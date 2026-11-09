@@ -183,6 +183,28 @@ func (a *agents) servedBy(router string) []string {
 	return out
 }
 
+// reportedTo lists the routers the agents that report to me are connected to.
+func (a *agents) reportedTo(me string) func() []string {
+	return func() []string {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		seen := map[string]bool{}
+		var out []string
+		for ag, rs := range a.conn {
+			if a.deaf[me][ag] || !rs[me] {
+				continue
+			}
+			for r, ok := range rs {
+				if ok && !seen[r] {
+					seen[r] = true
+					out = append(out, r)
+				}
+			}
+		}
+		return out
+	}
+}
+
 // leftRouter is the router's view: every listed agent reported to me, and
 // none is connected to target.
 func (a *agents) leftRouter(me string) func(target string, list []string) bool {
@@ -222,7 +244,7 @@ func newOccFleet(t *testing.T, b *valkeyBackend, ag *agents, n int) []*occRouter
 	}
 	waitFor(t, 5*time.Second, "routers to see each other", func() bool {
 		for _, r := range rs {
-			if r.store.Size() != n || r.store.DegradedEpoch() != 0 {
+			if r.store.Size() != n || r.store.DegradedEpoch() != 0 || r.store.UnknownRouter() != "" {
 				return false
 			}
 		}
@@ -241,6 +263,7 @@ func startOccRouter(t *testing.T, b *valkeyBackend, ag *agents, id, peer string)
 	}
 	st.SetPeerID(peer)
 	st.SetAgents(func() []string { return ag.servedBy(peer) })
+	st.SetRouterReports(ag.reportedTo(peer))
 	cr := st.NewCredits("occ", ag.leftRouter(peer))
 	c := admission.NewController(1, 300*time.Millisecond)
 	c.SetPool(cr)
@@ -551,6 +574,42 @@ func TestEvictionSeenAfterLostHeartbeatReply(t *testing.T) {
 	a2 := fill(rs[0], w, budget, 10)
 	if site := (len(b1) + len(a2)) * w; site > budget {
 		t.Fatalf("site holds %d > budget %d (r0 %d from old credits)", site, budget, len(a2)*w)
+	}
+}
+
+// Valkey loses its data while r0, cut off from it, still runs 900. A router
+// that starts then never saw r0, and the store does not list it; but the
+// agents report a connection to it, so no router takes new credits until
+// r0 is back and has rewritten what it holds.
+func TestFreshRouterAfterDataLossTakesNothing(t *testing.T) {
+	b, ag := newBackend(t), newAgents()
+	rs := newOccFleet(t, b, ag, 2)
+	const budget, w = 1000, 100
+	a := fill(rs[0], w, budget, 9)
+	time.Sleep(3 * interval)
+	rs[0].proxy.setCut(true)
+	b.flush(t)
+	ag.set("a0", "peer-2", true)
+	c := startOccRouter(t, b, ag, "r2", "peer-2")
+	waitFor(t, 3*time.Second, "r2 up", func() bool { return c.store.DegradedEpoch() == 0 })
+	var got []*admission.Reservation
+	end := time.Now().Add(time.Second)
+	for time.Now().Before(end) {
+		got = append(got, fill(c, w, budget, 10-len(got))...)
+		got = append(got, fill(rs[1], w, budget, 10-len(got))...)
+		if site := (len(a) + len(got)) * w; site > budget {
+			t.Fatalf("site holds %d > budget %d", site, budget)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// r0 is back and rewrites what it holds: the others may use the rest.
+	rs[0].proxy.setCut(false)
+	waitFor(t, 5*time.Second, "admission to resume", func() bool {
+		got = append(got, fill(c, w, budget, 1)...)
+		return len(got) > 0
+	})
+	if site := (len(a) + len(got)) * w; site > budget {
+		t.Fatalf("after r0 is back the site holds %d > budget %d", site, budget)
 	}
 }
 

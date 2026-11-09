@@ -135,12 +135,18 @@ func (c *Credits) degraded() bool { return c.s.DegradedEpoch() != 0 }
 // limits returns the most this wallet may hold. Caller holds wl.mu.
 //   - Store unreachable, or grants not replicated: this router's share of the
 //     budget, so the site stays within it even if every router holds its share.
+//   - The agents report a router the store does not know (it lost its data
+//     while that router was cut off): nothing more than it holds.
 //   - Back after an outage or an eviction: the budget minus what the routers
 //     not back yet held when this router last saw them (the pool may have lost
 //     it); nothing more than it holds for a wallet whose pool it did not read
 //     before the loss.
 func (c *Credits) limits(wl *wallet) (capW, capC int64) {
 	capW, capC = -1, -1 // no limit
+	if c.s.UnknownRouter() != "" {
+		// A router the store lost is serving: nothing more than held.
+		return wl.grantW, wl.grantC
+	}
 	if c.degraded() || c.s.Unreplicated() {
 		n := int64(c.s.Size())
 		if wl.budget > 0 {

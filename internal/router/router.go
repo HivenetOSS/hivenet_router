@@ -2036,6 +2036,7 @@ func (r *Router) setupShared() error {
 	// its credits until a newer run replaces it, or until every agent it
 	// served reports no connection to it.
 	st.SetAgents(r.servedAgents)
+	st.SetRouterReports(r.reportedRouters)
 	occ := st.NewCredits("occ", r.agentsLeftRouter)
 	kocc := st.NewCredits("kocc", r.agentsLeftRouter)
 	r.occupancy.SetPool(occ)
@@ -2051,6 +2052,22 @@ func (r *Router) setupShared() error {
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
 		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
 	return nil
+}
+
+// reportedRouters lists the routers the agents reported a connection to in
+// the last few seconds.
+func (r *Router) reportedRouters() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range r.agents.List() {
+		for _, p := range a.ReportedRouters(3 * time.Second) {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // agentsLeftRouter reports whether every agent in agents reported to this

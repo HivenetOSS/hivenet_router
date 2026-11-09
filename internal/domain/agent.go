@@ -128,6 +128,21 @@ func (a *Agent) ConnectedTo(routerPeer string, maxAge time.Duration) (fresh, con
 	return true, connected
 }
 
+// ReportedRouters returns the routers (libp2p peer IDs) the agent reported a
+// connection to within maxAge.
+func (a *Agent) ReportedRouters(maxAge time.Duration) []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.routers == nil || time.Since(a.routersAt) > maxAge {
+		return nil
+	}
+	out := make([]string, 0, len(a.routers))
+	for p := range a.routers {
+		out = append(out, p)
+	}
+	return out
+}
+
 // DecrementLoad safely decrements active requests
 func (a *Agent) DecrementLoad() {
 	a.mu.Lock()

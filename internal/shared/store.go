@@ -137,6 +137,13 @@ type Store struct {
 	publishedAt atomic.Int64 // unix ns the published list was taken at
 	joinedAt    atomic.Int64 // unix ns an agent last became usable here
 
+	// Routers the agents report a connection to that the store does not know:
+	// alive, but the store lost them (lost data), so what they hold is
+	// unknown. While there is one, no router takes new credits.
+	reportsFn   func() []string
+	knownSince  map[string]time.Time // router peer → first tick the store listed it
+	unknownPeer atomic.Pointer[string]
+
 	// unreplicated is set when no replica acknowledged a grant: a failover
 	// could lose it, so occupancy stays at this router's share until a
 	// replica acknowledges again.
@@ -229,6 +236,61 @@ func (s *Store) SetPeerID(id string) { s.cfg.PeerID = id }
 // SetAgents sets how the router lists the agents it serves (their libp2p
 // peer IDs). The list is published with the heartbeat. Call before Start.
 func (s *Store) SetAgents(fn func() []string) { s.agentsFn = fn }
+
+// SetRouterReports sets how the router lists the routers (libp2p peer IDs)
+// its agents report a connection to. Call before Start.
+func (s *Store) SetRouterReports(fn func() []string) { s.reportsFn = fn }
+
+// UnknownRouter returns a router the agents report a connection to that the
+// store has not listed for two intervals, or "" when there is none. Such a
+// router is serving, but the store does not know what it holds: it lost its
+// data while that router was cut off from it. A router that just started is
+// unknown for about one interval too.
+func (s *Store) UnknownRouter() string {
+	if p := s.unknownPeer.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// trackRouters records the routers the store lists (peers) and compares
+// them with the routers the agents report.
+func (s *Store) trackRouters(peers []string) {
+	if s.reportsFn == nil {
+		return
+	}
+	now := time.Now()
+	listed := map[string]bool{}
+	for _, p := range peers {
+		listed[p] = true
+		if _, ok := s.knownSince[p]; !ok {
+			s.knownSince[p] = now
+		}
+	}
+	for p := range s.knownSince {
+		if !listed[p] {
+			delete(s.knownSince, p)
+		}
+	}
+	unknown := ""
+	for _, p := range s.reportsFn() {
+		if p == s.cfg.PeerID || p == "" {
+			continue
+		}
+		if since, ok := s.knownSince[p]; !ok || now.Sub(since) < 2*s.cfg.Interval {
+			unknown = p
+			break
+		}
+	}
+	if old := s.UnknownRouter(); old != unknown {
+		if unknown != "" {
+			log.Warnf("shared occupancy: agents report router %s, which the store does not know; no router takes new credits until it is known", unknown)
+		} else {
+			log.Infof("shared occupancy: every router the agents report is known again")
+		}
+	}
+	s.unknownPeer.Store(&unknown)
+}
 
 // AgentJoined records that an agent became usable on this router: it
 // connected, or connected again after a drop.
@@ -572,6 +634,7 @@ func (s *Store) tick(ctx context.Context) {
 	if len(fetch) > 0 {
 		cmds = append(cmds, c.B().Hmget().Key(s.key("agents")).Field(fetch...).Build())
 	}
+	cmds = append(cmds, c.B().Hvals().Key(s.key("peers")).Build())
 	entries := make([]entry, 0, len(buf))
 	for k, v := range buf {
 		entries = append(entries, entry{K: string(k.kind), B: k.bucket, L: v.limit, N: v.n, D: k.day,
@@ -594,8 +657,14 @@ func (s *Store) tick(ctx context.Context) {
 	if full {
 		s.lastFull = time.Now()
 	}
+	if peers, err := res[len(res)-3].AsStrSlice(); err == nil {
+		if s.knownSince == nil {
+			s.knownSince = map[string]time.Time{}
+		}
+		s.trackRouters(peers)
+	}
 	if len(fetch) > 0 {
-		if vals, err := res[len(res)-3].ToArray(); err == nil {
+		if vals, err := res[len(res)-4].ToArray(); err == nil {
 			s.liveMu.Lock()
 			if s.agentsOf == nil {
 				s.agentsOf, s.agentVer = map[string][]string{}, map[string]string{}
