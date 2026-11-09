@@ -33,6 +33,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1229,15 +1230,22 @@ type routerRequests struct {
 
 // track counts one request in flight for the router it came from, so
 // cancelFrom can stop it, and returns the request to serve and the function
-// that ends it.
+// that ends it. The request ends when the router's timeout for it runs out
+// (domain.HeaderTimeout): the router has given up on it by then, and libp2p
+// does not tell the agent.
 func (a *Agent) track(r *http.Request) (*http.Request, func()) {
+	ctx, stop := r.Context(), context.CancelFunc(func() {})
+	if ms, err := strconv.ParseInt(r.Header.Get(domain.HeaderTimeout), 10, 64); err == nil && ms > 0 {
+		ctx, stop = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+	}
+	r.Header.Del(domain.HeaderTimeout) // not for the backend
 	router := p2phttp.ClientPeerID(r)
 	if router == "" {
-		return r, func() {}
+		return r.WithContext(ctx), stop
 	}
 	v, _ := a.inFlightBy.LoadOrStore(router, &routerRequests{cancels: map[uint64]context.CancelFunc{}})
 	rr := v.(*routerRequests)
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(ctx)
 	rr.mu.Lock()
 	id := rr.next
 	rr.next++
@@ -1250,6 +1258,7 @@ func (a *Agent) track(r *http.Request) (*http.Request, func()) {
 		delete(rr.cancels, id)
 		rr.mu.Unlock()
 		cancel()
+		stop()
 	}
 }
 

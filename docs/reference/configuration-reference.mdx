@@ -329,7 +329,7 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Requests per model that wait for room in the occupancy budget, up to the request timeout; `0` disables the queue. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) wait for room until their hold budget ends, beyond this bound |
 | `--max-concurrent` | — | `50` | Maximum simultaneous router-to-agent request forwards |
-| `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | Deadline for the complete router-side request operation |
+| `--request-timeout` | `HIVENET_ROUTER_REQUEST_TIMEOUT` | `60s` | Deadline for the complete router-side request operation, including the wait for room in the occupancy budget. The router sends the agent the time left, and the agent stops the backend call when it runs out, so the engine does not keep generating a response the router has already answered with `504` |
 | — | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
 
 ### Built-in policy
