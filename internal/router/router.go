@@ -1917,9 +1917,12 @@ type siteReplay struct {
 }
 
 func (g *siteReplay) First(id string, until, now time.Time) bool {
+	// Always recorded here too, so a token used while the store answered
+	// is still refused by this router if the store is down at its replay.
+	local := g.local.First(id, until, now)
 	first, err := g.store.FirstUse(context.Background(), id, until)
 	if err != nil {
-		return g.local.First(id, until, now)
+		return local
 	}
-	return first
+	return first && local
 }

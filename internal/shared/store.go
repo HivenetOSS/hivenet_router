@@ -102,6 +102,7 @@ type Store struct {
 	lastFull  time.Time // last time every daily total was written
 	lastReset time.Time // last time the client was rebuilt
 
+	okAt     atomic.Int64  // unix ms of the last successful tick
 	fleet    atomic.Int32  // live routers, this one included (last known while down)
 	evicted  atomic.Uint64 // times the other routers removed this run from the live set
 	seenLive bool          // this run has been in the live set
@@ -301,6 +302,11 @@ func (s *Store) conn() (valkey.Client, error) {
 // request's path use it, so they fail at once instead of connecting.
 func (s *Store) connected() (valkey.Client, error) {
 	if s.degraded.Load() != 0 || s.seq.Load() == 0 {
+		return nil, ErrNotConnected
+	}
+	// A round already failed: do not make a request wait on a store that
+	// may be gone, even before the outage is declared.
+	if time.Since(time.UnixMilli(s.okAt.Load())) > 2*s.cfg.Interval {
 		return nil, ErrNotConnected
 	}
 	s.connMu.Lock()
@@ -507,6 +513,7 @@ func (s *Store) tick(ctx context.Context) {
 	}
 	s.degraded.Store(0)
 	s.lastOK = time.Now()
+	s.okAt.Store(s.lastOK.UnixMilli())
 	s.m.up.Set(1)
 
 	n := len(live)

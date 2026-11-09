@@ -5,6 +5,7 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,13 +27,17 @@ import (
 // the rest; when another router is starved it keeps no headroom. It also
 // rewrites what it holds, which heals a write lost in a Valkey failover.
 //
-// A router that stops heartbeating keeps its credits until reclaimAfter (the
-// request timeout, so requests it was still running have ended) or until the
-// agents show that it has no connection to any of them: then it cannot be
-// running anything, and the other routers take its credits back at once.
+// A router that stops heartbeating keeps its credits while the agents still
+// reach it: it may have lost Valkey only and still be admitting within them.
+// Its credits go back to the pool once no agent is connected to it (it cannot
+// be running anything: the agents stop the requests of a router they lose), or
+// once a newer run of the same router is live. When no agent reports at all,
+// they go back after reclaimAfter.
 //
 // While Valkey is unreachable a router keeps admitting within what it holds,
-// capped at its share of the budget, and asks for no more.
+// capped at its share of the budget, and asks for no more. It stays at its
+// share after Valkey is back until every router it saw before is back or gone,
+// since Valkey may have lost what they hold.
 type Credits struct {
 	s            *Store
 	ns           string
@@ -46,7 +51,14 @@ type Credits struct {
 	refills  atomic.Int64
 	returned atomic.Int64
 	reclaims atomic.Int64
+	closed   atomic.Bool // ReleaseAll ran: admit nothing more
+
+	idleAfter time.Duration
 }
+
+// errNotReplicated is a grant no replica acknowledged: a failover could lose
+// it, so it is not used.
+var errNotReplicated = errors.New("shared occupancy: grant not acknowledged by a replica")
 
 type wallet struct {
 	key string
@@ -71,17 +83,33 @@ const chunkDiv = 8
 
 // refillBackoff spaces out refills that came back short, so parked requests
 // never turn into a stream of Valkey calls.
-const refillBackoff = 10 * time.Millisecond
+const refillBackoff = 50 * time.Millisecond
+
+// idleAfter is how long a wallet with nothing in flight keeps its credits;
+// then it hands them all back and is dropped, here and in Valkey.
+const idleAfter = time.Minute
 
 // NewCredits shares a budget under namespace ns ("occ" for B2, "kocc" for B4).
-// reclaimAfter is how long a silent router keeps its credits. reachable, if
-// set, reports whether any agent has a connection to the router with that
-// libp2p peer ID (known is false when no agent has reported recently).
+// reclaimAfter is how long a silent router keeps its credits when no agent
+// reports on it. reachable, if set, reports whether any agent has a connection
+// to the router with that libp2p peer ID (known is false when no agent has
+// reported recently).
 func (s *Store) NewCredits(ns string, reclaimAfter time.Duration, reachable func(peerID string) (known, reachable bool)) *Credits {
 	if reclaimAfter < 3*s.cfg.DownAfter {
 		reclaimAfter = 3 * s.cfg.DownAfter
 	}
-	return &Credits{s: s, ns: ns, reclaimAfter: reclaimAfter, reachable: reachable, wallets: map[string]*wallet{}}
+	return &Credits{s: s, ns: ns, reclaimAfter: reclaimAfter, reachable: reachable, wallets: map[string]*wallet{}, idleAfter: idleAfter}
+}
+
+// SetIdleAfter changes how long an unused wallet keeps its credits (default
+// one minute). Call before Start.
+func (c *Credits) SetIdleAfter(d time.Duration) { c.idleAfter = d }
+
+// Wallets returns how many wallets this router holds (tests, metrics).
+func (c *Credits) Wallets() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.wallets)
 }
 
 func (c *Credits) poolKey(key string) string { return c.s.key("pool", c.ns, key) }
@@ -103,11 +131,19 @@ func (c *Credits) degraded() bool { return c.s.DegradedEpoch() != 0 }
 // Caller holds wl.mu.
 func (c *Credits) fits(wl *wallet, w int64) bool {
 	gW, gC := wl.grantW, wl.grantC
-	if c.degraded() {
+	var n int64
+	switch {
+	case c.degraded():
 		// No refills while the store is down: spend at most this router's
 		// share, so the site stays within the budget even if every router
 		// holds its share.
-		n := int64(c.s.Size())
+		n = int64(c.s.Size())
+	case c.s.PendingCount() > 0:
+		// Back after an outage or an eviction: the pool may not know what
+		// the routers not back yet hold. Stay at this router's share.
+		n = int64(c.s.Size() + c.s.PendingCount())
+	}
+	if n > 0 {
 		if wl.budget > 0 {
 			gW = min(gW, wl.budget/max(n, 1))
 		}
@@ -132,6 +168,9 @@ func (wl *wallet) take(w int64) {
 
 // Take implements admission.Pool.
 func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInflight int) bool {
+	if c.closed.Load() {
+		return false
+	}
 	c.checkEvicted()
 	wl := c.wallet(key)
 	wl.mu.Lock()
@@ -149,7 +188,11 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 	wl.mu.Unlock()
 
 	if !wl.refill.TryLock() {
-		return false // another request is refilling; the caller parks and retries
+		// Another request is refilling; the caller parks and retries.
+		wl.mu.Lock()
+		wl.starved = true
+		wl.mu.Unlock()
+		return false
 	}
 	defer wl.refill.Unlock()
 
@@ -201,21 +244,29 @@ func (c *Credits) Adjust(key string, dw int64, dc int) {
 }
 
 // grant asks the pool for credits: at least need (else nothing), up to want.
-// A replica acknowledges the grant before it is used (WAIT), so a failover
-// cannot forget it and hand the same capacity to another router.
+// It is called on a request's path, so it never connects: it fails at once
+// while the store does not answer.
+//
+// With Sentinel a replica must acknowledge the grant (WAIT) before it is
+// used, so a failover cannot forget it and hand the same capacity to another
+// router. A grant no replica acknowledged is not used; it stays recorded as
+// held until the next tick rewrites this router's holdings, which only makes
+// the pool stricter for a moment.
 func (c *Credits) grant(ctx context.Context, key string, needW, wantW, needC, wantC, budget, maxIn int64) (int64, int64, error) {
-	cl, err := c.s.conn()
+	cl, err := c.s.connected()
 	if err != nil {
 		return 0, 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	args := []string{c.s.inc, itoa(needW), itoa(wantW), itoa(needC), itoa(wantC), itoa(budget), itoa(maxIn),
-		itoa(c.reclaimAfter.Milliseconds())}
-	res := cl.DoMulti(ctx,
-		cl.B().Eval().Script(grantScript).Numkeys(2).Key(c.poolKey(key), c.s.key("routers")).Arg(args...).Build(),
-		cl.B().Wait().Numreplicas(1).Timeout(20).Build())
+	args := []string{c.s.inc, itoa(needW), itoa(wantW), itoa(needC), itoa(wantC), itoa(budget), itoa(maxIn)}
+	cmds := valkey.Commands{cl.B().Eval().Script(grantScript).Numkeys(2).Key(c.poolKey(key), c.s.key("routers")).Arg(args...).Build()}
+	replicated := c.s.cfg.SentinelMaster != ""
+	if replicated {
+		cmds = append(cmds, cl.B().Wait().Numreplicas(1).Timeout(20).Build())
+	}
+	res := cl.DoMulti(ctx, cmds...)
 	c.s.m.credit.WithLabelValues("refill").Observe(time.Since(start).Seconds())
 	v, err := res[0].AsIntSlice()
 	if err != nil || len(v) != 2 {
@@ -224,6 +275,12 @@ func (c *Credits) grant(ctx context.Context, key string, needW, wantW, needC, wa
 			err = errShortReply
 		}
 		return 0, 0, err
+	}
+	if replicated && (v[0] > 0 || v[1] > 0) {
+		if acks, err := res[1].AsInt64(); err != nil || acks < 1 {
+			c.s.m.creditErrors.Inc()
+			return 0, 0, errNotReplicated
+		}
 	}
 	return v[0], v[1], nil
 }
@@ -276,6 +333,7 @@ func (c *Credits) tick(ctx context.Context) {
 		return
 	}
 	c.checkEvicted()
+	c.resolvePending()
 	cl, err := c.s.conn()
 	if err != nil {
 		return
@@ -285,19 +343,27 @@ func (c *Credits) tick(ctx context.Context) {
 
 	c.reclaimUnreachable(cctx, cl)
 
+	// A wallet idle past idleAfter handed its credits back on an earlier
+	// tick (keep is 0 below); drop it here and in Valkey, so keys and models
+	// no longer used cost nothing.
 	c.mu.Lock()
 	ws := make([]*wallet, 0, len(c.wallets))
+	var drops valkey.Commands
 	for k, wl := range c.wallets {
 		wl.mu.Lock()
-		idle := wl.usedW == 0 && wl.usedC == 0 && wl.grantW == 0 && wl.grantC == 0 && time.Since(wl.lastActive) > time.Minute
+		idle := wl.usedW == 0 && wl.usedC == 0 && wl.grantW == 0 && wl.grantC == 0 && time.Since(wl.lastActive) > c.idleAfter
 		wl.mu.Unlock()
 		if idle {
 			delete(c.wallets, k)
+			drops = append(drops, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc).Build())
 			continue
 		}
 		ws = append(ws, wl)
 	}
 	c.mu.Unlock()
+	if len(drops) > 0 {
+		cl.DoMulti(cctx, drops...)
+	}
 	if len(ws) == 0 {
 		return
 	}
@@ -342,6 +408,9 @@ func (c *Credits) tick(ctx context.Context) {
 			}
 		}
 		keepW, keepC := wl.usedW+headW, wl.usedC+headC
+		if wl.usedW == 0 && wl.usedC == 0 && time.Since(wl.lastActive) > c.idleAfter {
+			keepW, keepC = 0, 0 // idle: hand everything back
+		}
 		if wl.budget <= 0 {
 			keepW = 0
 		}
@@ -387,29 +456,60 @@ func (c *Credits) tick(ctx context.Context) {
 	}
 }
 
-// reclaimUnreachable evicts routers that stopped heartbeating and that no
-// agent is connected to: they cannot be running anything, so their credits go
-// back to the pool now instead of after reclaimAfter.
-func (c *Credits) reclaimUnreachable(ctx context.Context, cl valkey.Client) {
-	if c.reachable == nil {
-		return
+// gone reports why a silent run has certainly stopped serving, or "" when it
+// may still be: a newer run of the same router is live, no agent is connected
+// to it, or no agent reports at all and it has been silent past reclaimAfter.
+func (c *Credits) gone(run, peerID string, silent time.Duration) string {
+	if c.s.Superseded(run) {
+		return "a newer run of the same router is live"
 	}
+	known, reachable := false, false
+	if c.reachable != nil && peerID != "" {
+		known, reachable = c.reachable(peerID)
+	}
+	switch {
+	case known && !reachable:
+		return "no agent is connected to it"
+	case !known && silent >= c.reclaimAfter:
+		return "it has been silent for " + silent.Round(time.Second).String()
+	}
+	return ""
+}
+
+// resolvePending stops waiting for the routers seen before an outage that
+// are gone; see Store.Pending.
+func (c *Credits) resolvePending() {
+	for run, p := range c.s.Pending() {
+		if why := c.gone(run, p.Peer, time.Since(p.Since)); why != "" {
+			c.s.Forget(run)
+			log.Infof("shared occupancy: no longer waiting for router %s: %s", run, why)
+		}
+	}
+}
+
+// reclaimUnreachable evicts the silent routers that are gone, so their
+// credits go back to the pool. A silent router that agents still reach keeps
+// its credits: it may only have lost Valkey and still be admitting.
+func (c *Credits) reclaimUnreachable(ctx context.Context, cl valkey.Client) {
 	stale, err := staleRouters.Exec(ctx, cl, []string{c.s.key("routers"), c.s.key("peers")},
-		[]string{itoa(c.s.cfg.DownAfter.Milliseconds()), itoa(c.reclaimAfter.Milliseconds())}).AsStrSlice()
+		[]string{itoa(c.s.cfg.DownAfter.Milliseconds())}).AsStrSlice()
 	if err != nil {
 		return
 	}
-	for i := 0; i+1 < len(stale); i += 2 {
-		inst, peerID := stale[i], stale[i+1]
-		if inst == c.s.inc || peerID == "" {
+	for i := 0; i+2 < len(stale); i += 3 {
+		run, peerID := stale[i], stale[i+1]
+		silentMs, _ := strconv.ParseInt(stale[i+2], 10, 64)
+		if run == c.s.inc {
 			continue
 		}
-		if known, reachable := c.reachable(peerID); known && !reachable {
-			if cl.Do(ctx, cl.B().Zrem().Key(c.s.key("routers")).Member(inst).Build()).Error() == nil {
-				c.reclaims.Add(1)
-				c.s.m.creditReclaims.Inc()
-				log.Infof("shared occupancy: router %s is gone and no agent is connected to it; its credits are back in the pool", inst)
-			}
+		why := c.gone(run, peerID, time.Duration(silentMs)*time.Millisecond)
+		if why == "" {
+			continue
+		}
+		if cl.Do(ctx, cl.B().Zrem().Key(c.s.key("routers")).Member(run).Build()).Error() == nil {
+			c.reclaims.Add(1)
+			c.s.m.creditReclaims.Inc()
+			log.Infof("shared occupancy: router %s stopped (%s); its credits are back in the pool", run, why)
 		}
 	}
 }
@@ -418,6 +518,7 @@ func (c *Credits) reclaimUnreachable(ctx context.Context, cl valkey.Client) {
 // can no longer serve. A request still in flight then holds nothing: call it
 // after the router has stopped forwarding.
 func (c *Credits) ReleaseAll(ctx context.Context) {
+	c.closed.Store(true)
 	cl, err := c.s.conn()
 	if err != nil {
 		return
@@ -441,15 +542,13 @@ func (c *Credits) Stats() (refills, returned, reclaims int64) {
 
 // grantScript grants credits from a model's pool.
 // KEYS: pool hash, live-router set.
-// ARGV: run, needW, wantW, needC, wantC, budget, maxIn, reclaim window (ms).
-// What routers silent for longer than the reclaim window held is dropped
-// first. Grants min(want, free) when free covers need, else nothing.
+// ARGV: run, needW, wantW, needC, wantC, budget, maxIn.
+// What routers no longer in the live set held (evicted) is dropped first.
+// Grants min(want, free) when free covers need, else nothing.
 // Returns {weight, requests} granted.
 const grantScript = `
-local t = redis.call('TIME')
-local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local live = {}
-for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[2], now - tonumber(ARGV[8]), '+inf')) do live[r] = true end
+for _, r in ipairs(redis.call('ZRANGE', KEYS[2], 0, -1)) do live[r] = true end
 local me = ARGV[1]
 live[me] = true
 local h = redis.call('HGETALL', KEYS[1])
@@ -484,14 +583,16 @@ if gc > 0 then redis.call('HINCRBY', KEYS[1], 'g|' .. me .. '|c', gc) end
 redis.call('EXPIRE', KEYS[1], 3600)
 return {gw, gc}`
 
-// staleRouters lists routers silent for longer than ARGV[1] ms but not yet
-// past the reclaim window ARGV[2], with their peer IDs: run, peer, run, peer…
+// staleRouters lists routers silent for longer than ARGV[1] ms with their
+// peer IDs and how long they have been silent: run, peer, ms, run, peer, ms…
 var staleRouters = valkey.NewLuaScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local out = {}
-for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]), '(' .. (now - tonumber(ARGV[1])))) do
-  out[#out + 1] = r
-  out[#out + 1] = redis.call('HGET', KEYS[2], r) or ''
+local rs = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. (now - tonumber(ARGV[1])), 'WITHSCORES')
+for i = 1, #rs, 2 do
+  out[#out + 1] = rs[i]
+  out[#out + 1] = redis.call('HGET', KEYS[2], rs[i]) or ''
+  out[#out + 1] = tostring(now - tonumber(rs[i + 1]))
 end
 return out`)

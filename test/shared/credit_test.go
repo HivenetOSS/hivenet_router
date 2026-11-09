@@ -6,6 +6,7 @@ package shared_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -184,9 +185,33 @@ func TestCreditsReclaimedEarlyWhenNoAgentReachesRouter(t *testing.T) {
 	t.Logf("credits back after %v", time.Since(start).Round(100*time.Millisecond))
 }
 
-// A silent router the agents still reach (it lost Valkey, not the GPUs) keeps
-// its credits until the window.
+// A silent router the agents still reach (it lost Valkey, not the GPUs) may
+// still be admitting within its credits: it keeps them past the window, for as
+// long as the agents reach it.
 func TestCreditsKeptWhileAgentsReachRouter(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newOccFleet(t, mr, 2, time.Second)
+	const budget = 1000
+	if rs[0].occ.Admit(context.Background(), "m", 900, false, budget, 0) == nil {
+		t.Fatal("first admission refused")
+	}
+	rs[1].reach.Store(func(string) (bool, bool) { return true, true })
+	rs[0].cancel()
+	time.Sleep(3 * time.Second) // three times the window
+	if rs[1].occ.Admit(context.Background(), "m", 500, false, budget, 0) != nil {
+		t.Fatal("credits taken from a router the agents still reach")
+	}
+	// The agents lose it: its credits come back.
+	rs[1].reach.Store(func(p string) (bool, bool) { return true, p == "peer-1" })
+	waitFor(t, 3*time.Second, "credits back once no agent reaches it", func() bool {
+		return rs[1].occ.Admit(context.Background(), "m", 500, false, budget, 0) != nil
+	})
+}
+
+// A router that restarts runs again under the same ID and libp2p peer ID, so
+// the agents still reach that peer; the old run has ended all the same, and
+// its credits come back as soon as the new run is live.
+func TestCreditsOfRestartedRouterReclaimed(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newOccFleet(t, mr, 2, time.Hour)
 	const budget = 1000
@@ -195,10 +220,48 @@ func TestCreditsKeptWhileAgentsReachRouter(t *testing.T) {
 	}
 	rs[1].reach.Store(func(string) (bool, bool) { return true, true })
 	rs[0].cancel()
-	time.Sleep(2 * time.Second)
-	if rs[1].occ.Admit(context.Background(), "m", 500, false, budget, 0) != nil {
-		t.Fatal("credits taken from a router the agents still reach")
+	time.Sleep(10 * time.Millisecond) // the new run starts later
+	ctx, cancel := context.WithCancel(context.Background())
+	st, err := shared.New(shared.Config{Addrs: []string{mr.Addr()}, Prefix: "pc", RouterID: "r0", Interval: interval})
+	if err != nil {
+		t.Fatal(err)
 	}
+	st.SetPeerID("peer-0")
+	st.Start(ctx)
+	t.Cleanup(func() { cancel(); st.Close() })
+	waitFor(t, 3*time.Second, "the old run's credits to come back", func() bool {
+		return rs[1].occ.Admit(context.Background(), "m", 500, false, budget, 0) != nil
+	})
+}
+
+// Valkey loses its data (a restart without persistence) while one router is
+// cut off from it and still admitting within its credits. The router that
+// comes back first does not see what the other holds, so it stays at its share
+// until the other is back or gone.
+func TestCreditsStayAtShareAfterStoreLoss(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newOccFleet(t, mr, 2, time.Hour)
+	const budget = 1000
+	if rs[0].occ.Admit(context.Background(), "m", 400, false, budget, 0) == nil {
+		t.Fatal("first admission refused")
+	}
+	rs[1].reach.Store(func(string) (bool, bool) { return true, true })
+	rs[0].cancel() // cut off from Valkey, still serving
+	mr.FlushAll()
+	waitFor(t, 3*time.Second, "r1 to notice the loss", func() bool { return rs[1].store.PendingCount() == 1 })
+	time.Sleep(5 * interval)
+	if r := rs[1].occ.Admit(context.Background(), "m", 600, false, budget, 0); r != nil {
+		t.Fatal("r1 took 600 although the other router may still hold 400")
+	}
+	if rs[1].occ.Admit(context.Background(), "m", 450, false, budget, 0) == nil {
+		t.Fatal("r1 refused its share")
+	}
+	// The other router is gone: r1 may use the rest.
+	rs[1].reach.Store(func(p string) (bool, bool) { return true, p == "peer-1" })
+	waitFor(t, 3*time.Second, "r1 to use the whole budget", func() bool {
+		r := rs[1].occ.Admit(context.Background(), "m", 500, false, budget, 0)
+		return r != nil
+	})
 }
 
 // A router evicted by the others drops the credits it believed it held and
@@ -264,5 +327,37 @@ func TestFirstUseAcrossRouters(t *testing.T) {
 	}
 	if ok, err := rs[1].store.FirstUse(context.Background(), "jti-1", until); err != nil || ok {
 		t.Fatalf("replay on another router accepted: %v %v", ok, err)
+	}
+}
+
+// A wallet no request uses any more hands its credits back and is dropped,
+// here and in Valkey: per-key budgets (B4) seen once cost nothing after.
+func TestIdleWalletDropped(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newOccFleet(t, mr, 1, time.Hour)
+	rs[0].credits.SetIdleAfter(300 * time.Millisecond)
+	res := rs[0].occ.Admit(context.Background(), "k1\x00m", 100, false, 1000, 0)
+	if res == nil {
+		t.Fatal("admission refused")
+	}
+	res.Release()
+	waitFor(t, 5*time.Second, "the idle wallet to be dropped", func() bool { return rs[0].credits.Wallets() == 0 })
+	for _, k := range mr.Keys() {
+		if strings.Contains(k, ":pool:") {
+			if fields, _ := mr.HKeys(k); len(fields) > 0 {
+				t.Fatalf("pool %s still holds %v after the wallet was dropped", k, fields)
+			}
+		}
+	}
+}
+
+// After ReleaseAll (shutdown) the router admits nothing more: its credits are
+// back in the pool, so a request it still took would hold none.
+func TestNothingAdmittedAfterReleaseAll(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newOccFleet(t, mr, 1, time.Hour)
+	rs[0].credits.ReleaseAll(context.Background())
+	if rs[0].occ.Admit(context.Background(), "m", 10, false, 1000, 0) != nil {
+		t.Fatal("admitted after ReleaseAll")
 	}
 }

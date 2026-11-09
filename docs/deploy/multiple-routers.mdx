@@ -41,7 +41,8 @@ The store load depends on request rate, not on the number of keys: each round ca
 
 The occupancy budgets must never be exceeded, even for a moment, so they are not synced like the rate limits. For each model the store holds a pool: how much of the budget each router holds right now. Each router keeps a wallet of credits in memory and admits against it, so a request never waits on the store.
 
-- When its wallet runs short, a router asks the pool for more. The pool grants only from the part of the budget no router holds, so the routers together never hold more than the budget. A replica acknowledges each grant before it is used, so a failover cannot hand the same capacity out twice.
+- When its wallet runs short, a router asks the pool for more. The pool grants only from the part of the budget no router holds, so the routers together never hold more than the budget. With Sentinel, a replica acknowledges each grant before it is used, so a failover cannot hand the same capacity out twice; a grant no replica acknowledged is not used.
+- A wallet no request has used for a minute hands its credits back and is dropped.
 - Each round a router keeps what it uses plus a small headroom and hands back the rest. A router that found its wallet empty flags it, and the others then keep no headroom, so the budget follows the traffic.
 - Streamed output that grows a request past its credits is recorded as held on the next round.
 
@@ -51,9 +52,15 @@ The store sees a refill when a wallet runs short and one write per model per rou
 
 | Situation | When its credits come back |
 | --- | --- |
-| Clean shutdown | At once, once it can no longer reach the agents |
-| No agent is connected to it any more (for example, it crashed) | As soon as it misses its heartbeats (about three sync intervals): the agents report which routers they are connected to, and a router no agent reaches cannot be running anything |
-| It lost the store but still reaches the agents | After the request timeout plus 5 s, when the requests it may still be running have ended |
+| Clean shutdown | At once, once it can no longer reach the agents. It admits nothing more after that |
+| No agent is connected to it any more (for example, it crashed) | As soon as it misses its heartbeats (about three sync intervals). The agents report which routers they are connected to, and stop the requests of a router they lose, so the engines free that work at once |
+| It restarted | As soon as its new run is live: one router ID runs one process at a time |
+| It lost the store but the agents still reach it | Never while the agents reach it: it may still be admitting within the credits it holds (at most its share), so the others leave them alone. They come back once no agent reaches it, or when it reconnects and rewrites what it holds |
+| No agent reports at all | After the request timeout plus 5 s |
+
+A router that was given up by the others drops the credits it believed it held and asks the pool again.
+
+A router decides from the agents connected to it. If the network splits so that a router loses the store and some agents, while other agents still reach it, the others may take its credits back early. Run the routers and the store in one failure domain, or keep every agent connected to every router.
 
 A router that was given up by the others drops the credits it believed it held and asks the pool again.
 
