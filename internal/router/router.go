@@ -1912,6 +1912,7 @@ func (r *Router) setupShared() error {
 		SentinelMaster: cfg.SyncSentinelMaster,
 		Password:       cfg.SyncValkeyPassword,
 		TLS:            cfg.SyncValkeyTLS,
+		TLSCAFile:      cfg.SyncValkeyTLSCA,
 		Prefix:         cfg.SiteID,
 		RouterID:       cfg.RouterID,
 		Interval:       cfg.SyncInterval,
