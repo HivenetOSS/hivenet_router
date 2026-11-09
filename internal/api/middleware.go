@@ -103,7 +103,9 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		// Specify which HTTP headers the client is allowed to send.
 		// "Authorization" allows Bearer tokens, API keys.
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Client-Request-ID, X-Request-ID")
+		// Response headers a browser client's JavaScript may read.
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Client-Request-ID, X-Upstream-Request-ID")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -121,36 +123,92 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return gin.Recovery()
 }
 
-// RequestIDMiddleware attaches a trace ID to every request and response.
-// If the caller provides an X-Request-ID header that is a valid UUID (any
-// version) it is reused; otherwise a fresh UUID v4 is generated. Accepting
-// any UUID version allows callers using v1/v7 time-ordered IDs (e.g. from
-// OpenTelemetry or Jaeger) to propagate their own trace IDs. Rejecting
-// non-UUID values prevents audit log poisoning via crafted request IDs.
-// The ID is stored in the Gin context ("request_id") and echoed back in the
-// X-Request-ID response header.
+// Client request ID headers. A client sends its own ID in
+// X-Client-Request-ID, or in X-Request-ID as before; the router echoes it in
+// X-Client-Request-ID.
+const (
+	headerRequestID       = "X-Request-ID"
+	headerClientRequestID = "X-Client-Request-ID"
+	ctxKeyClientRequestID = "client_request_id"
+)
+
+// RequestIDMiddleware gives every request one ID, used end to end.
+//
+// The router always mints the ID, a UUIDv7, so no two requests share one,
+// whatever clients send. It is stored in the Gin context ("request_id"),
+// returned in the X-Request-ID response header and forwarded to the agent
+// and backend in X-Request-ID.
+//
+// A client may also send its own ID: X-Client-Request-ID, or X-Request-ID as
+// before. The first of the two that is a valid UUID (any version) is kept
+// in canonical form as the client request ID ("client_request_id" in the context and the audit record) and
+// echoed in X-Client-Request-ID. It labels the request and lets a retry be
+// recognised as the same request. It is never forwarded, and an invalid
+// value is dropped, so crafted text can't reach any log.
+//
 // Applied globally so every response — including 401s — is traceable.
 func RequestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.GetHeader("X-Request-ID")
-		if _, err := uuid.Parse(id); err != nil {
-			// Header absent, empty, or not a valid UUID — generate a fresh v4.
-			id = uuid.New().String()
+		for _, h := range []string{headerClientRequestID, headerRequestID} {
+			if id, ok := domain.CanonicalRequestID(c.GetHeader(h)); ok {
+				setClientRequestID(c, id)
+				break
+			}
 		}
-		setRequestID(c, id)
+		c.Request.Header.Del(headerClientRequestID)
+		setRequestID(c, newRequestID())
 		c.Next()
 	}
 }
 
 // setRequestID stores id as the request's ID: the Gin context, the
-// X-Request-ID response header and the active trace span (so Tempo traces
-// can be correlated with Loki audit logs that carry the same ID).
+// X-Request-ID response header, the X-Request-ID request header (so the
+// value forwarded to the agent and backend is this ID) and the active trace
+// span (so traces can be correlated with audit logs that carry the same ID).
 func setRequestID(c *gin.Context, id string) {
 	c.Set("request_id", id)
-	c.Header("X-Request-ID", id)
+	c.Request.Header.Set(headerRequestID, id)
+	c.Header(headerRequestID, id)
 	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
 		span.SetAttributes(attribute.String("request.id", id))
 	}
+}
+
+// setClientRequestID stores the client's own ID: the Gin context and the
+// X-Client-Request-ID response header.
+func setClientRequestID(c *gin.Context, id string) {
+	c.Set(ctxKeyClientRequestID, id)
+	c.Header(headerClientRequestID, id)
+	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
+		span.SetAttributes(attribute.String("request.client_id", id))
+	}
+}
+
+// newRequestID mints a UUIDv7: time-ordered, so IDs sort by creation time in
+// logs, and random enough that several router instances never collide.
+func newRequestID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		// NewV7 only fails if the system random source fails. Fall back to
+		// uuid.New, the previous behaviour, which panics in that case.
+		return uuid.New().String()
+	}
+	return id.String()
+}
+
+// requestIDFrom returns the request ID assigned by RequestIDMiddleware. A
+// handler reached without the middleware gets a fresh ID, stored like the
+// middleware's so every later reader sees it, and a logged error: it is a
+// wiring mistake, and readers that ran earlier (the audit log, early spans)
+// saw no ID.
+func requestIDFrom(c *gin.Context) string {
+	if id := c.GetString("request_id"); id != "" {
+		return id
+	}
+	log.Errorf("request_id missing on %s %s: RequestIDMiddleware is not installed on this route", c.Request.Method, c.Request.URL.Path)
+	id := newRequestID()
+	setRequestID(c, id)
+	return id
 }
 
 // TraceResponseMiddleware injects the W3C traceparent header into HTTP responses.
@@ -379,6 +437,17 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 // healthyAgentCount may be nil in legacy deployments; per-model keys then
 // fall back to a flat per_replica ceiling (no per-replica multiplication).
 func QuotaMiddleware(limiter auth.RateLimiter, m *metrics.RouterMetrics, healthyAgentCount func(model string) int) gin.HandlerFunc {
+	var replicas func(c *gin.Context, model string) int
+	if healthyAgentCount != nil {
+		replicas = func(_ *gin.Context, model string) int { return healthyAgentCount(model) }
+	}
+	return QuotaMiddlewareWithReplicas(limiter, m, replicas)
+}
+
+// QuotaMiddlewareWithReplicas is QuotaMiddleware with a replica count that
+// may depend on the request (its endpoint, for a request that may be held
+// while its model wakes: see Handlers.QuotaReplicas).
+func QuotaMiddlewareWithReplicas(limiter auth.RateLimiter, m *metrics.RouterMetrics, replicas func(c *gin.Context, model string) int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		caller := resolveCaller(c)
 		limits, _ := c.Get("quota_limits")
@@ -388,7 +457,11 @@ func QuotaMiddleware(limiter auth.RateLimiter, m *metrics.RouterMetrics, healthy
 		if quota.PerModel == nil {
 			allowed = enforceFlatQuota(c, limiter, m, caller, quota)
 		} else {
-			allowed = enforcePerModelQuota(c, limiter, m, caller, quota, healthyAgentCount)
+			var count func(string) int
+			if replicas != nil {
+				count = func(model string) int { return replicas(c, model) }
+			}
+			allowed = enforcePerModelQuota(c, limiter, m, caller, quota, count)
 		}
 		if allowed {
 			c.Next()

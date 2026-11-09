@@ -1039,6 +1039,12 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 	io.Copy(dst, resp.Body) //nolint:errcheck
 }
 
+// servesChat reports whether the agent serves a chat model. An empty
+// capability means llm, as on the router.
+func (a *Agent) servesChat() bool {
+	return a.cfg.Capability == "" || a.cfg.Capability == domain.CapabilityLLM
+}
+
 // waitForBackend polls the backend server until it is healthy and a model is detected.
 func (a *Agent) waitForBackend() (string, error) {
 	if a.cfg.Model != "" {
@@ -1062,20 +1068,33 @@ func (a *Agent) waitForBackend() (string, error) {
 			continue
 		}
 
-		if a.cfg.Model != "" {
-			return a.cfg.Model, nil
-		}
-
-		models, err := a.engine.DiscoverModels(ctx, a.cfg.BackendURL, a.httpClient)
-		if err != nil {
-			log.Warnf("Backend healthy but no model yet: %v (retrying in %v)", err, backendPollInterval)
-			if a.sleepOrStop(backendPollInterval) {
-				return "", fmt.Errorf("agent stopped")
+		model := a.cfg.Model
+		if model == "" {
+			models, err := a.engine.DiscoverModels(ctx, a.cfg.BackendURL, a.httpClient)
+			if err != nil {
+				log.Warnf("Backend healthy but no model yet: %v (retrying in %v)", err, backendPollInterval)
+				if a.sleepOrStop(backendPollInterval) {
+					return "", fmt.Errorf("agent stopped")
+				}
+				continue
 			}
-			continue
+			model = models[0]
 		}
 
-		return models[0], nil
+		// The warm-up is a chat completion, so only a chat model gets one:
+		// an embedding or rerank model would fail it on every try.
+		if w, ok := a.engine.(Warmer); ok && a.servesChat() {
+			start := time.Now()
+			if err := w.Warm(ctx, a.cfg.BackendURL, a.httpClient, model); err != nil {
+				log.Warnf("Backend healthy but model %s not warm yet: %v (retrying in %v)", model, err, backendPollInterval)
+				if a.sleepOrStop(backendPollInterval) {
+					return "", fmt.Errorf("agent stopped")
+				}
+				continue
+			}
+			log.Infof("Model %s warmed up in %v", model, time.Since(start).Round(time.Millisecond))
+		}
+		return model, nil
 	}
 }
 

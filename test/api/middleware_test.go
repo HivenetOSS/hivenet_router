@@ -117,14 +117,18 @@ func TestRequestIDMiddleware(t *testing.T) {
 		t.Errorf("generated X-Request-ID is not a UUID: %q", got)
 	}
 
-	// Valid provided UUID is reused.
+	// A valid client UUID is kept as the client request ID and echoed in
+	// X-Client-Request-ID; X-Request-ID is always the router's own ID.
 	provided := uuid.New().String()
 	w2 := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("X-Request-ID", provided)
 	r.ServeHTTP(w2, req)
-	if w2.Header().Get("X-Request-ID") != provided {
-		t.Errorf("provided request ID not reused: got %q want %q", w2.Header().Get("X-Request-ID"), provided)
+	if got := w2.Header().Get("X-Client-Request-ID"); got != provided {
+		t.Errorf("client request ID not echoed: got %q want %q", got, provided)
+	}
+	if got := w2.Header().Get("X-Request-ID"); got == provided {
+		t.Errorf("X-Request-ID = the client's ID %q, want the router's own", got)
 	}
 
 	// Non-UUID provided → replaced with a generated UUID.

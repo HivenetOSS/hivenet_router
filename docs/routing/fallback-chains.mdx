@@ -268,7 +268,9 @@ Disable queueing:
 --queue-depth 0
 ```
 
-While a request waits, it does not reserve a particular agent. When capacity becomes available, Hivenet Router evaluates the current policy step again.
+While a request waits, it does not reserve a particular agent. When capacity becomes available, Hivenet Router evaluates the current policy step again. A freed slot wakes one waiting request; a newly registered or recovered agent wakes every waiting request for its model.
+
+Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond `--queue-depth`: the hold limits already bound how many there are. With `--queue-depth 0` they do not wait either. A request woken from the queue that finds no free slot goes back to the head of the queue.
 
 Hivenet Router advances when:
 
@@ -685,12 +687,12 @@ reason="routing_policy: no eligible agents; eu-secondary: max_tries exhausted; a
 
 The precise wording depends on the gates and failures observed for the request.
 
-Use `X-Request-ID` to correlate the client request with logs:
+Send your own ID in `X-Client-Request-ID` to find the request in the audit log (`client_request_id`). The router's own ID for it is returned in `X-Request-ID`:
 
 ```bash
 curl -X POST \
   http://localhost:8080/v1/chat/completions \
-  -H "X-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
+  -H "X-Client-Request-ID: 8b9e4a6d-dfb4-4b95-bada-319e7e5b878a" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Llama-3.1-8B-Instruct",

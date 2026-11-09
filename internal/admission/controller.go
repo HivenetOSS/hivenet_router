@@ -165,6 +165,20 @@ func (c *Controller) SweepIdle(ttl time.Duration) int {
 // owns release (a single deferred Release on every exit path); the reservation
 // is never released here.
 func (c *Controller) Admit(ctx context.Context, model string, footprint int, grows bool, budgetTokens, maxInflight int) *Reservation {
+	return c.admit(ctx, model, footprint, grows, budgetTokens, maxInflight, c.parkFor, true)
+}
+
+// AdmitWithin is Admit with its own park duration instead of the configured
+// one, and outside the queue. A request that already waited for its model to
+// wake from zero uses it to wait for room as long as its hold budget allows,
+// rather than being refused after the short default park.
+func (c *Controller) AdmitWithin(ctx context.Context, model string, footprint int, grows bool, budgetTokens, maxInflight int, parkFor time.Duration) *Reservation {
+	return c.admit(ctx, model, footprint, grows, budgetTokens, maxInflight, parkFor, false)
+}
+
+// admit reserves footprint, parking up to parkFor; with queue, a request that
+// finds a place in the model's queue waits up to the queue wait instead.
+func (c *Controller) admit(ctx context.Context, model string, footprint int, grows bool, budgetTokens, maxInflight int, parkFor time.Duration, queue bool) *Reservation {
 	s := c.stateFor(model)
 	w := int64(footprint)
 	budget := c.effectiveBudget(budgetTokens)
@@ -178,8 +192,8 @@ func (c *Controller) Admit(ctx context.Context, model string, footprint int, gro
 	if c.tryAdmit(ctx, s, w, budget, maxInflight) {
 		return s.track(&Reservation{state: s, weight: w, grows: grows, at: time.Now()})
 	}
-	park := c.parkFor
-	if c.queueDepth > 0 && c.queueWait > park {
+	park := parkFor
+	if queue && c.queueDepth > 0 && c.queueWait > park {
 		if n := s.waiting.Add(1); n <= int32(c.queueDepth) {
 			park = c.queueWait
 			c.queueChanged(s, int(n))

@@ -452,6 +452,14 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		if got := w.Header().Get("X-Request-ID"); got != rid {
 			t.Errorf("X-Request-ID %q, want the token's %q", got, rid)
 		}
+		// The adopted ID is the request's single ID: the processor's ID and
+		// the header forwarded to the agent carry it too.
+		if p.ID != rid {
+			t.Errorf("pending request ID %q, want the token's %q", p.ID, rid)
+		}
+		if got := p.Request.HttpHeaders.Get("X-Request-ID"); got != rid {
+			t.Errorf("forwarded X-Request-ID %q, want the token's %q", got, rid)
+		}
 		if *b.charges != 1 {
 			t.Errorf("quota charged %d times at the target, want 1", *b.charges)
 		}
@@ -513,7 +521,7 @@ func TestRedirect_AtTheTarget(t *testing.T) {
 		b := newSite(t, "b", nil, testKeys(t))
 		push(t, fleetDoc(1, placement("m", redirect.KindChat, "a")), b)
 		for i := 0; i < 10; i++ {
-			c := claims(func(c *redirect.Claims) { c.RequestID = fmt.Sprintf("rid-%d", i) })
+			c := claims(func(c *redirect.Claims) { c.RequestID = fmt.Sprintf("0190f3a2-7c4e-7b1a-9f3d-%012d", i) })
 			loc, next := locationToken(t, send(b, chatPath+"?rt="+sign(t, c), chatBody, map[string]string{"X-Session-ID": fmt.Sprint(i)}))
 			if loc.Host != "c.example.com" {
 				t.Fatalf("Location %s, want c (never a, the origin)", loc)
@@ -630,19 +638,24 @@ func TestRedirect_SingleUseCannotBeStolen(t *testing.T) {
 			t.Fatalf("the other key: status %d key %q, want 200 on its own key-2", got.Code, p.KeyID)
 		}
 		got, p := follow(t, b, victim, chatBody)
-		if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
-			t.Fatalf("the victim: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
-				got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+		if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Client-Request-ID") != clientRID ||
+			got.Header().Get("X-Request-ID") != victim.Header().Get("X-Request-ID") {
+			t.Fatalf("the victim: status %d key %q X-Request-ID %q X-Client-Request-ID %q, want 200 on key-1 under %s, client ID %s",
+				got.Code, p.KeyID, got.Header().Get("X-Request-ID"), got.Header().Get("X-Client-Request-ID"),
+				victim.Header().Get("X-Request-ID"), clientRID)
 		}
 	})
 
 	t.Run("a same-key retry with its own X-Request-ID is served", func(t *testing.T) {
 		a, b := entryAndTarget(t)
 		for try := 1; try <= 2; try++ {
-			got, p := follow(t, b, send(a, chatPath, chatBody, withRID(redirectKey)), chatBody)
-			if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Request-ID") != clientRID {
-				t.Fatalf("try %d: status %d key %q X-Request-ID %q, want 200 on key-1 under %s",
-					try, got.Code, p.KeyID, got.Header().Get("X-Request-ID"), clientRID)
+			first := send(a, chatPath, chatBody, withRID(redirectKey))
+			got, p := follow(t, b, first, chatBody)
+			if got.Code != http.StatusOK || p.KeyID != "key-1" || got.Header().Get("X-Client-Request-ID") != clientRID ||
+				got.Header().Get("X-Request-ID") != first.Header().Get("X-Request-ID") {
+				t.Fatalf("try %d: status %d key %q X-Request-ID %q X-Client-Request-ID %q, want 200 on key-1 under %s, client ID %s",
+					try, got.Code, p.KeyID, got.Header().Get("X-Request-ID"), got.Header().Get("X-Client-Request-ID"),
+					first.Header().Get("X-Request-ID"), clientRID)
 			}
 		}
 		if len(b.rejects) != 0 {
@@ -826,5 +839,68 @@ func TestSiblingMapGauges(t *testing.T) {
 	version, expired = 42, 0
 	if got := read(); got["hivenet_sibling_map_version"] != 42 || got["hivenet_sibling_map_hints_expired"] != 0 {
 		t.Fatalf("after a push: %v", got)
+	}
+}
+
+// TestPendingDemandGauge: hivenet_pending_demand is read at scrape time,
+// with one series per model returned, and none left behind for a model
+// that is no longer returned.
+func TestPendingDemandGauge(t *testing.T) {
+	m := metrics.NewRouterMetrics()
+	demand := map[string]int{"m": 0, "n": 3}
+	m.RegisterPendingDemand(func() map[string]int { return demand })
+	read := func() map[string]float64 {
+		t.Helper()
+		fams, err := m.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]float64{}
+		for _, f := range fams {
+			if f.GetName() != "hivenet_pending_demand" {
+				continue
+			}
+			for _, s := range f.GetMetric() {
+				out[s.GetLabel()[0].GetValue()] = s.GetGauge().GetValue()
+			}
+		}
+		return out
+	}
+	if got := read(); len(got) != 2 || got["m"] != 0 || got["n"] != 3 {
+		t.Fatalf("first scrape %v, want m=0 n=3", got)
+	}
+	demand = map[string]int{"m": 1}
+	if got := read(); len(got) != 1 || got["m"] != 1 {
+		t.Fatalf("second scrape %v, want only m=1", got)
+	}
+}
+
+// TestWakeHoldMetrics: every outcome is counted; only released requests are
+// observed in the wake-time histogram.
+func TestWakeHoldMetrics(t *testing.T) {
+	m := metrics.NewRouterMetrics()
+	m.WakeHoldDone("m", "woken", 120*time.Second)
+	m.WakeHoldDone("m", "expired", 300*time.Second)
+	m.WakeHoldDone("m", "full", 0)
+	fams, err := m.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var holds, observed float64
+	for _, f := range fams {
+		switch f.GetName() {
+		case "hivenet_wake_holds_total":
+			for _, s := range f.GetMetric() {
+				holds += s.GetCounter().GetValue()
+			}
+		case "hivenet_wake_hold_seconds":
+			observed = float64(f.GetMetric()[0].GetHistogram().GetSampleCount())
+			if sum := f.GetMetric()[0].GetHistogram().GetSampleSum(); sum != 120 {
+				t.Errorf("histogram sum %v, want 120 (the woken hold only)", sum)
+			}
+		}
+	}
+	if holds != 3 || observed != 1 {
+		t.Fatalf("holds %v observed %v, want 3 and 1", holds, observed)
 	}
 }

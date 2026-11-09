@@ -499,7 +499,7 @@ While waiting, the request resumes when an in-flight request of the model finish
 
 Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free capacity slot between fallback steps. Routers ignore the `--capacity` of network agents.
 
-If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step.
+If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond the queue depth.
 
 <Note>
   The queue is keyed by model. Traffic for one model does not consume another model’s queue depth.

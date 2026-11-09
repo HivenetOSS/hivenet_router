@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/domain"
 
 	logging "github.com/ipfs/go-log/v2"
 )
@@ -109,7 +110,8 @@ func (t *tokenAuth) Authenticate(req *http.Request) (*auth.AuthResult, error) {
 		if keyReason == "" {
 			res.Redirect = &auth.RedirectInfo{
 				Hop: c.Hop, BodySHA: c.BodySHA, RequestID: c.RequestID,
-				Model: c.Model, Scope: string(c.Scope), From: c.From,
+				ClientRequestID: c.ClientRequestID,
+				Model:           c.Model, Scope: string(c.Scope), From: c.From,
 				TokenID: c.JTI, Exp: c.Exp,
 			}
 			return res, nil
@@ -136,7 +138,7 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 		return c, "clock"
 	case errors.Is(err, ErrTokenSignature):
 		return c, "signature"
-	case err != nil, c.RequestID == "", !ValidJTI(c.JTI):
+	case err != nil, !normalizeIDs(&c), !ValidJTI(c.JTI):
 		return c, "malformed"
 	case c.Site != t.r.Self:
 		return c, "site"
@@ -146,6 +148,26 @@ func (t *tokenAuth) check(req *http.Request, tok string, now time.Time) (Claims,
 		return c, "scope"
 	}
 	return c, ""
+}
+
+// normalizeIDs puts the token's request IDs in canonical form, so a token
+// signed with any UUID spelling is accepted. It reports false when the
+// request ID is not a UUID, or a client request ID is set and is not one.
+// The signature is already verified, so rewriting the claims is safe.
+func normalizeIDs(c *Claims) bool {
+	rid, ok := domain.CanonicalRequestID(c.RequestID)
+	if !ok {
+		return false
+	}
+	c.RequestID = rid
+	if c.ClientRequestID != "" {
+		crid, ok := domain.CanonicalRequestID(c.ClientRequestID)
+		if !ok {
+			return false
+		}
+		c.ClientRequestID = crid
+	}
+	return true
 }
 
 // inScope reports whether this policloud lies inside scope. Anything but

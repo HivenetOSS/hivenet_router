@@ -144,6 +144,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
 | Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
 | Cross-site redirect | Redirects to sibling policlouds, refused redirect tokens, and the sibling map’s version and hint state |
+| Hold at zero | Requests held while a model wakes from zero, how holds end, and how long they last |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
 ## Metric labels and cardinality
@@ -1419,6 +1420,18 @@ These series exist only when [cross-site redirect](/routing/cross-site-redirect)
 | `hivenet_sibling_map_hints_expired` | Gauge | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
 
 A rising `reason="expired"` rate means clients take longer than `--redirect-token-ttl` to follow the redirect; `reason="clock"` means this router’s clock is behind the router that signed the token; `reason="replay"` means a token was presented twice. A router whose `hivenet_sibling_map_version` lags the others missed a map push.
+
+## Hold-at-zero metrics
+
+These series exist only when [cross-site redirect](/routing/cross-site-redirect) is enabled with `--site-id`. `hivenet_pending_demand` has a series for every model the sibling map places on this policloud with `scale_from_zero: true`, `0` when nothing is held. It has none while the router has no map, so write queries with `or vector(0)`. See [Hold at zero](/routing/hold-at-zero).
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hivenet_pending_demand` | Gauge | `model` | Distinct requests waiting for the model on this router: held now, or released by a wake and not yet given a slot on an agent. A retry with the same API key and the same client request ID (a UUID in `X-Client-Request-ID` or `X-Request-ID`) counts once |
+| `hivenet_wake_holds_total` | Counter | `model`, `outcome` | Holds that ended: `woken` (released), `expired` (budget ran out), `full` (a hold limit was reached), `gone` (the client left) |
+| `hivenet_wake_hold_seconds` | Histogram | `model` | How long released requests were held; expired and abandoned holds are not observed |
+
+Sum `hivenet_pending_demand` across the routers of a policloud to get its demand for a model.
 
 ## Per-request duration by agent
 

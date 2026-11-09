@@ -326,3 +326,33 @@ func TestAdmissionDefaultsFromEnv(t *testing.T) {
 		t.Fatalf("want 1 env error for a negative cap, got %v", cfg.EnvErrors)
 	}
 }
+
+// TestLoadFromEnv_WakeHold: the hold-at-zero settings. A bad value refuses
+// startup via EnvErrors and keeps the default.
+func TestLoadFromEnv_WakeHold(t *testing.T) {
+	if c := config.LoadFromEnv(); c.WakeHoldBudget != 5*time.Minute || c.WakeHoldMax != 100 || c.WakeKeepAlive != 15*time.Second {
+		t.Fatalf("defaults: budget %v max %d keepalive %v, want 5m, 100, 15s", c.WakeHoldBudget, c.WakeHoldMax, c.WakeKeepAlive)
+	}
+
+	t.Setenv("HIVENET_ROUTER_WAKE_HOLD_BUDGET", "4m")
+	t.Setenv("HIVENET_ROUTER_WAKE_HOLD_MAX", "20")
+	t.Setenv("HIVENET_ROUTER_WAKE_KEEPALIVE", "0s") // 0 disables keepalives
+	if c := config.LoadFromEnv(); c.WakeHoldBudget != 4*time.Minute || c.WakeHoldMax != 20 || c.WakeKeepAlive != 0 || len(c.EnvErrors) != 0 {
+		t.Fatalf("overrides: budget %v max %d keepalive %v errors %v", c.WakeHoldBudget, c.WakeHoldMax, c.WakeKeepAlive, c.EnvErrors)
+	}
+
+	for env, bad := range map[string][]string{
+		"HIVENET_ROUTER_WAKE_HOLD_BUDGET": {"soon", "0s", "-1m"},
+		"HIVENET_ROUTER_WAKE_HOLD_MAX":    {"many", "0", "-3"},
+		"HIVENET_ROUTER_WAKE_KEEPALIVE":   {"often", "-5s"},
+	} {
+		for _, v := range bad {
+			t.Run(env+"="+v, func(t *testing.T) {
+				t.Setenv(env, v)
+				if c := config.LoadFromEnv(); len(c.EnvErrors) != 1 {
+					t.Errorf("errors %v, want exactly one", c.EnvErrors)
+				}
+			})
+		}
+	}
+}
