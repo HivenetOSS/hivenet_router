@@ -519,6 +519,41 @@ func TestPartitionedRouterFencedWhenAgentsReturn(t *testing.T) {
 	}
 }
 
+// A router evicted while cut off from the store, whose first heartbeat back
+// re-added it but lost its reply (the tick failed after it), still learns it
+// was evicted: its epoch changed. It drops the credits it held.
+func TestEvictionSeenAfterLostHeartbeatReply(t *testing.T) {
+	b := newBackend(t)
+	rs := newOccFleet(t, b, newAgents(), 2)
+	const budget, w = 1000, 100
+	a := fill(rs[0], w, budget, 5)
+	for _, r := range a {
+		r.Release() // r0 keeps holding these credits, unused
+	}
+	rs[0].proxy.setCut(true)
+	time.Sleep(4 * interval)
+	// r1 evicts r0; r0's first heartbeat back re-adds it with a new epoch,
+	// and r0 never sees that reply.
+	cl, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{b.addr}, DisableCache: true, ForceSingleClient: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	ctx := context.Background()
+	for _, m := range b.members(t) {
+		if strings.HasPrefix(m, "r0@") {
+			cl.Do(ctx, cl.B().Hset().Key("hivenet:{"+b.prefix+"}:epochs").FieldValue().FieldValue(m, "1").Build())
+		}
+	}
+	b1 := fill(rs[1], w, budget, 10)
+	rs[0].proxy.setCut(false)
+	waitFor(t, 3*time.Second, "r0 to notice the eviction", func() bool { return rs[0].store.Evictions() > 0 })
+	a2 := fill(rs[0], w, budget, 10)
+	if site := (len(b1) + len(a2)) * w; site > budget {
+		t.Fatalf("site holds %d > budget %d (r0 %d from old credits)", site, budget, len(a2)*w)
+	}
+}
+
 // A router that just started has no agent reports yet: it never takes the
 // credits of a silent router that may still be serving.
 func TestNewRouterDoesNotReclaimLiveRouter(t *testing.T) {

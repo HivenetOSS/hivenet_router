@@ -536,13 +536,18 @@ func (s *Store) tick(ctx context.Context) {
 	// hb[0] says whether this run was still in the live set. Once it has
 	// been, missing means the other routers evicted it (they saw it as gone
 	// and took back what it held), so whatever it holds must be re-granted.
+	// A new epoch says the same, even when the heartbeat that re-added this
+	// run had its reply lost (a tick that failed after it): this run was
+	// missing from the live set since the epoch it knows.
 	evictedNow := false
-	if hb[0] == "1" {
-		s.seenLive = true
-	} else if s.seenLive {
+	if known := s.currentEpoch(); (hb[0] != "1" && s.seenLive) || (known != "" && known != epoch) {
 		evictedNow = true
+		s.agentsForce = true
 		s.evicted.Add(1)
 		log.Warnf("shared counters: this router was evicted from the live set; re-requesting its shares")
+	}
+	if hb[0] == "1" {
+		s.seenLive = true
 	}
 	var live, livePeers []string
 	var fetch []string // runs whose agent list changed
