@@ -30,6 +30,24 @@ vllm:kv_cache_usage_perc{model_name="m"} 0.25
 	}
 }
 
+// When vLLM reports kv_cache_size_tokens it is used: for a hybrid model it is
+// well below num_gpu_blocks × block_size (measured on vLLM 0.31 with a hybrid
+// 27B model: 52,043 tokens, against 84,672 from the blocks).
+func TestVLLMKVCapacityPrefersReportedTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`vllm:cache_config_info{block_size="784",kv_cache_size_tokens="52043",num_gpu_blocks="108",mamba_block_size="784"} 1.0
+`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	m, err := (&VLLMEngine{}).ScrapeMetrics(context.Background(), srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.KVCapacityTokens == nil || *m.KVCapacityTokens != 52043 {
+		t.Fatalf("KV capacity %v, want 52043", m.KVCapacityTokens)
+	}
+}
+
 func TestVLLMKVCapacityAbsent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("vllm:num_requests_running 2\n")) //nolint:errcheck

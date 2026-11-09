@@ -310,7 +310,7 @@ When several agents run on the same host, each one needs a separate `--identity-
 
 ## How load is bounded
 
-The agent reports vLLM's KV-cache size in tokens, read from `vllm:cache_config_info` (`num_gpu_blocks × block_size`). When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
+The agent reports vLLM's KV-cache size in tokens, read from `vllm:cache_config_info`: its `kv_cache_size_tokens` label, or `num_gpu_blocks × block_size` on vLLM versions that do not report it. For hybrid models (attention plus mamba layers) only the first is right, because the blocks also hold mamba state. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
 
 vLLM's own scheduler limit, `--max-num-seqs`, still applies inside the engine.
 
