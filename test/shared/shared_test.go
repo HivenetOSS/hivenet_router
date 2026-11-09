@@ -6,6 +6,8 @@ package shared_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -418,5 +420,27 @@ func TestDailyTotalsRewrittenAfterFailover(t *testing.T) {
 	waitFor(t, 2*time.Second, "r2 to sync", func() bool { return late.store.SyncSeq() > 0 })
 	if ok, _, _ := late.rate.AllowInputTokens("t", "", tpd, 400); ok {
 		t.Fatal("a router joining after the failover saw today's 700 tokens as unspent")
+	}
+}
+
+// A site ID that cannot sit in a key's hash tag, or a TLS CA file that holds
+// no certificate, stops startup.
+func TestNewRejectsBadSiteIDAndCA(t *testing.T) {
+	for _, id := range []string{"a{b", "a b", "a:b", strings.Repeat("x", 65)} {
+		if _, err := shared.New(shared.Config{Addrs: []string{"x:1"}, RouterID: "r", Prefix: id}); err == nil {
+			t.Errorf("site ID %q accepted", id)
+		}
+	}
+	if _, err := shared.New(shared.Config{Addrs: []string{"x:1"}, RouterID: "r", Prefix: "pc-a.eu_1"}); err != nil {
+		t.Errorf("valid site ID refused: %v", err)
+	}
+	bad := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(bad, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{bad, filepath.Join(t.TempDir(), "missing.pem")} {
+		if _, err := shared.New(shared.Config{Addrs: []string{"x:1"}, RouterID: "r", TLSCAFile: f}); err == nil {
+			t.Errorf("TLS CA file %s accepted", f)
+		}
 	}
 }
