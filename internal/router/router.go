@@ -620,30 +620,7 @@ func (r *Router) Start() error {
 			// scale-down closes the connection on purpose. The reaper publishes
 			// a second "unregistered" later — the watcher's 1s debounce
 			// collapses the pair to one annotation write.
-			if agent := r.agents.Get(peerID); agent != nil {
-				agent.RLock()
-				dep, rep := agent.Metadata.DeploymentID, agent.Metadata.ReplicaID
-				meta := agent.Metadata
-				agent.RUnlock()
-				r.connHealthMu.Lock()
-				if agent.IsHealthy() {
-					agent.SetHealthy(false)
-					if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
-						log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
-					}
-					r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
-						strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
-					log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
-				}
-				r.connHealthMu.Unlock()
-				r.registrationNotifier.Publish(domain.RegistrationEvent{
-					EventType:    domain.RegistrationUnregistered,
-					DeploymentID: dep,
-					ReplicaID:    rep,
-					AgentID:      peerID.String(),
-					Timestamp:    time.Now().UTC(),
-				})
-			}
+			r.agentDisconnected(peerID)
 			go func() {
 				// Re-check inside the goroutine: the peer may have reconnected
 				// between the outer check and this execution. Closing a live
@@ -1722,8 +1699,8 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	// connection), nor LastSeen (it would delay the health monitor). See
 	// connHealthMu.
 	r.connHealthMu.Lock()
-	defer r.connHealthMu.Unlock()
 	if !r.peerConnected(session.PeerID) {
+		r.connHealthMu.Unlock()
 		log.Debugf("handleAgentHeartbeat: %s has no connection — heartbeat ignored", peerIDStr[:8])
 		http.Error(w, "agent not connected", http.StatusConflict)
 		return
@@ -1734,9 +1711,17 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 
 	wasHealthy := a.IsHealthy()
 	prevBackendHealthy := a.SetBackendHealthy(payload.BackendHealthy)
+	a.SetHealthy(payload.BackendHealthy)
+	if err := r.storage.UpdateAgentStatus(session.PeerID, payload.BackendHealthy, time.Now()); err != nil {
+		log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
+	}
+	r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, payload.BackendHealthy)
+	// Only the health change above is ordered with a disconnect; the rest
+	// runs outside the lock, so heartbeats of different agents and
+	// disconnects do not wait for each other.
+	r.connHealthMu.Unlock()
 
 	if payload.BackendHealthy {
-		a.SetHealthy(true)
 		if !wasHealthy || !prevBackendHealthy {
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
@@ -1745,21 +1730,10 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 				r.wake.Wake(model)
 			}
 		}
-		if err := r.storage.UpdateAgentStatus(session.PeerID, true, time.Now()); err != nil {
-			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
-		}
-		r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, true)
-	} else {
-		a.SetHealthy(false)
-		if err := r.storage.UpdateAgentStatus(session.PeerID, false, time.Now()); err != nil {
-			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
-		}
-		r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, false)
+	} else if prevBackendHealthy {
 		// Only increment counter and log on the healthy→unhealthy transition.
-		if prevBackendHealthy {
-			r.counters.RecordBackendFailure(session.PeerID)
-			log.Warnf("Agent %s reported backend unhealthy — removed from routing pool", peerIDStr[:8])
-		}
+		r.counters.RecordBackendFailure(session.PeerID)
+		log.Warnf("Agent %s reported backend unhealthy — removed from routing pool", peerIDStr[:8])
 	}
 
 	if payload.Hardware != nil {
@@ -1770,6 +1744,49 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// agentDisconnected takes an agent whose last connection closed out of the
+// routing pool and publishes it as unregistered. It does nothing when the
+// agent connected again before connHealthMu was taken: a heartbeat on the new
+// connection may already have marked it healthy, and the stale disconnect
+// must not undo that until the next heartbeat.
+func (r *Router) agentDisconnected(peerID peer.ID) {
+	agent := r.agents.Get(peerID)
+	if agent == nil {
+		return
+	}
+	agent.RLock()
+	meta := agent.Metadata
+	agent.RUnlock()
+	r.connHealthMu.Lock()
+	if r.peerConnected(peerID) {
+		r.connHealthMu.Unlock()
+		return
+	}
+	if agent.IsHealthy() {
+		agent.SetHealthy(false)
+		if r.storage != nil {
+			if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
+				log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
+			}
+		}
+		if r.metrics != nil {
+			r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
+				strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
+		}
+		log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
+	}
+	r.connHealthMu.Unlock()
+	if r.registrationNotifier != nil {
+		r.registrationNotifier.Publish(domain.RegistrationEvent{
+			EventType:    domain.RegistrationUnregistered,
+			DeploymentID: meta.DeploymentID,
+			ReplicaID:    meta.ReplicaID,
+			AgentID:      peerID.String(),
+			Timestamp:    time.Now().UTC(),
+		})
+	}
 }
 
 // installAgent puts a newly registered agent in the registry and reports

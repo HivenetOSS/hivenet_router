@@ -128,3 +128,37 @@ func TestInstallAgent_DisconnectedAgentIsUnhealthy(t *testing.T) {
 		t.Error("an agent registered after its disconnect is in the routing pool")
 	}
 }
+
+// TestAgentDisconnected_ReconnectedAgentStaysHealthy checks that a disconnect
+// handled after the agent connected again changes nothing: a heartbeat on the
+// new connection may already have marked it healthy. Without a connection the
+// agent leaves the routing pool.
+func TestAgentDisconnected_ReconnectedAgentStaysHealthy(t *testing.T) {
+	routerHost := newTestHost(t)
+	agentHost := newTestHost(t)
+	r := &Router{agents: NewAgentRegistry(), p2pHost: routerHost}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := agentHost.Connect(ctx, peer.AddrInfo{ID: routerHost.ID(), Addrs: routerHost.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "router sees the connection", func() bool { return r.peerConnected(agentHost.ID()) })
+	a := domain.NewAgent(agentHost.ID(), domain.AgentMetadata{Model: "m", Capacity: 1}, "t1")
+	r.agents.Register(a)
+
+	// The disconnect of an earlier connection is handled only now.
+	r.agentDisconnected(agentHost.ID())
+	if !a.IsHealthy() {
+		t.Fatal("a stale disconnect took a connected agent out of the routing pool")
+	}
+
+	if err := routerHost.Network().ClosePeer(agentHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "router sees the disconnect", func() bool { return !r.peerConnected(agentHost.ID()) })
+	r.agentDisconnected(agentHost.ID())
+	if a.IsHealthy() {
+		t.Error("a disconnected agent stayed in the routing pool")
+	}
+}

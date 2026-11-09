@@ -442,6 +442,11 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// per-key RPM flood limit alone.
 	countOnly := path == "/v1/messages/count_tokens"
 	var reservation admission.Reservations
+	// The request timeout counts from here, so a wait for room in the
+	// occupancy budget is part of it. A request released by a wake already
+	// waited for room within its hold budget: its timeout starts once it is
+	// admitted.
+	deadlineFrom := m.start
 	if !countOnly {
 		if !h.enforceRequestCaps(c, &req, inputEstimate) {
 			return
@@ -456,6 +461,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		reservation, admitted = h.enforceOccupancyBudget(c, &req, inputEstimate)
 		if !admitted {
 			return
+		}
+		if _, released := c.Get(ctxKeyHoldDeadline); released {
+			deadlineFrom = time.Now()
 		}
 	}
 	defer reservation.Release()
@@ -486,6 +494,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	}
 
 	pending := domain.NewPendingRequest(m.requestID, &req, h.timeout)
+	pending.Deadline = deadlineFrom.Add(h.timeout)
 	pending.Ctx = c.Request.Context()
 	pending.TenantID = m.tenantID
 	pending.KeyID = m.keyID
@@ -636,6 +645,15 @@ func (h *Handlers) healthyReplicas(model string) int {
 	return 1
 }
 
+// agentReplicas is the number of healthy agents serving model, 0 when none
+// (a model served only by a provider, or scaled to zero).
+func (h *Handlers) agentReplicas(model string) int {
+	if h.healthyAgentCount == nil {
+		return 0
+	}
+	return h.healthyAgentCount(model)
+}
+
 // enforceOccupancyBudget applies the KV-occupancy admit budget: the request is
 // admitted only while the model's weighted in-flight token sum plus this
 // request's footprint stays within admit_fraction × admit_budget_tokens, and the
@@ -694,8 +712,9 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		inflight := pol.MaxInflight * replicas
 		// Nothing bounds this model (no policy budget, no KV size reported,
 		// e.g. Ollama or llama.cpp): fall back to a per-replica request cap.
-		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 {
-			inflight = h.defaultMaxInflight * max(replicas, 1)
+		// Only agents count: a model served by a provider alone is not held.
+		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 && h.agentReplicas(req.Model) > 0 {
+			inflight = h.defaultMaxInflight * replicas
 		}
 		return budget, inflight
 	}
@@ -1077,7 +1096,7 @@ func (h *Handlers) awaitResponse(c *gin.Context, pending *domain.PendingRequest,
 		h.writeSuccessResponse(c, pending, req, m, resp)
 	case err := <-pending.Error:
 		writeErrorResponse(c, pending, err)
-	case <-time.After(h.timeout):
+	case <-time.After(time.Until(pending.Deadline)):
 		// No response — nothing billed. Agent ID is logged when already dispatched.
 		c.Set(auditKeyInputTokens, int64(0))
 		c.Set(auditKeyOutputTokens, int64(0))
