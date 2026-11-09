@@ -418,7 +418,9 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 		peer.AddrInfo{ID: routerPeerID, Addrs: routerAddrs},
 	)
 	if err != nil {
-		a.gater.RemoveRouter(routerPeerID)
+		// Connected and protected above: undo both, unless another session
+		// still uses this router.
+		a.dropRouter(node, routerPeerID)
 		return nil, "", fmt.Errorf("failed to create namespaced client: %w", err)
 	}
 

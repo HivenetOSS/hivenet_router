@@ -96,6 +96,7 @@ type modelState struct {
 	maxInflight int           // last max_inflight seen, for the concurrency gauge
 	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
 	waiting     atomic.Int32  // requests in the wait queue
+	bigWaiting  atomic.Int32  // parked requests larger than the whole budget
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
 	// SweepIdle. Atomic so the janitor never contends with the hot path.
@@ -178,12 +179,21 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	budget := c.effectiveBudget(budgetTokens)
 	// A request larger than the whole budget is held to the budget: it is
 	// admitted when nothing else is in flight. Its footprint is an upper bound
-	// (max_tokens), and the engine preempts if it really runs out.
-	if budget > 0 && w > budget {
+	// (max_tokens), and the engine preempts if it really runs out. While one
+	// waits, smaller requests wait behind it, so the model drains and it is
+	// not starved by a steady stream of small ones.
+	big := budget > 0 && w > budget
+	if big {
 		w = budget
 	}
+	try := func() bool {
+		if !big && s.bigWaiting.Load() > 0 {
+			return false
+		}
+		return s.tryReserve(w, budget, maxInflight)
+	}
 
-	if s.tryReserve(w, budget, maxInflight) {
+	if try() {
 		return &Reservation{state: s, weight: w, grows: grows}
 	}
 	park := parkFor
@@ -199,6 +209,10 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	if park <= 0 {
 		return nil
 	}
+	if big {
+		s.bigWaiting.Add(1)
+		defer s.bigWaiting.Add(-1)
+	}
 
 	timer := time.NewTimer(park)
 	defer timer.Stop()
@@ -206,7 +220,7 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 		// Grab the current wake channel BEFORE re-checking, so a release that
 		// happens between the check and the wait cannot be missed.
 		ch := s.notifyCh()
-		if s.tryReserve(w, budget, maxInflight) {
+		if try() {
 			return &Reservation{state: s, weight: w, grows: grows}
 		}
 		select {

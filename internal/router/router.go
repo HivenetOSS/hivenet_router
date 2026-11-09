@@ -503,10 +503,9 @@ func New(cfg *config.Config) (*Router, error) {
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 	}
-	// Over-budget requests wait in a per-model queue (--queue-depth) for room,
-	// up to the request timeout, before a 429.
-	// Half the request timeout at most, so an admitted request keeps at least
-	// the other half to run instead of a 504 right after a long wait.
+	// Over-budget requests wait in a per-model queue (--queue-depth) for room
+	// before a 429: half the request timeout at most, so an admitted request
+	// keeps at least the other half to run instead of a 504 right after.
 	r.occupancy.SetQueue(cfg.QueueDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck

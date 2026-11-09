@@ -153,6 +153,40 @@ func TestOversizedRequestAdmittedAlone(t *testing.T) {
 	}
 }
 
+// A request larger than the budget is not starved by a steady stream of
+// small ones: while it waits, they wait behind it, the model drains and it
+// gets in.
+func TestOversizedRequestNotStarved(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if r := c.Admit(context.Background(), model, 300, false, 1000, 0); r != nil {
+					time.Sleep(20 * time.Millisecond)
+					r.Release()
+				}
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	big := c.AdmitWithin(context.Background(), model, 5000, false, 1000, 0, 2*time.Second)
+	close(stop)
+	wg.Wait()
+	if big == nil {
+		t.Fatal("an oversized request was starved by small ones")
+	}
+	big.Release()
+}
+
 // TestQueueWaitsForRoom verifies a request over the budget waits in the queue
 // (up to its depth) until room frees, instead of the short park window, and a
 // request beyond the depth gets only the short park.
