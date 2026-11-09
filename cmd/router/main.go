@@ -95,6 +95,7 @@ func main() {
 	syncSentinelMaster := flag.String("sync-valkey-sentinel-master", cfg.SyncSentinelMaster, "Sentinel master set name; empty connects to Valkey directly (env: HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER)")
 	syncPasswordFile := flag.String("sync-valkey-password-file", "", "Path to a file holding the Valkey (and Sentinel) password (env: HIVENET_ROUTER_SYNC_VALKEY_PASSWORD)")
 	syncTLS := flag.Bool("sync-valkey-tls", cfg.SyncValkeyTLS, "Connect to Valkey and Sentinel with TLS (env: HIVENET_ROUTER_SYNC_VALKEY_TLS)")
+	syncMinRouters := flag.Int("sync-min-routers", max(cfg.SyncMinRouters, 1), "Routers of this site assumed while Valkey is unreachable or before it first answers; set it to the number of routers, so each one enforces its share (env: HIVENET_ROUTER_SYNC_MIN_ROUTERS)")
 	syncInterval := flag.Duration("sync-interval", cfg.SyncInterval, "How often the routers exchange usage, between 100ms and 10s (env: HIVENET_ROUTER_SYNC_INTERVAL)")
 	routerID := flag.String("router-id", cfg.RouterID, "Stable identity of this router among the routers of its site; defaults to the hostname, e.g. the pod name (env: HIVENET_ROUTER_ROUTER_ID)")
 
@@ -206,6 +207,7 @@ func main() {
 	cfg.SyncSentinelMaster = strings.TrimSpace(*syncSentinelMaster)
 	cfg.SyncValkeyTLS = *syncTLS
 	cfg.SyncInterval = *syncInterval
+	cfg.SyncMinRouters = *syncMinRouters
 	cfg.RouterID = strings.TrimSpace(*routerID)
 	if *syncPasswordFile != "" {
 		data, err := os.ReadFile(*syncPasswordFile)
@@ -220,6 +222,9 @@ func main() {
 	case "valkey":
 		if cfg.SyncValkeyAddrs == "" {
 			log.Fatal("--sync-store=valkey needs --sync-valkey-addrs")
+		}
+		if cfg.SyncMinRouters < 1 {
+			log.Fatalf("--sync-min-routers must be at least 1, got %d", cfg.SyncMinRouters)
 		}
 		if cfg.SyncInterval < 100*time.Millisecond || cfg.SyncInterval > 10*time.Second {
 			log.Fatalf("--sync-interval must be between 100ms and 10s, got %v", cfg.SyncInterval)

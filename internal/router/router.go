@@ -1817,6 +1817,7 @@ func (r *Router) setupShared() error {
 		Prefix:         cfg.SiteID,
 		RouterID:       cfg.RouterID,
 		Interval:       cfg.SyncInterval,
+		MinRouters:     cfg.SyncMinRouters,
 	})
 	if err != nil {
 		return fmt.Errorf("shared counters: %w", err)
@@ -1828,6 +1829,6 @@ func (r *Router) setupShared() error {
 	r.metrics.Register(st.Collectors()...)
 	r.shared = st
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
-		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval})
+		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
 	return nil
 }

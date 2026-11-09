@@ -5,6 +5,8 @@ package auth
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,8 +25,27 @@ type Fleet interface {
 	DegradedEpoch() uint64
 	// SyncSeq changes each time the other routers' usage has been applied.
 	SyncSeq() uint64
-	// DailyTotal returns the policloud's usage today for a daily bucket.
-	DailyTotal(ctx context.Context, bucket string) (int, error)
+	// DailyTotal returns the policloud's usage today for a daily bucket and
+	// the last usage entry the total includes. It fails at once, without
+	// waiting, while the store does not answer.
+	DailyTotal(ctx context.Context, bucket string) (total int, mark string, err error)
+}
+
+// streamAfter reports whether stream entry id comes after mark ("ms-seq").
+func streamAfter(id, mark string) bool {
+	if mark == "" {
+		return true
+	}
+	im, is := splitStreamID(id)
+	mm, ms := splitStreamID(mark)
+	return im > mm || (im == mm && is > ms)
+}
+
+func splitStreamID(id string) (int64, int64) {
+	a, b, _ := strings.Cut(id, "-")
+	ms, _ := strconv.ParseInt(a, 10, 64)
+	seq, _ := strconv.ParseInt(b, 10, 64)
+	return ms, seq
 }
 
 // Usage kinds (must match package shared).
