@@ -118,6 +118,7 @@ func AuditMiddleware() gin.HandlerFunc {
 			status := c.Writer.Status()
 
 			reqID, _ := c.Get("request_id")
+			clientReqID, _ := c.Get(ctxKeyClientRequestID)
 			tenantID, _ := c.Get("tenant_id")
 			keyID, _ := c.Get("key_id")
 			model, _ := c.Get(auditKeyModel)
@@ -154,6 +155,7 @@ func AuditMiddleware() gin.HandlerFunc {
 				zap.String("level", level),
 				zap.String("trace_id", traceID),
 				zap.String("request_id", strDefault(reqID, "")),
+				zap.String("client_request_id", strDefault(clientReqID, "")),
 				zap.String("tenant_id", strDefault(tenantID, "")),
 				zap.String("key_id", strDefault(keyID, "")),
 				zap.String("model", strDefault(model, "")),

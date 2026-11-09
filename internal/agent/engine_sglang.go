@@ -120,3 +120,10 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 func (e *SGLangEngine) ForwardChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, req domain.ChatRequest, options ...EngineOption) ([]byte, http.Header, error) {
 	return forwardOpenAIChatCompletion(ctx, baseURL, httpClient, model, req.RawBytes, e.Name(), options...)
 }
+
+// Warm runs a first generation: SGLang reports healthy before it has
+// compiled the kernels its first request needs, which can take a minute or
+// more.
+func (e *SGLangEngine) Warm(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
+	return warmChat(ctx, baseURL, httpClient, model)
+}

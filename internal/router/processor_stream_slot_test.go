@@ -4,6 +4,7 @@
 package router
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/policy"
 	"hivenet_router/test/testutil"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -179,3 +181,59 @@ func waitForRelease(t *testing.T, calls *atomic.Int64) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestSlotRelease_WakesWaiterOnlyWhenStreamEnds checks that a request waiting
+// for capacity is woken when a streamed response really frees its slot, at
+// the end of the generation, and not when the stream starts.
+func TestSlotRelease_WakesWaiterOnlyWhenStreamEnds(t *testing.T) {
+	agent := domain.NewAgent(peer.ID("agent-wake-1"), domain.AgentMetadata{
+		Model: "test-model", Capacity: 1, Capability: domain.CapabilityLLM, Engine: "vllm",
+	}, "")
+	agent.SetHealthy(true)
+	agent.SetBackendHealthy(true)
+	m := metrics.NewRouterMetrics()
+	counters := metrics.NewUniversalCounterStore(testutil.NoopStorage{}, m)
+	exec := policy.NewExecutor(fixedLister{agent}, policy.NewEvaluator(testutil.NoopStorage{}, counters),
+		&policy.Policy{RoutingPolicy: policy.PolicyStep{Strategy: "least-loaded", MaxTries: 1}}, 3, 30)
+	p := NewRequestProcessor(nil, exec, nil, m, counters, 1, nil, nil)
+
+	if !agent.TryAcquireSlot() {
+		t.Fatal("failed to acquire slot")
+	}
+	waiter := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := exec.NewSession("test-model", domain.CapabilityLLM).Select(ctx)
+		waiter <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // the waiter parks: the only slot is taken
+
+	body := &blockingReader{data: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", done: make(chan struct{})}
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	go io.Copy(io.Discard, pr)
+	go p.drainStream(agent, newDrainPending(), pw, newStreamingResponse(body), func() {}, NewSSETokenMeter(),
+		"EU-France", "vllm", "test-model", 5.0, p.slotRelease(agent))
+
+	select {
+	case err := <-waiter:
+		t.Fatalf("waiter returned (%v) while the stream still holds the slot", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(body.done) // the generation ends and frees the slot
+	select {
+	case err := <-waiter:
+		if err != nil {
+			t.Fatalf("waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the slot freed at the end of the stream woke no waiter")
+	}
+}
+
+// fixedLister lists the same agents for every model.
+type fixedLister []*domain.Agent
+
+func (l fixedLister) ListByModel(string) []*domain.Agent { return l }

@@ -101,6 +101,10 @@ curl http://localhost:8888/v1/models \
 
 The model ID returned here is the value clients must use when sending requests through Hivenet Router.
 
+<Note>
+  Hivenet Router forwards each request’s ID to vLLM in the `X-Request-ID` header, and vLLM uses it as the request ID in its logs, so the router’s and vLLM’s logs show the same ID. The router generates a new ID for every request, and a retry of the same request gets the ID followed by `-2`, `-3` and so on, so vLLM never receives the same ID twice. When a retry's response comes back, the client sees the router's request ID in `X-Request-ID` and the retry's ID, for example `<id>-2`, in `X-Upstream-Request-ID`.
+</Note>
+
 ## Prepare the Hivenet Router agent
 
 <Tabs>

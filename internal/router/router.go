@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"hivenet_router/internal/tokenizer"
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
+	"hivenet_router/internal/wake"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
@@ -131,6 +133,15 @@ type Router struct {
 	// Request queue
 	requestQueue chan *domain.PendingRequest
 
+	// connHealthMu orders the health changes that depend on an agent's libp2p
+	// connection: a heartbeat (which checks the connection, then marks the
+	// agent healthy) and a disconnect (which marks it unhealthy). libp2p
+	// removes a connection before it reports the disconnect, so with this
+	// lock a heartbeat either sees the connection gone, or finishes before
+	// the disconnect marks the agent unhealthy: a late heartbeat can never
+	// mark a disconnected agent healthy again.
+	connHealthMu sync.Mutex
+
 	// providers maps engine name to the configured closed-source provider.
 	// Built once at startup from cfg.Providers; read-only after that.
 	providers map[string]provider.Provider
@@ -175,6 +186,11 @@ type Router struct {
 	// redirect is the cross-site redirect state (internal/redirect); nil when
 	// cfg.SiteID is empty, which disables redirects entirely.
 	redirect *redirect.Redirector
+
+	// wake holds requests for a model scaled to zero here until it wakes
+	// (internal/wake); nil when redirect is disabled, since the sibling map
+	// says which models may be held.
+	wake *wake.Holder
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -485,6 +501,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
+		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 	}
 	// Over-budget requests wait in a per-model queue (--queue-depth) for room,
 	// up to the request timeout, before a 429.
@@ -588,13 +605,31 @@ func (r *Router) Start() error {
 			// Fire the "unregistered" registration event before the slot is
 			// closed — the watcher gets sub-second loss detection (<1s libp2p
 			// drop notification vs. the 30s reaper). The agent stays in
-			// AgentRegistry; only the registration-feed view changes here. The
-			// reaper publishes a second "unregistered" later — the watcher's
-			// 1s debounce collapses the pair to one annotation write.
+			// AgentRegistry, but it leaves the routing pool now: the router
+			// never dials agents, so without a connection it cannot serve, and
+			// waiting for the missed-heartbeat timeout would route requests to
+			// it (and keep a model scaled to zero from being held) for up to
+			// UnhealthyAfter. Its next heartbeat after reconnecting marks it
+			// healthy again. A disconnect is not counted as an agent failure: a
+			// scale-down closes the connection on purpose. The reaper publishes
+			// a second "unregistered" later — the watcher's 1s debounce
+			// collapses the pair to one annotation write.
 			if agent := r.agents.Get(peerID); agent != nil {
 				agent.RLock()
 				dep, rep := agent.Metadata.DeploymentID, agent.Metadata.ReplicaID
+				meta := agent.Metadata
 				agent.RUnlock()
+				r.connHealthMu.Lock()
+				if agent.IsHealthy() {
+					agent.SetHealthy(false)
+					if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
+						log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
+					}
+					r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
+						strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
+					log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
+				}
+				r.connHealthMu.Unlock()
 				r.registrationNotifier.Publish(domain.RegistrationEvent{
 					EventType:    domain.RegistrationUnregistered,
 					DeploymentID: dep,
@@ -838,6 +873,9 @@ func (r *Router) startHTTPServer() {
 	handlers.SetDefaultMaxInflight(r.cfg.DefaultMaxInflightPerReplica)
 	if r.shared != nil {
 		handlers.SetRouterShare(r.shared.Size)
+	}
+	if r.wake != nil { // nil = hold at zero disabled
+		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
@@ -1092,6 +1130,40 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 		},
 	)
 	return rd, nil
+}
+
+// newWakeHolder returns the holder for requests to models scaled to zero
+// here, or nil when cross-site redirect is disabled. It publishes the
+// pending demand of every model the sibling map lets this policloud hold, 0
+// when none of its requests is held.
+func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentRegistry, m *metrics.RouterMetrics) *wake.Holder {
+	if rd == nil {
+		return nil
+	}
+	limits := wake.Limits{PerModel: cfg.WakeHoldMax, PerCaller: cfg.WakeHoldMaxPerKey, Total: cfg.WakeHoldMaxTotal}
+	holder := wake.NewHolder(limits, agents.CountHealthyByModel, func(model string, outcome wake.Outcome, held time.Duration) {
+		m.WakeHoldDone(model, string(outcome), held)
+		switch outcome {
+		case wake.Woken:
+			log.Debugf("hold at zero: released a request for %s after %v", model, held.Round(time.Millisecond))
+		case wake.Expired:
+			log.Warnf("hold at zero: %s did not wake within the hold budget; answered 503 model_waking", model)
+		case wake.Full:
+			// Debug only: a flood of refusals must not flood the log; the
+			// refusals are counted in hivenet_wake_holds_total{outcome="full"}.
+			log.Debugf("hold at zero: a hold limit is reached for %s; answered 503 model_waking", model)
+		}
+	})
+	m.RegisterPendingDemand(func() map[string]int {
+		demand := holder.Demand()
+		for _, model := range rd.Map.WakeableModels(rd.Self) {
+			if _, ok := demand[model]; !ok {
+				demand[model] = 0
+			}
+		}
+		return demand
+	})
+	return holder
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.
@@ -1539,8 +1611,12 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 	}
 
 	agent := domain.NewAgent(peerID, metadata, payload.SessionToken)
-	r.agents.Register(agent)
+	connected := r.installAgent(agent)
 	r.storage.RegisterAgent(peerID, metadata, payload.SessionToken) //nolint:errcheck // best-effort persistence; in-memory registry is authoritative
+	if !connected {
+		r.storage.UpdateAgentStatus(peerID, false, time.Now()) //nolint:errcheck // best-effort, as above
+		log.Warnf("Agent %s registered after its connection closed — out of the routing pool until it reconnects", shortID(peerID))
+	}
 	r.counters.Bootstrap(peerID, metadata.Model, metadata.Engine, metadata.Organization, metadata.Machine)
 	r.metrics.AgentRegistered(peerID.String(), metadata.Region, metadata.Engine, metadata.Model, strconv.Itoa(metadata.Capacity), metadata.Organization, metadata.Machine)
 	// Fan out the settled "registered" event to every SSE subscriber on
@@ -1553,8 +1629,16 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		AgentID:      peerID.String(),
 		Timestamp:    time.Now().UTC(),
 	})
-	// New agent brings fresh capacity — wake any requests waiting in the queue for this model.
-	r.executor.SignalCapacity(metadata.Model)
+	// A new agent brings several slots at once: wake every request waiting
+	// for capacity on this model, not just one, and release every request
+	// held while the model was scaled to zero. An agent without a connection
+	// cannot serve them, so it wakes nothing.
+	if connected {
+		r.executor.BroadcastCapacity(metadata.Model)
+		if r.wake != nil {
+			r.wake.Wake(metadata.Model)
+		}
+	}
 
 	// Delete the old session only after the new agent is fully registered.
 	// A short grace period lets any in-flight routing-signal or heartbeat
@@ -1619,13 +1703,34 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	organization := session.Metadata.Organization
 	machine := session.Metadata.Machine
 
-	// Always update LastSeen — the agent is alive and reachable regardless of backend state.
+	// A heartbeat handled while the agent's connection closes must change
+	// nothing: not the health (requests would go to a peer with no
+	// connection), nor LastSeen (it would delay the health monitor). See
+	// connHealthMu.
+	r.connHealthMu.Lock()
+	defer r.connHealthMu.Unlock()
+	if !r.peerConnected(session.PeerID) {
+		log.Debugf("handleAgentHeartbeat: %s has no connection — heartbeat ignored", peerIDStr[:8])
+		http.Error(w, "agent not connected", http.StatusConflict)
+		return
+	}
+
+	// Update LastSeen — the agent is alive and reachable regardless of backend state.
 	a.UpdateLastSeen()
 
+	wasHealthy := a.IsHealthy()
 	prevBackendHealthy := a.SetBackendHealthy(payload.BackendHealthy)
 
 	if payload.BackendHealthy {
 		a.SetHealthy(true)
+		if !wasHealthy || !prevBackendHealthy {
+			// The agent is usable again without registering again: its slots
+			// are new capacity, and a model held at zero may now be awake.
+			r.executor.BroadcastCapacity(model)
+			if r.wake != nil {
+				r.wake.Wake(model)
+			}
+		}
 		if err := r.storage.UpdateAgentStatus(session.PeerID, true, time.Now()); err != nil {
 			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
 		}
@@ -1651,6 +1756,31 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// installAgent puts a newly registered agent in the registry and reports
+// whether its connection is still up. It holds connHealthMu, so it is ordered
+// with the disconnect handler: if the connection closed before, the agent is
+// installed unhealthy; if it closes after, the handler finds this agent and
+// marks it unhealthy. Either way an agent with no connection never stays in
+// the routing pool until UnhealthyAfter. Its next heartbeat on a new
+// connection marks it healthy.
+func (r *Router) installAgent(a *domain.Agent) bool {
+	r.connHealthMu.Lock()
+	defer r.connHealthMu.Unlock()
+	connected := r.peerConnected(a.ID)
+	if !connected {
+		a.SetHealthy(false)
+	}
+	r.agents.Register(a)
+	return connected
+}
+
+// peerConnected reports whether the router has a live libp2p connection to
+// the peer. Heartbeats only arrive over libp2p, so a router without a libp2p
+// host has no connected peer.
+func (r *Router) peerConnected(id peer.ID) bool {
+	return r.p2pHost != nil && r.p2pHost.Network().Connectedness(id) == libp2pnet.Connected
 }
 
 // handleRoutingSignals receives high-frequency metric pushes from agents (default 500ms).

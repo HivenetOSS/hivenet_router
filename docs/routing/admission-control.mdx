@@ -181,6 +181,8 @@ If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-Afte
 
 Retry this error with bounded exponential backoff and jitter.
 
+A request released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) waits longer: until its hold budget ends, even when `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` is `0`, because it already waited for the model. Its budget is recomputed every second while it waits, so replicas that join are used. If there is still no room when the hold budget ends, it gets `503 model_waking` with `Retry-After: 30` instead of this `429`. A released request larger than the whole budget of the current pool still gets this `429` at once, because waiting for the hold to end cannot help. Retry it with backoff as above: it can fit once more replicas join, since the budget grows with the replica count.
+
 ## B3: front-door shedding
 
 Use `shed_if` to reject new work before queueing when the healthy serving pool is already under pressure:

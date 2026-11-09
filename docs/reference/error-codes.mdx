@@ -130,6 +130,7 @@ Clients should therefore handle:
 | `agent_disconnected` | `503` | `router` | The selected agent could not be reached |
 | `backend_unavailable` | `503` | `backend` | Backend was unreachable, loading, overloaded, or temporarily unavailable |
 | `queue_full` | `503` | `router` | The router’s global pending-request channel remained full |
+| `model_waking` | `503` | `router` | A model scaled to zero on this policloud did not wake within the hold budget, too many requests already wait for it, or it woke but the admission gate had no room for a released request before its hold budget ended ([Hold at zero](/routing/hold-at-zero)) |
 | `backend_error` | `500` or `502` | `router` or `backend` | Unexpected internal, backend, provider, or response-format failure |
 | `request_timeout` | `504` | `router` | The router-side request deadline expired |
 | `stream_truncated` | `200` (in-stream frame) | `router` | An upstream stream was cut short mid-generation after the response started |
@@ -373,6 +374,34 @@ Returned only when [cross-site redirect](/routing/cross-site-redirect) is enable
 ```
 
 Enable redirect following in the client, for example `follow_redirects=True` with `httpx`. An invalid `X-Hivenet-Scope` request header is refused with `400 request_invalid` instead.
+
+### `model_waking`
+
+```text
+HTTP 503
+Retry-After: 30
+```
+
+Returned only for a request that [hold at zero](/routing/hold-at-zero) held, or refused to hold, for a model that the sibling map places on this policloud with `scale_from_zero: true`:
+
+- the model did not wake within the hold budget;
+- a hold limit is reached: per model, per API key and model, or in total;
+- the model woke, but the request still found no room in the admission gate before its hold budget ended. In this case a healthy agent already serves the model.
+
+The message differs in each case; see [`model_waking`](/routing/hold-at-zero#model_waking) for the three messages. Match on `code`, not on the message.
+
+```json
+{
+  "error": {
+    "code": "model_waking",
+    "message": "model llama-3-70b is waking up; retry in 30 seconds",
+    "source": "router",
+    "retry_after": 30
+  }
+}
+```
+
+`retry_after` repeats the `Retry-After` header, in seconds. Retry after that delay. To have the retry recognized as the same request, send a UUID of your own in `X-Client-Request-ID` (or `X-Request-ID`) and resend the same one; the router ignores an ID that is not a UUID. If the router already sent keepalive bytes to the held request, the status on the wire is `200` and this error is written in the body instead: as a final SSE event for a streaming request, as the JSON envelope after leading spaces otherwise.
 
 ## Request-size rejection
 
@@ -1120,7 +1149,8 @@ Hivenet Router can add the following headers.
 
 | Header | When present | Meaning |
 | --- | --- | --- |
-| `X-Request-ID` | Every router response | UUID used for logs, audit records, and support correlation |
+| `X-Request-ID` | Every router response | The request ID the router generated, used for logs, audit records, and support correlation |
+| `X-Client-Request-ID` | The client sent a valid UUID as its own ID | The client's ID, echoed |
 | `traceparent` | When a valid trace span exists | W3C trace context for Tempo or another tracing backend |
 | `WWW-Authenticate` | `401` responses | Bearer authentication challenge |
 | `X-RateLimit-Remaining-Requests` | Finite RPM quota | Remaining request-bucket capacity |

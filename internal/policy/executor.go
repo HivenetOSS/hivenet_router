@@ -213,8 +213,7 @@ func (e *Executor) getOrCreateQueue(model string) *WaitQueue {
 }
 
 // SignalCapacity wakes one goroutine waiting for capacity on model, if any.
-// Call this whenever a concurrency slot is freed (agent.DecrementLoad) or
-// new capacity arrives (new agent registered for model).
+// Call this whenever a concurrency slot is freed (agent.DecrementLoad).
 func (e *Executor) SignalCapacity(model string) {
 	if e.defaultQueueDepth == 0 {
 		return // queue disabled — no lock needed
@@ -227,6 +226,23 @@ func (e *Executor) SignalCapacity(model string) {
 	}
 	q.Signal()
 	// Depth update is handled by the onDequeue callback in Wait() — no call needed here.
+}
+
+// BroadcastCapacity wakes every goroutine waiting for capacity on model. Call
+// this when new capacity arrives (a new agent registered for model): an agent
+// brings several slots at once, so waking only one waiter would leave the
+// others parked until a slot is freed or their deadline expires.
+func (e *Executor) BroadcastCapacity(model string) {
+	if e.defaultQueueDepth == 0 {
+		return
+	}
+	e.queueMu.RLock()
+	q, ok := e.queues[model]
+	e.queueMu.RUnlock()
+	if !ok {
+		return
+	}
+	q.Broadcast()
 }
 
 // SetPolicy atomically replaces the global policy, preserving all named policies.
@@ -447,6 +463,9 @@ type Session struct {
 // A TryAcquireSlot race (slot filled between scoring and acquisition) does NOT
 // count as a forward failure — selection retries immediately within the same step.
 func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
+	// ticket: the session's place in the capacity queue, kept when it parks
+	// again after a wake that gave it no free slot (WaitQueue.WaitInLine).
+	var ticket uint64
 	for s.stepIdx < len(s.steps) {
 		step := &s.steps[s.stepIdx]
 
@@ -461,7 +480,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 					trace.WithAttributes(attribute.String("model", s.model)),
 				)
 				start := time.Now()
-				waitErr := queue.Wait(ctx)
+				waitErr := queue.WaitInLine(ctx, &ticket)
 				elapsed := time.Since(start)
 				// Depth gauge is updated by onDequeue callback in Wait() — no call needed here.
 				// Only record wait duration on successful dispatch (waitErr == nil): the histogram
@@ -486,6 +505,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 					step.name, waitErr, s.model)
 			}
 			s.advanceStep("no_candidates")
+			ticket = 0
 			continue
 		}
 
@@ -500,6 +520,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			continue
 		}
 
+		gotSlot(ctx)
 		return chosen, nil
 	}
 	// Use the reason captured at routing time rather than re-querying agent state,
@@ -695,6 +716,13 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 			// All healthy, filter-passing agents are either at capacity or were already tried
 			// and failed in this step. Waiting for a slot to free is worthwhile.
 			s.lastReason = ErrNoCapacity
+		case nAtCapacity == 0 && len(gateMiss) == 0 && errors.Is(s.lastReason, ErrNoCapacity):
+			// An earlier wait left ErrNoCapacity, but no agent is at capacity
+			// now: the ones left already failed in this step or are filtered
+			// out. Waiting for a slot cannot help, so the stale reason must not
+			// send the request back to the queue until its deadline. An agent
+			// excluded by a metric gate can clear, so a gate miss keeps the wait.
+			s.lastReason = ErrNoAgentsAvailable
 			// default: mixed reasons (filter exclusions, gate misses) —
 			// leave s.lastReason unchanged so a more specific reason from a prior step survives.
 		}
