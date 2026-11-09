@@ -126,7 +126,7 @@ token budget = floor(HIVENET_ROUTER_ADMIT_FRACTION
                      × summed KV capacity of the healthy replicas)
 ```
 
-vLLM and SGLang agents report their KV-cache size in tokens. Set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` to turn this off: B2 then applies only when the policy sets `admit_budget_tokens`.
+vLLM and SGLang agents report their KV-cache size in tokens. Only replicas whose agent has reported it count, so until every agent has reported, the budget is smaller than the pool, never larger. Set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` to turn this off: B2 then applies only when the policy sets `admit_budget_tokens`.
 
 Ollama, llama.cpp, Infinity and custom backends report no KV-cache size, so they get no automatic token budget. A model with no occupancy bound at all gets a default request backstop instead:
 
@@ -138,6 +138,8 @@ This applies when the policy sets neither `admit_budget_tokens` nor `max_infligh
 
 <Warning>
   **Upgrading.** B2 now turns on by itself for vLLM and SGLang, from the KV-cache size they report. Models whose engines report no KV-cache size get `8` requests in flight per replica by default. A single-router deployment that had no occupancy bound before may now see `429 concurrency_limit_exceeded` or queued requests. To keep the old behavior, set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` and `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=0`.
+
+  Upgrade agents before routers. Until an agent is upgraded it reports no KV-cache size, so its model gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` requests in flight per replica instead of the budget from the engine.
 </Warning>
 
 With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), the token budget and the request backstop are shared exactly: each router admits against credits it holds from a site-wide pool, and the routers together never hold more than the budget. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits).
@@ -158,7 +160,7 @@ estimated input tokens + declared maximum output tokens
 
 If output is undeclared, the reservation starts with the input estimate and grows as output streams. When the backend reports exact input usage, the router replaces the estimated input portion with the exact count. Success, error, timeout, and client disconnect all release the reservation.
 
-A request whose footprint is larger than the whole token budget is not rejected. It is held to the whole budget and admitted when nothing else of that model is in flight on this router.
+A request whose footprint is larger than the whole token budget is not rejected. It is held to the whole budget and admitted when nothing else of that model is in flight on this router. While it waits, smaller requests of that model wait behind it, so the model drains and it is not starved. The per-key occupancy share (B4) treats a request larger than the key's share the same way.
 
 When a request does not fit, it waits in the model's wait queue:
 
@@ -185,7 +187,7 @@ If capacity remains unavailable, the router returns HTTP `429`, sets `Retry-Afte
 
 Retry this error with bounded exponential backoff and jitter.
 
-A request released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) waits longer: until its hold budget ends, even when `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` is `0`, because it already waited for the model. Its budget is recomputed every second while it waits, so replicas that join are used. If there is still no room when the hold budget ends, it gets `503 model_waking` with `Retry-After: 30` instead of this `429`. A released request larger than the whole budget of the current pool still gets this `429` at once, because waiting for the hold to end cannot help. Retry it with backoff as above: it can fit once more replicas join, since the budget grows with the replica count.
+A request released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) waits longer: until its hold budget ends, even when `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` is `0`, because it already waited for the model. Its budget is recomputed every second while it waits, so replicas that join are used. If there is still no room when the hold budget ends, it gets `503 model_waking` with `Retry-After: 30` instead of this `429`. A released request larger than the whole budget waits like any other, and is admitted when nothing else of that model is in flight.
 
 ## B3: front-door shedding
 

@@ -101,6 +101,7 @@ func main() {
 	syncPasswordFile := flag.String("sync-valkey-password-file", "", "Path to a file holding the Valkey (and Sentinel) password (env: HIVENET_ROUTER_SYNC_VALKEY_PASSWORD)")
 	syncTLS := flag.Bool("sync-valkey-tls", cfg.SyncValkeyTLS, "Connect to Valkey and Sentinel with TLS (env: HIVENET_ROUTER_SYNC_VALKEY_TLS)")
 	syncTLSCA := flag.String("sync-valkey-tls-ca-file", cfg.SyncValkeyTLSCA, "PEM CA bundle that verifies Valkey and Sentinel with --sync-valkey-tls; empty uses the system roots (env: HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE)")
+	syncSite := flag.String("sync-site", cfg.SyncSite, "Name of this site in the shared store: every router of the site uses the same one. Defaults to --site-id, else \"default\". Unlike --site-id it does not turn on cross-site redirect (env: HIVENET_ROUTER_SYNC_SITE)")
 	syncMinRouters := flag.Int("sync-min-routers", max(cfg.SyncMinRouters, 1), "Routers of this site assumed while Valkey is unreachable or before it first answers; set it to the number of routers, so each one enforces its share (env: HIVENET_ROUTER_SYNC_MIN_ROUTERS)")
 	syncInterval := flag.Duration("sync-interval", cfg.SyncInterval, "How often the routers exchange usage, between 100ms and 10s (env: HIVENET_ROUTER_SYNC_INTERVAL)")
 	routerID := flag.String("router-id", cfg.RouterID, "Stable identity of this router among the routers of its site; defaults to the hostname, e.g. the pod name (env: HIVENET_ROUTER_ROUTER_ID)")
@@ -228,6 +229,7 @@ func main() {
 	cfg.SyncValkeyTLS = *syncTLS
 	cfg.SyncValkeyTLSCA = *syncTLSCA
 	cfg.SyncInterval = *syncInterval
+	cfg.SyncSite = strings.TrimSpace(*syncSite)
 	cfg.SyncMinRouters = *syncMinRouters
 	cfg.RouterID = strings.TrimSpace(*routerID)
 	if *syncPasswordFile != "" {

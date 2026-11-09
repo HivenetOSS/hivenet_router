@@ -64,6 +64,7 @@ type Agent struct {
 	// (libp2p peer ID → requests in flight for it), reported at routersAt.
 	routers      map[string]int64
 	routersAt    time.Time
+	reportedAt   time.Time
 	SessionToken string
 	mu           sync.RWMutex
 }
@@ -106,7 +107,7 @@ func (a *Agent) RUnlock() {
 func (a *Agent) SetReportedLoad(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.reportedInFlight, a.sentSinceReport, a.hasReport = max(n, 0), 0, true
+	a.reportedInFlight, a.sentSinceReport, a.hasReport, a.reportedAt = max(n, 0), 0, true, time.Now()
 }
 
 // SetRouterReport records which routers the agent is connected to right now.
@@ -165,11 +166,16 @@ func (a *Agent) TryAcquireSlot() bool {
 	return true
 }
 
+// reportMaxAge is how long an agent's own load report is used. Reports come
+// every 500 ms; an older one (pushes failing) would let sentSinceReport grow
+// without bound, so the router falls back to what it has in flight there.
+const reportMaxAge = 3 * time.Second
+
 // loadLocked is the agent's load as this router best knows it: the larger of
 // what this router has in flight there and what the agent last reported plus
 // what this router sent since. Caller holds a.mu.
 func (a *Agent) loadLocked() int {
-	if !a.hasReport {
+	if !a.hasReport || time.Since(a.reportedAt) > reportMaxAge {
 		return a.ActiveRequests
 	}
 	return max(a.ActiveRequests, a.reportedInFlight+a.sentSinceReport)

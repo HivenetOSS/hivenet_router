@@ -587,6 +587,8 @@ The new agent registers automatically once it can reach the router and its backe
 
 ## Upgrade Hivenet Router
 
+Upgrade agents before routers. A router of this version takes the occupancy budget from the KV-cache size that vLLM and SGLang agents report; until an agent is upgraded, its model gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per replica instead. An agent serves the model it finds when it starts: restart it after the backend changes model.
+
 Build the new binaries on the build machine:
 
 ```bash

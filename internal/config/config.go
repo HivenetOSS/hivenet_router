@@ -220,6 +220,7 @@ type Config struct {
 	SyncValkeyTLSCA    string // PEM CA bundle for Valkey/Sentinel TLS; empty = system roots
 	SyncInterval       time.Duration
 	SyncMinRouters     int
+	SyncSite           string // key prefix in the shared store; empty = SiteID, else "default"
 	RouterID           string
 
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
@@ -531,6 +532,7 @@ func LoadFromEnv() *Config {
 			cfg.SyncInterval = d
 		}
 	}
+	cfg.SyncSite = os.Getenv("HIVENET_ROUTER_SYNC_SITE")
 	if v := os.Getenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {

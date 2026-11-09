@@ -509,10 +509,9 @@ func New(cfg *config.Config) (*Router, error) {
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 	}
-	// Over-budget requests wait in a per-model queue (--queue-depth) for room,
-	// up to the request timeout, before a 429.
-	// Half the request timeout at most, so an admitted request keeps at least
-	// the other half to run instead of a 504 right after a long wait.
+	// Over-budget requests wait in a per-model queue (--queue-depth) for room
+	// before a 429: half the request timeout at most, so an admitted request
+	// keeps at least the other half to run instead of a 504 right after.
 	r.occupancy.SetQueue(cfg.QueueDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck
@@ -2003,6 +2002,15 @@ func (r *Router) healthMonitor() {
 
 // setupShared connects the rate and daily limiters to the other routers of
 // the policloud through Valkey when --sync-store=valkey.
+// syncSite is the site's name in the shared store: --sync-site, else
+// --site-id, else "default" (the store's own default).
+func syncSite(cfg *config.Config) string {
+	if cfg.SyncSite != "" {
+		return cfg.SyncSite
+	}
+	return cfg.SiteID
+}
+
 func (r *Router) setupShared() error {
 	cfg := r.cfg
 	if cfg.SyncStore != "valkey" {
@@ -2024,7 +2032,7 @@ func (r *Router) setupShared() error {
 		Password:       cfg.SyncValkeyPassword,
 		TLS:            cfg.SyncValkeyTLS,
 		TLSCAFile:      cfg.SyncValkeyTLSCA,
-		Prefix:         cfg.SiteID,
+		Prefix:         syncSite(cfg),
 		RouterID:       cfg.RouterID,
 		Interval:       cfg.SyncInterval,
 		MinRouters:     cfg.SyncMinRouters,
@@ -2055,7 +2063,7 @@ func (r *Router) setupShared() error {
 	r.metrics.Register(st.Collectors()...)
 	r.shared = st
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
-		RouterID: cfg.RouterID, Prefix: cfg.SiteID, Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
+		RouterID: cfg.RouterID, Prefix: syncSite(cfg), Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
 	return nil
 }
 

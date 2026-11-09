@@ -35,7 +35,7 @@ Between two rounds a router cannot see the others' latest usage. To keep the rou
 
 A router that starts or restarts replays the last minute of usage and reads today's totals, so it does not hand out a fresh budget. Usage already in the totals it reads is not counted again.
 
-The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router a round is about 36 KB.
+The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router, each request on its own key, a round is about 36 KB.
 
 ## Occupancy credits
 
@@ -88,11 +88,11 @@ The store holds only recent usage and today's totals. Persistence is optional: a
 
 ## Configure the routers
 
-Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`; up to 64 letters, digits, `.`, `_` or `-`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
+Give every router of the site the same `--sync-site` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`; up to 64 letters, digits, `.`, `_` or `-`; it defaults to `--site-id`, else `default`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
 
 ```bash
 hivenet-router \
-  --site-id site-a \
+  --sync-site site-a \
   --sync-store valkey \
   --sync-valkey-addrs sentinel-0:26379,sentinel-1:26379,sentinel-2:26379 \
   --sync-valkey-sentinel-master hivenet \
@@ -100,12 +100,15 @@ hivenet-router \
   --sync-min-routers 3
 ```
 
+`--sync-site` names the site in the store only. `--site-id` does too when `--sync-site` is not set, but it also turns on [cross-site redirect](/routing/cross-site-redirect), which needs redirect secrets, allowed domains, and dynamic API keys or auth mode `none`.
+
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `--sync-store` | `HIVENET_ROUTER_SYNC_STORE` | `none` | `none` or `valkey` |
 | `--sync-valkey-addrs` | `HIVENET_ROUTER_SYNC_VALKEY_ADDRS` | Empty | Comma-separated `host:port` of the Sentinels, or the address of one Valkey without Sentinel (Valkey Cluster is not supported) |
 | `--sync-valkey-sentinel-master` | `HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER` | Empty | Sentinel master set name; empty connects to Valkey directly |
-| `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | Password for Valkey and Sentinel |
+| `--sync-site` | `HIVENET_ROUTER_SYNC_SITE` | `--site-id`, else `default` | Name of the site in the store; the same on every router of the site |
+| `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | File holding the password for Valkey and Sentinel; the environment variable holds the password itself |
 | `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` | Connect with TLS |
 | `--sync-valkey-tls-ca-file` | `HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE` | Empty | PEM CA bundle that verifies Valkey and the Sentinels with TLS; empty uses the system roots |
 | `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` | Between `100ms` and `10s`. Shorter intervals make limits stricter between rounds and cost more round trips |

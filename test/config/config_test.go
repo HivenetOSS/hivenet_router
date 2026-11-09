@@ -283,10 +283,11 @@ func TestSyncSettingsFromEnv(t *testing.T) {
 	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_TLS", "true")
 	t.Setenv("HIVENET_ROUTER_SYNC_INTERVAL", "500ms")
 	t.Setenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS", "3")
+	t.Setenv("HIVENET_ROUTER_SYNC_SITE", "site-a")
 	t.Setenv("HIVENET_ROUTER_ROUTER_ID", "router-0")
 	cfg := config.LoadFromEnv()
 	if cfg.SyncStore != "valkey" || cfg.SyncValkeyAddrs != "s0:26379,s1:26379" || cfg.SyncSentinelMaster != "hivenet" ||
-		!cfg.SyncValkeyTLS || cfg.SyncInterval != 500*time.Millisecond || cfg.SyncMinRouters != 3 || cfg.RouterID != "router-0" {
+		!cfg.SyncValkeyTLS || cfg.SyncInterval != 500*time.Millisecond || cfg.SyncMinRouters != 3 || cfg.SyncSite != "site-a" || cfg.RouterID != "router-0" {
 		t.Fatalf("sync settings not read from the environment: %+v", cfg)
 	}
 	if len(cfg.EnvErrors) != 0 {
