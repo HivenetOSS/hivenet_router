@@ -127,7 +127,9 @@ func TestDailySharedAcrossRouters(t *testing.T) {
 			time.Sleep(interval + interval/2)
 		}
 	}
-	if spent > tpd+3*cost {
+	// The first admission of each round always passes, so a round can end a
+	// few requests past the budget; 2% bounds that.
+	if spent > tpd+tpd/50 {
 		t.Fatalf("spent %d tokens against a shared daily budget of %d", spent, tpd)
 	}
 	if spent < tpd*3/4 {
