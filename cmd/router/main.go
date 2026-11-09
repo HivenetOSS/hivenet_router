@@ -245,6 +245,9 @@ func main() {
 		if cfg.SyncMinRouters < 1 {
 			log.Fatalf("--sync-min-routers must be at least 1, got %d", cfg.SyncMinRouters)
 		}
+		if cfg.SyncMinRouters == 1 {
+			log.Warn("--sync-min-routers is 1: a router that starts while Valkey is unreachable enforces the whole of every limit on its own. Set it to the number of routers of the site")
+		}
 		if cfg.SyncInterval < 100*time.Millisecond || cfg.SyncInterval > 10*time.Second {
 			log.Fatalf("--sync-interval must be between 100ms and 10s, got %v", cfg.SyncInterval)
 		}

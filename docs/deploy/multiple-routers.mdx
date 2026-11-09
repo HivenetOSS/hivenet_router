@@ -56,7 +56,7 @@ The store holds only recent usage and today's totals. Persistence is optional: a
 
 ## Configure the routers
 
-Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`) and a stable `--router-id`. Set `--sync-min-routers` to the number of routers. In Kubernetes, a StatefulSet pod name works; the default is the hostname.
+Give every router of the site the same `--site-id` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
 
 ```bash
 hivenet-router \
