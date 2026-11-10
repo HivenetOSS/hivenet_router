@@ -10,6 +10,7 @@ package admission_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -681,6 +682,8 @@ func (p *sitePool) Take(_ context.Context, _ string, weight, budget int64, _ int
 	return true
 }
 
+func (p *sitePool) Ceiling(_ string, budget int64) int64 { return budget }
+
 func (p *sitePool) Adjust(_ string, dw int64, _ int) {
 	p.mu.Lock()
 	p.used += dw
@@ -711,5 +714,40 @@ func TestSitePoolBoundsWaitBehindBig(t *testing.T) {
 	r.Release()
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("small request waited %v behind an oversized one on a site-wide pool", d)
+	}
+}
+
+// countingPool refuses every take and counts them.
+type countingPool struct{ takes atomic.Int64 }
+
+func (p *countingPool) Take(context.Context, string, int64, int64, int) bool {
+	p.takes.Add(1)
+	return false
+}
+func (p *countingPool) Adjust(string, int64, int)            {}
+func (p *countingPool) Ceiling(_ string, budget int64) int64 { return budget }
+
+// TestParkedRequestsPollPoolOncePerModel verifies that requests parked on a
+// site-wide pool re-check it about once per poll interval per model, not
+// each on its own: a rejection storm must not turn into a storm of checks.
+func TestParkedRequestsPollPoolOncePerModel(t *testing.T) {
+	c := admission.NewController(1.0, 300*time.Millisecond)
+	p := &countingPool{}
+	c.SetPool(p)
+	var wg sync.WaitGroup
+	const waiters = 200
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Admit(context.Background(), model, 10, false, 1000, 0)
+		}()
+	}
+	wg.Wait()
+	// Two checks each on arrival (before parking and on entering the wait),
+	// then about one per 20 ms poll for the model over 300 ms; one check per
+	// waiter per poll would be ~3,000.
+	if n := p.takes.Load(); n > 2*waiters+100 {
+		t.Fatalf("%d pool checks for %d parked requests over 300 ms", n, waiters)
 	}
 }

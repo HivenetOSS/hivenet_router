@@ -18,11 +18,33 @@ type Pool interface {
 	// Adjust reports a change to what key holds: a release (negative weight,
 	// count -1), streamed growth or a true-up.
 	Adjust(key string, dw int64, dc int)
+	// Ceiling is the most weight this router can hold for key right now
+	// (budget in normal operation, less while it is held to its share). A
+	// request larger than that is held to it, like one larger than the
+	// whole budget.
+	Ceiling(key string, budget int64) int64
 }
 
 // SetPool makes the controller admit against a site-wide budget. Call once at
 // startup, before any request.
-func (c *Controller) SetPool(p Pool) { c.pool = p }
+func (c *Controller) SetPool(p Pool) {
+	c.pool = p
+	// A pool that can say when a key was starved wakes the requests parked
+	// on it, so they try again as soon as credits may be back.
+	if s, ok := p.(interface{ SetOnStarved(func(key string)) }); ok {
+		s.SetOnStarved(c.Wake)
+	}
+}
+
+// Wake makes the requests parked on model try again now.
+func (c *Controller) Wake(model string) {
+	c.mu.Lock()
+	s := c.models[model]
+	c.mu.Unlock()
+	if s != nil {
+		s.wake()
+	}
+}
 
 // poolPoll is how often a request parked on a site-wide budget re-checks it:
 // releases on other routers do not wake it.

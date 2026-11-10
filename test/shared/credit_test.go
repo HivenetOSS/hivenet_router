@@ -829,3 +829,27 @@ func TestCreditsWithSentinel(t *testing.T) {
 	}
 	t.Logf("r0 %d, r1 %d, unreplicated %v", len(a), len(b), rs[0].store.Unreplicated())
 }
+
+// While the store is down a router holds at most its share of the budget. A
+// request above that share is held to it, and admitted when nothing else is
+// in flight on that router, instead of being refused until the store is back.
+func TestOversizedRequestAdmittedWhileDegraded(t *testing.T) {
+	rs := newOccFleet(t, newBackend(t), newAgents(), 3)
+	const budget = 900 // a share of 300 each
+	held := rs[0].occ.Admit(context.Background(), "m", 300, false, budget, 0)
+	if held == nil {
+		t.Fatal("first request refused")
+	}
+	rs[0].proxy.setCut(true)
+	waitFor(t, 5*time.Second, "r0 to notice the store is down", func() bool { return rs[0].store.DegradedEpoch() != 0 })
+	held.Release()
+	big := rs[0].occ.Admit(context.Background(), "m", 600, false, budget, 0)
+	if big == nil {
+		t.Fatal("a request above the router's share was refused while degraded, with nothing else in flight")
+	}
+	defer big.Release()
+	if small := rs[0].occ.Admit(context.Background(), "m", 10, false, budget, 0); small != nil {
+		small.Release()
+		t.Fatal("admitted more while the oversized request holds the whole share")
+	}
+}

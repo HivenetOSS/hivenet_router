@@ -59,7 +59,15 @@ type Credits struct {
 	closed   atomic.Bool // ReleaseAll ran: admit nothing more
 
 	idleAfter time.Duration
+	// onStarved, if set, is called after each tick for every pool a request
+	// found no credit in since the last one, so the requests parked on it
+	// try again now that the routers have handed back what they did not need.
+	onStarved func(key string)
 }
+
+// SetOnStarved sets the function called after each tick for every starved
+// pool (see Credits.onStarved). Call before Start.
+func (c *Credits) SetOnStarved(fn func(key string)) { c.onStarved = fn }
 
 // errStaleEpoch is a grant refused because the store lost this run (an
 // eviction, or lost data) and this router has not noticed yet.
@@ -262,6 +270,9 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 		return false
 	}
 	defer wl.refill.Unlock()
+	if c.closed.Load() {
+		return false // ReleaseAll started: its HDEL must not be followed by a grant
+	}
 
 	wl.mu.Lock()
 	if c.fits(wl, w) {
@@ -310,6 +321,23 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 	wl.failedAt = time.Now()
 	wl.starved = true
 	return false
+}
+
+// Ceiling implements admission.Pool: the most weight this wallet can hold
+// now. While the store is down nothing can be granted, so it is what the
+// wallet already holds within its cap. 0 means nothing fits.
+func (c *Credits) Ceiling(key string, budget int64) int64 {
+	wl := c.lockWallet(key)
+	defer wl.mu.Unlock()
+	wl.budget = budget
+	capW, _ := c.limits(wl)
+	if capW < 0 || capW > budget {
+		capW = budget
+	}
+	if c.degraded() {
+		capW = min(capW, wl.grantW)
+	}
+	return capW
 }
 
 // Adjust implements admission.Pool: a release, streamed growth or a true-up.
@@ -488,6 +516,7 @@ func (c *Credits) tick(ctx context.Context) {
 
 	var writes, evals valkey.Commands // the same rewrites, by SHA and in full
 	var locked []*wallet
+	var starvedKeys []string
 	for i, wl := range ws {
 		// Hold the refill lock until the rewrite has landed, so a grant can
 		// never be overwritten by an older holding.
@@ -574,6 +603,7 @@ func (c *Credits) tick(ctx context.Context) {
 		starved := "0"
 		if wl.starved {
 			starved = "1"
+			starvedKeys = append(starvedKeys, wl.key)
 		}
 		wl.starved = false
 		wl.mu.Unlock()
@@ -598,6 +628,11 @@ func (c *Credits) tick(ctx context.Context) {
 	}
 	for _, wl := range locked {
 		wl.refill.Unlock()
+	}
+	if c.onStarved != nil {
+		for _, k := range starvedKeys {
+			c.onStarved(k)
+		}
 	}
 	// Grants were not acknowledged: check whether a replica follows again.
 	if c.s.Unreplicated() {
@@ -693,12 +728,19 @@ func (c *Credits) ReleaseAll(ctx context.Context) {
 		return
 	}
 	c.mu.Lock()
-	var cmds valkey.Commands
-	for k := range c.wallets {
-		cmds = append(cmds, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc, "b|"+c.s.inc, "m|"+c.s.inc).Build())
-	}
+	wallets := c.wallets
 	c.wallets = map[string]*wallet{}
 	c.mu.Unlock()
+	var cmds valkey.Commands
+	for k, wl := range wallets {
+		// A grant that passed the closed check before it was set may still
+		// be in flight: wait for it, or its HINCRBY could land after the
+		// HDEL and leave credits held by a router that is gone. Take finds
+		// the refill lock held from here on and asks for nothing more.
+		wl.refill.Lock()
+		defer wl.refill.Unlock()
+		cmds = append(cmds, cl.B().Hdel().Key(c.poolKey(k)).Field("g|"+c.s.inc+"|w", "g|"+c.s.inc+"|c", "want|"+c.s.inc, "b|"+c.s.inc, "m|"+c.s.inc).Build())
+	}
 	if len(cmds) > 0 {
 		cl.DoMulti(ctx, cmds...)
 	}

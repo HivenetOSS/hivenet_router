@@ -84,6 +84,9 @@ type agentRoutingSignalPayload struct {
 	// Routers lists the routers the agent is connected to right now (peer
 	// ID → requests in flight for it); absent from older agents.
 	Routers map[string]int64 `json:"routers,omitempty"`
+	// ReportEveryMs is how often the agent sends routing signals; absent
+	// from older agents.
+	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -720,8 +723,10 @@ func (r *Router) Start() error {
 		for _, c := range r.credits {
 			c.Start(processorCtx)
 		}
-		go r.reapLeakedReservations(processorCtx)
 	}
+	// A reservation an exit path forgot to release would hold its budget
+	// forever, with or without a shared store.
+	go r.reapLeakedReservations(processorCtx)
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
@@ -1882,6 +1887,9 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
+	if payload.ReportEveryMs > 0 {
+		agent.SetReportEvery(time.Duration(payload.ReportEveryMs) * time.Millisecond)
+	}
 	if payload.InFlight != nil {
 		agent.SetReportedLoad(*payload.InFlight)
 	}
@@ -2076,12 +2084,12 @@ func (r *Router) setupShared() error {
 }
 
 // reportedRouters lists the routers the agents reported a connection to in
-// the last few seconds.
+// a report that is still fresh (see domain.Agent.ReportMaxAge).
 func (r *Router) reportedRouters() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, a := range r.agents.List() {
-		for _, p := range a.ReportedRouters(3 * time.Second) {
+		for _, p := range a.ReportedRouters() {
 			if !seen[p] {
 				seen[p] = true
 				out = append(out, p)
@@ -2092,7 +2100,7 @@ func (r *Router) reportedRouters() []string {
 }
 
 // agentsLeftRouter reports whether every agent in agents reported to this
-// router, within the last few seconds, that it has no connection to the
+// router, in a report that is still fresh, that it has no connection to the
 // router with libp2p peer ID routerPeer. An agent this router does not know,
 // or that has not reported recently, may still serve that router: the answer
 // is then false. With no agents the router served nothing.
@@ -2106,7 +2114,7 @@ func (r *Router) agentsLeftRouter(routerPeer string, agents []string) bool {
 		if a == nil {
 			return false
 		}
-		if fresh, connected := a.ConnectedTo(routerPeer, 3*time.Second); !fresh || connected {
+		if fresh, connected := a.ConnectedTo(routerPeer); !fresh || connected {
 			return false
 		}
 	}
@@ -2142,11 +2150,11 @@ type siteReplay struct {
 	local *redirect.ReplayGuard
 }
 
-func (g *siteReplay) First(id string, until, now time.Time) bool {
+func (g *siteReplay) First(ctx context.Context, id string, until, now time.Time) bool {
 	// Always recorded here too, so a token used while the store answered
 	// is still refused by this router if the store is down at its replay.
-	local := g.local.First(id, until, now)
-	first, err := g.store.FirstUse(context.Background(), id, until)
+	local := g.local.First(ctx, id, until, now)
+	first, err := g.store.FirstUse(ctx, id, until)
 	if err != nil {
 		return local
 	}

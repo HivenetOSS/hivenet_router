@@ -20,6 +20,7 @@
 package redirect
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -721,9 +722,10 @@ type ReplayGuard struct {
 }
 
 // Replayer makes redirect tokens single-use: First records id until the given
-// time and reports whether this is its first use.
+// time and reports whether this is its first use. ctx is the request's: a
+// check against a shared store stops when the client is gone.
 type Replayer interface {
-	First(id string, until, now time.Time) bool
+	First(ctx context.Context, id string, until, now time.Time) bool
 }
 
 // NewReplayGuard returns an empty guard.
@@ -731,7 +733,7 @@ func NewReplayGuard() *ReplayGuard { return &ReplayGuard{seen: map[string]time.T
 
 // First records id until the given time and reports whether this is its
 // first use. Expired entries are swept at most every 10 seconds.
-func (g *ReplayGuard) First(id string, until, now time.Time) bool {
+func (g *ReplayGuard) First(_ context.Context, id string, until, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if now.Sub(g.lastSweep) > 10*time.Second {

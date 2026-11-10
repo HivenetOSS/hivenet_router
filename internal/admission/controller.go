@@ -104,6 +104,7 @@ type modelState struct {
 	waiting     atomic.Int32              // requests in the wait queue
 	queueMu     sync.Mutex                // orders the changes of waiting and their reports
 	bigWaiting  atomic.Int32              // parked requests larger than the whole budget
+	lastPoll    atomic.Int64              // unix ns of the last re-check of the pool (see takePoll)
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
 	// SweepIdle. Atomic so the janitor never contends with the hot path.
@@ -193,6 +194,15 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	if big {
 		w = budget
 	}
+	// While this router is held to its share of a site-wide budget (store
+	// down, grants not replicated), a request above that share could never
+	// fit: it is held to the share, admitted when nothing else is in flight
+	// here.
+	if c.pool != nil && budget > 0 {
+		if ceil := c.pool.Ceiling(model, budget); ceil > 0 && w > ceil {
+			w, big = ceil, true
+		}
+	}
 	// With a site-wide pool the other routers keep taking credits, so this
 	// router alone cannot drain the site for an oversized request: a smaller
 	// one waits behind it at most the short park, not the whole queue wait.
@@ -238,17 +248,25 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 		defer t.Stop()
 		poll = t.C
 	}
+	polled := false
 	for {
 		// Grab the current wake channel BEFORE re-checking, so a release that
 		// happens between the check and the wait cannot be missed.
 		ch := s.notifyCh()
-		if try() {
-			return s.track(&Reservation{state: s, weight: w, grows: grows, at: time.Now()})
+		if !polled || s.takePoll() {
+			if try() {
+				if polled {
+					s.wake() // credits came in: the others may fit too
+				}
+				return s.track(&Reservation{state: s, weight: w, grows: grows, at: time.Now()})
+			}
 		}
+		polled = false
 		select {
 		case <-ch:
 			// A request released; loop and retry.
 		case <-poll:
+			polled = true
 		case <-timer.C:
 			return nil
 		case <-ctx.Done():
@@ -353,6 +371,16 @@ func (s *modelState) release(weight int64) {
 	s.mu.Unlock()
 	close(ch)
 	s.emit()
+}
+
+// takePoll reports whether this parked request may re-check the site-wide
+// pool on this poll. One re-check per model per poll interval is enough: if
+// it finds credits it wakes the others. Without this, thousands of parked
+// requests would each check the pool on every poll.
+func (s *modelState) takePoll() bool {
+	now := time.Now().UnixNano()
+	last := s.lastPoll.Load()
+	return now-last >= int64(poolPoll) && s.lastPoll.CompareAndSwap(last, now)
 }
 
 // wake wakes every parked waiter without changing occupancy.
