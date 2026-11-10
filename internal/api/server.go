@@ -163,7 +163,7 @@ func (s *Server) registerRoutes() {
 	// A no-op map lookup for concrete model names.
 	inference.Use(s.handlers.AliasMiddleware())
 	// Cross-site redirect: a model with no healthy agent here, served by a
-	// sibling policloud, gets a 307 now — on the concrete model, before quota,
+	// sibling site, gets a 307 now — on the concrete model, before quota,
 	// so the redirecting router charges nothing. No-op when disabled.
 	inference.Use(s.handlers.RedirectDecision())
 	inference.Use(QuotaMiddlewareWithReplicas(s.rateLimiter, s.routerMetrics, s.handlers.QuotaReplicas(s.healthyAgentCount)))

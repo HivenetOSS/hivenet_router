@@ -274,7 +274,7 @@ type Handlers struct {
 	decisionLog      *semantic.DecisionLog
 	semanticObserver SemanticObserver // metrics hook, nil = off
 
-	// redirect answers 307 to a sibling policloud for a model with no healthy
+	// redirect answers 307 to a sibling site for a model with no healthy
 	// agent here; nil (the default) disables cross-site redirects. See
 	// RedirectTarget, RedirectDecision and SetRedirect.
 	redirect *redirect.Redirector

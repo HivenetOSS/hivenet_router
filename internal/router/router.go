@@ -1137,7 +1137,7 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 
 // newWakeHolder returns the holder for requests to models scaled to zero
 // here, or nil when cross-site redirect is disabled. It publishes the
-// pending demand of every model the sibling map lets this policloud hold, 0
+// pending demand of every model the sibling map lets this site hold, 0
 // when none of its requests is held.
 func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentRegistry, m *metrics.RouterMetrics) *wake.Holder {
 	if rd == nil {

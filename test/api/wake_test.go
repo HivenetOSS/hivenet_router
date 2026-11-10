@@ -24,7 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// wakeSite is policloud b of fleetDoc, where chat model m is placed with
+// wakeSite is site b of fleetDoc, where chat model m is placed with
 // scale_from_zero, with hold at zero enabled.
 type wakeSite struct {
 	*testSite
@@ -225,7 +225,7 @@ func TestWakeHold_ClientRetryCountsOnce(t *testing.T) {
 func TestWakeHold_BudgetExpires(t *testing.T) {
 	doc := fleetDoc(1)
 	for i := range doc.Placements {
-		if doc.Placements[i].Policloud == "b" && doc.Placements[i].Model == "m" {
+		if doc.Placements[i].Site == "b" && doc.Placements[i].Model == "m" {
 			doc.Placements[i].HoldBudget = "100ms" // overrides the 1m default
 		}
 	}
@@ -279,7 +279,7 @@ func assertModelWaking(t *testing.T, w *httptest.ResponseRecorder) {
 func TestWakeHold_NotHeld(t *testing.T) {
 	noScale := fleetDoc(1)
 	for i := range noScale.Placements {
-		if noScale.Placements[i].Policloud == "b" && noScale.Placements[i].Model == "m" {
+		if noScale.Placements[i].Site == "b" && noScale.Placements[i].Model == "m" {
 			no := false
 			noScale.Placements[i].ScaleFromZero = &no
 		}
@@ -409,7 +409,7 @@ func TestWakeHold_KeepAlive(t *testing.T) {
 func TestWakeHold_ErrorsAfterKeepAlive(t *testing.T) {
 	expiring := fleetDoc(1)
 	for i := range expiring.Placements {
-		if expiring.Placements[i].Policloud == "b" && expiring.Placements[i].Model == "m" {
+		if expiring.Placements[i].Site == "b" && expiring.Placements[i].Model == "m" {
 			expiring.Placements[i].HoldBudget = "100ms"
 		}
 	}

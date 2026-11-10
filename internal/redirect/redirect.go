@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
 // Package redirect implements cross-site redirects: when no healthy agent on
-// this policloud serves a model, the router answers HTTP 307 to a sibling
-// policloud that does, so a client configured with one hostname still reaches
+// this site serves a model, the router answers HTTP 307 to a sibling
+// site that does, so a client configured with one hostname still reaches
 // its model.
 //
 // Clients drop the Authorization header when a redirect changes host, so the
@@ -16,7 +16,7 @@
 // the package is never wired in and the router behaves exactly as before.
 //
 // The map format, the redirect decision and the token are frozen in contract 3
-// v2 (hivenet_ai_infra docs/contracts/03-sibling-map.md).
+// v3 (hivenet_ai_infra docs/contracts/03-sibling-map.md).
 package redirect
 
 import (
@@ -45,8 +45,10 @@ const (
 	// this many times is never redirected again.
 	MaxHops = 2
 
-	// Schema is the only sibling-map schema this router understands.
-	Schema = 2
+	// Schema is the only sibling-map schema this router understands. 3 renamed
+	// the v2 fields "policlouds" and a placement's "policloud" to "sites" and
+	// "site"; a v2 map is refused with a clear "unsupported map schema".
+	Schema = 3
 
 	// ClockSkew is the grace a token gets past its expiry, for clock drift
 	// between the routers that sign and verify it.
@@ -56,10 +58,12 @@ const (
 	// hold a request while the model wakes.
 	MaxHoldBudget = time.Hour
 
-	// homeSize is how many sibling policlouds one key + model may use, which
-	// keeps the key's rate limits meaningful (contract 3 v2 §3 step 4).
+	// homeSize is how many sibling sites one key + model may use, which
+	// keeps the key's rate limits meaningful (contract 3 v3 §3 step 4).
 	homeSize = 2
 
+	// tokenPrefix versions the token format, not the map: the token did not
+	// change in contract 3 v3, so it stays "v2.".
 	tokenPrefix = "v2."
 )
 
@@ -91,26 +95,26 @@ var (
 
 // ---- sibling map ------------------------------------------------------------
 
-// Policlouds, placements and hints as pushed. Pointers mark required fields
+// Sites, placements and hints as pushed. Pointers mark required fields
 // whose zero value is meaningful (a missing bool must not read as false).
 type (
-	// Policloud is one policloud: its public entry URL and where it is.
-	Policloud struct {
+	// Site is one site: its public entry URL and where it is.
+	Site struct {
 		ID      string `json:"id"`
 		URL     string `json:"url"`
 		Country string `json:"country"`
 		EU      *bool  `json:"eu"`
 	}
 
-	// Placement says a model of a kind runs in a policloud. Only Model, Kind,
-	// Policloud and ScaleFromZero decide where a request goes; Hint only lets
+	// Placement says a model of a kind runs in a site. Only Model, Kind,
+	// Site and ScaleFromZero decide where a request goes; Hint only lets
 	// the router skip a full or cold target. HoldBudget is optional: how long
-	// the policloud's routers hold a request while the model wakes from zero,
+	// the site's routers hold a request while the model wakes from zero,
 	// as a Go duration such as "240s" (the router's default when absent).
 	Placement struct {
 		Model         string `json:"model"`
 		Kind          string `json:"kind"`
-		Policloud     string `json:"policloud"`
+		Site          string `json:"site"`
 		ScaleFromZero *bool  `json:"scale_from_zero"`
 		HoldBudget    string `json:"hold_budget,omitempty"`
 		Hint          *Hint  `json:"hint,omitempty"`
@@ -131,7 +135,7 @@ type (
 		Version       *uint64     `json:"version"`
 		Region        string      `json:"region"`
 		GeneratedAt   string      `json:"generated_at,omitempty"`
-		Policlouds    []Policloud `json:"policlouds"`
+		Sites         []Site      `json:"sites"`
 		Placements    []Placement `json:"placements"`
 		HintsExpireAt string      `json:"hints_expire_at,omitempty"`
 	}
@@ -148,24 +152,24 @@ func (h *Hint) load() string {
 
 // Map is the in-memory sibling map, replaced whole by each push and safe for
 // concurrent use. It is also the redirect allowlist: a Location header only
-// ever points at a policloud URL taken from it, and every such URL's host
+// ever points at a site URL taken from it, and every such URL's host
 // lies under one of the allowed domains.
 type Map struct {
 	domains     []string // allowed host suffixes, from ParseDomains
 	mu          sync.RWMutex
 	doc         MapDoc
 	set         bool
-	policlouds  map[string]Policloud
+	sites       map[string]Site
 	byModel     map[string][]Placement
 	hintsExpire time.Time
 }
 
-// NewMap returns an empty map that accepts policloud URLs only under
+// NewMap returns an empty map that accepts site URLs only under
 // domains (from ParseDomains; none = every push is refused). Nothing is
 // redirected until the first push.
 func NewMap(domains []string) *Map { return &Map{domains: domains} }
 
-// ParseDomains parses the allowed host suffixes of policloud URLs: a
+// ParseDomains parses the allowed host suffixes of site URLs: a
 // comma-separated list such as ".inference.hivecompute.ai". Each suffix must
 // start with "." so that it can only match whole DNS labels
 // ("evilhivecompute.ai" never matches "hivecompute.ai"). At least one is
@@ -206,18 +210,18 @@ func (m *Map) Replace(doc MapDoc) error {
 		return errors.New("redirect: region is required")
 	}
 
-	policlouds := make(map[string]Policloud, len(doc.Policlouds))
-	clean := make([]Policloud, 0, len(doc.Policlouds))
-	for i, p := range doc.Policlouds {
-		u, err := m.validatePolicloud(p)
+	sites := make(map[string]Site, len(doc.Sites))
+	clean := make([]Site, 0, len(doc.Sites))
+	for i, p := range doc.Sites {
+		u, err := m.validateSite(p)
 		if err != nil {
-			return fmt.Errorf("redirect: policlouds[%d]: %w", i, err)
+			return fmt.Errorf("redirect: sites[%d]: %w", i, err)
 		}
-		if _, dup := policlouds[p.ID]; dup {
-			return fmt.Errorf("redirect: policlouds[%d]: duplicate id %q", i, p.ID)
+		if _, dup := sites[p.ID]; dup {
+			return fmt.Errorf("redirect: sites[%d]: duplicate id %q", i, p.ID)
 		}
 		p.URL = u
-		policlouds[p.ID] = p
+		sites[p.ID] = p
 		clean = append(clean, p)
 	}
 
@@ -225,7 +229,7 @@ func (m *Map) Replace(doc MapDoc) error {
 	seen := map[[2]string]bool{}
 	hinted := false
 	for i, pl := range doc.Placements {
-		if err := validatePlacement(pl, policlouds); err != nil {
+		if err := validatePlacement(pl, sites); err != nil {
 			return fmt.Errorf("redirect: placements[%d]: %w", i, err)
 		}
 		budget, err := parseHoldBudget(pl)
@@ -233,9 +237,9 @@ func (m *Map) Replace(doc MapDoc) error {
 			return fmt.Errorf("redirect: placements[%d]: %w", i, err)
 		}
 		pl.holdBudget = budget
-		key := [2]string{pl.Model, pl.Policloud}
+		key := [2]string{pl.Model, pl.Site}
 		if seen[key] {
-			return fmt.Errorf("redirect: placements[%d]: duplicate placement of %q in %q", i, pl.Model, pl.Policloud)
+			return fmt.Errorf("redirect: placements[%d]: duplicate placement of %q in %q", i, pl.Model, pl.Site)
 		}
 		seen[key] = true
 		hinted = hinted || pl.Hint != nil
@@ -259,41 +263,41 @@ func (m *Map) Replace(doc MapDoc) error {
 	if m.set && *doc.Version < *m.doc.Version {
 		return ErrStaleVersion
 	}
-	doc.Policlouds = clean
+	doc.Sites = clean
 	doc.Placements = append([]Placement(nil), doc.Placements...)
-	m.doc, m.set, m.policlouds, m.byModel, m.hintsExpire = doc, true, policlouds, byModel, hintsExpire
+	m.doc, m.set, m.sites, m.byModel, m.hintsExpire = doc, true, sites, byModel, hintsExpire
 	return nil
 }
 
-// validatePolicloud checks one entry and returns its URL without a trailing
+// validateSite checks one entry and returns its URL without a trailing
 // slash. Only absolute https origins are accepted: clients follow a redirect
 // from https down to http and then send the token (and some the API key) in
 // clear text.
-func (m *Map) validatePolicloud(p Policloud) (string, error) {
+func (m *Map) validateSite(p Site) (string, error) {
 	if p.ID == "" {
 		return "", errors.New("id must not be empty")
 	}
 	u, err := url.Parse(p.URL)
 	if err != nil {
-		return "", fmt.Errorf("policloud %q: url: %w", p.ID, err)
+		return "", fmt.Errorf("site %q: url: %w", p.ID, err)
 	}
 	if u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		strings.Trim(u.Path, "/") != "" {
-		return "", fmt.Errorf("policloud %q: url must be an absolute https:// origin with no path, query or credentials, got %q", p.ID, p.URL)
+		return "", fmt.Errorf("site %q: url must be an absolute https:// origin with no path, query or credentials, got %q", p.ID, p.URL)
 	}
 	if !m.allowedHost(u.Hostname()) {
-		return "", fmt.Errorf("policloud %q: host %q is not under the allowed domains %v", p.ID, u.Hostname(), m.domains)
+		return "", fmt.Errorf("site %q: host %q is not under the allowed domains %v", p.ID, u.Hostname(), m.domains)
 	}
 	if !countryCode.MatchString(p.Country) {
-		return "", fmt.Errorf("policloud %q: country must be an ISO 3166-1 alpha-2 code, got %q", p.ID, p.Country)
+		return "", fmt.Errorf("site %q: country must be an ISO 3166-1 alpha-2 code, got %q", p.ID, p.Country)
 	}
 	if p.EU == nil {
-		return "", fmt.Errorf("policloud %q: eu is required", p.ID)
+		return "", fmt.Errorf("site %q: eu is required", p.ID)
 	}
 	return strings.TrimSuffix(p.URL, "/"), nil
 }
 
-func validatePlacement(pl Placement, policlouds map[string]Policloud) error {
+func validatePlacement(pl Placement, sites map[string]Site) error {
 	if pl.Model == "" {
 		return errors.New("model must not be empty")
 	}
@@ -302,17 +306,17 @@ func validatePlacement(pl Placement, policlouds map[string]Policloud) error {
 	default:
 		return fmt.Errorf("model %q: unknown kind %q", pl.Model, pl.Kind)
 	}
-	if _, ok := policlouds[pl.Policloud]; !ok {
-		return fmt.Errorf("model %q: unknown policloud %q", pl.Model, pl.Policloud)
+	if _, ok := sites[pl.Site]; !ok {
+		return fmt.Errorf("model %q: unknown site %q", pl.Model, pl.Site)
 	}
 	if pl.ScaleFromZero == nil {
-		return fmt.Errorf("model %q in %q: scale_from_zero is required", pl.Model, pl.Policloud)
+		return fmt.Errorf("model %q in %q: scale_from_zero is required", pl.Model, pl.Site)
 	}
 	if pl.Hint != nil {
 		switch pl.Hint.Load {
 		case "", LoadOK, LoadBusy, LoadFull:
 		default:
-			return fmt.Errorf("model %q in %q: unknown hint load %q", pl.Model, pl.Policloud, pl.Hint.Load)
+			return fmt.Errorf("model %q in %q: unknown hint load %q", pl.Model, pl.Site, pl.Hint.Load)
 		}
 	}
 	return nil
@@ -326,7 +330,7 @@ func parseHoldBudget(pl Placement) (time.Duration, error) {
 	d, err := time.ParseDuration(pl.HoldBudget)
 	if err != nil || d <= 0 || d > MaxHoldBudget {
 		return 0, fmt.Errorf("model %q in %q: hold_budget %q must be a duration such as \"240s\", greater than 0 and at most %v",
-			pl.Model, pl.Policloud, pl.HoldBudget, MaxHoldBudget)
+			pl.Model, pl.Site, pl.HoldBudget, MaxHoldBudget)
 	}
 	return d, nil
 }
@@ -347,7 +351,7 @@ func (m *Map) Snapshot() MapDoc {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	doc := m.doc
-	doc.Policlouds = append([]Policloud(nil), m.doc.Policlouds...)
+	doc.Sites = append([]Site(nil), m.doc.Sites...)
 	doc.Placements = append([]Placement(nil), m.doc.Placements...)
 	return doc
 }
@@ -370,71 +374,71 @@ func (m *Map) HintsExpired(now time.Time) bool {
 	return !now.Before(m.hintsExpire)
 }
 
-// Policloud returns a policloud of the map by ID.
-func (m *Map) Policloud(id string) (Policloud, bool) {
+// Site returns a site of the map by ID.
+func (m *Map) Site(id string) (Site, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.policlouds[id]
+	p, ok := m.sites[id]
 	return p, ok
 }
 
 // TargetRequest is the input of Map.Target.
 type TargetRequest struct {
 	Model, Kind string
-	Self, From  string // this policloud and the request's origin; both excluded
+	Self, From  string // this site and the request's origin; both excluded
 	KeyID       string
 	Session     string // the X-Session-ID header ("" when absent)
 	Scope       Scope
 	Now         time.Time
 }
 
-// Target picks the sibling policloud for a request (contract 3 v2 §3 steps
+// Target picks the sibling site for a request (contract 3 v3 §3 steps
 // 3–7): placements of the model and kind, inside the scope, minus this
-// policloud and the origin; the key's home set (top 2 by H(keyID, model,
-// policloud)); ranked by the session; then, while the hints are fresh, no
+// site and the origin; the key's home set (top 2 by H(keyID, model,
+// site)); ranked by the session; then, while the hints are fresh, no
 // redirect when every candidate is cold and the model may be woken here
 // (placed here with scale_from_zero: it is held and woken here instead),
 // else skipping full or non-wakeable cold targets. ok is
 // false when there is no target.
-func (m *Map) Target(req TargetRequest) (Policloud, bool) {
+func (m *Map) Target(req TargetRequest) (Site, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	type cand struct {
 		pl       Placement
-		pc       Policloud
+		site     Site
 		home, by uint64
 	}
 	var cands []cand
 	for _, pl := range m.byModel[req.Model] {
-		if pl.Kind != req.Kind || pl.Policloud == req.Self || pl.Policloud == req.From {
+		if pl.Kind != req.Kind || pl.Site == req.Self || pl.Site == req.From {
 			continue
 		}
-		pc := m.policlouds[pl.Policloud]
-		if !req.Scope.Contains(pc) {
+		site := m.sites[pl.Site]
+		if !req.Scope.Contains(site) {
 			continue
 		}
-		cands = append(cands, cand{pl: pl, pc: pc, home: score(req.KeyID, req.Model, pc.ID)})
+		cands = append(cands, cand{pl: pl, site: site, home: score(req.KeyID, req.Model, site.ID)})
 	}
 	if len(cands) == 0 {
-		return Policloud{}, false
+		return Site{}, false
 	}
 
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].pc.ID, cands[j].pc.ID) })
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].site.ID, cands[j].site.ID) })
 	if len(cands) > homeSize {
 		cands = cands[:homeSize]
 	}
 	session := req.KeyID + "\x00" + req.Session
 	for i := range cands {
-		cands[i].by = score(session, req.Model, cands[i].pc.ID)
+		cands[i].by = score(session, req.Model, cands[i].site.ID)
 	}
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].pc.ID, cands[j].pc.ID) })
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].site.ID, cands[j].site.ID) })
 
 	if !req.Now.Before(m.hintsExpire) {
-		return cands[0].pc, true // no fresh hints: the session order alone
+		return cands[0].site, true // no fresh hints: the session order alone
 	}
 	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
-		return Policloud{}, false // every sibling is cold and the model may be woken here: wake it here
+		return Site{}, false // every sibling is cold and the model may be woken here: wake it here
 	}
 	firstEligible := -1
 	for i, c := range cands {
@@ -442,38 +446,38 @@ func (m *Map) Target(req TargetRequest) (Policloud, bool) {
 			continue
 		}
 		if c.pl.Hint.warm() {
-			return c.pc, true // the first eligible warm target
+			return c.site, true // the first eligible warm target
 		}
 		if firstEligible < 0 {
 			firstEligible = i
 		}
 	}
 	if firstEligible >= 0 {
-		return cands[firstEligible].pc, true // only cold, wakeable targets
+		return cands[firstEligible].site, true // only cold, wakeable targets
 	}
-	return cands[0].pc, true // every target skipped: a stale hint must not block service
+	return cands[0].site, true // every target skipped: a stale hint must not block service
 }
 
 // Wakeable reports whether a request for model, as kind, may be held on
-// policloud while the model wakes: the map places it there with
+// site while the model wakes: the map places it there with
 // scale_from_zero. budget is the placement's hold_budget, 0 when it has none.
-func (m *Map) Wakeable(model, kind, policloud string) (budget time.Duration, ok bool) {
+func (m *Map) Wakeable(model, kind, site string) (budget time.Duration, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if pl, ok := m.wakeable(model, kind, policloud); ok {
+	if pl, ok := m.wakeable(model, kind, site); ok {
 		return pl.holdBudget, true
 	}
 	return 0, false
 }
 
-// WakeableModels returns, sorted, the models the map places on policloud
+// WakeableModels returns, sorted, the models the map places on site
 // with scale_from_zero: the models whose requests may be held there.
-func (m *Map) WakeableModels(policloud string) []string {
+func (m *Map) WakeableModels(site string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []string
 	for model, pls := range m.byModel {
-		if slices.ContainsFunc(pls, func(pl Placement) bool { return pl.Policloud == policloud && *pl.ScaleFromZero }) {
+		if slices.ContainsFunc(pls, func(pl Placement) bool { return pl.Site == site && *pl.ScaleFromZero }) {
 			out = append(out, model)
 		}
 	}
@@ -482,21 +486,21 @@ func (m *Map) WakeableModels(policloud string) []string {
 }
 
 // wakeable is the one "may be held here" rule, used by Wakeable and Target:
-// the placement of model, as kind, on policloud with scale_from_zero. The
+// the placement of model, as kind, on site with scale_from_zero. The
 // caller holds m.mu.
-func (m *Map) wakeable(model, kind, policloud string) (Placement, bool) {
+func (m *Map) wakeable(model, kind, site string) (Placement, bool) {
 	for _, pl := range m.byModel[model] {
-		if pl.Kind == kind && pl.Policloud == policloud && *pl.ScaleFromZero {
+		if pl.Kind == kind && pl.Site == site && *pl.ScaleFromZero {
 			return pl, true
 		}
 	}
 	return Placement{}, false
 }
 
-// score is H(a, model, policloud): the first 8 bytes, big-endian, of
-// SHA-256(a + "\x00" + model + "\x00" + policloud).
-func score(a, model, policloud string) uint64 {
-	h := sha256.Sum256([]byte(a + "\x00" + model + "\x00" + policloud))
+// score is H(a, model, site): the first 8 bytes, big-endian, of
+// SHA-256(a + "\x00" + model + "\x00" + site).
+func score(a, model, site string) uint64 {
+	h := sha256.Sum256([]byte(a + "\x00" + model + "\x00" + site))
 	return binary.BigEndian.Uint64(h[:8])
 }
 
@@ -509,13 +513,13 @@ func better(a, b uint64, idA, idB string) bool {
 	return idA < idB
 }
 
-// Location builds the redirect URL: the policloud's origin, the request's own
+// Location builds the redirect URL: the site's origin, the request's own
 // path, the request's own query parameters (any previous token replaced) and
 // the new token.
-func Location(policloudURL string, req *url.URL, token string) string {
+func Location(siteURL string, req *url.URL, token string) string {
 	q := req.Query()
 	q.Set(QueryParam, token)
-	return policloudURL + req.Path + "?" + q.Encode()
+	return siteURL + req.Path + "?" + q.Encode()
 }
 
 // ---- scope ------------------------------------------------------------------
@@ -538,9 +542,9 @@ func ParseScope(s string) (Scope, error) {
 	return "", fmt.Errorf("redirect: invalid scope %q", s)
 }
 
-// Contains reports whether policloud p is inside the scope. An unknown scope
+// Contains reports whether site p is inside the scope. An unknown scope
 // contains nothing (fail-closed).
-func (s Scope) Contains(p Policloud) bool {
+func (s Scope) Contains(p Site) bool {
 	switch {
 	case s == ScopeAll:
 		return true
@@ -554,7 +558,7 @@ func (s Scope) Contains(p Policloud) bool {
 
 // ---- token ------------------------------------------------------------------
 
-// Claims is the body of a redirect token (contract 3 v2 §4).
+// Claims is the body of a redirect token (contract 3 v3 §4).
 type Claims struct {
 	KeyID     string `json:"key"` // the caller's API-key ID ("" with auth mode none), never the key
 	RequestID string `json:"rid"` // the first router's request ID; the target adopts it
@@ -563,8 +567,8 @@ type Claims struct {
 	ClientRequestID string `json:"crid,omitempty"`
 	Model           string `json:"model"` // the concrete model the first router routed on
 	Scope           Scope  `json:"scope"` // the effective scope at the first router
-	From            string `json:"from"`  // the first router's policloud ID
-	Site            string `json:"site"`  // the only policloud that accepts this token
+	From            string `json:"from"`  // the first router's site ID
+	Site            string `json:"site"`  // the only site that accepts this token
 	Path            string `json:"path"`  // the only path the token is valid for
 	Hop             int    `json:"hop"`   // redirects so far, including this one
 	BodySHA         string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
