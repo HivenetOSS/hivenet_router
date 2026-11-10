@@ -326,7 +326,12 @@ func (s *Store) conn() (valkey.Client, error) {
 		opt.ForceSingleClient = true
 	}
 	if s.cfg.SentinelMaster != "" {
-		opt.Sentinel = valkey.SentinelOption{MasterSet: s.cfg.SentinelMaster, Password: s.cfg.Password}
+		// The Sentinel connections take their own dialer: without a timeout,
+		// a connect to a Sentinel behind a network cut waits on the kernel's
+		// SYN retries, and after the cut heals the router reconnects only at
+		// the next retry, up to ~30 s later.
+		opt.Sentinel = valkey.SentinelOption{MasterSet: s.cfg.SentinelMaster, Password: s.cfg.Password,
+			Dialer: net.Dialer{Timeout: s.cfg.Interval}}
 		if s.cfg.TLS {
 			opt.Sentinel.TLSConfig = opt.TLSConfig
 		}
