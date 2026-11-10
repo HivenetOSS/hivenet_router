@@ -4,7 +4,8 @@
 // Package shared lets the routers of one site enforce each key's rate and
 // daily limits together, through one Valkey (normally behind Sentinel).
 //
-// Every router keeps deciding in memory, so a request never waits on Valkey.
+// Every router keeps deciding in memory: a request waits on Valkey only to
+// read a daily total, once per key and day (see DailyTotal).
 // Once per interval each router publishes the usage it admitted as one stream
 // entry, reads the entries the other routers published, and hands them to the
 // limiters, which subtract them from their own buckets. The same round trip
@@ -112,10 +113,13 @@ type Store struct {
 	dirty    map[dayBucket]bool     // daily totals to write on the next tick
 	fullNext bool                   // write every daily total on the next tick
 
-	cursor    string    // last stream entry read
-	lastOK    time.Time // last successful tick
-	lastFull  time.Time // last time every daily total was written
-	lastReset time.Time // last time the client was rebuilt
+	cursor    string            // last stream entry read
+	pubSeq    uint64            // number of the last usage batch published
+	unacked   []batch           // batches whose publish has no reply: sent again, same number
+	seen      map[string]uint64 // per run, the last batch number applied
+	lastOK    time.Time         // last successful tick
+	lastFull  time.Time         // last time every daily total was written
+	lastReset time.Time         // last time the client was rebuilt
 
 	okAt     atomic.Int64  // unix ms of the last successful tick
 	fleet    atomic.Int32  // live routers, this one included (last known while down)
@@ -126,6 +130,7 @@ type Store struct {
 	silentAt string        // the silent routers at the last tick, sorted
 	seq      atomic.Uint64 // successful ticks
 	degraded atomic.Uint64 // 0 while Valkey answers, else the outage number
+	resync   atomic.Uint64 // changes when usage entries may have been missed
 	outages  uint64
 
 	// Runs seen live before this router lost Valkey or was evicted, and not
@@ -204,6 +209,17 @@ type entry struct {
 	A int64  `json:"a,omitempty"` // ms between the oldest admission and the publish
 }
 
+// batch is one tick's usage, numbered so that a batch sent again after a
+// publish with no reply is applied only once.
+type batch struct {
+	seq     uint64
+	entries []entry
+}
+
+// maxUnacked bounds the batches kept for sending again; past it they are
+// merged into one, which may count the oldest twice but never loses usage.
+const maxUnacked = 60
+
 // fullEvery is how often every daily total of today is written again, so a
 // write lost in a failover the router did not notice is healed.
 const fullEvery = 5 * time.Minute
@@ -253,6 +269,7 @@ func New(cfg Config) (*Store, error) {
 		inc:   cfg.RouterID + "@" + strconv.FormatInt(time.Now().UnixMilli(), 10),
 		buf:   make(map[usageKey]*usageVal),
 		own:   make(map[dayBucket]int64),
+		seen:  make(map[string]uint64),
 		dirty: make(map[dayBucket]bool),
 		m:     newStoreMetrics(),
 	}
@@ -442,6 +459,11 @@ func (s *Store) SilentEpoch() uint64 { return s.silentEp.Load() }
 // SyncSeq changes after every tick that applied the other routers' usage.
 func (s *Store) SyncSeq() uint64 { return s.seq.Load() }
 
+// ResyncEpoch changes when this router may have missed other routers' usage
+// entries (it was cut off long enough for them to be trimmed, or a failover
+// lost them). A daily total read before the change must be read again.
+func (s *Store) ResyncEpoch() uint64 { return s.resync.Load() }
+
 // DegradedEpoch is 0 while Valkey answers, else a number that changes with each
 // outage, so a limiter can snapshot its state once per outage. Before Valkey
 // first answers the router counts as being in an outage.
@@ -563,9 +585,11 @@ func (s *Store) DailyTotal(ctx context.Context, bucket string) (int, string, err
 		return 0, "", err
 	}
 	// One script, so the stream position and the totals are read at the
-	// same instant: each router writes its totals before it adds the stream
-	// entry, so every entry up to that position is in the totals.
-	v, err := dailyTotal.Exec(ctx, c, []string{s.key("usage"), s.dailyKey(dayIndex(time.Now()), bucket)}, nil).ToArray()
+	// same instant: each router writes its totals and its stream entry in
+	// one transaction, so the totals hold exactly the entries up to that
+	// position.
+	day := dayIndex(time.Now())
+	v, err := dailyTotal.Exec(ctx, c, []string{s.key("usage"), s.dailyKey(day, bucket)}, []string{s.inc}).ToArray()
 	if err != nil || len(v) != 2 {
 		if err == nil {
 			err = errShortReply
@@ -580,17 +604,25 @@ func (s *Store) DailyTotal(ctx context.Context, bucket string) (int, string, err
 	if err != nil {
 		return 0, "", err
 	}
+	s.mu.Lock()
+	total += s.own[dayBucket{day, bucket}]
+	s.mu.Unlock()
 	return int(total), mark, nil
 }
 
-// dailyTotal returns the last stream entry and a daily bucket's total.
+// dailyTotal returns the last stream entry and a daily bucket's total,
+// without this run's own field (ARGV[1]): the run adds its own usage from
+// memory, which also holds what it has not published yet.
 // KEYS: usage stream, daily key.
 var dailyTotal = valkey.NewLuaScript(`
 local m = redis.call('XREVRANGE', KEYS[1], '+', '-', 'COUNT', 1)
 local mark = '0-0'
 if #m > 0 then mark = m[1][1] end
 local total = 0
-for _, v in ipairs(redis.call('HVALS', KEYS[2])) do total = total + tonumber(v) end
+local kv = redis.call('HGETALL', KEYS[2])
+for i = 1, #kv, 2 do
+  if kv[i] ~= ARGV[1] then total = total + tonumber(kv[i+1]) end
+end
 return {mark, total}`)
 
 // Start runs the sync loop until ctx is done or Close is called. The first
@@ -772,43 +804,74 @@ func (s *Store) tick(ctx context.Context) {
 		c.B().Zrangebyscore().Key(s.key("routers")).
 			Min(strconv.FormatInt(vNow-time.Hour.Milliseconds(), 10)).
 			Max("(" + strconv.FormatInt(vNow-s.cfg.DownAfter.Milliseconds(), 10)).Build()}
+	// The daily totals and the stream entries are written in one
+	// transaction: a total read together with the stream position (see
+	// DailyTotal) then holds exactly the entries up to that position.
+	writes := valkey.Commands{}
 	for db, n := range totals {
 		k := s.dailyKey(db.day, db.bucket)
-		cmds = append(cmds,
+		writes = append(writes,
 			c.B().Hset().Key(k).FieldValue().FieldValue(s.inc, strconv.FormatInt(n, 10)).Build(),
 			c.B().Expire().Key(k).Seconds(int64((48 * time.Hour).Seconds())).Build())
 	}
+	iAgents := -1
 	if len(fetch) > 0 {
+		iAgents = len(cmds)
 		cmds = append(cmds, c.B().Hmget().Key(s.key("agents")).Field(fetch...).Build())
 	}
+	iPeers := len(cmds)
 	cmds = append(cmds, c.B().Hvals().Key(s.key("peers")).Build())
-	entries := make([]entry, 0, len(buf))
-	for k, v := range buf {
-		entries = append(entries, entry{K: string(k.kind), B: k.bucket, L: v.limit, N: v.n, D: k.day,
-			A: time.Since(v.first).Milliseconds()})
+	batches := s.unacked
+	if len(buf) > 0 {
+		entries := make([]entry, 0, len(buf))
+		for k, v := range buf {
+			entries = append(entries, entry{K: string(k.kind), B: k.bucket, L: v.limit, N: v.n, D: k.day,
+				A: time.Since(v.first).Milliseconds()})
+		}
+		s.pubSeq++
+		batches = append(batches, batch{seq: s.pubSeq, entries: entries})
+		if len(batches) > maxUnacked {
+			merged := batch{seq: batches[len(batches)-1].seq}
+			for _, b := range batches {
+				merged.entries = append(merged.entries, b.entries...)
+			}
+			batches = []batch{merged}
+		}
 	}
-	payload, _ := json.Marshal(entries)
 	stream := s.key("usage")
 	minID := strconv.FormatInt(vNow-(2*time.Minute).Milliseconds(), 10)
-	cmds = append(cmds,
-		c.B().Xadd().Key(stream).Minid().Almost().Threshold(minID).Id("*").
-			FieldValue().FieldValue("r", s.inc).FieldValue("u", string(payload)).Build(),
-		c.B().Xrange().Key(stream).Start("("+s.cursor).End("+").Count(100000).Build())
+	for _, b := range batches { // nothing to publish on an idle tick
+		payload, _ := json.Marshal(b.entries)
+		writes = append(writes, c.B().Xadd().Key(stream).Minid().Almost().Threshold(minID).Id("*").
+			FieldValue().FieldValue("r", s.inc).FieldValue("s", strconv.FormatUint(b.seq, 10)).
+			FieldValue("u", string(payload)).Build())
+	}
+	if len(writes) > 0 {
+		cmds = append(cmds, c.B().Multi().Build())
+		cmds = append(cmds, writes...)
+		cmds = append(cmds, c.B().Exec().Build())
+	}
+	cmds = append(cmds, c.B().Xrange().Key(stream).Start("("+s.cursor).End("+").Count(100000).Build())
 	res := c.DoMulti(cctx, cmds...)
 	for _, r := range res[:len(res)-1] {
 		if err := r.Error(); err != nil {
-			s.failTick(buf, err)
+			// The batches may have been written even though the reply was
+			// lost: they are sent again with the same numbers, which the
+			// other routers apply only once.
+			s.unacked = batches
+			s.failTick(nil, err)
 			return
 		}
 	}
+	s.unacked = nil
 	if full {
 		s.lastFull = time.Now()
 	}
-	if peers, err := res[len(res)-3].AsStrSlice(); err == nil {
+	if peers, err := res[iPeers].AsStrSlice(); err == nil {
 		s.trackRouters(peers)
 	}
-	if len(fetch) > 0 {
-		if vals, err := res[len(res)-4].ToArray(); err == nil {
+	if iAgents >= 0 {
+		if vals, err := res[iAgents].ToArray(); err == nil {
 			s.liveMu.Lock()
 			if s.agentsOf == nil {
 				s.agentsOf, s.agentVer = map[string][]string{}, map[string]string{}
@@ -836,11 +899,12 @@ func (s *Store) tick(ctx context.Context) {
 		s.failTick(nil, err) // usage is published; only the read failed
 		return
 	}
-	if newest, err := res[0].AsXRange(); err == nil && len(newest) > 0 && streamBefore(newest[0].ID, s.cursor) {
+	if newest, err := res[0].AsXRange(); err == nil && len(newest) > 0 && StreamBefore(newest[0].ID, s.cursor) {
 		// Entries past the newest one were lost (a failover); new ones
 		// will follow it.
 		log.Infof("shared counters: the usage stream is behind this router's read position (failover?); reading from %s", newest[0].ID)
 		s.cursor = newest[0].ID
+		s.resync.Add(1)
 	}
 
 	s.trackLive(live, livePeers, evictedNow || (s.degraded.Load() != 0 && s.seq.Load() > 0))
@@ -849,6 +913,9 @@ func (s *Store) tick(ctx context.Context) {
 		log.Infof("shared counters: connected to Valkey; enforcing site-wide limits")
 	case s.degraded.Load() != 0:
 		log.Infof("shared counters: Valkey reachable again; enforcing site-wide limits")
+		// Entries older than two minutes may have been trimmed while this
+		// router was cut off: daily totals are read again.
+		s.resync.Add(1)
 	}
 	// Only once a lost run is tracked as such: until then a grant presents
 	// the old epoch and is refused.
@@ -872,14 +939,31 @@ func (s *Store) tick(ctx context.Context) {
 	s.fleet.Store(int32(n))
 	if stale, err := res[1].AsStrSlice(); err == nil {
 		s.trackSilent(stale, live)
+		// Forget the batch numbers of runs gone for more than an hour.
+		known := map[string]bool{}
+		for _, r := range append(stale, live...) {
+			known[r] = true
+		}
+		for r := range s.seen {
+			if !known[r] {
+				delete(s.seen, r)
+			}
+		}
 	}
 	s.m.peers.Set(float64(n - 1))
 
 	now := vNow + time.Since(vAt).Milliseconds() // Valkey's clock, now
 	for _, msg := range msgs {
 		s.cursor = msg.ID
-		if msg.FieldValues["r"] == s.inc {
+		run := msg.FieldValues["r"]
+		if run == s.inc {
 			continue // our own usage, counted when admitted
+		}
+		if n, err := strconv.ParseUint(msg.FieldValues["s"], 10, 64); err == nil {
+			if n <= s.seen[run] {
+				continue // a batch sent again: already applied
+			}
+			s.seen[run] = n
 		}
 		var es []entry
 		if json.Unmarshal([]byte(msg.FieldValues["u"]), &es) != nil {
@@ -976,8 +1060,9 @@ func splitRun(run string) (id string, start int64, ok bool) {
 	return run[:i], start, err == nil
 }
 
-// streamBefore reports whether stream ID a is before b.
-func streamBefore(a, b string) bool {
+// StreamBefore reports whether stream ID a ("ms-seq") is before b; an empty
+// ID is before every entry.
+func StreamBefore(a, b string) bool {
 	am, bm := streamMillis(a), streamMillis(b)
 	if am != bm {
 		return am < bm

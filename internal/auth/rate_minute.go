@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"hivenet_router/internal/shared"
+
 	"golang.org/x/time/rate"
 )
 
@@ -29,7 +31,7 @@ func (l *MinuteRateLimiter) SetFleet(f Fleet) { l.fleet = f }
 
 // ApplyPeerUsage takes tokens another router of the site admitted.
 func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration, _ int, _ string) {
-	if (kind != usageITPM && kind != usageOTPM) || limit <= 0 {
+	if (kind != shared.KindITPM && kind != shared.KindOTPM) || limit <= 0 {
 		return
 	}
 	// An existing bucket keeps this router's limit (see InMemoryLimiter.peerRPM).
@@ -88,7 +90,7 @@ func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, coun
 	if !ok {
 		return false
 	}
-	l.fleet.Record(usageITPM, key, limit, charged)
+	l.fleet.Record(shared.KindITPM, key, limit, charged)
 	return true
 }
 
@@ -120,7 +122,7 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 	count = silentCharge(l.fleet, count)
 	debit(l.bucket(key, limit), count)
 	if l.fleet != nil {
-		l.fleet.Record(usageOTPM, key, limit, count)
+		l.fleet.Record(shared.KindOTPM, key, limit, count)
 	}
 }
 
