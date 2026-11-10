@@ -620,3 +620,96 @@ func TestAdmitWithinWaitsPastTheDefaultPark(t *testing.T) {
 		t.Fatal("with room, AdmitWithin admits at once even with no park")
 	}
 }
+
+// TestBigLeavingWakesSmall verifies a small request parked only because an
+// oversized one waited is admitted as soon as the oversized one gives up.
+func TestBigLeavingWakesSmall(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	hold := c.Admit(context.Background(), model, 900, false, 1000, 0)
+	if hold == nil {
+		t.Fatal("first request refused")
+	}
+	defer hold.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	bigDone := make(chan struct{})
+	go func() {
+		defer close(bigDone)
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	got := make(chan time.Time, 1)
+	go func() {
+		if r := c.Admit(context.Background(), model, 50, false, 1000, 0); r != nil {
+			got <- time.Now()
+			r.Release()
+		}
+		close(got)
+	}()
+	time.Sleep(50 * time.Millisecond) // the small one parks behind it
+	left := time.Now()
+	cancel()
+	<-bigDone
+	select {
+	case at, ok := <-got:
+		if !ok {
+			t.Fatal("small request refused")
+		}
+		if d := at.Sub(left); d > 500*time.Millisecond {
+			t.Fatalf("small request admitted %v after the big one left", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("small request still parked after the big one left")
+	}
+}
+
+// sitePool is a site-wide budget that other routers also use (held).
+type sitePool struct {
+	mu   sync.Mutex
+	used int64
+}
+
+func (p *sitePool) Take(_ context.Context, _ string, weight, budget int64, _ int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.used+weight > budget {
+		return false
+	}
+	p.used += weight
+	return true
+}
+
+func (p *sitePool) Adjust(_ string, dw int64, _ int) {
+	p.mu.Lock()
+	p.used += dw
+	p.mu.Unlock()
+}
+
+// TestSitePoolBoundsWaitBehindBig verifies that with a site-wide pool, which
+// this router alone cannot drain, a small request waits behind an oversized
+// one only the short park, not the whole queue wait.
+func TestSitePoolBoundsWaitBehindBig(t *testing.T) {
+	c := admission.NewController(1.0, 100*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	pool := &sitePool{used: 500} // another router's requests
+	c.SetPool(pool)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	start := time.Now()
+	r := c.Admit(context.Background(), model, 50, false, 1000, 0)
+	if r == nil {
+		t.Fatal("small request refused")
+	}
+	r.Release()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("small request waited %v behind an oversized one on a site-wide pool", d)
+	}
+}
