@@ -5,8 +5,6 @@ package auth
 
 import (
 	"context"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,36 +28,15 @@ type Fleet interface {
 	Silent() int
 	// SilentEpoch changes whenever the set of silent routers changes.
 	SilentEpoch() uint64
+	// ResyncEpoch changes when this router may have missed other routers'
+	// usage; a daily total read before the change is read again.
+	ResyncEpoch() uint64
 	// DailyTotal returns the site's usage today for a daily bucket and
-	// the last usage entry the total includes. It fails at once, without
-	// waiting, while the store does not answer.
+	// the last usage entry the total includes, this router's unpublished
+	// usage included. It fails at once while the store is down, and waits
+	// at most until ctx ends while it hangs.
 	DailyTotal(ctx context.Context, bucket string) (total int, mark string, err error)
 }
-
-// streamAfter reports whether stream entry id comes after mark ("ms-seq").
-func streamAfter(id, mark string) bool {
-	if mark == "" {
-		return true
-	}
-	im, is := splitStreamID(id)
-	mm, ms := splitStreamID(mark)
-	return im > mm || (im == mm && is > ms)
-}
-
-func splitStreamID(id string) (int64, int64) {
-	a, b, _ := strings.Cut(id, "-")
-	ms, _ := strconv.ParseInt(a, 10, 64)
-	seq, _ := strconv.ParseInt(b, 10, 64)
-	return ms, seq
-}
-
-// Usage kinds (must match package shared).
-const (
-	usageRPM   byte = 'r'
-	usageDaily byte = 'd'
-	usageITPM  byte = 'i'
-	usageOTPM  byte = 'o'
-)
 
 // fleetShare divides a burst among the live routers, never below 1.
 func fleetShare(burst int, f Fleet) int {

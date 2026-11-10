@@ -18,13 +18,13 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Occupancy budgets (B2, B4) | No | Each router applies its own budget |
 | Dynamic API keys | No | Push key changes to every router |
 
-Requests never wait on the store. Every router keeps deciding in memory, exactly as a single router does.
+Every router keeps deciding in memory, exactly as a single router does. The only time a request waits on the store is the first request of the day for a key with a daily limit, which reads that key's total once: at most 200 ms, and requests for the same key share the read.
 
 ## How it works
 
 Every `--sync-interval` (default `1s`) each router:
 
-1. publishes the usage it admitted since the last round as one entry on a stream in Valkey;
+1. publishes the usage it admitted since the last round as one entry on a stream in Valkey (nothing when it admitted nothing);
 2. reads the entries the other routers published and subtracts them from its own buckets;
 3. writes its own running total of today's tokens for each daily bucket it used (a bucket's total is the sum over routers, so a write lost in a failover is healed by the next one);
 4. records a heartbeat, which tells every router how many routers are live.
@@ -40,10 +40,10 @@ The store load depends on request rate, not on the number of keys: each round ca
 | Situation | Behavior |
 | --- | --- |
 | Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen, never fewer than `--sync-min-routers`), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
-| One router cut off from the store while the others still reach it | The cut-off router enforces its share of every limit on its own. The others count it as silent (it stopped heartbeating but no newer run replaced it) and keep its share free: they use (routers − silent) ÷ routers of each rate limit, and leave it its share of what was left of each daily budget. A router that shuts down cleanly leaves the live set and is not counted |
+| One router cut off from the store while the others still reach it | The cut-off router enforces its share of every limit on its own. The others count it as silent (it stopped heartbeating but no newer run replaced it) and keep its share free: they use (routers − silent) ÷ routers of each rate limit, and leave it its share of what was left of each daily budget. A router that shuts down cleanly leaves the live set and is not counted. A router that crashes and restarts with the same router ID (by default the hostname, so a container restart in the same pod) is replaced at the next round. One that disappears without a clean shutdown and never comes back with the same ID, such as a pod on a lost node, counts as silent for up to an hour: the others cannot tell it from a cut-off router that is still spending its share |
 | Router starts while the store is unreachable | Same as above: it enforces its share with `--sync-min-routers` routers until the store answers |
 | Store back | Routers publish the usage they held back, with the time it was admitted, and return to shared limits. Usage a rate bucket has refilled since is not charged again |
-| A router cannot read today's total for a key with a daily limit (it never saw the key today and the store is unreachable) | The router refuses that key's requests at once with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected. A request never waits for the store |
+| A router cannot read today's total for a key with a daily limit (it never saw the key today and the store is unreachable) | The router refuses that key's requests at once with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected. While the store is unreachable the refusal is immediate; while it hangs, the read waits at most 200 ms |
 | Midnight UTC, or `auth.yaml` reloaded, while the store is unreachable | Keys the router already knew keep working: a new day starts at zero for every router, and a reload keeps today's usage. Each router spends at most its share |
 | The store is unreachable for ten sync intervals | The router reconnects from the configured addresses, in case Valkey or the Sentinels came back at new addresses |
 

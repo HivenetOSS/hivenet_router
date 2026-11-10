@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"hivenet_router/internal/config"
+	"hivenet_router/internal/shared"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
 
@@ -106,10 +108,11 @@ type dailyBucket struct {
 	// Shared counters only. loadedDay is the day the site total was read
 	// from the fleet; epoch/base snapshot the usage when an outage began, so
 	// during it this router spends only its share of what was left.
-	loadedDay int
-	mark      string // last usage entry the loaded total includes
-	epoch     uint64
-	base      int
+	loadedDay  int
+	loadedSync uint64 // the fleet's ResyncEpoch when the total was read
+	mark       string // last usage entry the loaded total includes
+	epoch      uint64
+	base       int
 
 	// Admission lease (shared counters only): between two syncs this router
 	// may admit at most its share of what was left at the last sync.
@@ -152,6 +155,9 @@ type InMemoryLimiter struct {
 	// Set once at startup via SetFleet.
 	fleet  Fleet
 	leases leases
+	// dailyReads lets the requests that need the same daily total share one
+	// read of the shared store.
+	dailyReads singleflight.Group
 }
 
 // SetFleet shares this limiter's usage with the other routers of the
@@ -209,7 +215,7 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 		if !ok {
 			return false, 0, nil
 		}
-		l.fleet.Record(usageRPM, bucket, rpm, charged)
+		l.fleet.Record(shared.KindRPM, bucket, rpm, charged)
 	} else if !lim.Allow() {
 		return false, 0, nil
 	}
@@ -292,6 +298,11 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admiss
 		// Clamp to the limit so the gauge reaches 100% and all subsequent
 		// checks also fail immediately (no gap between used and tpd).
 		if b.used < tpd {
+			if !admission && l.fleet != nil {
+				// Output tokens are already spent: the other routers must
+				// see this bucket full too.
+				l.fleet.Record(shared.KindDaily, bucket, tpd, tpd-b.used)
+			}
 			b.used = tpd
 			l.reportUsage(tenantID, b.used)
 		}
@@ -302,18 +313,20 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admiss
 		b.leaseSpent += n
 	}
 	if l.fleet != nil {
-		l.fleet.Record(usageDaily, bucket, tpd, n)
+		l.fleet.Record(shared.KindDaily, bucket, tpd, n)
 	}
 	l.reportUsage(tenantID, b.used)
 	return true, tpd - b.used, nil
 }
 
 // loadFleetDaily reads the site's usage today for a daily bucket the
-// first time this router touches it each day. It reports false when the total
-// cannot be read: the router does not know how much is left, so it refuses
-// (fail closed) rather than grant a full day's budget on top of the others'.
-// The read never waits for the store: while it does not answer the call fails
-// at once.
+// first time this router touches it each day, and again after this router may
+// have missed other routers' usage (see Fleet.ResyncEpoch). It reports false
+// when a first read fails: the router does not know how much is left, so it
+// refuses (fail closed) rather than grant a full day's budget on top of the
+// others'. A failed read again keeps the total it has. While the store is down
+// the read fails at once; while it hangs, it waits at most 200 ms, and the
+// requests for the same bucket share one read.
 //
 // A bucket this router knew yesterday needs no read at midnight: a new day
 // starts at zero for every router, and during an outage each one then spends
@@ -323,31 +336,43 @@ func (l *InMemoryLimiter) loadFleetDaily(bucket string, b *dailyBucket) bool {
 		return true
 	}
 	today := utcDayIndex()
+	sync := l.fleet.ResyncEpoch()
+	degraded := l.fleet.DegradedEpoch() != 0
 	b.mu.Lock()
-	if b.loadedDay == today {
+	if b.loadedDay == today && (b.loadedSync == sync || degraded) {
 		b.mu.Unlock()
 		return true
 	}
-	if b.loadedDay == today-1 && l.fleet.DegradedEpoch() != 0 {
-		b.day, b.used, b.base, b.loadedDay, b.mark = today, 0, 0, today, ""
+	if b.loadedDay == today-1 && degraded {
+		b.day, b.used, b.base, b.loadedDay, b.mark, b.loadedSync = today, 0, 0, today, "", sync
 		b.mu.Unlock()
 		return true
 	}
+	known := b.loadedDay == today
 	b.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	total, mark, err := l.fleet.DailyTotal(ctx, bucket)
+	v, err, _ := l.dailyReads.Do(bucket, func() (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		total, mark, err := l.fleet.DailyTotal(ctx, bucket)
+		return dailyRead{total, mark}, err
+	})
 	if err != nil {
-		return false
+		return known
 	}
+	r := v.(dailyRead)
 	b.mu.Lock()
-	if b.loadedDay != today {
-		// The total already holds every router's usage up to mark, ours
-		// included; usage applied before the read is in it too.
-		b.day, b.used, b.base, b.loadedDay, b.mark = today, total, 0, today, mark
+	if b.loadedDay != today || b.loadedSync != sync {
+		// The total holds every router's usage up to mark, ours included
+		// (published or not).
+		b.day, b.used, b.base, b.loadedDay, b.mark, b.loadedSync = today, r.total, 0, today, r.mark, sync
 	}
 	b.mu.Unlock()
 	return true
+}
+
+type dailyRead struct {
+	total int
+	mark  string
 }
 
 // dailyAllowance is the daily limit this router may spend up to. While the
@@ -415,14 +440,14 @@ func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
 // the UTC day of a daily usage, id the stream entry that carried it.
 func (l *InMemoryLimiter) ApplyPeerUsage(kind byte, bucket string, limit, n int, age time.Duration, day int, id string) {
 	switch kind {
-	case usageRPM:
+	case shared.KindRPM:
 		if limit <= 0 {
 			return
 		}
 		lim := l.peerRPM(bucket, limit)
 		window := time.Duration(float64(lim.Burst()) / float64(lim.Limit()) * float64(time.Second))
 		debit(lim, decayed(n, age, window))
-	case usageDaily:
+	case shared.KindDaily:
 		today := utcDayIndex()
 		if day != today {
 			return // another day's budget
@@ -433,7 +458,7 @@ func (l *InMemoryLimiter) ApplyPeerUsage(kind byte, bucket string, limit, n int,
 		}
 		b := v.(*dailyBucket)
 		b.mu.Lock()
-		if b.loadedDay != today || !streamAfter(id, b.mark) {
+		if b.loadedDay != today || !shared.StreamBefore(b.mark, id) {
 			b.mu.Unlock()
 			return // already in the total this router read
 		}
@@ -537,7 +562,9 @@ func (l *InMemoryLimiter) SweepIdle() int {
 	l.dailyBuckets.Range(func(k, v any) bool {
 		b := v.(*dailyBucket)
 		b.mu.Lock()
-		stale := b.day != today
+		// Yesterday's buckets are kept while the shared store is down: the
+		// midnight reset needs them (see loadFleetDaily).
+		stale := b.day < today-1 || (b.day == today-1 && (l.fleet == nil || l.fleet.DegradedEpoch() == 0))
 		b.mu.Unlock()
 		if stale {
 			l.dailyBuckets.Delete(k)
