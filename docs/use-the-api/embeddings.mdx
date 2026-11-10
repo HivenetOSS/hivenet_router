@@ -38,8 +38,8 @@ The embedding request uses the same routing pipeline as other Hivenet Router wor
 | `Content-Type: application/json` | Yes | Identifies the JSON request |
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Client-Request-ID: <uuid>` | No | Your own ID for the request, returned in the response and stored in the audit log. `X-Request-ID` is also accepted |
-| `X-Hivenet-Scope: <scope>` | No | Where the request may be [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`. Default: the country of the policloud the request reached ([details](/routing/cross-site-redirect#scope)) |
-| `X-Session-ID: <id>` | No | Keeps a conversation on the same policloud when the request is [redirected](/routing/cross-site-redirect#choosing-the-policloud) |
+| `X-Hivenet-Scope: <scope>` | No | Where the request may be [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`. Default: the country of the site the request reached ([details](/routing/cross-site-redirect#scope)) |
+| `X-Session-ID: <id>` | No | Keeps a conversation on the same site when the request is [redirected](/routing/cross-site-redirect#choosing-the-site) |
 
 Hivenet Router gives every request its own ID and returns it in `X-Request-ID`. A valid UUID you send as your own ID is returned in `X-Client-Request-ID`. See [request IDs](/observability/audit-logging#request-ids).
 

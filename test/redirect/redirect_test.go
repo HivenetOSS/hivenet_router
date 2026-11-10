@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-// Package redirect_test covers cross-site redirects (contract 3 v2): the
+// Package redirect_test covers cross-site redirects (contract 3 v3): the
 // sibling map, the redirect choice, scopes, the signed single-use token and
-// the token-based authentication a sibling policloud uses.
+// the token-based authentication a sibling site uses.
 package redirect_test
 
 import (
@@ -38,20 +38,20 @@ var domains = []string{".example.com"}
 
 func u64(v uint64) *uint64 { return &v }
 
-func pc(id, country string, eu *bool) redirect.Policloud {
-	return redirect.Policloud{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: eu}
+func mkSite(id, country string, eu *bool) redirect.Site {
+	return redirect.Site{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: eu}
 }
 
-func place(model, kind, policloud string, sfz *bool, hint *redirect.Hint) redirect.Placement {
-	return redirect.Placement{Model: model, Kind: kind, Policloud: policloud, ScaleFromZero: sfz, Hint: hint}
+func place(model, kind, site string, sfz *bool, hint *redirect.Hint) redirect.Placement {
+	return redirect.Placement{Model: model, Kind: kind, Site: site, ScaleFromZero: sfz, Hint: hint}
 }
 
 // doc is a valid map: fr-1 (entry), fr-2, de-1, us-1; model m (chat) on all
 // but fr-1, embedding e on de-1 only.
 func doc(version uint64) redirect.MapDoc {
 	return redirect.MapDoc{
-		Schema: 2, Version: u64(version), Region: "eu",
-		Policlouds: []redirect.Policloud{pc("fr-1", "FR", yes), pc("fr-2", "FR", yes), pc("de-1", "DE", yes), pc("us-1", "US", no)},
+		Schema: 3, Version: u64(version), Region: "eu",
+		Sites: []redirect.Site{mkSite("fr-1", "FR", yes), mkSite("fr-2", "FR", yes), mkSite("de-1", "DE", yes), mkSite("us-1", "US", no)},
 		Placements: []redirect.Placement{
 			place("m", redirect.KindChat, "fr-2", yes, nil),
 			place("m", redirect.KindChat, "de-1", yes, nil),
@@ -69,27 +69,28 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 		name string
 		mod  func(*redirect.MapDoc)
 	}{
-		{"unknown schema", func(d *redirect.MapDoc) { d.Schema = 3 }},
+		{"unknown schema", func(d *redirect.MapDoc) { d.Schema = 4 }},
+		{"schema 2 (policlouds)", func(d *redirect.MapDoc) { d.Schema = 2 }},
 		{"missing schema", func(d *redirect.MapDoc) { d.Schema = 0 }},
 		{"missing version", func(d *redirect.MapDoc) { d.Version = nil }},
 		{"missing region", func(d *redirect.MapDoc) { d.Region = "" }},
-		{"empty policloud id", func(d *redirect.MapDoc) { d.Policlouds[0].ID = "" }},
-		{"duplicate policloud id", func(d *redirect.MapDoc) { d.Policlouds[1].ID = "fr-1" }},
+		{"empty site id", func(d *redirect.MapDoc) { d.Sites[0].ID = "" }},
+		{"duplicate site id", func(d *redirect.MapDoc) { d.Sites[1].ID = "fr-1" }},
 		// Clients follow https→http and then send the token in clear text.
-		{"http url", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "http://fr-1.example.com" }},
-		{"url with path", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com/v1" }},
-		{"url with query", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com?x=1" }},
-		{"url with credentials", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://u:p@fr-1.example.com" }},
-		{"host outside the allowed domains", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.attacker.net" }},
-		{"allowed domain only as a prefix", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://fr-1.example.com.attacker.net" }},
-		{"allowed domain without a label boundary", func(d *redirect.MapDoc) { d.Policlouds[0].URL = "https://evilexample.com" }},
-		{"lowercase country", func(d *redirect.MapDoc) { d.Policlouds[0].Country = "fr" }},
-		{"3-letter country", func(d *redirect.MapDoc) { d.Policlouds[0].Country = "FRA" }},
-		{"missing eu", func(d *redirect.MapDoc) { d.Policlouds[0].EU = nil }},
+		{"http url", func(d *redirect.MapDoc) { d.Sites[0].URL = "http://fr-1.example.com" }},
+		{"url with path", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://fr-1.example.com/v1" }},
+		{"url with query", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://fr-1.example.com?x=1" }},
+		{"url with credentials", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://u:p@fr-1.example.com" }},
+		{"host outside the allowed domains", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://fr-1.attacker.net" }},
+		{"allowed domain only as a prefix", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://fr-1.example.com.attacker.net" }},
+		{"allowed domain without a label boundary", func(d *redirect.MapDoc) { d.Sites[0].URL = "https://evilexample.com" }},
+		{"lowercase country", func(d *redirect.MapDoc) { d.Sites[0].Country = "fr" }},
+		{"3-letter country", func(d *redirect.MapDoc) { d.Sites[0].Country = "FRA" }},
+		{"missing eu", func(d *redirect.MapDoc) { d.Sites[0].EU = nil }},
 		{"empty model", func(d *redirect.MapDoc) { d.Placements[0].Model = "" }},
 		{"unknown kind", func(d *redirect.MapDoc) { d.Placements[0].Kind = "image" }},
-		{"unknown policloud", func(d *redirect.MapDoc) { d.Placements[0].Policloud = "nope" }},
-		{"duplicate placement", func(d *redirect.MapDoc) { d.Placements[1].Policloud = "fr-2" }},
+		{"unknown site", func(d *redirect.MapDoc) { d.Placements[0].Site = "nope" }},
+		{"duplicate placement", func(d *redirect.MapDoc) { d.Placements[1].Site = "fr-2" }},
 		{"missing scale_from_zero", func(d *redirect.MapDoc) { d.Placements[0].ScaleFromZero = nil }},
 		{"unknown hint load", func(d *redirect.MapDoc) {
 			d.Placements[0].Hint, d.HintsExpireAt = &redirect.Hint{Load: "hot"}, future
@@ -124,7 +125,7 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 // case and port; a map with no allowed domain refuses every push.
 func TestMapReplace_AllowedDomains(t *testing.T) {
 	d := doc(1)
-	d.Policlouds[1].URL = "https://FR-2.Example.COM:8443"
+	d.Sites[1].URL = "https://FR-2.Example.COM:8443"
 	if err := redirect.NewMap(domains).Replace(d); err != nil {
 		t.Fatalf("upper-case host with a port: %v", err)
 	}
@@ -162,29 +163,29 @@ func TestMapReplace_NumericVersions(t *testing.T) {
 	}
 }
 
-// TestMapReplace_TrimsTrailingSlash: a policloud URL is stored without a
+// TestMapReplace_TrimsTrailingSlash: a site URL is stored without a
 // trailing slash so Location never contains "//v1".
 func TestMapReplace_TrimsTrailingSlash(t *testing.T) {
 	d := doc(1)
-	d.Policlouds[1].URL = "https://fr-2.example.com/"
+	d.Sites[1].URL = "https://fr-2.example.com/"
 	m := redirect.NewMap(domains)
 	if err := m.Replace(d); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := m.Policloud("fr-2"); p.URL != "https://fr-2.example.com" {
+	if p, _ := m.Site("fr-2"); p.URL != "https://fr-2.example.com" {
 		t.Fatalf("got %q", p.URL)
 	}
 }
 
-// h is the contract's H(a, model, policloud), written independently of the
+// h is the contract's H(a, model, site), written independently of the
 // package so the test checks the formula, not the code against itself.
-func h(a, model, policloud string) uint64 {
-	sum := sha256.Sum256([]byte(a + "\x00" + model + "\x00" + policloud))
+func h(a, model, site string) uint64 {
+	sum := sha256.Sum256([]byte(a + "\x00" + model + "\x00" + site))
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
 // expected computes the contract's choice without hints: top-2 home set by
-// H(key, model, pc), then the session order inside it.
+// H(key, model, site), then the session order inside it.
 func expected(key, session, model string, cands []string) []string {
 	sort.Slice(cands, func(i, j int) bool { return h(key, model, cands[i]) > h(key, model, cands[j]) })
 	if len(cands) > 2 {
@@ -231,7 +232,7 @@ func TestTarget_FollowsTheContractFormula(t *testing.T) {
 }
 
 // TestTarget_HomeSetIsTwo: one key + model only ever reaches two sibling
-// policlouds, however many sessions it uses (its rate limits stay meaningful).
+// sites, however many sessions it uses (its rate limits stay meaningful).
 func TestTarget_HomeSetIsTwo(t *testing.T) {
 	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
@@ -242,11 +243,11 @@ func TestTarget_HomeSetIsTwo(t *testing.T) {
 		used[target(t, m, redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", KeyID: "key-1", Session: fmt.Sprint(s)})] = true
 	}
 	if len(used) != 2 {
-		t.Fatalf("one key reached %d policlouds (%v), want 2", len(used), used)
+		t.Fatalf("one key reached %d sites (%v), want 2", len(used), used)
 	}
 }
 
-// TestTarget_Filters: kind, this policloud, the origin and the scope.
+// TestTarget_Filters: kind, this site, the origin and the scope.
 func TestTarget_Filters(t *testing.T) {
 	m := redirect.NewMap(domains)
 	if err := m.Replace(doc(1)); err != nil {
@@ -260,11 +261,11 @@ func TestTarget_Filters(t *testing.T) {
 		{"embedding only where placed as embedding", redirect.TargetRequest{Model: "e", Kind: redirect.KindEmbedding, Self: "fr-1", From: "fr-1"}, []string{"de-1"}},
 		{"kind mismatch: a chat model is not redirected for embeddings", redirect.TargetRequest{Model: "m", Kind: redirect.KindEmbedding, Self: "fr-1", From: "fr-1"}, []string{""}},
 		{"unknown model", redirect.TargetRequest{Model: "x", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1"}, []string{""}},
-		{"never this policloud", redirect.TargetRequest{Model: "e", Kind: redirect.KindEmbedding, Self: "de-1", From: "fr-1"}, []string{""}},
+		{"never this site", redirect.TargetRequest{Model: "e", Kind: redirect.KindEmbedding, Self: "de-1", From: "fr-1"}, []string{""}},
 		{"never the origin (2nd hop)", redirect.TargetRequest{Model: "e", Kind: redirect.KindEmbedding, Self: "fr-2", From: "de-1"}, []string{""}},
 		{"country scope", redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:FR"}, []string{"fr-2"}},
 		{"EU scope excludes us-1", redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "EU"}, []string{"fr-2", "de-1"}},
-		{"scope with no policloud left", redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:IT"}, []string{""}},
+		{"scope with no site left", redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:IT"}, []string{""}},
 		{"unknown scope fails closed", redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "anywhere"}, []string{""}},
 	}
 	for _, tc := range cases {
@@ -293,8 +294,8 @@ func TestTarget_Hints(t *testing.T) {
 	first, second := order[0], order[1]
 	build := func(hFirst, hSecond *redirect.Hint, sfzFirst *bool, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
-			Schema: 2, Version: u64(1), Region: "eu",
-			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
+			Schema: 3, Version: u64(1), Region: "eu",
+			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
 			Placements: []redirect.Placement{
 				place("m", redirect.KindChat, first, sfzFirst, hFirst),
 				place("m", redirect.KindChat, second, yes, hSecond),
@@ -344,8 +345,8 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
 	build := func(hereKind string, hereWakes *bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
-			Schema: 2, Version: u64(1), Region: "eu",
-			Policlouds: []redirect.Policloud{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
+			Schema: 3, Version: u64(1), Region: "eu",
+			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
 			Placements: []redirect.Placement{
 				place("m", redirect.KindChat, "a", yes, ha),
 				place("m", redirect.KindChat, "b", yes, hb),
@@ -389,7 +390,7 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	}
 }
 
-// TestWakeable: which requests a policloud may hold while a model wakes,
+// TestWakeable: which requests a site may hold while a model wakes,
 // and with which budget.
 func TestWakeable(t *testing.T) {
 	d := doc(1)
@@ -400,9 +401,9 @@ func TestWakeable(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		model, kind, policloud string
-		budget                 time.Duration
-		ok                     bool
+		model, kind, site string
+		budget            time.Duration
+		ok                bool
 	}{
 		{"m", redirect.KindChat, "fr-2", 4 * time.Minute, true},
 		{"m", redirect.KindChat, "de-1", 0, true}, // no hold_budget: the router's default applies
@@ -412,9 +413,9 @@ func TestWakeable(t *testing.T) {
 		{"unknown", redirect.KindChat, "fr-2", 0, false},
 	}
 	for _, tc := range cases {
-		budget, ok := m.Wakeable(tc.model, tc.kind, tc.policloud)
+		budget, ok := m.Wakeable(tc.model, tc.kind, tc.site)
 		if budget != tc.budget || ok != tc.ok {
-			t.Errorf("Wakeable(%s, %s, %s) = %v, %v; want %v, %v", tc.model, tc.kind, tc.policloud, budget, ok, tc.budget, tc.ok)
+			t.Errorf("Wakeable(%s, %s, %s) = %v, %v; want %v, %v", tc.model, tc.kind, tc.site, budget, ok, tc.budget, tc.ok)
 		}
 	}
 	if got := m.WakeableModels("fr-2"); len(got) != 1 || got[0] != "m" {
@@ -460,7 +461,7 @@ func TestScope(t *testing.T) {
 			t.Errorf("%q: expected an error", s)
 		}
 	}
-	fr, us := pc("fr", "FR", yes), pc("us", "US", no)
+	fr, us := mkSite("fr", "FR", yes), mkSite("us", "US", no)
 	if !redirect.Scope("EU").Contains(fr) || redirect.Scope("EU").Contains(us) ||
 		!redirect.Scope("country:US").Contains(us) || redirect.Scope("country:US").Contains(fr) ||
 		!redirect.ScopeAll.Contains(us) {
@@ -672,7 +673,7 @@ func registry(t *testing.T, enabled bool, expires *time.Time) *auth.DynamicKeyPr
 	return keys
 }
 
-// newRedirector is policloud de-1 (DE, EU) of the map doc(1).
+// newRedirector is site de-1 (DE, EU) of the map doc(1).
 func newRedirector(t *testing.T, rejects *[]string) *redirect.Redirector {
 	t.Helper()
 	m := redirect.NewMap(domains)
@@ -741,10 +742,10 @@ func TestTokenAuth(t *testing.T) {
 		{"key disabled since the redirect", request(sign(nil), ""), registry(t, false, nil), &recorder{}, true, false, "", "key"},
 		{"key expired since the redirect", request(sign(nil), ""), registry(t, true, &past), &recorder{}, true, false, "", "key"},
 		{"unknown key id", request(sign(func(c *redirect.Claims) { c.KeyID = "nope" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "key"},
-		{"token for another policloud", request(sign(func(c *redirect.Claims) { c.Site = "fr-2" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "site"},
+		{"token for another site", request(sign(func(c *redirect.Claims) { c.Site = "fr-2" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "site"},
 		{"token for another path", request(sign(func(c *redirect.Claims) { c.Path = "/v1/embeddings" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "path"},
-		{"scope that excludes this policloud (DE)", request(sign(func(c *redirect.Claims) { c.Scope = "country:FR" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
-		{"EU scope at an EU policloud", request(sign(func(c *redirect.Claims) { c.Scope = "EU" }), ""), registry(t, true, nil), &recorder{}, false, true, "key-1", ""},
+		{"scope that excludes this site (DE)", request(sign(func(c *redirect.Claims) { c.Scope = "country:FR" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
+		{"EU scope at an EU site", request(sign(func(c *redirect.Claims) { c.Scope = "EU" }), ""), registry(t, true, nil), &recorder{}, false, true, "key-1", ""},
 		{"malformed scope", request(sign(func(c *redirect.Claims) { c.Scope = "world" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "scope"},
 		{"empty request ID", request(sign(func(c *redirect.Claims) { c.RequestID = "" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
 		{"request ID that is not a UUID", request(sign(func(c *redirect.Claims) { c.RequestID = "evil'; DROP--" }), ""), registry(t, true, nil), &recorder{}, true, false, "", "malformed"},
@@ -848,7 +849,7 @@ func TestTokenAuth_SingleUseIsLast(t *testing.T) {
 }
 
 // TestTokenAuth_ScopeNeedsOwnCountry: a country scope is checked against this
-// policloud's map entry; without one it fails closed.
+// site's map entry; without one it fails closed.
 func TestTokenAuth_ScopeNeedsOwnCountry(t *testing.T) {
 	var rejects []string
 	rd := newRedirector(t, &rejects)

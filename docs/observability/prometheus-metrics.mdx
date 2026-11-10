@@ -143,7 +143,7 @@ For supported engines, each agent scrapes its local backend’s `/metrics` endpo
 | Queue | Requests waiting for agent capacity |
 | Tenant and quota | Requests, tokens, limits, last use, and quota failures |
 | Admission control | Gate rejections, replica-scaled occupancy budgets, and in-flight concurrency |
-| Cross-site redirect | Redirects to sibling policlouds, refused redirect tokens, and the sibling map’s version and hint state |
+| Cross-site redirect | Redirects to sibling sites, refused redirect tokens, and the sibling map’s version and hint state |
 | Hold at zero | Requests held while a model wakes from zero, how holds end, and how long they last |
 | HTTP | Router endpoint latency, active requests, and provider calls |
 
@@ -1410,7 +1410,7 @@ These series exist only when [cross-site redirect](/routing/cross-site-redirect)
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `hivenet_redirects_total` | Counter | `model`, `site`, `hop` | `307` responses to a sibling policloud; `hop="2"` means the sibling map was stale |
+| `hivenet_redirects_total` | Counter | `model`, `site`, `hop` | `307` responses to a sibling site; `hop="2"` means the sibling map was stale |
 | `hivenet_redirect_rejections_total` | Counter | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key`, `body` |
 | `hivenet_sibling_map_version` | Gauge | None | Version of the sibling map this router holds; `0` before the first push |
 | `hivenet_sibling_map_hints_expired` | Gauge | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
@@ -1419,7 +1419,7 @@ A rising `reason="expired"` rate means clients take longer than `--redirect-toke
 
 ## Hold-at-zero metrics
 
-These series exist only when [cross-site redirect](/routing/cross-site-redirect) is enabled with `--site-id`. `hivenet_pending_demand` has a series for every model the sibling map places on this policloud with `scale_from_zero: true`, `0` when nothing is held. It has none while the router has no map, so write queries with `or vector(0)`. See [Hold at zero](/routing/hold-at-zero).
+These series exist only when [cross-site redirect](/routing/cross-site-redirect) is enabled with `--site-id`. `hivenet_pending_demand` has a series for every model the sibling map places on this site with `scale_from_zero: true`, `0` when nothing is held. It has none while the router has no map, so write queries with `or vector(0)`. See [Hold at zero](/routing/hold-at-zero).
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -1427,7 +1427,7 @@ These series exist only when [cross-site redirect](/routing/cross-site-redirect)
 | `hivenet_wake_holds_total` | Counter | `model`, `outcome` | Holds that ended: `woken` (released), `expired` (budget ran out), `full` (a hold limit was reached), `gone` (the client left) |
 | `hivenet_wake_hold_seconds` | Histogram | `model` | How long released requests were held; expired and abandoned holds are not observed |
 
-Sum `hivenet_pending_demand` across the routers of a policloud to get its demand for a model.
+Sum `hivenet_pending_demand` across the routers of a site to get its demand for a model.
 
 ## Per-request duration by agent
 

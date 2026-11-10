@@ -255,12 +255,12 @@ func TestLoadFromEnv_Redirect(t *testing.T) {
 			c.SiteID, c.RedirectSecrets, c.RedirectTokenTTL, c.RedirectAllowedDomains)
 	}
 
-	t.Setenv("HIVENET_ROUTER_SITE_ID", " pc-fr-1 ")
+	t.Setenv("HIVENET_ROUTER_SITE_ID", " site-fr-1 ")
 	t.Setenv("HIVENET_ROUTER_REDIRECT_SECRETS", " k2:new-secret,k1:old-secret ")
 	t.Setenv("HIVENET_ROUTER_REDIRECT_TOKEN_TTL", "90s")
 	t.Setenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS", " .inference.hivecompute.ai ")
 	c := config.LoadFromEnv()
-	if c.SiteID != "pc-fr-1" || c.RedirectSecrets != "k2:new-secret\nk1:old-secret" || c.RedirectTokenTTL != 90*time.Second ||
+	if c.SiteID != "site-fr-1" || c.RedirectSecrets != "k2:new-secret\nk1:old-secret" || c.RedirectTokenTTL != 90*time.Second ||
 		c.RedirectAllowedDomains != ".inference.hivecompute.ai" || len(c.EnvErrors) != 0 {
 		t.Fatalf("site %q secrets %q ttl %v domains %q errors %v",
 			c.SiteID, c.RedirectSecrets, c.RedirectTokenTTL, c.RedirectAllowedDomains, c.EnvErrors)

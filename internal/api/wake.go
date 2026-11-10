@@ -77,7 +77,7 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 // agent serving it is healthy, then lets it continue as a normal request.
 //
 // A request is held when the sibling map places its model, for the
-// endpoint's kind, on this policloud with scale_from_zero, and no healthy
+// endpoint's kind, on this site with scale_from_zero, and no healthy
 // agent here serves it. RedirectDecision runs first: a warm sibling gets the
 // request with a 307 before anything is held. The hold runs after the quota
 // check and before the handler, so a key over its quota is refused at once
