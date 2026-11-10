@@ -84,10 +84,11 @@ func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, coun
 	}
 	// While the store is down this router's share of the limit can be smaller
 	// than one maximum-size prompt; a full share still admits it.
-	if !allowShared(l.fleet, &l.leases, key, lim, count, true) {
+	ok, charged := allowShared(l.fleet, &l.leases, key, lim, count, true)
+	if !ok {
 		return false
 	}
-	l.fleet.Record(usageITPM, key, limit, count)
+	l.fleet.Record(usageITPM, key, limit, charged)
 	return true
 }
 
@@ -116,6 +117,7 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 		count = limit
 	}
 	key := outKey(tenantID, model)
+	count = silentCharge(l.fleet, count)
 	debit(l.bucket(key, limit), count)
 	if l.fleet != nil {
 		l.fleet.Record(usageOTPM, key, limit, count)

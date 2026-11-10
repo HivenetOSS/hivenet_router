@@ -31,6 +31,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +112,9 @@ type Store struct {
 	lastReset time.Time // last time the client was rebuilt
 
 	fleet    atomic.Int32  // live routers, this one included (last known while down)
+	silent   atomic.Int32  // routers in the live set that stopped heartbeating, not replaced
+	silentEp atomic.Uint64 // changes whenever the set of silent routers changes
+	silentAt string        // the silent routers at the last tick, sorted
 	seq      atomic.Uint64 // successful ticks
 	degraded atomic.Uint64 // 0 while Valkey answers, else the outage number
 	outages  uint64
@@ -217,6 +221,17 @@ func (s *Store) Size() int {
 	}
 	return max(n, 1)
 }
+
+// Silent returns how many routers stopped heartbeating (for longer than
+// DownAfter, less than an hour) without a newer run of the same router
+// taking their place. Such a router may only have lost the store: it keeps
+// enforcing its share of every limit on its own, so the others keep that
+// share free for it. A router that shuts down cleanly leaves the live set
+// and is not silent. 0 while the store is down.
+func (s *Store) Silent() int { return int(s.silent.Load()) }
+
+// SilentEpoch changes whenever the set of silent routers changes.
+func (s *Store) SilentEpoch() uint64 { return s.silentEp.Load() }
 
 // SyncSeq changes after every tick that applied the other routers' usage.
 func (s *Store) SyncSeq() uint64 { return s.seq.Load() }
@@ -411,6 +426,13 @@ func (s *Store) Close() {
 		s.tick(ctx)
 		cancel()
 	}
+	// Leave the live set: a router that shut down is not silent, and the
+	// others need not keep a share free for it.
+	if c, err := s.connected(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Interval)
+		c.Do(ctx, c.B().Zrem().Key(s.key("routers")).Member(s.inc).Build())
+		cancel()
+	}
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	s.closed = true
@@ -482,7 +504,11 @@ func (s *Store) tick(ctx context.Context) {
 	// the entries this router read last, and then the read position moves
 	// back to what it has. Daily totals next, then the stream entry: see
 	// DailyTotal.
-	cmds := valkey.Commands{c.B().Xrevrange().Key(s.key("usage")).End("+").Start("-").Count(1).Build()}
+	cmds := valkey.Commands{c.B().Xrevrange().Key(s.key("usage")).End("+").Start("-").Count(1).Build(),
+		// Runs that stopped heartbeating in the last hour: see Silent.
+		c.B().Zrangebyscore().Key(s.key("routers")).
+			Min(strconv.FormatInt(vNow-time.Hour.Milliseconds(), 10)).
+			Max("(" + strconv.FormatInt(vNow-s.cfg.DownAfter.Milliseconds(), 10)).Build()}
 	for db, n := range totals {
 		k := s.dailyKey(db.day, db.bucket)
 		cmds = append(cmds,
@@ -544,6 +570,9 @@ func (s *Store) tick(ctx context.Context) {
 		n++
 	}
 	s.fleet.Store(int32(n))
+	if stale, err := res[1].AsStrSlice(); err == nil {
+		s.trackSilent(stale, live)
+	}
 	s.m.peers.Set(float64(n - 1))
 
 	now := vNow + time.Since(vAt).Milliseconds() // Valkey's clock, now
@@ -606,6 +635,45 @@ func (s *Store) failTick(buf map[usageKey]*usageVal, err error) {
 		log.Infof("shared counters: Valkey unreachable for %v; reconnecting from the configured addresses",
 			time.Since(s.lastOK).Round(time.Second))
 	}
+}
+
+// trackSilent records the runs that stopped heartbeating (stale) and were
+// not replaced by a newer run of the same router (live).
+func (s *Store) trackSilent(stale, live []string) {
+	newest := map[string]int64{}
+	for _, r := range live {
+		if id, start, ok := splitRun(r); ok && start > newest[id] {
+			newest[id] = start
+		}
+	}
+	var silent []string
+	for _, r := range stale {
+		if r == s.inc {
+			continue
+		}
+		if id, start, ok := splitRun(r); ok && newest[id] > start {
+			continue // restarted: this run has ended
+		}
+		silent = append(silent, r)
+	}
+	sort.Strings(silent)
+	if key := strings.Join(silent, ","); key != s.silentAt {
+		if len(silent) > 0 {
+			log.Warnf("shared counters: %d router(s) stopped heartbeating (%s); the others keep their share of every limit free for them", len(silent), key)
+		}
+		s.silentAt = key
+		s.silentEp.Add(1)
+	}
+	s.silent.Store(int32(len(silent)))
+}
+
+func splitRun(run string) (id string, start int64, ok bool) {
+	i := strings.LastIndexByte(run, '@')
+	if i < 0 {
+		return "", 0, false
+	}
+	start, err := strconv.ParseInt(run[i+1:], 10, 64)
+	return run[:i], start, err == nil
 }
 
 // streamBefore reports whether stream ID a is before b.
