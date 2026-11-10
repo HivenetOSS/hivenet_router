@@ -21,7 +21,7 @@ import (
 )
 
 // TestHoldAtZeroEndToEnd runs the real router with no agent for a model that
-// the sibling map places on this policloud with scale_from_zero. A streaming
+// the sibling map places on this site with scale_from_zero. A streaming
 // request is held and counted in hivenet_pending_demand, receives keepalive
 // comments, and is served as soon as an agent for the model registers.
 func TestHoldAtZeroEndToEnd(t *testing.T) {
@@ -36,7 +36,7 @@ func TestHoldAtZeroEndToEnd(t *testing.T) {
 	cfg.P2PListenAddr = "127.0.0.1"
 	cfg.JWTSecret = jwtSecret
 	cfg.DiskDBPath = filepath.Join(t.TempDir(), "badger")
-	cfg.SiteID = "pc-a"
+	cfg.SiteID = "site-a"
 	cfg.RedirectSecrets = "k1:0123456789abcdef0123456789abcdef"
 	cfg.RedirectAllowedDomains = ".example.com"
 	cfg.WakeKeepAlive = 200 * time.Millisecond
@@ -57,9 +57,9 @@ func TestHoldAtZeroEndToEnd(t *testing.T) {
 		return resp.StatusCode == http.StatusOK
 	})
 
-	siblingMap := fmt.Sprintf(`{"schema":2,"version":1,"region":"eu",
-		"policlouds":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
-		"placements":[{"model":%q,"kind":"chat","policloud":"pc-a","scale_from_zero":true,"hold_budget":"60s"}]}`, stubModel)
+	siblingMap := fmt.Sprintf(`{"schema":3,"version":1,"region":"eu",
+		"sites":[{"id":"site-a","url":"https://site-a.example.com","country":"FR","eu":true}],
+		"placements":[{"model":%q,"kind":"chat","site":"site-a","scale_from_zero":true,"hold_budget":"60s"}]}`, stubModel)
 	resp, err := http.Post(base+"/admin/sibling-map", "application/json", strings.NewReader(siblingMap))
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func burst(t *testing.T, policy, holdBudget string, n int) map[string]int {
 	cfg.DiskDBPath = filepath.Join(dir, "badger")
 	cfg.PolicyFile = policyFile
 	cfg.QueueDepth = 1
-	cfg.SiteID = "pc-a"
+	cfg.SiteID = "site-a"
 	cfg.RedirectSecrets = "k1:0123456789abcdef0123456789abcdef"
 	cfg.RedirectAllowedDomains = ".example.com"
 	r, err := router.New(cfg)
@@ -256,9 +256,9 @@ func burst(t *testing.T, policy, holdBudget string, n int) map[string]int {
 		resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
 	})
-	siblingMap := fmt.Sprintf(`{"schema":2,"version":1,"region":"eu",
-		"policlouds":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
-		"placements":[{"model":%q,"kind":"chat","policloud":"pc-a","scale_from_zero":true,"hold_budget":%q}]}`, stubModel, holdBudget)
+	siblingMap := fmt.Sprintf(`{"schema":3,"version":1,"region":"eu",
+		"sites":[{"id":"site-a","url":"https://site-a.example.com","country":"FR","eu":true}],
+		"placements":[{"model":%q,"kind":"chat","site":"site-a","scale_from_zero":true,"hold_budget":%q}]}`, stubModel, holdBudget)
 	resp, err := http.Post(base+"/admin/sibling-map", "application/json", strings.NewReader(siblingMap))
 	if err != nil {
 		t.Fatal(err)

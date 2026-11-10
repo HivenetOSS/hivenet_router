@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,7 @@ const (
 )
 
 // endpointKinds maps each redirectable inference path to the placement kind
-// that may serve it (contract 3 v2 §3).
+// that may serve it (contract 3 v3 §3).
 var endpointKinds = map[string]string{
 	"/v1/chat/completions":      redirect.KindChat,
 	"/v1/messages":              redirect.KindChat,
@@ -84,7 +85,7 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 				"failed to read request body", domain.SourceRouter)
 			return
 		}
-		// The last two token checks (contract 3 v2 §4): the body, then single
+		// The last two token checks (contract 3 v3 §4): the body, then single
 		// use. The token is marked used only here, once every check passed, so
 		// a request refused on any check never uses up the client's token.
 		reason, msg := "", ""
@@ -129,16 +130,16 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 	}
 }
 
-// RedirectDecision answers 307 to a sibling policloud when no healthy agent
+// RedirectDecision answers 307 to a sibling site when no healthy agent
 // here serves the model and the sibling map lists one that does (contract 3
-// v2 §3). It runs after AliasMiddleware (so it routes on the concrete model)
+// v3 §3). It runs after AliasMiddleware (so it routes on the concrete model)
 // and before QuotaMiddleware: the redirecting router does no inference and
 // charges no quota. It covers every inference endpoint, by the placement kind
 // that matches the path.
 //
 // The scope of a first hop comes from the X-Hivenet-Scope header
 // ("country:XX", "EU" or "all"; an invalid value is a 400, never widened).
-// Without the header it is this policloud's country, so by default a request
+// Without the header it is this site's country, so by default a request
 // stays in the country it landed in. A redirected request keeps the scope of
 // its token.
 //
@@ -207,7 +208,7 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 		// do not follow redirects (for example plain httpx).
 		c.AbortWithStatusJSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
 			domain.ErrCodeModelRedirected,
-			fmt.Sprintf("model %s is served by policloud %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID),
+			fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID),
 			domain.SourceRouter)})
 		h.redirect.Redirected(model, target.ID, hop+1)
 	}
@@ -216,13 +217,13 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 // requestedScope returns the scope a first hop may be redirected within:
 // min(requested, key scope_max), where scope_max is "all" until keys carry
 // it (W5.5). The request asks with X-Hivenet-Scope; without it the scope is
-// this policloud's country (the caller's home country until keys carry one),
-// or empty — matching no policlouds — while this policloud is not in the map.
+// this site's country (the caller's home country until keys carry one),
+// or empty — matching no sites — while this site is not in the map.
 // On an invalid header it writes 400 and returns false.
 func (h *Handlers) requestedScope(c *gin.Context) (redirect.Scope, bool) {
 	v := strings.TrimSpace(c.GetHeader(scopeHeader))
 	if v == "" {
-		if self, ok := h.redirect.Map.Policloud(h.redirect.Self); ok {
+		if self, ok := h.redirect.Map.Site(h.redirect.Self); ok {
 			return redirect.Scope("country:" + self.Country), true
 		}
 		return "", true
@@ -264,7 +265,7 @@ func clientBody(c *gin.Context) []byte {
 const errRedirectNotActive = "cross-site redirect is not enabled on this router (set HIVENET_ROUTER_SITE_ID)"
 
 // GetSiblingMap handles GET /admin/sibling-map: this router's site ID and the
-// current map (version 0 and no policlouds before the first push). The map
+// current map (version 0 and no sites before the first push). The map
 // writer compares the version to detect drift.
 func (h *Handlers) GetSiblingMap(c *gin.Context) {
 	if h.redirect == nil {
@@ -277,7 +278,7 @@ func (h *Handlers) GetSiblingMap(c *gin.Context) {
 		"schema":          redirect.Schema,
 		"version":         h.redirect.Map.Version(),
 		"region":          doc.Region,
-		"policlouds":      orEmpty(doc.Policlouds),
+		"sites":           orEmpty(doc.Sites),
 		"placements":      orEmpty(doc.Placements),
 		"hints_expire_at": doc.HintsExpireAt,
 	})
@@ -301,9 +302,19 @@ func (h *Handlers) ReplaceSiblingMap(c *gin.Context) {
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	// Unknown fields are refused: a body in an older format (contract 3 v2
+	// "policlouds") would otherwise decode as an empty map.
 	var doc redirect.MapDoc
-	if err := c.ShouldBindJSON(&doc); err != nil {
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+		return
+	}
+	// The map must list this router's own site: without it, the default
+	// scope and token checks have nothing to compare against.
+	if !slices.ContainsFunc(doc.Sites, func(s redirect.Site) bool { return s.ID == h.redirect.Self }) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("sibling map does not list this router's site %q", h.redirect.Self)})
 		return
 	}
 	if err := h.redirect.Map.Replace(doc); err != nil {
@@ -314,9 +325,9 @@ func (h *Handlers) ReplaceSiblingMap(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	log.Infof("sibling map replaced via POST /admin/sibling-map (version %d, %d policlouds, %d placements)",
-		*doc.Version, len(doc.Policlouds), len(doc.Placements))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "version": *doc.Version, "policlouds": len(doc.Policlouds), "placements": len(doc.Placements)})
+	log.Infof("sibling map replaced via POST /admin/sibling-map (version %d, %d sites, %d placements)",
+		*doc.Version, len(doc.Sites), len(doc.Placements))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "version": *doc.Version, "sites": len(doc.Sites), "placements": len(doc.Placements)})
 }
 
 // redactPath removes the redirect token from a logged request path: the

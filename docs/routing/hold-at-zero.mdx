@@ -1,14 +1,14 @@
 ---
 title: "Hold at zero"
-description: "Hold requests for a model that is scaled to zero on this policloud until an agent for it is healthy, and publish the demand an autoscaler uses to wake it."
+description: "Hold requests for a model that is scaled to zero on this site until an agent for it is healthy, and publish the demand an autoscaler uses to wake it."
 sidebarTitle: "Hold at zero"
 ---
 
-Hold at zero lets a model scale down to zero replicas without failing the requests that arrive while it is asleep. When a request asks for a model that the sibling map places on this policloud with `scale_from_zero: true`, and no healthy agent serves it here, Hivenet Router holds the request instead of failing it. It counts the request in the `hivenet_pending_demand` metric, keeps the connection alive, and serves the request as soon as an agent for the model registers.
+Hold at zero lets a model scale down to zero replicas without failing the requests that arrive while it is asleep. When a request asks for a model that the sibling map places on this site with `scale_from_zero: true`, and no healthy agent serves it here, Hivenet Router holds the request instead of failing it. It counts the request in the `hivenet_pending_demand` metric, keeps the connection alive, and serves the request as soon as an agent for the model registers.
 
 Hivenet Router does not start or stop models. An external autoscaler, such as [KEDA](https://keda.sh), reads `hivenet_pending_demand` and scales the model from zero. The agent registers once its backend answers its health check, and the router releases the held requests.
 
-Hold at zero needs [cross-site redirect](/routing/cross-site-redirect): the sibling map says which models may be held on this policloud. With no `--site-id`, or for a model the map does not place here with `scale_from_zero: true`, nothing is held and the router behaves as before.
+Hold at zero needs [cross-site redirect](/routing/cross-site-redirect): the sibling map says which models may be held on this site. With no `--site-id`, or for a model the map does not place here with `scale_from_zero: true`, nothing is held and the router behaves as before.
 
 <Info>
   The sibling map is held in memory. A restarted router holds nothing until the map writer pushes the map again, and requests for a model at zero fail as before in the meantime.
@@ -18,9 +18,9 @@ Hold at zero needs [cross-site redirect](/routing/cross-site-redirect): the sibl
 
 After the API key is authenticated, the model alias is resolved and the model is checked against the key’s allowlist:
 
-1. **Served here.** If a healthy agent on this policloud serves the model, the request is served here as usual.
-2. **Redirect first.** If the sibling map lists another policloud in the request’s scope that serves the model, the router answers `307` to it, following the rules in [Cross-site redirect](/routing/cross-site-redirect#choosing-the-policloud). The one exception: while the map’s hints are fresh, every sibling in the caller’s [home set](/routing/cross-site-redirect#choosing-the-policloud) (the two policlouds a key is redirected to for a model) is cold and the model may be held here (step 3), the request is not redirected, because a cold sibling is no faster than waking the model here. A warm sibling outside the home set does not prevent this. The request then continues to step 3, as it does when no sibling is in scope or the request has already been redirected twice.
-3. **Held here?** If the map places the model on this policloud, for the endpoint’s kind, with `scale_from_zero: true`, the request is held. Otherwise it fails as before, normally with `404 model_not_found`.
+1. **Served here.** If a healthy agent on this site serves the model, the request is served here as usual.
+2. **Redirect first.** If the sibling map lists another site in the request’s scope that serves the model, the router answers `307` to it, following the rules in [Cross-site redirect](/routing/cross-site-redirect#choosing-the-site). The one exception: while the map’s hints are fresh, every sibling in the caller’s [home set](/routing/cross-site-redirect#choosing-the-site) (the two sites a key is redirected to for a model) is cold and the model may be held here (step 3), the request is not redirected, because a cold sibling is no faster than waking the model here. A warm sibling outside the home set does not prevent this. The request then continues to step 3, as it does when no sibling is in scope or the request has already been redirected twice.
+3. **Held here?** If the map places the model on this site, for the endpoint’s kind, with `scale_from_zero: true`, the request is held. Otherwise it fails as before, normally with `404 model_not_found`.
 4. **Quota.** The key’s quota is checked before the hold, so a key over its limits is refused at once. See [Quota while held](#quota-while-held).
 5. **Hold.** The request waits, counted once in `hivenet_pending_demand{model}`. After `--wake-keepalive`, the client receives [keepalive bytes](#keepalive).
 6. **Wake.** The autoscaler starts the model. When an agent for the model registers, every held request is released and continues as a normal request: admission, routing and the backend call. It stays counted in `hivenet_pending_demand` until it gets a slot on an agent, and keeps receiving keepalives until its response starts. See [After the wake](#after-the-wake).
@@ -125,9 +125,9 @@ A new or recovered agent wakes every queued request together. A request that fin
 
 A client that retries the same request, with the same API key and the same [client request ID](/observability/audit-logging#request-ids) (`X-Client-Request-ID` or `X-Request-ID`), counts once. The client ID must be a UUID: any other value is ignored, and each retry then counts on its own. A request without a client ID counts on its own, and requests from different keys always count separately, even with the same client ID.
 
-The metric has a series, `0` when nothing is held, for every model that the map places on this policloud with `scale_from_zero: true`. It has no series for the model while the router has no map (after a restart, until the map writer pushes it again), or when the map no longer places the model here with `scale_from_zero: true`. Write autoscaler queries so that a missing series counts as `0`, as in the example below.
+The metric has a series, `0` when nothing is held, for every model that the map places on this site with `scale_from_zero: true`. It has no series for the model while the router has no map (after a restart, until the map writer pushes it again), or when the map no longer places the model here with `scale_from_zero: true`. Write autoscaler queries so that a missing series counts as `0`, as in the example below.
 
-Each router counts only the requests it holds itself. With several routers per policloud, sum the metric across them.
+Each router counts only the requests it holds itself. With several routers per site, sum the metric across them.
 
 ### Waking the model
 
@@ -187,7 +187,7 @@ The flags are listed in the [configuration reference](/reference/configuration-r
 A placement in the [sibling map](/routing/cross-site-redirect#pushing-the-sibling-map) may set its own hold budget:
 
 ```json
-{"model": "llama-3-70b", "kind": "chat", "policloud": "pc-fr-1", "scale_from_zero": true, "hold_budget": "240s"}
+{"model": "llama-3-70b", "kind": "chat", "site": "site-fr-1", "scale_from_zero": true, "hold_budget": "240s"}
 ```
 
 `hold_budget` is optional: a Go duration greater than `0` and at most `1h`. Any other value rejects the whole map push with `400`. It applies only to placements with `scale_from_zero: true`.
@@ -201,5 +201,5 @@ The [hold-at-zero metrics](/observability/prometheus-metrics#hold-at-zero-metric
 - Hold at zero needs cross-site redirect and the sibling map: there is no other way to declare which models may be held.
 - A model whose wake takes longer than its hold budget is still held for the whole budget before `model_waking`. The router does not know a model’s expected wake time.
 - There is no endpoint to wake a model ahead of traffic. Scale it up with your autoscaler instead.
-- Each router holds its own requests. A client retry that reaches another router of the same policloud is counted there too.
+- Each router holds its own requests. A client retry that reaches another router of the same site is counted there too.
 - Once keepalives have started, a later error is reported in the body of a `200` response.
