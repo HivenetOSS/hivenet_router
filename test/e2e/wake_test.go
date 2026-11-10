@@ -21,7 +21,7 @@ import (
 )
 
 // TestHoldAtZeroEndToEnd runs the real router with no agent for a model that
-// the sibling map places on this policloud with scale_from_zero. A streaming
+// the sibling map places on this site with scale_from_zero. A streaming
 // request is held and counted in hivenet_pending_demand, receives keepalive
 // comments, and is served as soon as an agent for the model registers.
 func TestHoldAtZeroEndToEnd(t *testing.T) {
@@ -58,8 +58,8 @@ func TestHoldAtZeroEndToEnd(t *testing.T) {
 	})
 
 	siblingMap := fmt.Sprintf(`{"schema":2,"version":1,"region":"eu",
-		"policlouds":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
-		"placements":[{"model":%q,"kind":"chat","policloud":"pc-a","scale_from_zero":true,"hold_budget":"60s"}]}`, stubModel)
+		"sites":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
+		"placements":[{"model":%q,"kind":"chat","site":"pc-a","scale_from_zero":true,"hold_budget":"60s"}]}`, stubModel)
 	resp, err := http.Post(base+"/admin/sibling-map", "application/json", strings.NewReader(siblingMap))
 	if err != nil {
 		t.Fatal(err)
@@ -257,8 +257,8 @@ func burst(t *testing.T, policy, holdBudget string, n int) map[string]int {
 		return resp.StatusCode == http.StatusOK
 	})
 	siblingMap := fmt.Sprintf(`{"schema":2,"version":1,"region":"eu",
-		"policlouds":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
-		"placements":[{"model":%q,"kind":"chat","policloud":"pc-a","scale_from_zero":true,"hold_budget":%q}]}`, stubModel, holdBudget)
+		"sites":[{"id":"pc-a","url":"https://pc-a.example.com","country":"FR","eu":true}],
+		"placements":[{"model":%q,"kind":"chat","site":"pc-a","scale_from_zero":true,"hold_budget":%q}]}`, stubModel, holdBudget)
 	resp, err := http.Post(base+"/admin/sibling-map", "application/json", strings.NewReader(siblingMap))
 	if err != nil {
 		t.Fatal(err)

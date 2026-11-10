@@ -6,8 +6,8 @@ package api_test
 // Cross-site redirect (contract 3 v2) through the real middleware chain, in
 // production order: AuthMiddleware over redirect.Wrap, then body limit,
 // RedirectTarget, AliasMiddleware, RedirectDecision and QuotaMiddleware, then
-// the handlers. Each "policloud" is a gin engine with its own healthy-agent
-// counts and request queue; a stub processor answers what a policloud queues.
+// the handlers. Each "site" is a gin engine with its own healthy-agent
+// counts and request queue; a stub processor answers what a site queues.
 
 import (
 	"bytes"
@@ -49,7 +49,7 @@ type testSite struct {
 	engine  *gin.Engine
 	rd      *redirect.Redirector
 	queue   chan *domain.PendingRequest
-	redirs  []string // "model→policloud@hop" per 307 written
+	redirs  []string // "model→site@hop" per 307 written
 	rejects []string
 	charges *int // per-minute quota charges (QuotaMiddleware → AllowRequest)
 }
@@ -78,8 +78,8 @@ func testSigner(t *testing.T) *redirect.Signer {
 	return s
 }
 
-// newSite builds policloud id. healthy gives its healthy-agent count per model
-// (absent = 0); keys is the dynamic key registry shared by every policloud.
+// newSite builds site id. healthy gives its healthy-agent count per model
+// (absent = 0); keys is the dynamic key registry shared by every site.
 func newSite(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider) *testSite {
 	t.Helper()
 	s := &testSite{queue: make(chan *domain.PendingRequest, 4)}
@@ -145,12 +145,12 @@ var yes = func() *bool { b := true; return &b }()
 // (DE); embedding model e on b; rerank model r on c. extra placements are
 // appended.
 func fleetDoc(version uint64, extra ...redirect.Placement) redirect.MapDoc {
-	pc := func(id, country string) redirect.Policloud {
-		return redirect.Policloud{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: yes}
+	pc := func(id, country string) redirect.Site {
+		return redirect.Site{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: yes}
 	}
 	return redirect.MapDoc{
 		Schema: 2, Version: &version, Region: "eu",
-		Policlouds: []redirect.Policloud{pc("a", "FR"), pc("b", "FR"), pc("c", "DE")},
+		Sites: []redirect.Site{pc("a", "FR"), pc("b", "FR"), pc("c", "DE")},
 		Placements: append([]redirect.Placement{
 			placement("m", redirect.KindChat, "b"), placement("m", redirect.KindChat, "c"),
 			placement("e", redirect.KindEmbedding, "b"), placement("r", redirect.KindRerank, "c"),
@@ -158,8 +158,8 @@ func fleetDoc(version uint64, extra ...redirect.Placement) redirect.MapDoc {
 	}
 }
 
-func placement(model, kind, policloud string) redirect.Placement {
-	return redirect.Placement{Model: model, Kind: kind, Policloud: policloud, ScaleFromZero: yes}
+func placement(model, kind, site string) redirect.Placement {
+	return redirect.Placement{Model: model, Kind: kind, Site: site, ScaleFromZero: yes}
 }
 
 func push(t *testing.T, doc redirect.MapDoc, sites ...*testSite) {
@@ -230,7 +230,7 @@ func locationToken(t *testing.T, w *httptest.ResponseRecorder) (*url.URL, redire
 	return loc, c
 }
 
-// TestRedirect_MissWrites307: the entry policloud has no agent for the model,
+// TestRedirect_MissWrites307: the entry site has no agent for the model,
 // so it answers 307 to a sibling with a v2 token, and spends nothing: no
 // queueing and no quota charge. Without X-Hivenet-Scope the request stays in
 // the entry's country: b (FR), never c (DE).
@@ -266,7 +266,7 @@ func TestRedirect_MissWrites307(t *testing.T) {
 		t.Error("a redirected request must not be queued")
 	}
 	if *a.charges != 0 {
-		t.Errorf("the redirecting policloud charged %d quota unit(s); it must charge none", *a.charges)
+		t.Errorf("the redirecting site charged %d quota unit(s); it must charge none", *a.charges)
 	}
 	if len(a.redirs) != 1 || a.redirs[0] != "m→b@1" {
 		t.Errorf("redirect metric %v", a.redirs)
@@ -302,7 +302,7 @@ func TestRedirect_EmbeddingsAndRerank(t *testing.T) {
 }
 
 // TestRedirect_ServedHereOrUnchanged: no 307 when a local agent serves the
-// model, no policloud serves it, redirect is disabled, or the key may not use
+// model, no site serves it, redirect is disabled, or the key may not use
 // the model.
 func TestRedirect_ServedHereOrUnchanged(t *testing.T) {
 	for _, tc := range []struct {
@@ -312,7 +312,7 @@ func TestRedirect_ServedHereOrUnchanged(t *testing.T) {
 		enable  bool
 	}{
 		{"local agent", map[string]int{"m": 1}, "m", true},
-		{"no policloud serves the model (existing 404 path)", nil, "unknown", true},
+		{"no site serves the model (existing 404 path)", nil, "unknown", true},
 		{"redirect disabled", nil, "m", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -352,7 +352,7 @@ func disable(t *testing.T, s *testSite) {
 }
 
 // TestRedirect_Scope: X-Hivenet-Scope bounds where a first hop may go; no
-// header = this policloud's country; an invalid value is a 400, never
+// header = this site's country; an invalid value is a 400, never
 // widened; a redirected request keeps its token's scope (see AtTheTarget).
 func TestRedirect_Scope(t *testing.T) {
 	a := newSite(t, "a", nil, testKeys(t))
@@ -384,7 +384,7 @@ func TestRedirect_Scope(t *testing.T) {
 		}
 	}
 
-	t.Run("no policloud in the scope: served here", func(t *testing.T) {
+	t.Run("no site in the scope: served here", func(t *testing.T) {
 		done := sendAsync(a, chatPath, chatBody, scoped("country:US"))
 		serveOne(t, a)
 		if w := <-done; w.Header().Get("Location") != "" {
@@ -401,7 +401,7 @@ func TestRedirect_Scope(t *testing.T) {
 			}
 		})
 	}
-	t.Run("this policloud not in the map: no default scope, served here", func(t *testing.T) {
+	t.Run("this site not in the map: no default scope, served here", func(t *testing.T) {
 		x := newSite(t, "x", nil, testKeys(t))
 		push(t, fleetDoc(1), x)
 		done := sendAsync(x, chatPath, chatBody, bearer())
@@ -413,7 +413,7 @@ func TestRedirect_Scope(t *testing.T) {
 }
 
 // TestRedirect_SessionAffinity: the same key and X-Session-ID always get the
-// same policloud (scope all, so both b and c are candidates).
+// same site (scope all, so both b and c are candidates).
 func TestRedirect_SessionAffinity(t *testing.T) {
 	a := newSite(t, "a", nil, testKeys(t))
 	push(t, fleetDoc(1), a)
@@ -664,7 +664,7 @@ func TestRedirect_SingleUseCannotBeStolen(t *testing.T) {
 	})
 }
 
-// TestRedirect_RoundTrip: a real HTTP client against two TLS policlouds. It
+// TestRedirect_RoundTrip: a real HTTP client against two TLS sites. It
 // sends its key to a, follows the 307 without the key (as clients do when the
 // host changes) and gets the answer from b under the first request ID.
 func TestRedirect_RoundTrip(t *testing.T) {
@@ -674,7 +674,7 @@ func TestRedirect_RoundTrip(t *testing.T) {
 	defer srvA.Close()
 	defer srvB.Close()
 	doc := fleetDoc(1)
-	doc.Policlouds[0].URL, doc.Policlouds[1].URL = srvA.URL, srvB.URL
+	doc.Sites[0].URL, doc.Sites[1].URL = srvA.URL, srvB.URL
 	doc.Placements = doc.Placements[:1] // m on b only
 	push(t, doc, a, b)
 
@@ -701,7 +701,7 @@ func TestRedirect_RoundTrip(t *testing.T) {
 		resp, err := client.Do(req)
 		done <- result{resp, err}
 	}()
-	p := serveOne(t, b) // policloud b's processor answers the redirected request
+	p := serveOne(t, b) // site b's processor answers the redirected request
 	r := <-done
 	if r.err != nil {
 		t.Fatal(r.err)
@@ -758,22 +758,22 @@ func TestSiblingMapAdmin(t *testing.T) {
 		Schema        int                  `json:"schema"`
 		Version       uint64               `json:"version"`
 		Region        string               `json:"region"`
-		Policlouds    []redirect.Policloud `json:"policlouds"`
+		Sites         []redirect.Site      `json:"sites"`
 		Placements    []redirect.Placement `json:"placements"`
 		HintsExpireAt string               `json:"hints_expire_at"`
 	}
 	w := call(http.MethodGet, nil)
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.SiteID != "a" || got.Schema != 2 || got.Version != 10 ||
-		got.Region != "eu" || len(got.Policlouds) != 3 || len(got.Placements) != 4 || got.HintsExpireAt != "2026-11-03T12:00:00Z" {
+		got.Region != "eu" || len(got.Sites) != 3 || len(got.Placements) != 4 || got.HintsExpireAt != "2026-11-03T12:00:00Z" {
 		t.Fatalf("GET: %s", w.Body)
 	}
 
 	schema1 := fleetDoc(11)
 	schema1.Schema = 1
 	httpURL := fleetDoc(11)
-	httpURL.Policlouds[0].URL = "http://a.example.com"
+	httpURL.Sites[0].URL = "http://a.example.com"
 	foreign := fleetDoc(11)
-	foreign.Policlouds[2].URL = "https://c.attacker.net"
+	foreign.Sites[2].URL = "https://c.attacker.net"
 	for name, tc := range map[string]struct {
 		body any
 		want int
@@ -782,7 +782,7 @@ func TestSiblingMapAdmin(t *testing.T) {
 		"unknown schema": {schema1, http.StatusBadRequest},
 		"http url":       {httpURL, http.StatusBadRequest},
 		"foreign host":   {foreign, http.StatusBadRequest},
-		"no version":     {`{"schema":2,"region":"eu","policlouds":[],"placements":[]}`, http.StatusBadRequest},
+		"no version":     {`{"schema":2,"region":"eu","sites":[],"placements":[]}`, http.StatusBadRequest},
 		"not json":       {"{", http.StatusBadRequest},
 	} {
 		if w := call(http.MethodPost, tc.body); w.Code != tc.want {
