@@ -27,7 +27,7 @@ A request moves through these stages:
 11. Move to the next fallback step when the current step is exhausted.
 12. Use an optional external provider fallback after all local steps fail.
 
-These stages run on the router that received the request. With [cross-site redirect](#cross-site-redirect) enabled, a request for a model that has no healthy agent here can first be redirected to another policloud.
+These stages run on the router that received the request. With [cross-site redirect](#cross-site-redirect) enabled, a request for a model that has no healthy agent here can first be redirected to another site.
 
 The three configurable policy layers are:
 
@@ -559,7 +559,7 @@ Model and capability remain hard constraints throughout the chain. A fallback st
 
 ## Cross-site redirect
 
-Several Hivenet Router deployments, each called a policloud, can share one public hostname while running different models. With `--site-id` set and a sibling map pushed to every router, a request for a model that has no healthy agent on this policloud gets `307 Temporary Redirect` to a sibling policloud that serves it.
+Several Hivenet Router deployments, each called a site, can share one public hostname while running different models. With `--site-id` set and a sibling map pushed to every router, a request for a model that has no healthy agent on this site gets `307 Temporary Redirect` to a sibling site that serves it.
 
 - A redirect never replaces a working local agent: it happens only when no healthy agent here serves the model.
 - The redirect is decided before quota, so the redirecting router charges nothing.

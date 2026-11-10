@@ -17,11 +17,11 @@ import (
 
 var log = logging.Logger("redirect")
 
-// Redirector is one policloud's redirect state: who this policloud is, the
+// Redirector is one site's redirect state: who this site is, the
 // sibling map, the token signer, the single-use guard and optional metric
 // hooks.
 type Redirector struct {
-	Self   string // this policloud's ID (the routers' --site-id)
+	Self   string // this site's ID (the routers' --site-id)
 	Map    *Map
 	Signer *Signer
 	Replay *ReplayGuard
@@ -35,7 +35,7 @@ type Redirector struct {
 }
 
 // Use marks the token jti, valid until exp, as used and reports whether this
-// was its first use. It is the last token check (contract 3 v2 §4), made only
+// was its first use. It is the last token check (contract 3 v3 §4), made only
 // once the key and the body have passed.
 func (r *Redirector) Use(jti string, exp int64, now time.Time) bool {
 	return r.Replay.First(jti, time.Unix(exp, 0).Add(ClockSkew), now)
@@ -71,7 +71,7 @@ func Wrap(rd *Redirector, next auth.Provider, keys *auth.DynamicKeyProvider) aut
 }
 
 // CheckAuthMode rejects cross-site redirect (a non-empty siteID) with static
-// auth.yaml keys: they carry no key ID, so a sibling policloud could not
+// auth.yaml keys: they carry no key ID, so a sibling site could not
 // resolve a token to its key. Dynamic keys and auth mode none both work.
 func CheckAuthMode(siteID string, apiProv auth.Provider) error {
 	if _, static := apiProv.(*auth.StaticKeyProvider); static && siteID != "" {
@@ -87,7 +87,7 @@ type tokenAuth struct {
 }
 
 // Authenticate accepts a redirected request when its token passes the checks
-// of contract 3 v2 §4 up to the key, in order. The last two, the body hash
+// of contract 3 v3 §4 up to the key, in order. The last two, the body hash
 // and single use, cannot run here (the body is not read yet): the API layer
 // (RedirectTarget) runs them from AuthResult.Redirect before quota, with the
 // same fallback, and only then marks the token used.
@@ -170,8 +170,8 @@ func normalizeIDs(c *Claims) bool {
 	return true
 }
 
-// inScope reports whether this policloud lies inside scope. Anything but
-// "all" needs this policloud's country from the map: fail-closed without it.
+// inScope reports whether this site lies inside scope. Anything but
+// "all" needs this site's country from the map: fail-closed without it.
 func (t *tokenAuth) inScope(scope Scope) bool {
 	if scope == ScopeAll {
 		return true
@@ -179,7 +179,7 @@ func (t *tokenAuth) inScope(scope Scope) bool {
 	if _, err := ParseScope(string(scope)); err != nil {
 		return false
 	}
-	self, ok := t.r.Map.Policloud(t.r.Self)
+	self, ok := t.r.Map.Site(t.r.Self)
 	return ok && scope.Contains(self)
 }
 

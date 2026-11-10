@@ -86,7 +86,7 @@ func main() {
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
-	siteID := flag.String("site-id", cfg.SiteID, "This router's policloud ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
+	siteID := flag.String("site-id", cfg.SiteID, "This router's site ID in the sibling map; enables cross-site redirect (env: HIVENET_ROUTER_SITE_ID)")
 	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
 	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
 	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
