@@ -117,6 +117,11 @@ type dailyBucket struct {
 	leaseSpent int
 	leaseCap   int
 
+	// What the silent routers may still spend on their own (their share of
+	// what was left when they went silent), kept free by this router.
+	silentEp      uint64
+	silentReserve int
+
 	// Peer usage applied during the last sync (peerSeq is the sync it was
 	// applied in). The lease assumes the other routers keep spending at that
 	// rate until the next sync, which their usage has not reached us yet for.
@@ -200,10 +205,11 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 	bucket := bucketKey(tenantID, model)
 	lim := l.getOrCreateRPM(bucket, rpm)
 	if l.fleet != nil {
-		if !allowShared(l.fleet, &l.leases, bucket, lim, 1, false) {
+		ok, charged := allowShared(l.fleet, &l.leases, bucket, lim, 1, false)
+		if !ok {
 			return false, 0, nil
 		}
-		l.fleet.Record(usageRPM, bucket, rpm, 1)
+		l.fleet.Record(usageRPM, bucket, rpm, charged)
 	} else if !lim.Allow() {
 		return false, 0, nil
 	}
@@ -377,8 +383,20 @@ func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
 		return true
 	}
 	nr := l.fleet.Size()
-	if nr <= 1 {
+	silent := l.fleet.Silent()
+	if ep := l.fleet.SilentEpoch(); b.silentEp != ep {
+		// The silent routers changed: keep free the share of what is left
+		// that each may still spend while cut off (it enforces 1/N of it).
+		b.silentEp, b.silentReserve = ep, 0
+		if silent > 0 && b.used < tpd {
+			b.silentReserve = (tpd - b.used) * silent / (nr + silent)
+		}
+	}
+	if nr <= 1 && silent == 0 {
 		return true
+	}
+	if b.used+n > tpd-b.silentReserve {
+		return false
 	}
 	if seq := l.fleet.SyncSeq(); b.leaseSeq != seq {
 		// What is left, minus what the others are likely spending right now
@@ -388,7 +406,7 @@ func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
 			inFlight = b.peerLast
 		}
 		b.leaseSeq, b.leaseSpent = seq, 0
-		b.leaseCap = max(1, (tpd-b.used-inFlight)/nr)
+		b.leaseCap = max(1, (tpd-b.used-inFlight-b.silentReserve)/max(nr, 1))
 	}
 	return b.leaseSpent == 0 || b.leaseSpent+n <= b.leaseCap
 }

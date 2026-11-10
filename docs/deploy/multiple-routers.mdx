@@ -41,6 +41,7 @@ The store load depends on request rate, not on the number of keys: each round ca
 | Situation | Behavior |
 | --- | --- |
 | Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen, never fewer than `--sync-min-routers`), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
+| One router cut off from the store while the others still reach it | The cut-off router enforces its share of every limit on its own. The others count it as silent (it stopped heartbeating but no newer run replaced it) and keep its share free: they use (routers − silent) ÷ routers of each rate limit, and leave it its share of what was left of each daily budget. A router that shuts down cleanly leaves the live set and is not counted |
 | Router starts while the store is unreachable | Same as above: it enforces its share with `--sync-min-routers` routers until the store answers |
 | Store back | Routers publish the usage they held back, with the time it was admitted, and return to shared limits. Usage a rate bucket has refilled since is not charged again |
 | A router cannot read today's total for a key with a daily limit (it never saw the key today and the store is unreachable) | The router refuses that key's requests at once with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected. A request never waits for the store |
