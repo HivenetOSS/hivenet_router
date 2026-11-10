@@ -215,6 +215,7 @@ func parsePrometheusTextFull(r io.Reader) (
 	scalars = make(map[string]float64)
 	buckets = make(map[string][]bucketPoint)
 	finishReasons = make(map[string]uint64)
+	kvByEngine := map[string]float64{} // KV tokens per vLLM engine (data parallel)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
@@ -278,10 +279,12 @@ func parsePrometheusTextFull(r io.Reader) (
 			}
 		}
 
-		// vLLM publishes its KV-cache geometry as labels of an info metric.
+		// vLLM publishes its KV-cache geometry as labels of an info metric,
+		// one series per engine with data parallelism: the capacity is the
+		// sum over the distinct engines.
 		if name == "vllm:cache_config_info" {
 			if t, ok := kvCapacityFromLabels(labelSet); ok {
-				scalars[kvCapacityScalar] = t
+				kvByEngine[parseLabels(labelSet)["engine"]] = t
 			}
 			continue
 		}
@@ -290,6 +293,14 @@ func parsePrometheusTextFull(r io.Reader) (
 		if _, seen := scalars[name]; !seen {
 			scalars[name] = v
 		}
+	}
+
+	if len(kvByEngine) > 0 {
+		total := 0.0
+		for _, t := range kvByEngine {
+			total += t
+		}
+		scalars[kvCapacityScalar] = total
 	}
 
 	// Sort each bucket slice by le ascending so histogramQuantile can interpolate.

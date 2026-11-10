@@ -357,3 +357,14 @@ func TestLoadFromEnv_WakeHold(t *testing.T) {
 		}
 	}
 }
+
+// The occupancy queue follows --queue-depth unless set on its own.
+func TestLoadFromEnv_AdmissionQueueDepth(t *testing.T) {
+	if got := config.DefaultConfig().AdmissionQueueDepth; got != -1 {
+		t.Fatalf("default AdmissionQueueDepth = %d, want -1 (follow QueueDepth)", got)
+	}
+	t.Setenv("HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH", "100")
+	if got := config.LoadFromEnv().AdmissionQueueDepth; got != 100 {
+		t.Fatalf("AdmissionQueueDepth = %d, want 100", got)
+	}
+}

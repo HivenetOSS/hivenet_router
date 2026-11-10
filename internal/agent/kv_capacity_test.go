@@ -61,3 +61,22 @@ func TestVLLMKVCapacityAbsent(t *testing.T) {
 		t.Fatalf("KV capacity %v without cache_config_info, want nil", *m.KVCapacityTokens)
 	}
 }
+
+// With data parallelism vLLM reports one cache_config_info series per engine:
+// the capacity is their sum, and a repeated series is counted once.
+func TestVLLMKVCapacitySumsEngines(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`vllm:cache_config_info{block_size="16",engine="0",num_gpu_blocks="1000"} 1.0
+vllm:cache_config_info{block_size="16",engine="1",num_gpu_blocks="1000"} 1.0
+vllm:cache_config_info{block_size="16",engine="1",num_gpu_blocks="1000"} 1.0
+`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	m, err := (&VLLMEngine{}).ScrapeMetrics(context.Background(), srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.KVCapacityTokens == nil || *m.KVCapacityTokens != 2*16000 {
+		t.Fatalf("KV capacity %v, want %d", m.KVCapacityTokens, 2*16000)
+	}
+}

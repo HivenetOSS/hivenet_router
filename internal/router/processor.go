@@ -12,8 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/libp2p/go-libp2p/core/network"
 	"sync"
 	"time"
 
@@ -23,6 +21,7 @@ import (
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/provider"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	p2phttp "github.com/libp2p/go-libp2p/p2p/http"
 	"go.opentelemetry.io/otel"

@@ -593,3 +593,47 @@ func TestAdmitWithinWaitsPastTheDefaultPark(t *testing.T) {
 		t.Fatal("with room, AdmitWithin admits at once even with no park")
 	}
 }
+
+// TestBigLeavingWakesSmall verifies a small request parked only because an
+// oversized one waited is admitted as soon as the oversized one gives up.
+func TestBigLeavingWakesSmall(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	hold := c.Admit(context.Background(), model, 900, false, 1000, 0)
+	if hold == nil {
+		t.Fatal("first request refused")
+	}
+	defer hold.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	bigDone := make(chan struct{})
+	go func() {
+		defer close(bigDone)
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	got := make(chan time.Time, 1)
+	go func() {
+		if r := c.Admit(context.Background(), model, 50, false, 1000, 0); r != nil {
+			got <- time.Now()
+			r.Release()
+		}
+		close(got)
+	}()
+	time.Sleep(50 * time.Millisecond) // the small one parks behind it
+	left := time.Now()
+	cancel()
+	<-bigDone
+	select {
+	case at, ok := <-got:
+		if !ok {
+			t.Fatal("small request refused")
+		}
+		if d := at.Sub(left); d > 500*time.Millisecond {
+			t.Fatalf("small request admitted %v after the big one left", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("small request still parked after the big one left")
+	}
+}

@@ -550,8 +550,9 @@ func (a *Agent) runRoutingSignalPusher(rs *routerSession, done <-chan struct{}) 
 	}
 }
 
-// pushRoutingSignals sends one routing-signal POST to /routing-signals.
-// Returns immediately (no retry) if bm and snap are both nil.
+// pushRoutingSignals sends one routing-signal POST to /routing-signals of
+// one router session, with the latest cached snapshot and this agent's
+// in-flight count. It does not retry: the next tick sends fresh values.
 func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 	a.snapshotMu.RLock()
 	snap := a.snapshot

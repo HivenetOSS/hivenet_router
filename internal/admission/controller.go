@@ -96,6 +96,7 @@ type modelState struct {
 	maxInflight int           // last max_inflight seen, for the concurrency gauge
 	notify      chan struct{} // closed-and-replaced on every release to wake parked waiters
 	waiting     atomic.Int32  // requests in the wait queue
+	queueMu     sync.Mutex    // orders the changes of waiting and their reports
 	bigWaiting  atomic.Int32  // parked requests larger than the whole budget
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
@@ -198,12 +199,9 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	}
 	park := parkFor
 	if queue && c.queueDepth > 0 && c.queueWait > park {
-		if n := s.waiting.Add(1); n <= int32(c.queueDepth) {
+		if c.enqueue(s) {
 			park = c.queueWait
-			c.queueChanged(s, int(n))
-			defer func() { c.queueChanged(s, int(s.waiting.Add(-1))) }()
-		} else {
-			s.waiting.Add(-1) // queue full: a short park only
+			defer c.dequeue(s)
 		}
 	}
 	if park <= 0 {
@@ -211,7 +209,13 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	}
 	if big {
 		s.bigWaiting.Add(1)
-		defer s.bigWaiting.Add(-1)
+		defer func() {
+			// The smaller requests parked only because this one waited may
+			// fit now: wake them, or they wait with room free.
+			if s.bigWaiting.Add(-1) == 0 {
+				s.wake()
+			}
+		}()
 	}
 
 	timer := time.NewTimer(park)
@@ -232,6 +236,25 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 			return nil
 		}
 	}
+}
+
+// enqueue takes a place in the model's queue, reporting false when it is full.
+// The depth is changed and reported under one lock, so the gauge never
+// receives two updates out of order.
+func (c *Controller) enqueue(s *modelState) bool {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	if s.waiting.Load() >= int32(c.queueDepth) {
+		return false
+	}
+	c.queueChanged(s, int(s.waiting.Add(1)))
+	return true
+}
+
+func (c *Controller) dequeue(s *modelState) {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	c.queueChanged(s, int(s.waiting.Add(-1)))
 }
 
 func (c *Controller) queueChanged(s *modelState, waiting int) {
@@ -308,6 +331,15 @@ func (s *modelState) release(weight int64) {
 	s.mu.Unlock()
 	close(ch)
 	s.emit()
+}
+
+// wake wakes every parked waiter without changing occupancy.
+func (s *modelState) wake() {
+	s.mu.Lock()
+	ch := s.notify
+	s.notify = make(chan struct{})
+	s.mu.Unlock()
+	close(ch)
 }
 
 // grow tightens occupancy as an undeclared request produces output. It never

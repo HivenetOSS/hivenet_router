@@ -82,6 +82,7 @@ func main() {
 	semanticPinMaxPerKey := flag.Int("semantic-pin-max-per-key", cfg.SemanticPinMaxPerKey, "Max semantic task pins per API key; LRU-evicted beyond (env: HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY)")
 	maxTriesPerStep := flag.Int("max-tries-per-step", cfg.MaxTriesPerStep, "Default maximum forward attempts per policy step (used when a step does not set max_tries)")
 	defaultQueueDepth := flag.Int("queue-depth", cfg.QueueDepth, "Max concurrent waiters per model in the capacity wait queue; 0 disables the queue")
+	admissionQueueDepth := flag.Int("admission-queue-depth", cfg.AdmissionQueueDepth, "Max requests per model waiting for room in the occupancy budget; 0 disables the queue, -1 uses --queue-depth (env: HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH)")
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
@@ -152,6 +153,10 @@ func main() {
 		log.Fatalf("--queue-depth must be >= 0, got %d", *defaultQueueDepth)
 	}
 	cfg.QueueDepth = *defaultQueueDepth
+	if *admissionQueueDepth < -1 {
+		log.Fatalf("--admission-queue-depth must be >= -1, got %d", *admissionQueueDepth)
+	}
+	cfg.AdmissionQueueDepth = *admissionQueueDepth
 	if *sessionTTL <= 5*time.Minute {
 		log.Fatalf("--session-ttl must be greater than 5m (re-auth safety margin), got %v", *sessionTTL)
 	}
@@ -331,6 +336,9 @@ func main() {
 		log.Info("  Queue depth/model:   disabled")
 	} else {
 		log.Infof("  Queue depth/model:   %d", cfg.QueueDepth)
+	}
+	if cfg.AdmissionQueueDepth >= 0 {
+		log.Infof("  Admission queue:     %d", cfg.AdmissionQueueDepth)
 	}
 	if cfg.SemanticDecisionLog != "" {
 		log.Infof("  Semantic decisions:  %s", cfg.SemanticDecisionLog)

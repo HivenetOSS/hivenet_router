@@ -140,6 +140,11 @@ type Config struct {
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
 	QueueDepth int
 
+	// AdmissionQueueDepth is the per-model queue of requests waiting for room
+	// in the occupancy budget (B2). Negative (the default) uses QueueDepth.
+	// Env: HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH  Flag: --admission-queue-depth
+	AdmissionQueueDepth int
+
 	// AdmitFraction scales a model's KV token capacity into the occupancy admit
 	// budget: a request is admitted only while the weighted in-flight token sum
 	// stays within AdmitFraction × admit_budget_tokens. Below 1.0 it leaves head-
@@ -314,6 +319,7 @@ func DefaultConfig() *Config {
 		SemanticPinMax:               100_000,
 		SemanticPinMaxPerKey:         10_000,
 		QueueDepth:                   30,
+		AdmissionQueueDepth:          -1,
 		MaxRequestBytes:              10 << 20, // 10 MB
 		AdmitFraction:                0.90,     // learned estimator + true-up now cover the token-estimate error
 		AdmitParkTimeout:             250 * time.Millisecond,
@@ -395,6 +401,11 @@ func LoadFromEnv() *Config {
 	if v := os.Getenv("HIVENET_ROUTER_QUEUE_DEPTH"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.QueueDepth = n
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.AdmissionQueueDepth = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_ADMIT_FRACTION"); v != "" {
