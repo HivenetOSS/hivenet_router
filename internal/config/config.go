@@ -63,7 +63,7 @@ type Config struct {
 	// Must match between router and all agents. Required — startup fails if empty.
 	JWTSecret string
 
-	// Cross-site redirect (internal/redirect, contract 3 v2). SiteID is this
+	// Cross-site redirect (internal/redirect, contract 3 v3). SiteID is this
 	// router's site ID in the sibling map; empty (the default) disables
 	// redirects entirely. RedirectSecrets holds the token signing secrets as
 	// "id:secret" lines (parsed by redirect.ParseSecrets: the first signs,

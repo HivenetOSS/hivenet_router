@@ -55,7 +55,7 @@ Clients remove the `Authorization` header when a redirect changes host. The `307
 
 ```text
 HTTP/1.1 307 Temporary Redirect
-Location: https://pc-de-1.example.com/v1/chat/completions?rt=v2.<secret id>.<claims>.<signature>
+Location: https://site-de-1.example.com/v1/chat/completions?rt=v2.<secret id>.<claims>.<signature>
 Cache-Control: no-store
 ```
 
@@ -112,23 +112,23 @@ A token that expires before the client follows is refused with `401`, and counte
 Replace the whole map with an admin request:
 
 ```bash
-curl -X POST https://pc-fr-1.example.com/admin/sibling-map \
+curl -X POST https://site-fr-1.example.com/admin/sibling-map \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "schema": 2,
+    "schema": 3,
     "version": 1762171200,
     "region": "eu",
     "generated_at": "2026-11-03T12:00:00Z",
     "sites": [
-      {"id": "pc-fr-1", "url": "https://pc-fr-1.example.com", "country": "FR", "eu": true},
-      {"id": "pc-de-1", "url": "https://pc-de-1.example.com", "country": "DE", "eu": true}
+      {"id": "site-fr-1", "url": "https://site-fr-1.example.com", "country": "FR", "eu": true},
+      {"id": "site-de-1", "url": "https://site-de-1.example.com", "country": "DE", "eu": true}
     ],
     "placements": [
-      {"model": "llama-3-70b", "kind": "chat", "site": "pc-fr-1", "scale_from_zero": false},
-      {"model": "llama-3-70b", "kind": "chat", "site": "pc-de-1", "scale_from_zero": true,
+      {"model": "llama-3-70b", "kind": "chat", "site": "site-fr-1", "scale_from_zero": false},
+      {"model": "llama-3-70b", "kind": "chat", "site": "site-de-1", "scale_from_zero": true,
        "hint": {"warm": false, "load": "ok"}},
-      {"model": "bge-m3", "kind": "embedding", "site": "pc-de-1", "scale_from_zero": true}
+      {"model": "bge-m3", "kind": "embedding", "site": "site-de-1", "scale_from_zero": true}
     ],
     "hints_expire_at": "2026-11-03T12:01:00Z"
   }'
@@ -136,11 +136,11 @@ curl -X POST https://pc-fr-1.example.com/admin/sibling-map \
 
 | Field | Rule |
 | --- | --- |
-| `schema` | Required, `2`. Any other schema is rejected with `400` |
+| `schema` | Required, `3`. Any other schema is rejected with `400`, including the older `2` (which named sites `policlouds`). A field the schema does not define is also rejected with `400` |
 | `version` | Required, an unsigned integer. A push with a lower version is rejected with `409`; an equal version is accepted as a replay |
 | `region` | Required. The map’s region |
 | `generated_at` | Optional. When the map writer built the map |
-| `sites[].id` | Required, unique. The site’s `--site-id` |
+| `sites[].id` | Required, unique. The site’s `--site-id`. The map must list the site of the router it is pushed to, or the push is rejected with `400` |
 | `sites[].url` | Required. An absolute `https://` origin with no path, query or credentials, whose host ends with one of `--redirect-allowed-domains` (case is ignored). A trailing `/` is removed |
 | `sites[].country` | Required. ISO 3166-1 alpha-2 code, such as `FR` |
 | `sites[].eu` | Required. Whether the site is in the EU |

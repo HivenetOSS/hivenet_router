@@ -187,7 +187,7 @@ The flags are listed in the [configuration reference](/reference/configuration-r
 A placement in the [sibling map](/routing/cross-site-redirect#pushing-the-sibling-map) may set its own hold budget:
 
 ```json
-{"model": "llama-3-70b", "kind": "chat", "site": "pc-fr-1", "scale_from_zero": true, "hold_budget": "240s"}
+{"model": "llama-3-70b", "kind": "chat", "site": "site-fr-1", "scale_from_zero": true, "hold_budget": "240s"}
 ```
 
 `hold_budget` is optional: a Go duration greater than `0` and at most `1h`. Any other value rejects the whole map push with `400`. It applies only to placements with `scale_from_zero: true`.

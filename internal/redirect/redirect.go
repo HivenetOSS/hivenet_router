@@ -16,7 +16,7 @@
 // the package is never wired in and the router behaves exactly as before.
 //
 // The map format, the redirect decision and the token are frozen in contract 3
-// v2 (hivenet_ai_infra docs/contracts/03-sibling-map.md).
+// v3 (hivenet_ai_infra docs/contracts/03-sibling-map.md).
 package redirect
 
 import (
@@ -45,8 +45,10 @@ const (
 	// this many times is never redirected again.
 	MaxHops = 2
 
-	// Schema is the only sibling-map schema this router understands.
-	Schema = 2
+	// Schema is the only sibling-map schema this router understands. 3 renamed
+	// the v2 fields "policlouds" and a placement's "policloud" to "sites" and
+	// "site"; a v2 map is refused with a clear "unsupported map schema".
+	Schema = 3
 
 	// ClockSkew is the grace a token gets past its expiry, for clock drift
 	// between the routers that sign and verify it.
@@ -57,9 +59,11 @@ const (
 	MaxHoldBudget = time.Hour
 
 	// homeSize is how many sibling sites one key + model may use, which
-	// keeps the key's rate limits meaningful (contract 3 v2 §3 step 4).
+	// keeps the key's rate limits meaningful (contract 3 v3 §3 step 4).
 	homeSize = 2
 
+	// tokenPrefix versions the token format, not the map: the token did not
+	// change in contract 3 v3, so it stays "v2.".
 	tokenPrefix = "v2."
 )
 
@@ -388,7 +392,7 @@ type TargetRequest struct {
 	Now         time.Time
 }
 
-// Target picks the sibling site for a request (contract 3 v2 §3 steps
+// Target picks the sibling site for a request (contract 3 v3 §3 steps
 // 3–7): placements of the model and kind, inside the scope, minus this
 // site and the origin; the key's home set (top 2 by H(keyID, model,
 // site)); ranked by the session; then, while the hints are fresh, no
@@ -402,7 +406,7 @@ func (m *Map) Target(req TargetRequest) (Site, bool) {
 
 	type cand struct {
 		pl       Placement
-		pc       Site
+		site     Site
 		home, by uint64
 	}
 	var cands []cand
@@ -410,28 +414,28 @@ func (m *Map) Target(req TargetRequest) (Site, bool) {
 		if pl.Kind != req.Kind || pl.Site == req.Self || pl.Site == req.From {
 			continue
 		}
-		pc := m.sites[pl.Site]
-		if !req.Scope.Contains(pc) {
+		site := m.sites[pl.Site]
+		if !req.Scope.Contains(site) {
 			continue
 		}
-		cands = append(cands, cand{pl: pl, pc: pc, home: score(req.KeyID, req.Model, pc.ID)})
+		cands = append(cands, cand{pl: pl, site: site, home: score(req.KeyID, req.Model, site.ID)})
 	}
 	if len(cands) == 0 {
 		return Site{}, false
 	}
 
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].pc.ID, cands[j].pc.ID) })
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].site.ID, cands[j].site.ID) })
 	if len(cands) > homeSize {
 		cands = cands[:homeSize]
 	}
 	session := req.KeyID + "\x00" + req.Session
 	for i := range cands {
-		cands[i].by = score(session, req.Model, cands[i].pc.ID)
+		cands[i].by = score(session, req.Model, cands[i].site.ID)
 	}
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].pc.ID, cands[j].pc.ID) })
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].site.ID, cands[j].site.ID) })
 
 	if !req.Now.Before(m.hintsExpire) {
-		return cands[0].pc, true // no fresh hints: the session order alone
+		return cands[0].site, true // no fresh hints: the session order alone
 	}
 	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
 		return Site{}, false // every sibling is cold and the model may be woken here: wake it here
@@ -442,16 +446,16 @@ func (m *Map) Target(req TargetRequest) (Site, bool) {
 			continue
 		}
 		if c.pl.Hint.warm() {
-			return c.pc, true // the first eligible warm target
+			return c.site, true // the first eligible warm target
 		}
 		if firstEligible < 0 {
 			firstEligible = i
 		}
 	}
 	if firstEligible >= 0 {
-		return cands[firstEligible].pc, true // only cold, wakeable targets
+		return cands[firstEligible].site, true // only cold, wakeable targets
 	}
-	return cands[0].pc, true // every target skipped: a stale hint must not block service
+	return cands[0].site, true // every target skipped: a stale hint must not block service
 }
 
 // Wakeable reports whether a request for model, as kind, may be held on
@@ -554,7 +558,7 @@ func (s Scope) Contains(p Site) bool {
 
 // ---- token ------------------------------------------------------------------
 
-// Claims is the body of a redirect token (contract 3 v2 §4).
+// Claims is the body of a redirect token (contract 3 v3 §4).
 type Claims struct {
 	KeyID     string `json:"key"` // the caller's API-key ID ("" with auth mode none), never the key
 	RequestID string `json:"rid"` // the first router's request ID; the target adopts it

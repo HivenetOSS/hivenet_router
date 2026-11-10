@@ -113,7 +113,7 @@ type AuthResult struct {
 }
 
 // RedirectInfo is what a verified redirect token tells the API layer about a
-// request repeated at a sibling site (contract 3 v2 §4).
+// request repeated at a sibling site (contract 3 v3 §4).
 type RedirectInfo struct {
 	Hop       int    // redirects taken, including the one that brought it here
 	BodySHA   string // hex SHA-256 the request body must match, checked before quota

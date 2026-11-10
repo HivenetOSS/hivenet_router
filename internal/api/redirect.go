@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,7 @@ const (
 )
 
 // endpointKinds maps each redirectable inference path to the placement kind
-// that may serve it (contract 3 v2 §3).
+// that may serve it (contract 3 v3 §3).
 var endpointKinds = map[string]string{
 	"/v1/chat/completions":      redirect.KindChat,
 	"/v1/messages":              redirect.KindChat,
@@ -84,7 +85,7 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 				"failed to read request body", domain.SourceRouter)
 			return
 		}
-		// The last two token checks (contract 3 v2 §4): the body, then single
+		// The last two token checks (contract 3 v3 §4): the body, then single
 		// use. The token is marked used only here, once every check passed, so
 		// a request refused on any check never uses up the client's token.
 		reason, msg := "", ""
@@ -131,7 +132,7 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 
 // RedirectDecision answers 307 to a sibling site when no healthy agent
 // here serves the model and the sibling map lists one that does (contract 3
-// v2 §3). It runs after AliasMiddleware (so it routes on the concrete model)
+// v3 §3). It runs after AliasMiddleware (so it routes on the concrete model)
 // and before QuotaMiddleware: the redirecting router does no inference and
 // charges no quota. It covers every inference endpoint, by the placement kind
 // that matches the path.
@@ -301,9 +302,19 @@ func (h *Handlers) ReplaceSiblingMap(c *gin.Context) {
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	// Unknown fields are refused: a body in an older format (contract 3 v2
+	// "policlouds") would otherwise decode as an empty map.
 	var doc redirect.MapDoc
-	if err := c.ShouldBindJSON(&doc); err != nil {
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+		return
+	}
+	// The map must list this router's own site: without it, the default
+	// scope and token checks have nothing to compare against.
+	if !slices.ContainsFunc(doc.Sites, func(s redirect.Site) bool { return s.ID == h.redirect.Self }) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("sibling map does not list this router's site %q", h.redirect.Self)})
 		return
 	}
 	if err := h.redirect.Map.Replace(doc); err != nil {

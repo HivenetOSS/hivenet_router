@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-// Package redirect_test covers cross-site redirects (contract 3 v2): the
+// Package redirect_test covers cross-site redirects (contract 3 v3): the
 // sibling map, the redirect choice, scopes, the signed single-use token and
 // the token-based authentication a sibling site uses.
 package redirect_test
@@ -38,7 +38,7 @@ var domains = []string{".example.com"}
 
 func u64(v uint64) *uint64 { return &v }
 
-func pc(id, country string, eu *bool) redirect.Site {
+func mkSite(id, country string, eu *bool) redirect.Site {
 	return redirect.Site{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: eu}
 }
 
@@ -50,8 +50,8 @@ func place(model, kind, site string, sfz *bool, hint *redirect.Hint) redirect.Pl
 // but fr-1, embedding e on de-1 only.
 func doc(version uint64) redirect.MapDoc {
 	return redirect.MapDoc{
-		Schema: 2, Version: u64(version), Region: "eu",
-		Sites: []redirect.Site{pc("fr-1", "FR", yes), pc("fr-2", "FR", yes), pc("de-1", "DE", yes), pc("us-1", "US", no)},
+		Schema: 3, Version: u64(version), Region: "eu",
+		Sites: []redirect.Site{mkSite("fr-1", "FR", yes), mkSite("fr-2", "FR", yes), mkSite("de-1", "DE", yes), mkSite("us-1", "US", no)},
 		Placements: []redirect.Placement{
 			place("m", redirect.KindChat, "fr-2", yes, nil),
 			place("m", redirect.KindChat, "de-1", yes, nil),
@@ -69,7 +69,8 @@ func TestMapReplace_RejectsInvalid(t *testing.T) {
 		name string
 		mod  func(*redirect.MapDoc)
 	}{
-		{"unknown schema", func(d *redirect.MapDoc) { d.Schema = 3 }},
+		{"unknown schema", func(d *redirect.MapDoc) { d.Schema = 4 }},
+		{"schema 2 (policlouds)", func(d *redirect.MapDoc) { d.Schema = 2 }},
 		{"missing schema", func(d *redirect.MapDoc) { d.Schema = 0 }},
 		{"missing version", func(d *redirect.MapDoc) { d.Version = nil }},
 		{"missing region", func(d *redirect.MapDoc) { d.Region = "" }},
@@ -184,7 +185,7 @@ func h(a, model, site string) uint64 {
 }
 
 // expected computes the contract's choice without hints: top-2 home set by
-// H(key, model, pc), then the session order inside it.
+// H(key, model, site), then the session order inside it.
 func expected(key, session, model string, cands []string) []string {
 	sort.Slice(cands, func(i, j int) bool { return h(key, model, cands[i]) > h(key, model, cands[j]) })
 	if len(cands) > 2 {
@@ -293,8 +294,8 @@ func TestTarget_Hints(t *testing.T) {
 	first, second := order[0], order[1]
 	build := func(hFirst, hSecond *redirect.Hint, sfzFirst *bool, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
-			Schema: 2, Version: u64(1), Region: "eu",
-			Sites: []redirect.Site{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
+			Schema: 3, Version: u64(1), Region: "eu",
+			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
 			Placements: []redirect.Placement{
 				place("m", redirect.KindChat, first, sfzFirst, hFirst),
 				place("m", redirect.KindChat, second, yes, hSecond),
@@ -344,8 +345,8 @@ func TestTarget_WakeHereBeforeColdSibling(t *testing.T) {
 	cold, warm := &redirect.Hint{Warm: no}, &redirect.Hint{Warm: yes}
 	build := func(hereKind string, hereWakes *bool, ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
-			Schema: 2, Version: u64(1), Region: "eu",
-			Sites: []redirect.Site{pc("self", "FR", yes), pc("a", "FR", yes), pc("b", "FR", yes)},
+			Schema: 3, Version: u64(1), Region: "eu",
+			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
 			Placements: []redirect.Placement{
 				place("m", redirect.KindChat, "a", yes, ha),
 				place("m", redirect.KindChat, "b", yes, hb),
@@ -460,7 +461,7 @@ func TestScope(t *testing.T) {
 			t.Errorf("%q: expected an error", s)
 		}
 	}
-	fr, us := pc("fr", "FR", yes), pc("us", "US", no)
+	fr, us := mkSite("fr", "FR", yes), mkSite("us", "US", no)
 	if !redirect.Scope("EU").Contains(fr) || redirect.Scope("EU").Contains(us) ||
 		!redirect.Scope("country:US").Contains(us) || redirect.Scope("country:US").Contains(fr) ||
 		!redirect.ScopeAll.Contains(us) {

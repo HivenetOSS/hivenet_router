@@ -35,7 +35,7 @@ type Redirector struct {
 }
 
 // Use marks the token jti, valid until exp, as used and reports whether this
-// was its first use. It is the last token check (contract 3 v2 §4), made only
+// was its first use. It is the last token check (contract 3 v3 §4), made only
 // once the key and the body have passed.
 func (r *Redirector) Use(jti string, exp int64, now time.Time) bool {
 	return r.Replay.First(jti, time.Unix(exp, 0).Add(ClockSkew), now)
@@ -87,7 +87,7 @@ type tokenAuth struct {
 }
 
 // Authenticate accepts a redirected request when its token passes the checks
-// of contract 3 v2 §4 up to the key, in order. The last two, the body hash
+// of contract 3 v3 §4 up to the key, in order. The last two, the body hash
 // and single use, cannot run here (the body is not read yet): the API layer
 // (RedirectTarget) runs them from AuthResult.Redirect before quota, with the
 // same fallback, and only then marks the token used.

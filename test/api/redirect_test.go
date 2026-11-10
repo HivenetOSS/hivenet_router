@@ -3,7 +3,7 @@
 
 package api_test
 
-// Cross-site redirect (contract 3 v2) through the real middleware chain, in
+// Cross-site redirect (contract 3 v3) through the real middleware chain, in
 // production order: AuthMiddleware over redirect.Wrap, then body limit,
 // RedirectTarget, AliasMiddleware, RedirectDecision and QuotaMiddleware, then
 // the handlers. Each "site" is a gin engine with its own healthy-agent
@@ -145,12 +145,12 @@ var yes = func() *bool { b := true; return &b }()
 // (DE); embedding model e on b; rerank model r on c. extra placements are
 // appended.
 func fleetDoc(version uint64, extra ...redirect.Placement) redirect.MapDoc {
-	pc := func(id, country string) redirect.Site {
+	mkSite := func(id, country string) redirect.Site {
 		return redirect.Site{ID: id, URL: "https://" + id + ".example.com", Country: country, EU: yes}
 	}
 	return redirect.MapDoc{
-		Schema: 2, Version: &version, Region: "eu",
-		Sites: []redirect.Site{pc("a", "FR"), pc("b", "FR"), pc("c", "DE")},
+		Schema: 3, Version: &version, Region: "eu",
+		Sites: []redirect.Site{mkSite("a", "FR"), mkSite("b", "FR"), mkSite("c", "DE")},
 		Placements: append([]redirect.Placement{
 			placement("m", redirect.KindChat, "b"), placement("m", redirect.KindChat, "c"),
 			placement("e", redirect.KindEmbedding, "b"), placement("r", redirect.KindRerank, "c"),
@@ -720,7 +720,7 @@ func TestRedirect_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSiblingMapAdmin: GET and POST /admin/sibling-map with the v2 format.
+// TestSiblingMapAdmin: GET and POST /admin/sibling-map with the schema 3 format.
 func TestSiblingMapAdmin(t *testing.T) {
 	s := newSite(t, "a", nil, testKeys(t))
 	h := api.NewHandlers(nil, nil, nil, time.Second, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -763,7 +763,7 @@ func TestSiblingMapAdmin(t *testing.T) {
 		HintsExpireAt string               `json:"hints_expire_at"`
 	}
 	w := call(http.MethodGet, nil)
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.SiteID != "a" || got.Schema != 2 || got.Version != 10 ||
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.SiteID != "a" || got.Schema != 3 || got.Version != 10 ||
 		got.Region != "eu" || len(got.Sites) != 3 || len(got.Placements) != 4 || got.HintsExpireAt != "2026-11-03T12:00:00Z" {
 		t.Fatalf("GET: %s", w.Body)
 	}
@@ -774,6 +774,8 @@ func TestSiblingMapAdmin(t *testing.T) {
 	httpURL.Sites[0].URL = "http://a.example.com"
 	foreign := fleetDoc(11)
 	foreign.Sites[2].URL = "https://c.attacker.net"
+	noSelf := fleetDoc(11) // a valid map that does not list this router (a)
+	noSelf.Sites = noSelf.Sites[1:]
 	for name, tc := range map[string]struct {
 		body any
 		want int
@@ -782,8 +784,13 @@ func TestSiblingMapAdmin(t *testing.T) {
 		"unknown schema": {schema1, http.StatusBadRequest},
 		"http url":       {httpURL, http.StatusBadRequest},
 		"foreign host":   {foreign, http.StatusBadRequest},
-		"no version":     {`{"schema":2,"region":"eu","sites":[],"placements":[]}`, http.StatusBadRequest},
+		"no version":     {`{"schema":3,"region":"eu","sites":[],"placements":[]}`, http.StatusBadRequest},
 		"not json":       {"{", http.StatusBadRequest},
+		// The schema 2 field names: refused as unknown fields, so an old
+		// writer can never empty the map.
+		"old field names": {`{"schema":3,"version":11,"region":"eu","policlouds":[{"id":"a","url":"https://a.example.com","country":"FR","eu":true}],"placements":[]}`, http.StatusBadRequest},
+		"schema 2":        {`{"schema":2,"version":11,"region":"eu","sites":[],"placements":[]}`, http.StatusBadRequest},
+		"no own site":     {noSelf, http.StatusBadRequest},
 	} {
 		if w := call(http.MethodPost, tc.body); w.Code != tc.want {
 			t.Errorf("%s: status %d, want %d (%s)", name, w.Code, tc.want, w.Body)
