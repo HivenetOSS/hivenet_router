@@ -140,7 +140,7 @@ func TestDailySharedAcrossRouters(t *testing.T) {
 }
 
 // Output is charged after the response exists: it is judged against the
-// policloud total only, never refused because this router's share is spent.
+// site total only, never refused because this router's share is spent.
 func TestOutputNeverRefusedByRouterShare(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newFleet(t, mr, 3)
@@ -206,7 +206,7 @@ func TestStoreDownEachRouterEnforcesItsShare(t *testing.T) {
 	}
 }
 
-// A router that cannot read today's policloud total refuses daily-limited
+// A router that cannot read today's site total refuses daily-limited
 // requests (it cannot know what the others spent); keys without a daily
 // limit keep working.
 func TestDailyFailsClosedWithoutTotals(t *testing.T) {
@@ -215,7 +215,7 @@ func TestDailyFailsClosedWithoutTotals(t *testing.T) {
 	mr.Close()
 	r := newRouter(t, addr, "r0")
 	if ok, _, _ := r.rate.AllowInputTokens("t", "", 1000, 10); ok {
-		t.Fatal("admitted a daily-limited request without the policloud total")
+		t.Fatal("admitted a daily-limited request without the site total")
 	}
 	if ok, _, _ := r.rate.AllowInputTokens("t", "", 0, 10); !ok {
 		t.Fatal("refused a key without a daily limit")
@@ -241,7 +241,7 @@ func TestJoiningRouterKnowsRecentUsage(t *testing.T) {
 		t.Fatal("joining router admitted a key whose minute is already spent")
 	}
 	if ok, _, _ := b.rate.AllowInputTokens("t", "", tpd, 200); ok {
-		t.Fatal("joining router admitted beyond today's policloud total")
+		t.Fatal("joining router admitted beyond today's site total")
 	}
 }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-// Package shared lets the routers of one policloud enforce each key's rate and
+// Package shared lets the routers of one site enforce each key's rate and
 // daily limits together, through one Valkey (normally behind Sentinel).
 //
 // Every router keeps deciding in memory, so a request never waits on Valkey.
@@ -71,7 +71,7 @@ type Config struct {
 	Password       string        // Valkey (and Sentinel) password; empty for none
 	TLS            bool          // connect with TLS
 	TLSCAFile      string        // PEM CA bundle to verify Valkey and Sentinel; empty for the system roots
-	Prefix         string        // key prefix, one per policloud (the site ID)
+	Prefix         string        // key prefix, one per site (the site ID)
 	RouterID       string        // stable router identity, e.g. the pod name
 	Interval       time.Duration // sync interval
 	DownAfter      time.Duration // unreachable this long → each router enforces its share
@@ -211,7 +211,7 @@ func New(cfg Config) (*Store, error) {
 // AddApplier registers a receiver for the other routers' usage. Call before Start.
 func (s *Store) AddApplier(a Applier) { s.appliers = append(s.appliers, a) }
 
-// Size returns the live routers in the policloud, this one included. While
+// Size returns the live routers in the site, this one included. While
 // Valkey is unreachable, or before it first answered, it is the last count
 // seen, never fewer than MinRouters.
 func (s *Store) Size() int {
@@ -338,7 +338,7 @@ func (s *Store) resetConn() {
 	}
 }
 
-// DailyTotal returns the policloud's tokens used today in a daily bucket, and
+// DailyTotal returns the site's tokens used today in a daily bucket, and
 // the last stream entry the total already includes: usage carried by that
 // entry or an earlier one must not be added again. It fails at once, without
 // waiting, while Valkey is not answering.
@@ -551,9 +551,9 @@ func (s *Store) tick(ctx context.Context) {
 
 	switch {
 	case s.seq.Load() == 0:
-		log.Infof("shared counters: connected to Valkey; enforcing policloud-wide limits")
+		log.Infof("shared counters: connected to Valkey; enforcing site-wide limits")
 	case s.degraded.Load() != 0:
-		log.Infof("shared counters: Valkey reachable again; enforcing policloud-wide limits")
+		log.Infof("shared counters: Valkey reachable again; enforcing site-wide limits")
 	}
 	s.degraded.Store(0)
 	s.lastOK = time.Now()
