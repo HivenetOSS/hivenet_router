@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,18 +42,32 @@ const jwtSecret = "e2e-integration-secret-0123456789abcdef"
 const stubModel = "stub-model"
 
 // freePort asks the kernel for an unused TCP port on 127.0.0.1.
+// usedPorts holds every port freePort has handed out in this test binary:
+// the probe listener is closed before the router binds, so without it two
+// calls could return the same port.
+var (
+	usedPortsMu sync.Mutex
+	usedPorts   = map[int]bool{}
+)
+
 func freePort(t *testing.T) int {
 	t.Helper()
+	usedPortsMu.Lock()
+	defer usedPortsMu.Unlock()
 	// Below the ephemeral range (32768 and up on Linux): a port taken from
 	// that range can be handed to an outgoing connection before the router
 	// binds it.
 	for i := 0; i < 200; i++ {
 		port := 20000 + rand.IntN(12000)
+		if usedPorts[port] {
+			continue
+		}
 		l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 		if err != nil {
 			continue
 		}
 		l.Close() //nolint:errcheck
+		usedPorts[port] = true
 		return port
 	}
 	t.Fatal("freePort: no free port")

@@ -4,6 +4,7 @@
 package shared_test
 
 import (
+	"context"
 	"io"
 	"net"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+
+	"hivenet_router/internal/shared"
 )
 
 // cutProxy forwards TCP to a Valkey address until cut, so a test can cut one
@@ -153,5 +156,26 @@ func TestRepublishedBatchCountedOnce(t *testing.T) {
 	time.Sleep(3 * interval)
 	if rem, _ := rs[1].rate.RemainingTokens("t", "", tpd); rem != 900 {
 		t.Fatalf("r1 sees %d left after the batch came twice, want 900", rem)
+	}
+}
+
+// A Sentinel that never answers (packets dropped, as in a network cut) must
+// not hold the sync loop: every connect has a timeout, so the router notices
+// a healed cut within a round instead of after the kernel's SYN retries.
+// 192.0.2.1 is reserved for documentation and never answers.
+func TestUnansweredSentinelDoesNotHoldLoop(t *testing.T) {
+	st, err := shared.New(shared.Config{Addrs: []string{"192.0.2.1:26379"}, SentinelMaster: "m",
+		Prefix: "pc", RouterID: "a", Interval: interval})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Start(context.Background())
+	time.Sleep(3 * interval)
+	done := make(chan struct{})
+	go func() { st.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sync loop is stuck connecting to a Sentinel that never answers")
 	}
 }
