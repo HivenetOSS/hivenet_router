@@ -24,10 +24,10 @@ type MinuteRateLimiter struct {
 }
 
 // SetFleet shares this limiter's usage with the other routers of the
-// policloud. Must be called before the limiter handles any requests.
+// site. Must be called before the limiter handles any requests.
 func (l *MinuteRateLimiter) SetFleet(f Fleet) { l.fleet = f }
 
-// ApplyPeerUsage takes tokens another router of the policloud admitted.
+// ApplyPeerUsage takes tokens another router of the site admitted.
 func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration, _ int, _ string) {
 	if (kind != usageITPM && kind != usageOTPM) || limit <= 0 {
 		return

@@ -26,7 +26,7 @@ func newStoreMetrics() *storeMetrics {
 		}),
 		peers: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "hivenet_sync_peers",
-			Help: "Other live routers in this policloud, as last seen.",
+			Help: "Other live routers in this site, as last seen.",
 		}),
 		lag: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "hivenet_sync_lag_seconds",

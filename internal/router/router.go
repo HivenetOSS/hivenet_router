@@ -171,7 +171,7 @@ type Router struct {
 	minuteLimiter *auth.MinuteRateLimiter
 
 	// shared publishes and applies limit usage across the routers of this
-	// policloud (nil unless --sync-store=valkey).
+	// site (nil unless --sync-store=valkey).
 	shared *shared.Store
 	// credits share the occupancy budgets (B2 global, B4 per key) across the
 	// routers of the site (nil unless --sync-store=valkey).
@@ -2001,7 +2001,7 @@ func (r *Router) healthMonitor() {
 }
 
 // setupShared connects the rate and daily limiters to the other routers of
-// the policloud through Valkey when --sync-store=valkey.
+// the site through Valkey when --sync-store=valkey.
 // syncSite is the site's name in the shared store: --sync-site, else
 // --site-id, else "default" (the store's own default).
 func syncSite(cfg *config.Config) string {
