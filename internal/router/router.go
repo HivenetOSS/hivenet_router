@@ -745,12 +745,6 @@ func (r *Router) Close() error {
 		bl.Flush()
 	}
 
-	// Publish the usage admitted since the last sync so the other routers
-	// count it, then disconnect from the shared store.
-	if r.shared != nil {
-		r.shared.Close()
-	}
-
 	// 2. Stop processor and periodic-flush goroutines.
 	if r.processorCancel != nil {
 		r.processorCancel()
@@ -764,6 +758,14 @@ func (r *Router) Close() error {
 	// 4. Close libp2p host and all associated streams.
 	if r.p2pHost != nil {
 		r.p2pHost.Close()
+	}
+
+	// Publish the usage admitted since the last sync so the other routers
+	// count it, then disconnect from the shared store. This runs after the
+	// agents are gone, so no request can still finish and add usage that
+	// would never be published.
+	if r.shared != nil {
+		r.shared.Close()
 	}
 
 	// 5. Flush the semantic decision log (nil-safe). The HTTP server is still
