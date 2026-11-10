@@ -708,7 +708,7 @@ func BodySHA(body []byte) string {
 // each time with a new token.
 //
 // It is in memory, so on its own a token can be used once per router of the
-// target policloud; with several routers the router wraps it in a guard
+// target site; with several routers the router wraps it in a guard
 // backed by the shared store (see Replayer).
 type ReplayGuard struct {
 	mu        sync.Mutex
