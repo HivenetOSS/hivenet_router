@@ -194,7 +194,7 @@ type Config struct {
 	QuotaBackend string
 
 	// Shared counters (router high availability). With SyncStore "valkey" the
-	// routers of one policloud enforce each key's rate and daily limits
+	// routers of one site enforce each key's rate and daily limits
 	// together through one Valkey; "" or "none" keeps every counter local to
 	// this router. Excludes QuotaBackend "badger".
 	//   SyncValkeyAddrs     comma-separated host:port list — Sentinel

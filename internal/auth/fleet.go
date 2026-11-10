@@ -13,7 +13,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Fleet shares rate and daily usage with the other routers of a policloud
+// Fleet shares rate and daily usage with the other routers of a site
 // (implemented by *shared.Store). Each router keeps deciding locally; the
 // fleet publishes what it admitted and hands back what the others admitted.
 type Fleet interface {
@@ -30,7 +30,7 @@ type Fleet interface {
 	Silent() int
 	// SilentEpoch changes whenever the set of silent routers changes.
 	SilentEpoch() uint64
-	// DailyTotal returns the policloud's usage today for a daily bucket and
+	// DailyTotal returns the site's usage today for a daily bucket and
 	// the last usage entry the total includes. It fails at once, without
 	// waiting, while the store does not answer.
 	DailyTotal(ctx context.Context, bucket string) (total int, mark string, err error)
@@ -78,7 +78,7 @@ func fleetShare(burst int, f Fleet) int {
 
 // lease is one bucket's per-router state with shared counters.
 //
-// Each router's bucket is its view of the policloud-wide bucket: full burst,
+// Each router's bucket is its view of the site-wide bucket: full burst,
 // refilled at the full rate, minus what every router spent (its own at once,
 // the others' at each sync). Between two syncs it cannot see the others, so it
 // may spend at most its share — 1/N — of what the bucket held at the last
