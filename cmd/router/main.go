@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -102,6 +103,7 @@ func main() {
 	syncPasswordFile := flag.String("sync-valkey-password-file", "", "Path to a file holding the Valkey (and Sentinel) password (env: HIVENET_ROUTER_SYNC_VALKEY_PASSWORD)")
 	syncTLS := flag.Bool("sync-valkey-tls", cfg.SyncValkeyTLS, "Connect to Valkey and Sentinel with TLS (env: HIVENET_ROUTER_SYNC_VALKEY_TLS)")
 	syncTLSCA := flag.String("sync-valkey-tls-ca-file", cfg.SyncValkeyTLSCA, "PEM CA bundle that verifies Valkey and Sentinel with --sync-valkey-tls; empty uses the system roots (env: HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE)")
+	advertiseGRPC := flag.String("advertise-grpc-addr", cfg.AdvertiseGRPCAddr, "gRPC address (host:port) agents reach this router at; with --sync-store the routers share it so agents find every router of the site (env: HIVENET_ROUTER_ADVERTISE_GRPC_ADDR)")
 	syncSite := flag.String("sync-site", cfg.SyncSite, "Name of this site in the shared store: every router of the site uses the same one. Defaults to --site-id, else \"default\". Unlike --site-id it does not turn on cross-site redirect (env: HIVENET_ROUTER_SYNC_SITE)")
 	syncMinRouters := flag.Int("sync-min-routers", max(cfg.SyncMinRouters, 1), "Routers of this site assumed while Valkey is unreachable or before it first answers; set it to the number of routers, so each one enforces its share (env: HIVENET_ROUTER_SYNC_MIN_ROUTERS)")
 	syncInterval := flag.Duration("sync-interval", cfg.SyncInterval, "How often the routers exchange usage, between 100ms and 10s (env: HIVENET_ROUTER_SYNC_INTERVAL)")
@@ -235,6 +237,15 @@ func main() {
 	cfg.SyncValkeyTLSCA = *syncTLSCA
 	cfg.SyncInterval = *syncInterval
 	cfg.SyncSite = strings.TrimSpace(*syncSite)
+	cfg.AdvertiseGRPCAddr = strings.TrimSpace(*advertiseGRPC)
+	if cfg.AdvertiseGRPCAddr != "" {
+		if _, port, err := net.SplitHostPort(cfg.AdvertiseGRPCAddr); err != nil || port == "" {
+			log.Fatalf("--advertise-grpc-addr must be host:port, got %q", cfg.AdvertiseGRPCAddr)
+		}
+		if cfg.SyncStore == "" || cfg.SyncStore == "none" {
+			log.Warnf("--advertise-grpc-addr has no effect without --sync-store: the routers have nowhere to share it")
+		}
+	}
 	cfg.SyncMinRouters = *syncMinRouters
 	cfg.RouterID = strings.TrimSpace(*routerID)
 	if *syncPasswordFile != "" {
