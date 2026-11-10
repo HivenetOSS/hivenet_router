@@ -444,3 +444,52 @@ func TestNewRejectsBadSiteIDAndCA(t *testing.T) {
 		}
 	}
 }
+
+// A router that stops heartbeating without being replaced may only have lost
+// the store: it keeps enforcing its share on its own. The others keep that
+// share free, so together the site stays within the limit.
+func TestSilentRouterShareKeptFree(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 3)
+	rs[0].cancel() // r0 stops syncing but does not shut down
+	waitFor(t, 3*time.Second, "r0 to be silent", func() bool {
+		return rs[1].store.Silent() == 1 && rs[2].store.Silent() == 1
+	})
+	const rpm, tpd, cost = 120, 3000, 10
+	allowed, spent := 0, 0
+	for i := 0; i < 600; i++ {
+		r := rs[1+i%2]
+		if ok, _, _ := r.rate.AllowRequest("t", "", rpm); ok {
+			allowed++
+		}
+		if ok, _, _ := r.rate.AllowInputTokens("d", "", tpd, cost); ok {
+			spent += cost
+		}
+		if i%30 == 0 {
+			time.Sleep(interval + interval/2)
+		}
+	}
+	// r1 and r2 keep r0's third free: about 2/3 of the burst plus refill.
+	if allowed > rpm*2/3+15 {
+		t.Fatalf("r1 and r2 admitted %d requests against %d with a third kept for r0", allowed, rpm*2/3)
+	}
+	if allowed < rpm/2 {
+		t.Fatalf("r1 and r2 admitted only %d: far too strict", allowed)
+	}
+	if spent > tpd*2/3+tpd/50 {
+		t.Fatalf("r1 and r2 spent %d tokens of a %d daily budget with a third kept for r0", spent, tpd)
+	}
+}
+
+// A router that shuts down leaves the live set: it is not silent, and the
+// others may use the whole limit.
+func TestClosedRouterIsNotSilent(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 3)
+	rs[0].cancel()
+	rs[0].store.Close()
+	time.Sleep(6 * interval)
+	if n := rs[1].store.Silent(); n != 0 {
+		t.Fatalf("a router that shut down counts as silent (%d)", n)
+	}
+}

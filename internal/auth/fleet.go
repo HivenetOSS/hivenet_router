@@ -25,6 +25,11 @@ type Fleet interface {
 	DegradedEpoch() uint64
 	// SyncSeq changes each time the other routers' usage has been applied.
 	SyncSeq() uint64
+	// Silent is the number of routers that stopped heartbeating but were not
+	// replaced: each may still enforce its share of every limit on its own.
+	Silent() int
+	// SilentEpoch changes whenever the set of silent routers changes.
+	SilentEpoch() uint64
 	// DailyTotal returns the policloud's usage today for a daily bucket and
 	// the last usage entry the total includes. It fails at once, without
 	// waiting, while the store does not answer.
@@ -107,9 +112,26 @@ func (ls *leases) reset() {
 	ls.m.Range(func(k, _ any) bool { ls.m.Delete(k); return true })
 }
 
-// allowShared admits n tokens from lim under the fleet rules above. oversize
+// silentCharge is what n uses cost the live routers while some routers are
+// silent: each use counts (live + silent) ÷ live times, so the live routers
+// together use at most live ÷ (live + silent) of a rate limit and leave the
+// silent routers the share they may still be spending on their own.
+func silentCharge(f Fleet, n int) int {
+	if f == nil || f.DegradedEpoch() != 0 {
+		return n
+	}
+	s := f.Silent()
+	if s <= 0 || n <= 0 {
+		return n
+	}
+	nr := max(f.Size(), 1)
+	return (n*(nr+s) + nr - 1) / nr
+}
+
+// allowShared admits n tokens from lim under the fleet rules above, and
+// returns what it charged (see silentCharge), the usage to publish. oversize
 // lets a full bucket admit more than its burst (one maximum-size prompt).
-func allowShared(f Fleet, ls *leases, key string, lim *rate.Limiter, n int, oversize bool) bool {
+func allowShared(f Fleet, ls *leases, key string, lim *rate.Limiter, n int, oversize bool) (bool, int) {
 	now := time.Now()
 	nr := f.Size()
 	le := ls.get(key)
@@ -133,24 +155,25 @@ func allowShared(f Fleet, ls *leases, key string, lim *rate.Limiter, n int, over
 		if ok {
 			debit(lim, n)
 		}
-		return ok
+		return ok, n
 	}
 	le.deg = nil
-	if nr <= 1 {
-		return allowLocal(lim, n, oversize, now)
+	n = silentCharge(f, n)
+	if nr <= 1 && f.Silent() == 0 {
+		return allowLocal(lim, n, oversize, now), n
 	}
 	if seq := f.SyncSeq(); le.seq != seq {
 		le.seq, le.spent = seq, 0
 		le.cap = max(1, int(lim.TokensAt(now))/nr)
 	}
 	if le.spent > 0 && le.spent+n > le.cap {
-		return false
+		return false, n
 	}
 	if !allowLocal(lim, n, oversize, now) {
-		return false
+		return false, n
 	}
 	le.spent += n
-	return true
+	return true, n
 }
 
 func allowLocal(lim *rate.Limiter, n int, oversize bool, now time.Time) bool {
