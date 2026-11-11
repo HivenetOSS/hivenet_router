@@ -1597,7 +1597,10 @@ func (m *RouterMetrics) AgentHardwareUnregistered(peerID, region, model, engine,
 // retains its previous value, preventing false-zero series when the engine does
 // not expose a particular metric.
 // Called by EnginePunctualStore on each heartbeat that carries backend metrics.
-func (m *RouterMetrics) AgentEnginePunctualUpdated(peerID, model, engine, organization, machine string, bm *domain.BackendMetrics) {
+//
+// deploymentID labels the engine histograms only (see engineHistogramLabels);
+// the scalar gauges keep their shared label set.
+func (m *RouterMetrics) AgentEnginePunctualUpdated(peerID, model, engine, organization, machine, deploymentID string, bm *domain.BackendMetrics) {
 	labels := prometheus.Labels{"peer_id": peerID, "model": model, "engine": engine, "organization": organization, "machine": machine}
 	if bm.KVCacheUtilization != nil {
 		m.engineKVCache.With(labels).Set(*bm.KVCacheUtilization)
@@ -1632,7 +1635,7 @@ func (m *RouterMetrics) AgentEnginePunctualUpdated(peerID, model, engine, organi
 
 	// Feed the custom collector with any histogram snapshots the engine
 	// reported. Nil snapshots leave the prior value unchanged.
-	m.engineHistograms.update(peerID, model, engine, organization, machine, bm)
+	m.engineHistograms.update(peerID, model, engine, organization, machine, deploymentID, bm)
 
 	// Finish-reason counter: compute deltas from the last cumulative snapshot
 	// and Add() positive increments. First heartbeat after startup has no
@@ -1670,7 +1673,7 @@ func (m *RouterMetrics) AgentEnginePunctualUnregistered(peerID, model, engine, o
 
 	// Clear histogram snapshots and finish-reason tracker state so no
 	// zombie series linger after the agent disconnects.
-	m.engineHistograms.remove(peerID, model, engine, organization, machine)
+	m.engineHistograms.remove(peerID)
 	m.engineFinishState.clear(engineSnapshotKey(peerID, model, engine, organization, machine))
 
 	// Remove every finished_reason variant for this peer in one call —
