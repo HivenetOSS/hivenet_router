@@ -145,6 +145,56 @@ vllm:time_to_first_token_seconds_count 10
 	}
 }
 
+// TestVLLM_ScrapeMetrics_DecodeTime pins that the agent ships vLLM's
+// per-request decode-time histogram, which the router re-exports as
+// hivenet_agent_engine_request_decode_time_seconds (the output-speed
+// denominator).
+func TestVLLM_ScrapeMetrics_DecodeTime(t *testing.T) {
+	metricsText := `vllm:request_decode_time_seconds_bucket{le="1.0"} 4
+vllm:request_decode_time_seconds_bucket{le="5.0"} 10
+vllm:request_decode_time_seconds_bucket{le="+Inf"} 10
+vllm:request_decode_time_seconds_sum 16.0
+vllm:request_decode_time_seconds_count 10
+`
+	url, cl := vllmBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			io.WriteString(w, metricsText)
+		}
+	})
+
+	m, err := (&agent.VLLMEngine{}).ScrapeMetrics(context.Background(), url, cl)
+	if err != nil {
+		t.Fatalf("ScrapeMetrics: %v", err)
+	}
+	h := m.DecodeTimeHistogram
+	if h == nil {
+		t.Fatal("DecodeTimeHistogram is nil")
+	}
+	if h.Sum != 16 || h.Count != 10 {
+		t.Errorf("decode sum/count = %v/%v, want 16/10", h.Sum, h.Count)
+	}
+	if len(h.Buckets) == 0 {
+		t.Error("decode histogram has no buckets")
+	}
+}
+
+// TestVLLM_ScrapeMetrics_NoDecodeTime pins that an engine build without the
+// decode histogram leaves the field nil (no series), never a zero histogram.
+func TestVLLM_ScrapeMetrics_NoDecodeTime(t *testing.T) {
+	url, cl := vllmBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			io.WriteString(w, "vllm:num_requests_running 1\n")
+		}
+	})
+	m, err := (&agent.VLLMEngine{}).ScrapeMetrics(context.Background(), url, cl)
+	if err != nil {
+		t.Fatalf("ScrapeMetrics: %v", err)
+	}
+	if m.DecodeTimeHistogram != nil {
+		t.Errorf("DecodeTimeHistogram = %+v, want nil", m.DecodeTimeHistogram)
+	}
+}
+
 func TestVLLM_ForwardChat(t *testing.T) {
 	e := &agent.VLLMEngine{}
 

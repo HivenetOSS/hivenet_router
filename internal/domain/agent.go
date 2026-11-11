@@ -300,6 +300,14 @@ type BackendMetrics struct {
 	// Re-exported as hivenet_agent_engine_request_generation_tokens_{bucket,sum,count}.
 	GenerationTokensHistogram *HistogramSnapshot `json:"generation_tokens_histogram,omitempty"`
 
+	// DecodeTimeHistogram is the per-request decode-phase duration histogram
+	// (seconds): first token to last token, excluding prefill. Source:
+	// vllm:request_decode_time_seconds (vLLM only). Re-exported as
+	// hivenet_agent_engine_request_decode_time_seconds_{bucket,sum,count}; its
+	// _sum, paired with the generation-tokens histogram's _sum, gives a
+	// deployment's measured output speed (decode tokens / decode seconds).
+	DecodeTimeHistogram *HistogramSnapshot `json:"decode_time_histogram,omitempty"`
+
 	// FinishReasonCounts maps vLLM finished_reason label values (stop, length,
 	// abort, etc.) to cumulative request counts observed on the engine since it
 	// last restarted. The router computes deltas across snapshots and increments
