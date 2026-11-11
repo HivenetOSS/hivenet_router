@@ -39,11 +39,11 @@ func NewEnginePunctualStore(s storage.RoutingStorage, m *RouterMetrics) *EngineP
 // Prometheus gauges. Nil pointer fields in bm are silently skipped — the gauge
 // retains its previous value. The entire operation runs under mu.
 // Called from both handleRoutingSignals (~500ms, primary) and handleAgentHeartbeat (~5s, fallback).
-func (e *EnginePunctualStore) Update(peerID peer.ID, model, engine, organization, machine string, bm *domain.BackendMetrics) {
+func (e *EnginePunctualStore) Update(peerID peer.ID, model, engine, organization, machine, deploymentID string, bm *domain.BackendMetrics) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.m.AgentEnginePunctualUpdated(peerID.String(), model, engine, organization, machine, bm)
+	e.m.AgentEnginePunctualUpdated(peerID.String(), model, engine, organization, machine, deploymentID, bm)
 
 	if err := e.storage.SetEnginePunctual(peerID, bm); err != nil {
 		log.Warnf("EnginePunctualStore.Update: storage write failed for %s: %v", peerID, err)

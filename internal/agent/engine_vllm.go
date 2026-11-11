@@ -134,6 +134,12 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 	genCount := metricVal(scalars, "vllm:request_generation_tokens_count")
 	m.GenerationTokensHistogram = bucketsToSnapshot(buckets["vllm:request_generation_tokens"], genSum, genCount)
 
+	// Per-request decode duration (first token → last token). Paired with the
+	// generation-tokens histogram it yields measured output speed.
+	decodeSum := metricVal(scalars, "vllm:request_decode_time_seconds_sum")
+	decodeCount := metricVal(scalars, "vllm:request_decode_time_seconds_count")
+	m.DecodeTimeHistogram = bucketsToSnapshot(buckets["vllm:request_decode_time_seconds"], decodeSum, decodeCount)
+
 	// Finish-reason breakdown. parsePrometheusTextFull captures this from
 	// vllm:request_success_total{finished_reason=...} label variants — the
 	// default scalar map only retains one series per metric name, so a
