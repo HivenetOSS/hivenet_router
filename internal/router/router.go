@@ -467,6 +467,7 @@ func New(cfg *config.Config) (*Router, error) {
 	if r, ok := rateLimiter.(flushErrorReporter); ok {
 		r.SetOnFlushError(routerMetrics.QuotaBackendError)
 	}
+
 	r := &Router{
 		cfg:                  cfg,
 		storage:              store,
@@ -937,6 +938,7 @@ func (r *Router) watchPolicyReload() {
 			log.Info("SIGHUP received but neither --policy-file, --policy-model-dir, nor --auth-config-file is configured — ignoring")
 			continue
 		}
+
 		// Reload auth providers on every SIGHUP. When --auth-config-file is set this
 		// re-parses the file and re-reads HIVENET_ROUTER_ADMIN_API_KEYS from ENV, enabling
 		// live key rotation without a restart. When no auth config file is configured
