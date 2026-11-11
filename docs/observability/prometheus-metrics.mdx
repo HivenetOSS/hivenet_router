@@ -689,7 +689,12 @@ hivenet_agent_engine_ttft_seconds
 hivenet_agent_engine_itl_seconds
 hivenet_agent_engine_request_prompt_tokens
 hivenet_agent_engine_request_generation_tokens
+hivenet_agent_engine_request_decode_time_seconds
 ```
+
+`hivenet_agent_engine_request_decode_time_seconds` is the per-request decode phase (first token to last token, excluding prefill), re-exported from `vllm:request_decode_time_seconds`.
+
+Every engine histogram carries the labels `peer_id`, `model`, `engine`, `organization`, `machine` and `deployment_id`. `deployment_id` is the agent's `HIVENET_ROUTER_DEPLOYMENT_ID`, or `unset` when the agent does not set one (the same value the tenant metrics use). It is on the histograms only; the scalar engine gauges keep their label set.
 
 Prometheus exposes each histogram as:
 
@@ -723,6 +728,35 @@ histogram_quantile(
     )
   )
 )
+```
+
+### Median TTFT for one deployment
+
+```promql
+histogram_quantile(
+  0.5,
+  sum by (le) (
+    rate(
+      hivenet_agent_engine_ttft_seconds_bucket{deployment_id="<id>"}[24h]
+    )
+  )
+)
+```
+
+The router selects an agent by model, not by deployment, so a deployment's series reflect only its own traffic when its agents serve no other deployment.
+
+### Output speed for one deployment
+
+vLLM produces the first token during prefill, so decode time covers one token fewer than the generated count. Subtract the request count from the generated tokens:
+
+```promql
+(
+  sum(rate(hivenet_agent_engine_request_generation_tokens_sum{deployment_id="<id>"}[24h]))
+  -
+  sum(rate(hivenet_agent_engine_request_generation_tokens_count{deployment_id="<id>"}[24h]))
+)
+/
+sum(rate(hivenet_agent_engine_request_decode_time_seconds_sum{deployment_id="<id>"}[24h]))
 ```
 
 ### Fleet P90 ITL
