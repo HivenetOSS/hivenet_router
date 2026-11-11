@@ -467,7 +467,6 @@ func New(cfg *config.Config) (*Router, error) {
 	if r, ok := rateLimiter.(flushErrorReporter); ok {
 		r.SetOnFlushError(routerMetrics.QuotaBackendError)
 	}
-
 	r := &Router{
 		cfg:                  cfg,
 		storage:              store,
@@ -938,7 +937,6 @@ func (r *Router) watchPolicyReload() {
 			log.Info("SIGHUP received but neither --policy-file, --policy-model-dir, nor --auth-config-file is configured — ignoring")
 			continue
 		}
-
 		// Reload auth providers on every SIGHUP. When --auth-config-file is set this
 		// re-parses the file and re-reads HIVENET_ROUTER_ADMIN_API_KEYS from ENV, enabling
 		// live key rotation without a restart. When no auth config file is configured
@@ -1698,7 +1696,9 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		r.hardware.Update(session.PeerID, region, model, engine, organization, machine, payload.Hardware)
 	}
 	if payload.BackendMetrics != nil {
-		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
+		// deployment_id is registration metadata (the /register body), so it
+		// lives on the registry agent, not on the gRPC session metadata.
+		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, a.Metadata.DeploymentID, payload.BackendMetrics)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1751,7 +1751,8 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 
 	// O(1) lookup: session.PeerID was set by LinkPeerID during /register.
 	// Verify the agent is still in the registry (may have been removed by the health monitor).
-	if r.agents.Get(session.PeerID) == nil {
+	a := r.agents.Get(session.PeerID)
+	if a == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
@@ -1763,7 +1764,7 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	machine := session.Metadata.Machine
 
 	if payload.BackendMetrics != nil {
-		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
+		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, a.Metadata.DeploymentID, payload.BackendMetrics)
 	}
 	if payload.Hardware != nil {
 		r.hardware.Update(session.PeerID, region, model, engine, organization, machine, payload.Hardware)
