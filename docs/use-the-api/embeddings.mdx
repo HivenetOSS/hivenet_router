@@ -245,7 +245,7 @@ Authorization: Bearer <api-key>
 
 An API key can limit access to particular models.
 
-A request for a model outside the key’s allowlist returns HTTP `403`:
+The allowlist is the key's `models` / `allowed_models` list, or the models in its `quota.per_model` block, the same as for chat completions. A request for a model outside it returns HTTP `403`:
 
 ```json
 {

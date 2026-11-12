@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
@@ -334,5 +336,130 @@ func TestIsolation_RateLimitHeadersArePerKey(t *testing.T) {
 	}
 	if got := remaining(isoKeyB); got != "9" {
 		t.Errorf("key a2 first request: remaining %q, want 9 (a1's requests are not counted)", got)
+	}
+}
+
+// aclServer is a full api.Server whose storage lists models "chat" and
+// "coder", with the "auto" semantic alias over both, three keys of one tenant
+// ("open" has no allowlist, "listed" lists chat, "permodel" declares a
+// per-model quota for chat) and the given isolation switches.
+func aclServer(t *testing.T, iso api.Isolation) *isoServer {
+	t.Helper()
+	exec := policy.NewExecutor(nil, nil, policy.Default(), 3, 0)
+	doc, err := policy.LoadModelDocBytes([]byte(aliasDocYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.SetNamedPolicy("auto", doc); err != nil {
+		t.Fatal(err)
+	}
+	healthy := func(string) int { return 1 }
+	q := make(chan *domain.PendingRequest, 8)
+	lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000}
+	h := api.NewHandlers(aliasStorage{models: []string{"chat", "coder"}}, nil, q, 2*time.Second,
+		exec, nil, nil, lim, nil, nil, nil, nil, nil, nil, healthy, nil, nil, nil, nil, nil, nil, nil)
+	h.SetIsolation(iso)
+	rpm, tpd := 100, 0
+	prov, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{
+		{KeyHash: sha256Hex("open"), Metadata: auth.KeyMetadata{Name: "open", Owner: "t"}},
+		{KeyHash: sha256Hex("listed"), Metadata: auth.KeyMetadata{Name: "listed", Owner: "t"}, Models: []string{"chat"}},
+		{KeyHash: sha256Hex("permodel"), Metadata: auth.KeyMetadata{Name: "permodel", Owner: "t"},
+			Quota: auth.QuotaConfig{PerModel: map[string]*auth.PerModelQuotaConfig{"chat": {RequestsPerMinutePerReplica: &rpm, TokensPerDay: &tpd}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &isoServer{srv: api.NewServer(h, ":0", prov, prov, lim, metrics.NewRouterMetrics(), healthy, 1<<20), queue: q}
+}
+
+// call sends one request and, when it reaches the queue, answers it.
+func (s *isoServer) call(t *testing.T, method, path, body, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	var b []byte
+	if body != "" {
+		b = []byte(body)
+	}
+	go func() { done <- s.do(method, path, b, bearerOf(key)) }()
+	select {
+	case w := <-done:
+		return w
+	case p := <-s.queue:
+		p.Response <- &domain.ChatResponse{RawBytes: []byte(`{"served":true}`)}
+		return <-done
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s %s: no response", method, path)
+		return nil
+	}
+}
+
+// TestIsolation_RequireModelAllowlist: with RequireModelAllowlist on, a key
+// without an allowlist can neither call nor list any model: chat, messages,
+// embeddings, rerank, the auto alias, /v1/models and /v1/models/:model all
+// refuse it. Keys with an allowlist (models or per_model) are unaffected, and
+// with the switch off an unrestricted key still reaches every model.
+func TestIsolation_RequireModelAllowlist(t *testing.T) {
+	chat := `{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":5}`
+	calls := []struct{ name, path, body string }{
+		{"chat", "/v1/chat/completions", fmt.Sprintf(chat, "chat")},
+		{"messages", "/v1/messages", fmt.Sprintf(chat, "chat")},
+		{"embeddings", "/v1/embeddings", `{"model":"chat","input":"x"}`},
+		{"rerank", "/v1/rerank", `{"model":"chat","query":"q","documents":["d"]}`},
+		{"auto alias", "/v1/chat/completions", fmt.Sprintf(chat, "auto")},
+	}
+	for _, required := range []bool{false, true} {
+		s := aclServer(t, api.Isolation{RequireModelAllowlist: required})
+		for _, key := range []string{"open", "listed", "permodel"} {
+			denied := required && key == "open"
+			for _, c := range calls {
+				w := s.call(t, http.MethodPost, c.path, c.body, key)
+				if denied != (w.Code == http.StatusForbidden) {
+					t.Errorf("required=%v key=%s %s: status %d, want denied=%v; body %s", required, key, c.name, w.Code, denied, w.Body)
+				}
+			}
+			list := s.call(t, http.MethodGet, "/v1/models", "", key)
+			if listsChat := strings.Contains(list.Body.String(), `"chat"`); listsChat == denied {
+				t.Errorf("required=%v key=%s /v1/models lists chat=%v; body %s", required, key, listsChat, list.Body)
+			}
+			if w := s.call(t, http.MethodGet, "/v1/models/chat", "", key); denied != (w.Code == http.StatusNotFound) {
+				t.Errorf("required=%v key=%s /v1/models/chat: status %d, want hidden=%v", required, key, w.Code, denied)
+			}
+		}
+	}
+
+	// A model miss that would be redirected to a sibling policloud is not
+	// redirected for a key without an allowlist: no token is minted for it.
+	t.Run("redirect", func(t *testing.T) {
+		a := newSiteWith(t, "a", nil, testKeys(t), api.Isolation{RequireModelAllowlist: true})
+		push(t, fleetDoc(1), a)
+		w := send(a, chatPath, chatBody, scoped("all"))
+		if w.Code != http.StatusForbidden || w.Header().Get("Location") != "" || len(a.redirs) != 0 {
+			t.Fatalf("status %d Location %q redirects %v, want 403 and no redirect", w.Code, w.Header().Get("Location"), a.redirs)
+		}
+	})
+}
+
+// TestEmbeddings_HonoursEffectiveAllowlist: embeddings and rerank apply the
+// same allowlist as chat, including a per_model quota block acting as the
+// allowlist. Before, they read only allowed_models, so a per_model key's
+// allowlist was enforced only indirectly by the quota layer.
+func TestEmbeddings_HonoursEffectiveAllowlist(t *testing.T) {
+	perModel := auth.QuotaLimits{PerModel: map[string]auth.PerModelQuotaLimits{"e": {}}}
+	for _, tc := range []struct {
+		path, body string
+		run        func(*api.Handlers, *gin.Context)
+	}{
+		{"/v1/embeddings", `{"model":"other","input":"x"}`, (*api.Handlers).Embeddings},
+		{"/v1/rerank", `{"model":"other","query":"q","documents":["d"]}`, (*api.Handlers).Rerank},
+	} {
+		q := make(chan *domain.PendingRequest, 1)
+		h := newTestHandlers(q, &fakeLimiter{})
+		c, w := newCtx(tc.path, []byte(tc.body))
+		c.Set("tenant_id", "t")
+		c.Set("quota_limits", perModel)
+		tc.run(h, c)
+		if w.Code != http.StatusForbidden || len(q) != 0 {
+			t.Errorf("%s for a model outside the per_model allowlist: status %d queued %d, want 403 and nothing queued", tc.path, w.Code, len(q))
+		}
 	}
 }
