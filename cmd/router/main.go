@@ -18,7 +18,6 @@ package main
 import (
 	"context"
 	"flag"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -239,8 +238,8 @@ func main() {
 	cfg.SyncSite = strings.TrimSpace(*syncSite)
 	cfg.AdvertiseGRPCAddr = strings.TrimSpace(*advertiseGRPC)
 	if cfg.AdvertiseGRPCAddr != "" {
-		if _, port, err := net.SplitHostPort(cfg.AdvertiseGRPCAddr); err != nil || port == "" {
-			log.Fatalf("--advertise-grpc-addr must be host:port, got %q", cfg.AdvertiseGRPCAddr)
+		if err := config.ValidAdvertiseAddr(cfg.AdvertiseGRPCAddr); err != nil {
+			log.Fatalf("--advertise-grpc-addr: %v", err)
 		}
 		if cfg.SyncStore == "" || cfg.SyncStore == "none" {
 			log.Warnf("--advertise-grpc-addr has no effect without --sync-store: the routers have nowhere to share it")

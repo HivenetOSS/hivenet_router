@@ -158,13 +158,18 @@ Keeping every agent's `--routers` up to date is easy to get wrong. Instead, set 
 --advertise-grpc-addr router-0.router-headless:50051
 ```
 
+The address must name a host agents can dial and a numeric port: a listen address such as `:50051` or `0.0.0.0:50051` is refused at startup.
+
 Each router publishes its address with its heartbeat in the store. Every router hands the agents the live routers of the site that advertise one: in the authentication response, then in every heartbeat reply. An agent then:
 
 - opens a session with every listed router it has no session with, so a router added to the site gets the agents within one heartbeat (default 5 s);
 - needs only one reachable router in `--routers`, which becomes the starting list (it may be a DNS name);
-- closes the session of a discovered router only once that router has been missing from every list for 2 minutes and its session is down. A short or empty list (the store unreachable, a router restarting) changes nothing, and the routers in `--routers` are never closed.
+- recognizes a router it already reaches under another address (a `--routers` DNS name, the router listed under its pod IP) by its peer ID, and opens no second session to it. A router listed under a new address is dialed there once its old session is down;
+- closes the session of a discovered router only once that router has been missing from every list for 2 minutes and its session is down, or at once when one of its `--routers` entries already reaches it. A short or empty list (a router restarting) changes nothing, and the routers in `--routers` are never closed.
 
-At most 32 routers are taken from a list. The list comes only from routers the agent authenticated with, and a listed address is useless without the site's JWT secret. The list holds the same live routers the occupancy budgets are divided by, so a router that counts in the division also gets the agents.
+While the store is unreachable, the routers hand out no list, since they can no longer tell which routers are alive.
+
+An agent keeps at most 32 discovered routers. The list comes only from routers the agent authenticated with, and a listed address is useless without the site's JWT secret. The list holds the same live routers the occupancy budgets are divided by, so a router that counts in the division also gets the agents.
 
 Older agents ignore the list; routers without `--advertise-grpc-addr` are not listed, and agents keep the sessions from their `--routers`.
 

@@ -1764,23 +1764,11 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	reply := heartbeatReply{}
+	reply := domain.HeartbeatReply{}
 	for _, sr := range r.siteRouters() {
-		reply.Routers = append(reply.Routers, siteRouterJSON{GRPCAddr: sr.GetGrpcAddr(), PeerID: sr.GetPeerId()})
+		reply.Routers = append(reply.Routers, domain.SiteRouter{GRPCAddr: sr.GetGrpcAddr(), PeerID: sr.GetPeerId()})
 	}
 	_ = json.NewEncoder(w).Encode(reply)
-}
-
-// heartbeatReply answers an agent's heartbeat. Routers lists the site's live
-// routers that advertise an address (see siteRouters); older agents ignore
-// the body.
-type heartbeatReply struct {
-	Routers []siteRouterJSON `json:"routers,omitempty"`
-}
-
-type siteRouterJSON struct {
-	GRPCAddr string `json:"grpc_addr"`
-	PeerID   string `json:"peer_id"`
 }
 
 // maxSiteRouters bounds the list handed to agents.

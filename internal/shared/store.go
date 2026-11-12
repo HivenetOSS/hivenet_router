@@ -296,7 +296,8 @@ type SiteRouter struct {
 }
 
 // SiteRouters returns the live routers of the site that advertise an address,
-// as of the last successful tick (nil before it). Agents use it to connect to
+// as of the last successful tick (nil before it, and while the store is
+// unreachable). Agents use it to connect to
 // every router (see --advertise-grpc-addr).
 func (s *Store) SiteRouters() []SiteRouter {
 	if p := s.site.Load(); p != nil {
@@ -1036,6 +1037,12 @@ func (s *Store) failTick(buf map[usageKey]*usageVal, err error) {
 	s.fullNext = true
 	s.mu.Unlock()
 	s.m.errors.Inc()
+	if time.Since(s.lastOK) >= s.cfg.DownAfter {
+		// The list of live routers can no longer be refreshed: stop handing
+		// it out, or agents keep dialing routers that died meanwhile. They
+		// treat an empty list as "change nothing".
+		s.site.Store(nil)
+	}
 	if time.Since(s.lastOK) >= s.cfg.DownAfter && s.degraded.Load() == 0 {
 		s.outages++
 		s.degraded.Store(s.outages)

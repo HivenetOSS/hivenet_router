@@ -329,6 +329,7 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 		return false
 	}
 	rs.peer, rs.client = routerPeer, client
+	a.setPeer(rs, routerPeer)
 	a.openSession(routerPeer)
 	defer a.closeSession(routerPeer)
 	// Runs first: its requests are stopped before the router leaves the report.
@@ -563,6 +564,11 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 	for {
 		select {
 		case <-a.stopCh:
+			return
+		case <-rs.stop:
+			// Dropped (see pruneRouters), possibly between authentication
+			// and registration: end the session rather than serve outside
+			// the set.
 			return
 		case <-ticker.C:
 			if err := a.sendHeartbeat(rs); err != nil {
@@ -848,12 +854,7 @@ func (a *Agent) sendHeartbeat(rs *routerSession) error {
 		return fmt.Errorf("heartbeat rejected: HTTP %d", resp.StatusCode)
 	}
 	// The reply lists the site's live routers (older routers send nothing).
-	var reply struct {
-		Routers []struct {
-			GRPCAddr string `json:"grpc_addr"`
-			PeerID   string `json:"peer_id"`
-		} `json:"routers"`
-	}
+	var reply domain.HeartbeatReply
 	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&reply) == nil {
 		list := make([]siteRouter, 0, len(reply.Routers))
 		for _, r := range reply.Routers {
