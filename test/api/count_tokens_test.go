@@ -128,7 +128,7 @@ func TestCountTokens_SkipsDailyBudget(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body %s)", w.Code, w.Body.String())
 	}
-	if remaining, err := lim.RemainingTokens("t1", "", tpd); err != nil || remaining != tpd {
+	if remaining, err := lim.RemainingTokens("t1", "anonymous", "", tpd); err != nil || remaining != tpd {
 		t.Errorf("count_tokens must not charge the daily budget; remaining=%d (want %d), err=%v", remaining, tpd, err)
 	}
 }

@@ -95,12 +95,12 @@ func TestDailyReadAgainAfterTrimmedOutage(t *testing.T) {
 		return a.store.Size() == 2 && b.store.Size() == 2
 	})
 	const tpd = 1000
-	if ok, _, _ := b.rate.AllowInputTokens("t", "", tpd, 1); !ok {
+	if ok, _, _ := b.rate.AllowInputTokens("t", "key", "", tpd, 1); !ok {
 		t.Fatal("b refused")
 	}
 	p.setCut(true)
 	waitFor(t, 5*time.Second, "b to notice the outage", func() bool { return b.store.DegradedEpoch() != 0 })
-	if ok, _, _ := a.rate.AllowInputTokens("t", "", tpd, 500); !ok {
+	if ok, _, _ := a.rate.AllowInputTokens("t", "key", "", tpd, 500); !ok {
 		t.Fatal("a refused")
 	}
 	time.Sleep(3 * interval)   // a publishes its usage and total
@@ -110,7 +110,7 @@ func TestDailyReadAgainAfterTrimmedOutage(t *testing.T) {
 	// A failed read is tried again on the next request (the first one after
 	// a reconnect may hit a connection the cut closed).
 	waitFor(t, 2*time.Second, "b to count a's 500 tokens", func() bool {
-		rem, _ := b.rate.RemainingTokens("t", "", tpd)
+		rem, _ := b.rate.RemainingTokens("t", "key", "", tpd)
 		return rem <= 499
 	})
 }
@@ -120,7 +120,7 @@ func TestDailyReadAgainAfterTrimmedOutage(t *testing.T) {
 func TestIdleTicksPublishNothing(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newFleet(t, mr, 2)
-	rs[0].rate.AllowRequest("t", "", 60)
+	rs[0].rate.AllowRequest("t", "key", "", 60)
 	time.Sleep(3 * interval)
 	stream := usageStream(t, mr)
 	before, _ := mr.Stream(stream)
@@ -137,14 +137,14 @@ func TestRepublishedBatchCountedOnce(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newFleet(t, mr, 2)
 	const tpd = 1000
-	if rem, _ := rs[1].rate.RemainingTokens("t", "", tpd); rem != tpd {
+	if rem, _ := rs[1].rate.RemainingTokens("t", "key", "", tpd); rem != tpd {
 		t.Fatalf("r1 sees %d left, want %d", rem, tpd)
 	}
-	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 100); !ok {
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "key", "", tpd, 100); !ok {
 		t.Fatal("r0 refused")
 	}
 	waitFor(t, 2*time.Second, "r1 to count r0's usage", func() bool {
-		rem, _ := rs[1].rate.RemainingTokens("t", "", tpd)
+		rem, _ := rs[1].rate.RemainingTokens("t", "key", "", tpd)
 		return rem == 900
 	})
 	stream := usageStream(t, mr)
@@ -154,7 +154,7 @@ func TestRepublishedBatchCountedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(3 * interval)
-	if rem, _ := rs[1].rate.RemainingTokens("t", "", tpd); rem != 900 {
+	if rem, _ := rs[1].rate.RemainingTokens("t", "key", "", tpd); rem != 900 {
 		t.Fatalf("r1 sees %d left after the batch came twice, want 900", rem)
 	}
 }

@@ -704,6 +704,7 @@ func (r *Router) Start() error {
 
 	if r.shared != nil {
 		r.shared.Start(processorCtx)
+		go r.publishTenantUsage(processorCtx)
 	}
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
@@ -985,6 +986,39 @@ func (r *Router) watchPolicyReload() {
 				r.metrics.PolicyReload("sighup", "success")
 				log.Infof("SIGHUP: routing policy reloaded from %s", r.cfg.PolicyFile)
 			}
+		}
+	}
+}
+
+// publishTenantUsage refreshes hivenet_tenant_tokens_used_today for every
+// tenant on each sync interval, from the site-wide usage the shared counters
+// keep per tenant. Every router of a site therefore exports the same value
+// (aggregate it with max by (tenant_id), not sum), including for tenants it
+// served nothing for. Only runs with shared counters; without them the
+// limiter reports each change as it happens.
+func (r *Router) publishTenantUsage(ctx context.Context) {
+	type tenantUsage interface{ TenantUsageToday(tenantID string) int }
+	type tenantLister interface {
+		Tenants() map[string]auth.QuotaLimits
+	}
+	usage, ok := r.rateLimiter.(tenantUsage)
+	if !ok {
+		return
+	}
+	t := time.NewTicker(r.cfg.SyncInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		lister, ok := r.apiAuth.Load().(tenantLister)
+		if !ok {
+			continue
+		}
+		for tenant := range lister.Tenants() {
+			r.metrics.TenantSetTokensUsedToday(tenant, usage.TenantUsageToday(tenant))
 		}
 	}
 }

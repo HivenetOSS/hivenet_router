@@ -302,3 +302,37 @@ func TestIsolation_StaticKeysHaveDistinctB4State(t *testing.T) {
 		t.Errorf("key a2 after a1 drained its bucket: %d, want 200 (own bucket)", code)
 	}
 }
+
+// TestIsolation_RateLimitHeadersArePerKey: X-RateLimit-Remaining-Requests
+// describes the calling key's own bucket. Requests on one key of a tenant do
+// not show up in another key's remaining count.
+func TestIsolation_RateLimitHeadersArePerKey(t *testing.T) {
+	quota := auth.QuotaConfig{RequestsPerMinute: 10}
+	prov, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{
+		{KeyHash: sha256Hex(isoKeyA), Metadata: auth.KeyMetadata{Name: "a1", Owner: "tenant-a"}, Quota: quota},
+		{KeyHash: sha256Hex(isoKeyB), Metadata: auth.KeyMetadata{Name: "a2", Owner: "tenant-a"}, Quota: quota},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := gin.New()
+	e.POST("/v1/chat/completions", api.AuthMiddleware(prov),
+		api.QuotaMiddleware(auth.NewInMemoryLimiter(), metrics.NewRouterMetrics(), nil),
+		func(c *gin.Context) { c.Status(http.StatusOK) })
+	remaining := func(key string) string {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+		r.Header.Set("Authorization", "Bearer "+key)
+		e.ServeHTTP(w, r)
+		return w.Header().Get("X-RateLimit-Remaining-Requests")
+	}
+	for range 3 {
+		remaining(isoKeyA)
+	}
+	if got := remaining(isoKeyA); got != "6" {
+		t.Errorf("key a1 after 4 requests: remaining %q, want 6", got)
+	}
+	if got := remaining(isoKeyB); got != "9" {
+		t.Errorf("key a2 first request: remaining %q, want 9 (a1's requests are not counted)", got)
+	}
+}

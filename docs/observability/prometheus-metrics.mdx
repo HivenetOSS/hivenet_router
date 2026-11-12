@@ -1247,7 +1247,7 @@ tenant_id
 
 A value of `0` means unlimited.
 
-These gauges describe keys using the flat quota shape.
+These gauges describe keys using the flat quota shape. Limits are enforced per key; the gauge is the tenant's total ceiling, the sum of its flat-shape keys' limits (`0` if any of them is unlimited). It is set at startup, on reload and whenever the key registry changes.
 
 ### Per-model quota limits
 
@@ -1270,7 +1270,7 @@ requests per minute per replica
 × healthy replicas
 ```
 
-It can change as agent health and fleet size change.
+It can change as agent health and fleet size change. When several keys of one tenant declare the same model, the RPM gauge shows the effective ceiling of the key that was admitted last; the TPD gauge is the sum over those keys.
 
 ### Tokens used today
 
@@ -1284,15 +1284,21 @@ Label:
 tenant_id
 ```
 
-The value resets at midnight UTC.
+The value is the tenant's tokens used today, summed over all its keys and models that have a daily token budget (`tokens_per_day`); traffic on keys without one is not metered by the daily limiter, so count it with `hivenet_tenant_input_tokens_total` and `hivenet_tenant_output_tokens_total`. It counts only tokens that were charged: a request refused for its daily budget adds nothing. It resets at midnight UTC.
+
+With [shared counters](/deploy/multiple-routers) the value is the site total: every router of the site refreshes it for every tenant on each `--sync-interval`, so every router exports the same value. Aggregate it with `max`, not `sum`, which would count it once per router:
+
+```promql
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
+```
 
 Token-budget utilization for flat quotas:
 
 ```promql
-hivenet_tenant_tokens_used_today
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
 /
 clamp_min(
-  hivenet_tenant_quota_tpd_limit,
+  max by (tenant_id) (hivenet_tenant_quota_tpd_limit),
   1
 )
 ```

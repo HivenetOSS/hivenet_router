@@ -15,6 +15,7 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Requests per minute | Yes | Within one sync interval of usage |
 | Input and output tokens per minute | Yes | Within one sync interval of usage |
 | Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
+| Tenant usage today (`hivenet_tenant_tokens_used_today`) | Yes | Every router reports the site total for every tenant, refreshed each sync interval; aggregate it with `max by (tenant_id)` |
 | Occupancy budgets (B2, B4) | No | Each router admits its share: the budget and `max_inflight` divided by the live routers, so the routers together stay within them |
 | Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
 | Dynamic API keys | No | Push key changes to every router |
@@ -90,6 +91,10 @@ hivenet-router \
 <Warning>
   The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
 </Warning>
+
+<Note>
+  Limits are counted per key, and the shared counters are named with a version marker. Routers older than per-key counting kept one bucket per tenant; during a rolling upgrade the old and new routers do not add to each other's counters, so until the last router is upgraded each group enforces the limits on its own. Each key's daily count starts from zero once on upgrade.
+</Note>
 
 ## Connect agents to every router
 
