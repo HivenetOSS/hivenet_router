@@ -312,6 +312,48 @@ Start the second agent with a different model and identity:
 
 When several agents run on the same host, each one needs a separate `--identity-path` so every process keeps a distinct peer identity.
 
+## Isolate tenants in the prefix cache
+
+vLLM's automatic prefix caching shares cached prompt blocks between every request with the same prefix. When several customers share one vLLM server, a faster first token can reveal that another customer sent the same prefix (vLLM advisory CVE-2025-46570). vLLM's per-request `cache_salt` field closes this: only requests with the same salt share cached blocks.
+
+Start the router with `--cache-salt` (`HIVENET_ROUTER_CACHE_SALT=true`) and a salt secret to have Hivenet Router set the salt itself:
+
+```bash
+openssl rand -base64 48 > /etc/hivenet-router/cache-salt.secret
+
+hivenet-router \
+  --cache-salt \
+  --cache-salt-secret-file /etc/hivenet-router/cache-salt.secret
+```
+
+With salting on, for every request forwarded to an agent started with `--engine vllm`:
+
+- The router sets `cache_salt` to a value derived from the tenant (the key's owner) with HMAC-SHA256 under the secret: 43 base64url characters. All keys of one tenant share their salt, so a tenant still reuses its own cached prefixes; two tenants never share one.
+- Any `cache_salt` the client sent is removed first, so a client cannot choose another tenant's salt.
+- The salt is set on `/v1/chat/completions` (streaming or not), `/v1/messages`, `/v1/embeddings` and `/v1/rerank`. `/v1/messages/count_tokens` runs no prefill, so it gets no salt; a client salt is still removed.
+- The salt is decided on each forward attempt, so a retry that lands on another engine gets the right treatment for that engine.
+
+Other engines get what they support. On every path, any client-sent `cache_salt` is removed first.
+
+| Engine (`--engine`) | Chat completions | `/v1/messages` | Embeddings and rerank |
+| --- | --- | --- | --- |
+| `vllm` | Tenant salt | Tenant salt | Tenant salt |
+| `sglang` (v0.5.11 or later) | Tenant salt | Not isolated: released SGLang drops the salt on this endpoint | No salt field; not salted |
+| `llamacpp` | `cache_prompt: false`: the request reuses no cached prefix, so a tenant also loses its own cache reuse | Not isolated | Not cached by llama.cpp |
+| `ollama`, `custom` (including vLLM run with `--engine custom`) | Not isolated | Not isolated | Not salted |
+
+When an LLM agent registers with a generation path that is not isolated, the router logs a warning and counts it in `hivenet_cache_isolation_gaps{model, engine}`. Keep such agents off models shared by several customers, or accept that cache timing can leak between them. The OpenAI and Anthropic fallback providers never receive a salt.
+
+The secret:
+
+- must be at least 32 bytes and differ from the JWT secret (which every agent holds) and the key-store secret; the router refuses to start otherwise
+- must be the same on every router in front of the same agents, or one tenant's requests through different routers do not share its own cache
+- changes every salt when rotated, which costs one cold prefix cache
+
+<Note>
+  Salting changes which requests share prefix-cache blocks, not what the model computes. Run vLLM with the `sha256` prefix hash (the default since vLLM 0.11), and check that your vLLM version accepts `cache_salt` before turning salting on.
+</Note>
+
 ## How load is bounded
 
 The agent reports vLLM's KV-cache size in tokens, read from `vllm:cache_config_info`: its `kv_cache_size_tokens` label, or `num_gpu_blocks × block_size` on vLLM versions that do not report it. For hybrid models (attention plus mamba layers) only the first is right, because the blocks also hold mamba state. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).

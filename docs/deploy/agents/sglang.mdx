@@ -298,6 +298,10 @@ The agent then sends `Authorization: Bearer <key>` on every request to SGLang: r
 The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
 </Note>
 
+## Isolate tenants in the prefix cache
+
+With the router's `--cache-salt` on, chat completions forwarded to an SGLang agent carry a per-tenant `cache_salt`, so tenants never share RadixAttention prefix-cache entries. This needs SGLang v0.5.11 or later. `/v1/messages` is not isolated: released SGLang versions drop the salt on that endpoint, and the router logs a warning and counts the agent in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
+
 ## How load is bounded
 
 The agent reports SGLang's KV-cache size in tokens, read from `sglang:max_total_num_tokens`. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).

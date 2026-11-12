@@ -121,6 +121,11 @@ type RouterMetrics struct {
 	// tenantRateLimited counts requests rejected due to RPM quota per tenant.
 	tenantRateLimited *prometheus.CounterVec
 
+	// cacheIsolationGaps counts the registered LLM agents, per model and
+	// engine, that serve a generation path without per-tenant prefix-cache
+	// isolation (cachesalt.Capabilities.Gaps).
+	cacheIsolationGaps *prometheus.GaugeVec
+
 	// tenantQuotaRPMLimit exposes the configured RPM limit per tenant (0 = unlimited).
 	// Populated only for keys on the legacy flat quota shape. Per-model keys
 	// leave this series at its seeded 0 value — see tenantPerModelQuotaRPMLimit
@@ -466,6 +471,13 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Requests rejected due to RPM quota per tenant and API key.",
 			},
 			[]string{"tenant_id", "key_id"},
+		),
+		cacheIsolationGaps: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_cache_isolation_gaps",
+				Help: "Registered LLM agents serving a generation path without per-tenant prefix-cache isolation, per model and engine.",
+			},
+			[]string{"model", "engine"},
 		),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -963,6 +975,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantRequestSuccess,
 		m.tenantRequestFailed,
 		m.tenantRateLimited,
+		m.cacheIsolationGaps,
 		m.tenantQuotaRPMLimit,
 		m.tenantQuotaTPDLimit,
 		m.tenantPerModelQuotaRPMLimit,
@@ -1854,6 +1867,15 @@ func (m *RouterMetrics) ServeMetrics(addr string) {
 			log.Errorf("metrics server error: %v", err)
 		}
 	}()
+}
+
+// SetCacheIsolationGaps replaces hivenet_cache_isolation_gaps with the given
+// agent counts per [model, engine].
+func (m *RouterMetrics) SetCacheIsolationGaps(counts map[[2]string]int) {
+	m.cacheIsolationGaps.Reset()
+	for k, n := range counts {
+		m.cacheIsolationGaps.WithLabelValues(k[0], k[1]).Set(float64(n))
+	}
 }
 
 // Register adds extra collectors to this instance's registry. Used by optional
