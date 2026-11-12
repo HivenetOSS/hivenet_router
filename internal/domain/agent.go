@@ -119,8 +119,9 @@ func (a *Agent) SetReportEvery(d time.Duration) {
 }
 
 // ReportMaxAge is how old the agent's report may be and still be used: three
-// report intervals, never less than reportMaxAge. An agent that reports
-// slowly would otherwise always look stale.
+// report intervals, never less than reportMaxAge nor more than
+// reportMaxAgeCap. An agent that reports slowly would otherwise always look
+// stale.
 func (a *Agent) ReportMaxAge() time.Duration {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -128,7 +129,7 @@ func (a *Agent) ReportMaxAge() time.Duration {
 }
 
 func (a *Agent) reportMaxAgeLocked() time.Duration {
-	return max(reportMaxAge, 3*a.reportEvery)
+	return min(max(reportMaxAge, 3*a.reportEvery), reportMaxAgeCap)
 }
 
 // SetRouterReport records which routers the agent is connected to right now.
@@ -194,6 +195,12 @@ func (a *Agent) TryAcquireSlot() bool {
 // has in flight there. An agent that reports less often gets three of its
 // intervals (see ReportMaxAge).
 const reportMaxAge = 3 * time.Second
+
+// reportMaxAgeCap bounds how long a report is used, whatever interval the
+// agent asks for. A report that says "not connected to router X" can make the
+// other routers reclaim X's credits; an agent misconfigured with a very long
+// interval would keep such a report alive long after it reconnected to X.
+const reportMaxAgeCap = 30 * time.Second
 
 // loadLocked is the agent's load as this router best knows it: the larger of
 // what this router has in flight there and what the agent last reported plus
