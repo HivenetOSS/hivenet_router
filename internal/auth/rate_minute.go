@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"hivenet_router/internal/shared"
+
 	"golang.org/x/time/rate"
 )
 
@@ -17,6 +19,29 @@ import (
 // second, burst = limit (one minute's capacity). Safe for concurrent use.
 type MinuteRateLimiter struct {
 	buckets sync.Map // direction+bucketKey → *rate.Limiter
+
+	// fleet, when set, shares usage with the other routers (SetFleet).
+	fleet  Fleet
+	leases leases
+}
+
+// SetFleet shares this limiter's usage with the other routers of the
+// site. Must be called before the limiter handles any requests.
+func (l *MinuteRateLimiter) SetFleet(f Fleet) { l.fleet = f }
+
+// ApplyPeerUsage takes tokens another router of the site admitted.
+func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, age time.Duration, _ int, _ string) {
+	if (kind != shared.KindITPM && kind != shared.KindOTPM) || limit <= 0 {
+		return
+	}
+	// An existing bucket keeps this router's limit (see InMemoryLimiter.peerRPM).
+	var lim *rate.Limiter
+	if v, ok := l.buckets.Load(key); ok {
+		lim = v.(*rate.Limiter)
+	} else {
+		lim = l.bucket(key, limit)
+	}
+	debit(lim, decayed(n, age, time.Minute))
 }
 
 // NewMinuteRateLimiter creates an empty MinuteRateLimiter.
@@ -54,7 +79,19 @@ func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, coun
 	if limit <= 0 || count <= 0 {
 		return true
 	}
-	return l.bucket(inKey(tenantID, model), limit).AllowN(time.Now(), count)
+	key := inKey(tenantID, model)
+	lim := l.bucket(key, limit)
+	if l.fleet == nil {
+		return lim.AllowN(time.Now(), count)
+	}
+	// While the store is down this router's share of the limit can be smaller
+	// than one maximum-size prompt; a full share still admits it.
+	ok, charged := allowShared(l.fleet, &l.leases, key, lim, count, true)
+	if !ok {
+		return false
+	}
+	l.fleet.Record(shared.KindITPM, key, limit, charged)
+	return true
 }
 
 // OutputExhausted reports whether the (tenant, model) OTPM bucket has run dry —
@@ -81,12 +118,21 @@ func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, co
 	if count > limit {
 		count = limit
 	}
-	l.bucket(outKey(tenantID, model), limit).ReserveN(time.Now(), count)
+	key := outKey(tenantID, model)
+	count = silentCharge(l.fleet, count)
+	debit(l.bucket(key, limit), count)
+	if l.fleet != nil {
+		l.fleet.Record(shared.KindOTPM, key, limit, count)
+	}
 }
 
 // Reset clears all buckets so limits reloaded from auth.yaml take effect
 // immediately. Safe to call concurrently with request handling.
 func (l *MinuteRateLimiter) Reset() {
+	l.leases.reset()
+	if l.fleet != nil {
+		return // kept with shared counters, as InMemoryLimiter.Reset
+	}
 	l.buckets.Range(func(k, _ any) bool { l.buckets.Delete(k); return true })
 }
 
@@ -101,6 +147,7 @@ func (l *MinuteRateLimiter) SweepIdle() int {
 		lim := v.(*rate.Limiter)
 		if lim.TokensAt(now) >= float64(lim.Burst()) {
 			l.buckets.Delete(k)
+			l.leases.drop(k.(string))
 			removed++
 		}
 		return true

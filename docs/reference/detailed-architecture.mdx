@@ -6,7 +6,7 @@ sidebarTitle: "Detailed architecture"
 
 Hivenet Router uses a hub-and-spoke architecture with one router process coordinating one or more inference agents.
 
-The router exposes the client and administration APIs. Agents connect inference engines to the router, advertise their capabilities and capacity, report their health and operational state, and proxy selected requests to their local backends.
+The router exposes the client and administration APIs. Agents connect inference engines to the router, advertise their capabilities, report their health and operational state, and proxy selected requests to their local backends.
 
 ```mermaid
 flowchart LR
@@ -45,7 +45,7 @@ For the conceptual view and product boundaries, start with [Architecture overvie
 
 A Hivenet Router deployment currently consists of:
 
-- one router process
+- one router process, or several routers behind a load balancer (see [Run several routers](/deploy/multiple-routers))
 - one or more agent processes
 - one inference backend behind each agent
 - optional Prometheus, Grafana, Loki, and Tempo services
@@ -62,9 +62,9 @@ Agents can run:
 Hivenet Router does not depend on Kubernetes for registration, discovery, or routing. Agents authenticate and register themselves.
 
 <Warning>
-  The current router is a single coordination point.
+  Each router keeps its own agent registry, request queues, routing-policy state, sessions, and dynamic API keys. These are not replicated between router processes.
 
-  Agent state, request queues, routing-policy state, sessions, and dynamic API keys are not replicated between router processes. Running several independent routers does not create one shared active-active routing plane.
+  With several routers, every agent connects to every router (`--routers`) and keeps one session with each. Rate and daily limits, the occupancy budgets and redirect-token single use are shared through `--sync-store=valkey`.
 </Warning>
 
 ## Main network surfaces
@@ -198,8 +198,7 @@ Each live agent record contains:
 - its active agent-initiated transport connection
 - model and capability
 - engine and deployment metadata
-- declared concurrency capacity
-- current active-request count
+- current active-request count and the agent's own reported in-flight count
 - process and backend health
 - last heartbeat time
 - current session token
@@ -229,12 +228,12 @@ It:
 
 1. creates a routing session
 2. selects an agent
-3. acquires one declared capacity slot
+3. acquires a slot on the agent, which counts the request in its load
 4. forwards the request over libp2p HTTP
 5. handles streaming or buffered responses
 6. records the result and observed latency
 7. retries or advances the fallback chain when appropriate
-8. releases the capacity slot
+8. releases the slot
 9. wakes the next request waiting for that model
 
 A semaphore also limits the total number of concurrent agent forwards performed by one router process.
@@ -335,6 +334,8 @@ It does not require:
 - one uninterrupted connection for the process lifetime
 
 When a stage fails, the agent closes the current peer connection, waits, and begins the connection sequence again.
+
+With `--routers`, the agent runs this sequence independently for each router of the site. Each session reconnects with exponential backoff from 1 s up to 30 s, with jitter, so a router that is down does not affect the others. One backend health check and one engine metrics poller serve all sessions.
 
 ## Agent startup and registration
 
@@ -550,7 +551,7 @@ sequenceDiagram
     H->>Q: Enqueue pending request
     Q->>P: Start routing session
     P->>P: Filter, gate, and rank agents
-    P->>A: Acquire one capacity slot
+    P->>A: Acquire one slot
     P->>A: Forward through libp2p HTTP
     A->>E: Forward original path, body, and headers
     E-->>A: Response or SSE stream
@@ -628,7 +629,9 @@ token budget = floor(admit fraction × admit_budget_tokens × healthy replicas)
 request backstop = max_inflight × healthy replicas
 ```
 
-The B4 occupancy share uses `share × admit_budget_tokens × healthy replicas` without the admit fraction. B4 is a per-key fairness control; B2 remains the pool-safety limit.
+When the policy sets no `admit_budget_tokens`, the token budget is the admit fraction × the KV capacity, in tokens, that the healthy replicas' engines report (vLLM and SGLang). With several routers sharing `--sync-store=valkey`, the token budget and request backstop are shared through occupancy credits: each router admits against credits held from a site-wide pool.
+
+The B4 occupancy share uses `share × admit_budget_tokens × healthy replicas`, or the share of the engine-reported KV capacity, without the admit fraction. B4 is a per-key fairness control; B2 remains the pool-safety limit.
 
 #### Reservation lifetime
 
@@ -688,7 +691,7 @@ Each policy step evaluates candidates in this order:
 3. capability
 4. static `match` fields
 5. earlier failures in the current step
-6. declared capacity
+6. declared capacity, for agents that declare one
 7. dynamic `exclude_if` gates
 8. strategy ranking
 
@@ -698,13 +701,11 @@ The current strategy is:
 least-loaded
 ```
 
-It compares:
-
-```text
-active requests / declared capacity
-```
+It compares each agent's load in requests: the larger of this router's in-flight requests to the agent and the agent's own reported count from all routers, plus what this router sent since that report.
 
 ### 8. Capacity wait queue
+
+This queue applies only to agents with a declared capacity, such as agents in embedded or test setups. Routers ignore the `--capacity` of network agents; for them, `--queue-depth` sizes the wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
 
 When eligible agents exist but all are at capacity, the request can enter a bounded per-model FIFO queue.
 
@@ -760,9 +761,9 @@ For a non-streaming response, the router reads the completed body and can use ba
 
 For a streaming response, the router pipes bytes to the client while a stream meter observes the output.
 
-For non-streaming responses, the selected agent’s capacity slot remains occupied until the complete response finishes, fails, or is cancelled.
+For non-streaming responses, the selected agent’s slot remains occupied until the complete response finishes, fails, or is cancelled.
 
-For streaming responses, the selected agent’s capacity slot remains occupied until the stream fully drains. The router releases it when the stream ends normally or when the client disconnects. Active-request counts, capacity utilization, capacity gates, and `least-loaded` ranking therefore cover the whole streaming generation.
+For streaming responses, the selected agent’s slot remains occupied until the stream fully drains. The router releases it when the stream ends normally or when the client disconnects. Active-request counts and `least-loaded` ranking therefore cover the whole streaming generation.
 
 The router’s `--max-concurrent` forwarding slot is released earlier, after response headers arrive and streaming begins.
 
@@ -823,6 +824,8 @@ When the router’s view of an agent connection appears stale or disconnected, H
 
 The router does not establish a new inbound connection to the agent. The agent’s reconnect loop is responsible for restoring its outbound connection to the router.
 
+The router and agent do not cap the number of libp2p streams per connection; connection, memory, and file-descriptor limits still apply. A forward that hits a libp2p resource limit is treated as "agent busy": the router retries on another agent and keeps the connection open, so other streams on it are not cut.
+
 ### Provider fallback
 
 When every local step is exhausted, an eligible LLM request may use the configured external provider fallback.
@@ -838,8 +841,8 @@ Hivenet Router has several independent limits.
 | HTTP enqueue wait | `5s` | Prevents handlers from blocking indefinitely on a full queue |
 | Global request queue | `100` | Bounds pending processor work |
 | Concurrent forwards | `50` | Bounds router forwarding goroutines |
-| Per-model capacity queue | `30` | Bounds requests waiting for model capacity |
-| Agent capacity | `10` | Bounds requests assigned to one agent |
+| Per-model wait queue | `30` | Bounds requests waiting for room in the occupancy budget |
+| Occupancy budget (B2) | Engine KV capacity × `0.90` for vLLM and SGLang; `8` requests in flight per replica otherwise | Bounds work per model |
 | Policy step attempts | `3` | Bounds backend retries within one step |
 | Request deadline | `60s` | Bounds the complete router-side operation |
 | Agent backend HTTP timeout | `120s` | Bounds an agent’s backend request |
@@ -1154,8 +1157,8 @@ For example:
 
 The current design does not provide:
 
-- active-active router clustering
-- replication of dynamic API keys or queues
+- replication of agent state, dynamic API keys, or queues between routers
+- occupancy budgets shared exactly across routers
 - automatic inference-backend deployment
 - automatic model loading through the public API
 - translation between OpenAI and Anthropic request schemas

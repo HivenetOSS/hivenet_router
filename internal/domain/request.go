@@ -106,6 +106,18 @@ type Reservation interface {
 	Release()
 }
 
+// HeaderTimeout carries, from the router to the agent, how many milliseconds
+// a forwarded request has left. The agent stops the backend call when they
+// run out: the router has answered 504 and released the request's occupancy
+// by then, so an engine still running it would hold capacity no one counts.
+// A duration, not a time, so the hosts' clocks do not matter.
+const HeaderTimeout = "X-Hivenet-Timeout-Ms"
+
+// TimeoutHeader is the value of HeaderTimeout for a request due at deadline.
+func TimeoutHeader(deadline time.Time) string {
+	return strconv.FormatInt(max(time.Until(deadline).Milliseconds(), 1), 10)
+}
+
 // NewPendingRequest creates a new pending request
 func NewPendingRequest(id string, request *ChatRequest, timeout time.Duration) *PendingRequest {
 	return &PendingRequest{

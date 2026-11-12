@@ -92,7 +92,7 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 		switch {
 		case info.BodySHA != redirect.BodySHA(body):
 			reason, msg = "body", "the request body does not match the redirect token"
-		case !h.redirect.Use(info.TokenID, info.Exp, time.Now()):
+		case !h.redirect.Use(c.Request.Context(), info.TokenID, info.Exp, time.Now()):
 			reason, msg = "replay", "the redirect token was already used"
 		}
 		if reason != "" {

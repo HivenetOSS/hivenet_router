@@ -145,6 +145,19 @@ func TestLeastLoadedStrategy(t *testing.T) {
 	}
 }
 
+// In a pool that mixes agents with and without a declared capacity, a ratio
+// (0.9 at 9 of 10) must not beat a count (1 request): all rank by count.
+func TestLeastLoadedMixedPoolRanksByCount(t *testing.T) {
+	cands := []policy.ScoredCandidate{
+		loaded("a", 10, 9),
+		loaded("b", 0, 1),
+	}
+	got := policy.Get("least-loaded").Select(cands)
+	if got == nil || got.ID.String() != cands[1].Agent.ID.String() {
+		t.Errorf("expected b (1 in flight) to beat a (9 in flight), got %v", got)
+	}
+}
+
 func TestStrategy_UnknownReturnsNil(t *testing.T) {
 	if policy.Get("round-robin") != nil {
 		t.Error("unimplemented strategy must return nil from Get")

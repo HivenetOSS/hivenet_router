@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"hivenet_router/internal/shared"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,6 +34,7 @@ import (
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
 	"hivenet_router/internal/wake"
+	pb "hivenet_router/proto"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
@@ -77,6 +79,15 @@ type agentRoutingSignalPayload struct {
 	SessionToken   string                   `json:"session_token"`
 	BackendMetrics *domain.BackendMetrics   `json:"backend_metrics,omitempty"`
 	Hardware       *domain.HardwareSnapshot `json:"hardware,omitempty"`
+	// InFlight is the agent's count of requests in flight from all routers;
+	// absent from older agents.
+	InFlight *int `json:"in_flight,omitempty"`
+	// Routers lists the routers the agent is connected to right now (peer
+	// ID → requests in flight for it); absent from older agents.
+	Routers map[string]int64 `json:"routers,omitempty"`
+	// ReportEveryMs is how often the agent sends routing signals; absent
+	// from older agents.
+	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -162,6 +173,13 @@ type Router struct {
 	// (ITPM/OTPM). Reset alongside rateLimiter on auth reload so updated caps
 	// take effect immediately.
 	minuteLimiter *auth.MinuteRateLimiter
+
+	// shared publishes and applies limit usage across the routers of this
+	// site (nil unless --sync-store=valkey).
+	shared *shared.Store
+	// credits share the occupancy budgets (B2 global, B4 per key) across the
+	// routers of the site (nil unless --sync-store=valkey).
+	credits []*shared.Credits
 
 	// occupancy is the global KV-occupancy admit controller (B2), keyed per
 	// model; keyAdmission is the per-key occupancy-share controller (B4), keyed
@@ -495,6 +513,19 @@ func New(cfg *config.Config) (*Router, error) {
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 	}
+	// Over-budget requests wait in a per-model queue (--admission-queue-depth,
+	// by default --queue-depth) for room before a 429: half the request timeout
+	// at most, so an admitted request keeps at least the other half to run
+	// instead of a 504 right after.
+	admissionDepth := cfg.AdmissionQueueDepth
+	if admissionDepth < 0 {
+		admissionDepth = cfg.QueueDepth
+	}
+	r.occupancy.SetQueue(admissionDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
+	if err := r.setupShared(); err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	// Refresh tenant quota gauges whenever the dynamic key registry changes,
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
 	// waiting for the first request from each tenant.
@@ -554,7 +585,7 @@ func (r *Router) Start() error {
 	rcMgrLimits := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&rcMgrLimits)
 	resourceManager, err := rcmgr.NewResourceManager(
-		rcmgr.NewFixedLimiter(rcMgrLimits.AutoScale()),
+		rcmgr.NewFixedLimiter(p2p.UnlimitedStreams(rcMgrLimits.AutoScale(), false)),
 		rcmgr.WithLimitPerSubnet(
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 32, ConnCount: r.cfg.P2PMaxConnsPerIP}},
 			[]rcmgr.ConnLimitPerSubnet{{PrefixLength: 56, ConnCount: r.cfg.P2PMaxConnsPerIP}},
@@ -582,6 +613,12 @@ func (r *Router) Start() error {
 	// stale scope is still open, causing every reconnect attempt to be rejected
 	// with an immediate TCP FIN before the Noise handshake.
 	r.p2pHost.Network().Notify(&libp2pnet.NotifyBundle{
+		// A new connection from an agent: see agentJoined.
+		ConnectedF: func(_ libp2pnet.Network, conn libp2pnet.Conn) {
+			if r.agents.Get(conn.RemotePeer()) != nil {
+				r.agentJoined()
+			}
+		},
 		DisconnectedF: func(n libp2pnet.Network, conn libp2pnet.Conn) {
 			peerID := conn.RemotePeer()
 			if len(n.ConnsToPeer(peerID)) != 0 {
@@ -599,30 +636,7 @@ func (r *Router) Start() error {
 			// scale-down closes the connection on purpose. The reaper publishes
 			// a second "unregistered" later — the watcher's 1s debounce
 			// collapses the pair to one annotation write.
-			if agent := r.agents.Get(peerID); agent != nil {
-				agent.RLock()
-				dep, rep := agent.Metadata.DeploymentID, agent.Metadata.ReplicaID
-				meta := agent.Metadata
-				agent.RUnlock()
-				r.connHealthMu.Lock()
-				if agent.IsHealthy() {
-					agent.SetHealthy(false)
-					if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
-						log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
-					}
-					r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
-						strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
-					log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
-				}
-				r.connHealthMu.Unlock()
-				r.registrationNotifier.Publish(domain.RegistrationEvent{
-					EventType:    domain.RegistrationUnregistered,
-					DeploymentID: dep,
-					ReplicaID:    rep,
-					AgentID:      peerID.String(),
-					Timestamp:    time.Now().UTC(),
-				})
-			}
+			r.agentDisconnected(peerID)
 			go func() {
 				// Re-check inside the goroutine: the peer may have reconnected
 				// between the outer check and this execution. Closing a live
@@ -638,6 +652,10 @@ func (r *Router) Start() error {
 	// All agent management endpoints are registered under a single protocol so
 	// that agents can use one NamespacedClient for both /register and /heartbeat.
 	r.httpHost = &p2phttp.Host{StreamHost: r.p2pHost}
+	// libp2p creates its peer-metadata cache lazily and without a lock on the
+	// first NamespacedClient call, so concurrent first requests to a new agent
+	// race on it. Create it here, before any request.
+	r.httpHost.SetPeerMetadata(r.p2pHost.ID(), p2phttp.PeerMeta{})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", r.handleAgentRegister)
@@ -700,6 +718,16 @@ func (r *Router) Start() error {
 		log.Infof("Quota BadgerLimiter periodic flush started (interval: %v)", r.cfg.UniversalFlushInterval)
 	}
 
+	if r.shared != nil {
+		r.shared.SetPeerID(r.p2pHost.ID().String())
+		r.shared.Start(processorCtx)
+		for _, c := range r.credits {
+			c.Start(processorCtx)
+		}
+	}
+	// A reservation an exit path forgot to release would hold its budget
+	// forever, with or without a shared store.
+	go r.reapLeakedReservations(processorCtx)
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
@@ -760,6 +788,18 @@ func (r *Router) Close() error {
 		r.p2pHost.Close()
 	}
 
+	// No request can reach an agent any more: hand the occupancy credits back
+	// to the other routers, publish the usage admitted since the last sync,
+	// and disconnect from the shared store.
+	if r.shared != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		for _, c := range r.credits {
+			c.ReleaseAll(ctx)
+		}
+		cancel()
+		r.shared.Close()
+	}
+
 	// 5. Flush the semantic decision log (nil-safe). The HTTP server is still
 	//    serving here; DecisionLog.Write is safe after Close and drops the record.
 	if err := r.decisionLog.Close(); err != nil {
@@ -786,6 +826,7 @@ func (r *Router) startGRPCServer() {
 		r.sessionManager,
 		r.p2pHost,
 	)
+	authServer.SetSiteRouters(r.siteRouters)
 	if err := grpc.StartServer(r.cfg.GRPCPort, authServer, r.grpcTLSCert); err != nil {
 		log.Errorf("gRPC server error: %v", err)
 	}
@@ -839,7 +880,11 @@ func (r *Router) startHTTPServer() {
 		handlers.SetDecisionLog(r.decisionLog)
 	}
 	handlers.SetRedirect(r.redirect) // nil = cross-site redirect disabled
-	if r.wake != nil {               // nil = hold at zero disabled
+	if r.cfg.AdmitFromEngineKV {
+		handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
+	}
+	handlers.SetDefaultMaxInflight(r.cfg.DefaultMaxInflightPerReplica)
+	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
@@ -1339,6 +1384,21 @@ func (r *Router) EnginePressureForModel(model string) (kvUtil, waiting *float64)
 	return MeanEnginePressure(metrics)
 }
 
+// EngineKVCapacityForModel sums the KV-cache size, in tokens, that the healthy
+// agents serving model report (0 when none reports it).
+func (r *Router) EngineKVCapacityForModel(model string) int {
+	total := 0.0
+	for _, agent := range r.agents.ListByModel(model) {
+		if !agent.IsHealthy() {
+			continue
+		}
+		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil {
+			total += *ep.KVCapacityTokens
+		}
+	}
+	return int(total)
+}
+
 // MeanEnginePressure averages the KV-cache utilization and waiting-request count
 // over the given per-agent engine snapshots, ignoring nil metrics. A dimension
 // that no snapshot reports is returned as nil (not zero), so the shed gate skips
@@ -1533,8 +1593,10 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		capability = domain.CapabilityLLM
 	}
 	metadata := domain.AgentMetadata{
-		Model:         session.Metadata.Model,
-		Capacity:      int(session.Metadata.Capacity),
+		Model: session.Metadata.Model,
+		// The agent's declared capacity is ignored: the router admits by the
+		// engine's KV capacity (B2) and live load, never by a request count.
+		Capacity:      0,
 		Version:       session.Metadata.Version,
 		Region:        session.Metadata.Region,
 		Tags:          session.Metadata.Tags,
@@ -1645,7 +1707,9 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	region := session.Metadata.Region
 	engine := session.Metadata.Engine
 	model := session.Metadata.Model
-	capacity := strconv.Itoa(int(session.Metadata.Capacity))
+	// The registered agent's capacity (0: routers ignore the declared one), so
+	// the series matches the one registration created.
+	capacity := strconv.Itoa(a.Metadata.Capacity)
 	organization := session.Metadata.Organization
 	machine := session.Metadata.Machine
 
@@ -1654,8 +1718,8 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 	// connection), nor LastSeen (it would delay the health monitor). See
 	// connHealthMu.
 	r.connHealthMu.Lock()
-	defer r.connHealthMu.Unlock()
 	if !r.peerConnected(session.PeerID) {
+		r.connHealthMu.Unlock()
 		log.Debugf("handleAgentHeartbeat: %s has no connection — heartbeat ignored", peerIDStr[:8])
 		http.Error(w, "agent not connected", http.StatusConflict)
 		return
@@ -1666,32 +1730,30 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 
 	wasHealthy := a.IsHealthy()
 	prevBackendHealthy := a.SetBackendHealthy(payload.BackendHealthy)
+	a.SetHealthy(payload.BackendHealthy)
+	if err := r.storage.UpdateAgentStatus(session.PeerID, payload.BackendHealthy, time.Now()); err != nil {
+		log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
+	}
+	r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, payload.BackendHealthy)
+	// Only the health change above is ordered with a disconnect; the rest
+	// runs outside the lock, so heartbeats of different agents and
+	// disconnects do not wait for each other.
+	r.connHealthMu.Unlock()
 
 	if payload.BackendHealthy {
-		a.SetHealthy(true)
 		if !wasHealthy || !prevBackendHealthy {
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
+			r.agentJoined()
 			r.executor.BroadcastCapacity(model)
 			if r.wake != nil {
 				r.wake.Wake(model)
 			}
 		}
-		if err := r.storage.UpdateAgentStatus(session.PeerID, true, time.Now()); err != nil {
-			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
-		}
-		r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, true)
-	} else {
-		a.SetHealthy(false)
-		if err := r.storage.UpdateAgentStatus(session.PeerID, false, time.Now()); err != nil {
-			log.Warnf("handleAgentHeartbeat: storage update failed for %s: %v", peerIDStr, err)
-		}
-		r.metrics.AgentHealthUpdated(peerIDStr, region, engine, model, capacity, organization, machine, false)
+	} else if prevBackendHealthy {
 		// Only increment counter and log on the healthy→unhealthy transition.
-		if prevBackendHealthy {
-			r.counters.RecordBackendFailure(session.PeerID)
-			log.Warnf("Agent %s reported backend unhealthy — removed from routing pool", peerIDStr[:8])
-		}
+		r.counters.RecordBackendFailure(session.PeerID)
+		log.Warnf("Agent %s reported backend unhealthy — removed from routing pool", peerIDStr[:8])
 	}
 
 	if payload.Hardware != nil {
@@ -1701,7 +1763,75 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	reply := domain.HeartbeatReply{}
+	for _, sr := range r.siteRouters() {
+		reply.Routers = append(reply.Routers, domain.SiteRouter{GRPCAddr: sr.GetGrpcAddr(), PeerID: sr.GetPeerId()})
+	}
+	_ = json.NewEncoder(w).Encode(reply)
+}
+
+// maxSiteRouters bounds the list handed to agents.
+const maxSiteRouters = 32
+
+// siteRouters returns the live routers of this router's site that advertise
+// the address agents reach them at (--advertise-grpc-addr), for the agents to
+// connect to every one. Nil without a shared store.
+func (r *Router) siteRouters() []*pb.SiteRouter {
+	if r.shared == nil {
+		return nil
+	}
+	var out []*pb.SiteRouter
+	for _, sr := range r.shared.SiteRouters() {
+		if len(out) == maxSiteRouters {
+			break
+		}
+		out = append(out, &pb.SiteRouter{GrpcAddr: sr.Addr, PeerId: sr.PeerID})
+	}
+	return out
+}
+
+// agentDisconnected takes an agent whose last connection closed out of the
+// routing pool and publishes it as unregistered. It does nothing when the
+// agent connected again before connHealthMu was taken: a heartbeat on the new
+// connection may already have marked it healthy, and the stale disconnect
+// must not undo that until the next heartbeat.
+func (r *Router) agentDisconnected(peerID peer.ID) {
+	agent := r.agents.Get(peerID)
+	if agent == nil {
+		return
+	}
+	agent.RLock()
+	meta := agent.Metadata
+	agent.RUnlock()
+	r.connHealthMu.Lock()
+	if r.peerConnected(peerID) {
+		r.connHealthMu.Unlock()
+		return
+	}
+	if agent.IsHealthy() {
+		agent.SetHealthy(false)
+		if r.storage != nil {
+			if err := r.storage.UpdateAgentStatus(peerID, false, time.Now()); err != nil {
+				log.Warnf("disconnect: storage update failed for %s: %v", peerID, err)
+			}
+		}
+		if r.metrics != nil {
+			r.metrics.AgentHealthUpdated(peerID.String(), meta.Region, meta.Engine, meta.Model,
+				strconv.Itoa(meta.Capacity), meta.Organization, meta.Machine, false)
+		}
+		log.Infof("Agent %s disconnected — out of the routing pool until it reconnects", peerID.String()[:8])
+	}
+	r.connHealthMu.Unlock()
+	if r.registrationNotifier != nil {
+		r.registrationNotifier.Publish(domain.RegistrationEvent{
+			EventType:    domain.RegistrationUnregistered,
+			DeploymentID: meta.DeploymentID,
+			ReplicaID:    meta.ReplicaID,
+			AgentID:      peerID.String(),
+			Timestamp:    time.Now().UTC(),
+		})
+	}
 }
 
 // installAgent puts a newly registered agent in the registry and reports
@@ -1719,7 +1849,35 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 		a.SetHealthy(false)
 	}
 	r.agents.Register(a)
+	if connected {
+		r.agentJoined()
+	}
 	return connected
+}
+
+// agentJoined tells the shared store that an agent became usable here (it
+// registered, connected again, or came back healthy). A router cut off from
+// the store then stops admitting from the credits it holds: the agent may
+// have told the other routers it had no connection to this one, and they may
+// have taken those credits back.
+func (r *Router) agentJoined() {
+	if r.shared != nil {
+		r.shared.AgentJoined()
+	}
+}
+
+// servedAgents lists the agents connected to this router, published with its
+// heartbeat so the other routers know which agents to ask about it. An agent
+// whose backend is unhealthy is listed too: it may still be running this
+// router's requests.
+func (r *Router) servedAgents() []string {
+	var ids []string
+	for _, a := range r.agents.List() {
+		if r.peerConnected(a.ID) {
+			ids = append(ids, a.ID.String())
+		}
+	}
+	return ids
 }
 
 // peerConnected reports whether the router has a live libp2p connection to
@@ -1751,9 +1909,19 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 
 	// O(1) lookup: session.PeerID was set by LinkPeerID during /register.
 	// Verify the agent is still in the registry (may have been removed by the health monitor).
-	if r.agents.Get(session.PeerID) == nil {
+	agent := r.agents.Get(session.PeerID)
+	if agent == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
+	}
+	if payload.ReportEveryMs > 0 {
+		agent.SetReportEvery(time.Duration(payload.ReportEveryMs) * time.Millisecond)
+	}
+	if payload.InFlight != nil {
+		agent.SetReportedLoad(*payload.InFlight)
+	}
+	if payload.Routers != nil {
+		agent.SetRouterReport(payload.Routers)
 	}
 
 	region := session.Metadata.Region
@@ -1870,4 +2038,153 @@ func (r *Router) healthMonitor() {
 			log.Infof("Active agents: %d", r.agents.Count())
 		}
 	}
+}
+
+// setupShared connects the rate and daily limiters to the other routers of
+// the site through Valkey when --sync-store=valkey.
+// syncSite is the site's name in the shared store: --sync-site, else
+// --site-id, else "default" (the store's own default).
+func syncSite(cfg *config.Config) string {
+	if cfg.SyncSite != "" {
+		return cfg.SyncSite
+	}
+	return cfg.SiteID
+}
+
+func (r *Router) setupShared() error {
+	cfg := r.cfg
+	if cfg.SyncStore != "valkey" {
+		return nil
+	}
+	limiter, ok := r.rateLimiter.(*auth.InMemoryLimiter)
+	if !ok {
+		return fmt.Errorf("shared counters need the in-memory quota backend, got %q", cfg.QuotaBackend)
+	}
+	var addrs []string
+	for _, a := range strings.Split(cfg.SyncValkeyAddrs, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	st, err := shared.New(shared.Config{
+		Addrs:          addrs,
+		SentinelMaster: cfg.SyncSentinelMaster,
+		Password:       cfg.SyncValkeyPassword,
+		TLS:            cfg.SyncValkeyTLS,
+		TLSCAFile:      cfg.SyncValkeyTLSCA,
+		Prefix:         syncSite(cfg),
+		RouterID:       cfg.RouterID,
+		AdvertiseAddr:  cfg.AdvertiseGRPCAddr,
+		Interval:       cfg.SyncInterval,
+		MinRouters:     cfg.SyncMinRouters,
+		// A router cut off when the store lost its data reconnects within
+		// ten rounds, and its requests end within the request timeout.
+		SettleAfter: cfg.RequestTimeout + 10*cfg.SyncInterval + 5*time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("shared counters: %w", err)
+	}
+	limiter.SetFleet(st)
+	st.AddApplier(limiter)
+	r.minuteLimiter.SetFleet(st)
+	st.AddApplier(r.minuteLimiter)
+
+	// Occupancy budgets: credits from a site-wide pool. A silent router keeps
+	// its credits until a newer run replaces it, or until every agent it
+	// served reports no connection to it.
+	st.SetAgents(r.servedAgents)
+	st.SetRouterReports(r.reportedRouters)
+	occ := st.NewCredits("occ", r.agentsLeftRouter)
+	kocc := st.NewCredits("kocc", r.agentsLeftRouter)
+	r.occupancy.SetPool(occ)
+	r.keyAdmission.SetPool(kocc)
+	r.credits = []*shared.Credits{occ, kocc}
+
+	// Redirect tokens are single-use across the site, not per router.
+	if r.redirect != nil {
+		r.redirect.Replay = &siteReplay{store: st, local: redirect.NewReplayGuard()}
+	}
+	r.metrics.Register(st.Collectors()...)
+	r.shared = st
+	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
+		RouterID: cfg.RouterID, Prefix: syncSite(cfg), Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
+	return nil
+}
+
+// reportedRouters lists the routers the agents reported a connection to in
+// a report that is still fresh (see domain.Agent.ReportMaxAge).
+func (r *Router) reportedRouters() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range r.agents.List() {
+		for _, p := range a.ReportedRouters() {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// agentsLeftRouter reports whether every agent in agents reported to this
+// router, in a report that is still fresh, that it has no connection to the
+// router with libp2p peer ID routerPeer. An agent this router does not know,
+// or that has not reported recently, may still serve that router: the answer
+// is then false. With no agents the router served nothing.
+func (r *Router) agentsLeftRouter(routerPeer string, agents []string) bool {
+	for _, id := range agents {
+		pid, err := peer.Decode(id)
+		if err != nil {
+			return false
+		}
+		a := r.agents.Get(pid)
+		if a == nil {
+			return false
+		}
+		if fresh, connected := a.ConnectedTo(routerPeer); !fresh || connected {
+			return false
+		}
+	}
+	return true
+}
+
+// reapLeakedReservations releases occupancy reservations older than any
+// request can live. It should find nothing: each one it finds is an exit path
+// that skipped its release, and is logged and counted.
+func (r *Router) reapLeakedReservations(ctx context.Context) {
+	maxAge := r.cfg.RequestTimeout + time.Minute
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n := r.occupancy.ReapStale(maxAge) + r.keyAdmission.ReapStale(maxAge)
+			if n > 0 {
+				log.Warnf("Released %d occupancy reservation(s) older than %v: a request exit path skipped its release", n, maxAge)
+				r.metrics.AdmissionReaped(n)
+			}
+		}
+	}
+}
+
+// siteReplay makes redirect tokens single-use across every router of the
+// site through the shared store, and falls back to this router's memory when
+// the store cannot answer.
+type siteReplay struct {
+	store *shared.Store
+	local *redirect.ReplayGuard
+}
+
+func (g *siteReplay) First(ctx context.Context, id string, until, now time.Time) bool {
+	// Always recorded here too, so a token used while the store answered
+	// is still refused by this router if the store is down at its replay.
+	local := g.local.First(ctx, id, until, now)
+	first, err := g.store.FirstUse(ctx, id, until)
+	if err != nil {
+		return local
+	}
+	return first && local
 }

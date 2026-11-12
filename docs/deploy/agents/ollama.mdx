@@ -1,6 +1,6 @@
 ---
 title: "Ollama agent"
-description: "Connect an Ollama backend to Hivenet Router, select the model an agent represents, and configure capacity for local or edge inference."
+description: "Connect an Ollama backend to Hivenet Router, select the model an agent represents, and bound its load for local or edge inference."
 sidebarTitle: "Ollama"
 ---
 
@@ -217,7 +217,6 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
       --backend-url http://localhost:11434 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
-      --capacity 5 \
       --region EU-France \
       --identity-path /data/agent-identity.key
     ```
@@ -238,7 +237,6 @@ The examples pin the agent to `llama3.1:8b`. This avoids ambiguity when more tha
       --backend-url http://localhost:11434 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /opt/hivenet-router/jwt.secret \
-      --capacity 5 \
       --region EU-France \
       --identity-path /var/lib/hivenet-router/agent/identity.key
     ```
@@ -254,9 +252,8 @@ The agent waits until Ollama responds and the selected model is available. If Ol
 | `--engine ollama` | Selects the Ollama integration |
 | `--model` | Pins the agent to one Ollama model |
 | `--backend-url` | Base URL of the local Ollama server |
-| `--router-grpc` | Router endpoint used for agent authentication |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--identity-path` | Persistent private key that keeps the peer ID stable |
 
@@ -348,34 +345,14 @@ export HIVENET_ROUTER_BACKEND_API_KEY="<proxy-api-key>"
 
 The agent then sends `Authorization: Bearer <key>` on every request to the backend: readiness checks, model discovery through `/api/tags`, and inference. It is the only `Authorization` header the backend receives. The client's router credentials are never forwarded to the backend, with or without this key. See [Backend API key](/reference/configuration-reference#backend-api-key).
 
-## Set agent capacity
+## How load is bounded
 
-`--capacity` controls how many concurrent requests Hivenet Router may assign to the agent.
+Ollama does not report a KV-cache size, so the router sets no automatic token budget for this agent. Instead, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica of the model. To choose your own bound, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
-It does not change Ollama’s own parallelism or memory settings.
-
-A conservative starting point is:
-
-| Host type | Starting capacity |
-| --- | --- |
-| GPU inference | `3` to `5` |
-| CPU-only inference | `1` to `2` |
-
-These values are starting points, not fixed limits. The right setting depends on:
-
-- model size
-- available RAM or VRAM
-- context length
-- Ollama’s parallelism configuration
-- acceptable response time
-- whether several models share the same hardware
-
-Test the backend under representative load before raising capacity.
-
-When the agent reaches capacity, Hivenet Router stops assigning new requests to it. Depending on your router configuration, requests may wait in the per-model queue, move through a fallback chain, or fail when no capacity is available.
+With `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=0` and no policy bound, Ollama's own queue protects it. Ollama's own parallelism settings still apply.
 
 <Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify Ollama concurrency under sustained streaming load before raising it.
+  `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
 
 ## Verify the connection
@@ -428,7 +405,7 @@ Hivenet Router can still expose:
 - agent health
 - routed request counts
 - failed request counts
-- active request and capacity state
+- active request state
 - smoothed round-trip time
 - success and failure history
 - CPU and memory metrics
@@ -639,7 +616,7 @@ Engine-specific values such as KV cache utilization, waiting requests, time to f
     --http-timeout 10m
     ```
 
-    Also check whether the agent capacity is too high for the model and hardware.
+    Also check whether the policy's `max_inflight` or `admit_budget_tokens` lets too much work reach the model and hardware.
   </Accordion>
 </AccordionGroup>
 
@@ -651,7 +628,7 @@ Engine-specific values such as KV cache utilization, waiting requests, time to f
   </Card>
 
   <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">
-    Learn how metadata, capacity, and policies affect agent selection.
+    Learn how metadata, load, and policies affect agent selection.
   </Card>
 
   <Card title="Hardware metrics" icon="gauge-high" href="/observability/hardware-metrics">
