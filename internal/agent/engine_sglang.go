@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"hivenet_router/internal/domain"
 )
@@ -25,7 +26,17 @@ import (
 //	Detailed health: GET /health_generate  (includes memory stats, KV cache usage)
 //	Prometheus:      GET /metrics          (requires --enable-metrics at launch)
 //	Native generate: POST /generate        (SGLang low-level generation API)
-type SGLangEngine struct{}
+type SGLangEngine struct {
+	// decodeMu guards the decode-seconds floor below. ScrapeMetrics derives
+	// decode seconds from two sums that SGLang updates at different times, so
+	// the agent keeps the value from going down between scrapes.
+	decodeMu sync.Mutex
+	// decodeSecondsFloor is the last decode-seconds value shipped, and
+	// decodeRequestsSeen the num_requests_total it was shipped with. A drop in
+	// num_requests_total means the engine restarted, and the floor is reset.
+	decodeSecondsFloor float64
+	decodeRequestsSeen float64
+}
 
 func (e *SGLangEngine) Name() string { return "sglang" }
 
@@ -125,18 +136,30 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 		metricSum(sums, "sglang:time_to_first_token_seconds_sum"),
 		metricSum(sums, "sglang:time_to_first_token_seconds_count"))
 
-	// ITL: SGLang's per-request time-per-output-token histogram, the
-	// counterpart of vLLM's per-request inter-token-latency histogram. The
-	// per-step sglang:inter_token_latency_seconds observes one value per
-	// token, not one per request, so it is deliberately not used.
-	itlPts := mergeBucketVariants(buckets["sglang:request_time_per_output_token_seconds"])
+	// ITL: sglang:inter_token_latency_seconds is observed once per generated
+	// token, like vllm:inter_token_latency_seconds, so the two engines feed
+	// the same distribution. (sglang:request_time_per_output_token_seconds is
+	// a per-request average and would mean something else.) It carries no
+	// is_streaming label; merging is a no-op then.
+	itlPts := mergeBucketVariants(buckets["sglang:inter_token_latency_seconds"])
 	m.AvgITLSeconds = histogramAvg(sums,
-		"sglang:request_time_per_output_token_seconds_sum",
-		"sglang:request_time_per_output_token_seconds_count")
+		"sglang:inter_token_latency_seconds_sum",
+		"sglang:inter_token_latency_seconds_count")
 	m.P90ITLSeconds = histogramQuantile(itlPts, 0.9)
 	m.ITLHistogram = bucketsToSnapshot(itlPts,
-		metricSum(sums, "sglang:request_time_per_output_token_seconds_sum"),
-		metricSum(sums, "sglang:request_time_per_output_token_seconds_count"))
+		metricSum(sums, "sglang:inter_token_latency_seconds_sum"),
+		metricSum(sums, "sglang:inter_token_latency_seconds_count"))
+
+	// Per-request prompt and generation lengths, observed for every finished
+	// request. No is_streaming label.
+	m.PromptTokensHistogram = bucketsToSnapshot(
+		mergeBucketVariants(buckets["sglang:prompt_tokens_histogram"]),
+		metricSum(sums, "sglang:prompt_tokens_histogram_sum"),
+		metricSum(sums, "sglang:prompt_tokens_histogram_count"))
+	m.GenerationTokensHistogram = bucketsToSnapshot(
+		mergeBucketVariants(buckets["sglang:generation_tokens_histogram"]),
+		metricSum(sums, "sglang:generation_tokens_histogram_sum"),
+		metricSum(sums, "sglang:generation_tokens_histogram_count"))
 
 	// Decode-phase counters for the universal output-speed formula. The first
 	// token is produced by prefill, so each request contributes one fewer
@@ -154,14 +177,42 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 	}
 	if e2e := metricSum(sums, "sglang:e2e_request_latency_seconds_sum"); e2e != nil {
 		if ttft := metricSum(sums, "sglang:time_to_first_token_seconds_sum"); ttft != nil {
-			decodeSeconds := *e2e - *ttft
-			if decodeSeconds < 0 {
-				decodeSeconds = 0
-			}
-			m.DecodeSecondsTotal = &decodeSeconds
+			m.DecodeSecondsTotal = e.monotonicDecodeSeconds(*e2e-*ttft, metricSum(sums, "sglang:num_requests_total"))
 		}
 	}
 	return m, nil
+}
+
+// monotonicDecodeSeconds keeps the decode-seconds counter from going down.
+//
+// SGLang observes a request's TTFT at its first token but its e2e latency only
+// when it finishes, so e2e sum − TTFT sum drops whenever a request reaches its
+// first token while none finishes. The router exports the value as a
+// Prometheus counter, and Prometheus reads any drop as a reset: rate() would
+// add the whole value and the measured output speed would collapse. The value
+// is therefore held at its highest point until the running requests finish
+// and it climbs past it again. It may go down only when the engine restarted,
+// which num_requests_total going down reveals.
+//
+// The result is a lower bound: an aborted request adds its TTFT but never an
+// e2e latency, so the decode seconds read slightly low.
+func (e *SGLangEngine) monotonicDecodeSeconds(raw float64, requests *float64) *float64 {
+	if raw < 0 {
+		raw = 0
+	}
+	e.decodeMu.Lock()
+	defer e.decodeMu.Unlock()
+	if requests != nil {
+		if *requests < e.decodeRequestsSeen {
+			e.decodeSecondsFloor = 0 // engine restarted
+		}
+		e.decodeRequestsSeen = *requests
+	}
+	if raw < e.decodeSecondsFloor {
+		raw = e.decodeSecondsFloor
+	}
+	e.decodeSecondsFloor = raw
+	return &raw
 }
 
 func (e *SGLangEngine) ForwardChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, req domain.ChatRequest, options ...EngineOption) ([]byte, http.Header, error) {

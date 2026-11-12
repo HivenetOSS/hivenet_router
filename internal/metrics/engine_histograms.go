@@ -16,6 +16,11 @@ import (
 // engineHistogramCollector. Kept as a package-level var so the Desc values in
 // the collector and any future consumers stay in sync.
 //
+// A deployment is one customer's deployment of a model: a model variant served
+// by N replicas on one GPU type. Each replica is one agent, started with the
+// deployment's id, so every replica of a deployment carries the same value; the
+// machine label already says where a replica runs.
+//
 // deployment_id is the agent's logical deployment (HIVENET_ROUTER_DEPLOYMENT_ID;
 // unsetDeploymentID for an agent that does not set one, matching the tenant
 // metrics' default so the two families select alike). It lets a consumer read one
@@ -122,7 +127,7 @@ func newEngineHistogramCollector() *engineHistogramCollector {
 		),
 		decodeSecondsDesc: prometheus.NewDesc(
 			"hivenet_agent_engine_decode_seconds_total",
-			"Cumulative seconds the inference engine spent in the decode phase (first token to last token, excluding prefill) since it last restarted. vLLM: request_decode_time_seconds sum; SGLang: e2e sum minus TTFT sum; llama.cpp: tokens_predicted_seconds_total. The denominator of the measured output speed.",
+			"Cumulative seconds the inference engine spent in the decode phase (first token to last token, excluding prefill) since it last restarted. vLLM: request_decode_time_seconds sum; SGLang: e2e sum minus TTFT sum, held by the agent so it never goes down while the engine runs; llama.cpp: tokens_predicted_seconds_total. The denominator of the measured output speed.",
 			engineHistogramLabels, nil,
 		),
 		snapshots: make(map[string]*engineHistSnapshot),

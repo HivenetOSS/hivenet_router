@@ -697,7 +697,7 @@ These expose the latest reported generation and prompt-ingestion throughput from
 
 ## Engine histograms
 
-The router re-exports the raw engine histogram buckets each engine exposes: vLLM provides all of them (TTFT, ITL, prompt/generation token length, decode time), SGLang provides TTFT and per-request ITL (its `is_streaming` label variants are summed into one series), and llama.cpp provides none — it has no TTFT or ITL histogram, so those families carry no series for llama.cpp agents. The prompt/generation token-length histograms are vLLM-only; for token counts on every engine use the decode-phase counters below.
+The router re-exports the raw engine histogram buckets each engine exposes: vLLM provides all of them (TTFT, ITL, prompt/generation token length, decode time), SGLang provides TTFT, ITL (per token, as on vLLM) and the prompt/generation token-length histograms (its `is_streaming` label variants are summed into one series), and llama.cpp provides none — it has no TTFT, ITL or length histogram, so those families carry no series for llama.cpp agents. The decode-time histogram is vLLM-only; for output speed on every engine use the decode-phase counters below.
 
 The re-exported histogram families are:
 
@@ -718,7 +718,7 @@ hivenet_agent_engine_decode_tokens_total
 hivenet_agent_engine_decode_seconds_total
 ```
 
-They re-export the engine's own cumulative decode-phase counters: vLLM's generation tokens minus one per request (the first token is produced by prefill) over the `request_decode_time_seconds` sum; SGLang's `generation_tokens_total` minus `num_requests_total` over e2e latency minus TTFT; llama.cpp's `tokens_predicted_total` over `tokens_predicted_seconds_total`. `rate(tokens) / rate(seconds)` is the deployment's measured output speed on every engine. When an engine restarts the counters drop, and `rate()` accounts for that as a counter reset.
+They re-export the engine's own cumulative decode-phase counters: vLLM's generation tokens minus one per request (the first token is produced by prefill) over the `request_decode_time_seconds` sum; SGLang's `generation_tokens_total` minus `num_requests_total` over e2e latency minus TTFT; llama.cpp's `tokens_predicted_total` over `tokens_predicted_seconds_total`. `rate(tokens) / rate(seconds)` is the deployment's measured output speed on every engine. When an engine restarts the counters drop, and `rate()` accounts for that as a counter reset. On SGLang the agent keeps the decode seconds from going down between restarts, and aborted requests make them read slightly low (see the SGLang agent page).
 
 Every engine histogram and decode-phase counter carries the labels `peer_id`, `model`, `engine`, `organization`, `machine` and `deployment_id`. `deployment_id` is the agent's `HIVENET_ROUTER_DEPLOYMENT_ID`, or `unset` when the agent does not set one (the same value the tenant metrics use). It is on the histograms and the decode-phase counters only; the scalar engine gauges keep their existing label set. `deployment_id` is self-declared by the agent, so scope per-deployment queries with `organization="<org>"` as well.
 
