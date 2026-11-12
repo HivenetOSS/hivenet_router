@@ -368,7 +368,7 @@ It sends the resulting engine data to the router, which exposes it through the r
 | Decode-phase tokens | `sglang:generation_tokens_total` minus `sglang:num_requests_total` | `hivenet_agent_engine_decode_tokens_total` |
 | Decode-phase seconds | `sglang:e2e_request_latency_seconds` sum minus `sglang:time_to_first_token_seconds` sum | `hivenet_agent_engine_decode_seconds_total` |
 
-SGLang splits some latency histograms across `is_streaming` label variants (streaming and non-streaming requests); the agent sums the variants into one series. ITL is observed once per generated token, as on vLLM. On a SGLang build that does not expose a histogram, its fields stay nil and no series is emitted.
+SGLang splits some latency histograms across `is_streaming` label variants (streaming and non-streaming requests); the agent sums the variants into one series. ITL is observed once per generated token, as on vLLM. On an SGLang build that does not expose a histogram, its fields stay nil and no series is emitted.
 
 SGLang records a request's TTFT at its first token but its end-to-end latency only when it finishes, so the decode-phase seconds briefly lag while requests run. The agent never lets the counter go down while the engine runs; it drops only when the engine restarts. An aborted request adds its TTFT but no end-to-end latency, so the decode seconds read slightly low and the output speed slightly high.
 
