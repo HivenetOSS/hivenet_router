@@ -92,7 +92,7 @@ func TestRouterMetrics_EmitMethodsNoPanic(t *testing.T) {
 		Timestamp: 1,
 	}
 	m.AgentHardwareUpdated(peerID, region, model, engine, org, mach, snap)
-	m.AgentEnginePunctualUpdated(peerID, model, engine, org, mach, &domain.BackendMetrics{
+	m.AgentEnginePunctualUpdated(peerID, model, engine, org, mach, "dep-1", &domain.BackendMetrics{
 		KVCacheUtilization: &kv, RunningRequests: &run,
 	})
 

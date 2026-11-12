@@ -77,9 +77,9 @@ func (e *LlamaCPPEngine) DiscoverModels(_ context.Context, baseURL string, httpC
 // Requires --metrics at launch. A 5-second timeout is applied via the caller-supplied
 // context. Scrape failures are non-fatal: the heartbeat proceeds without backend metrics.
 //
-// Reuses parsePrometheusTextFull, histogramQuantile, histogramAvg, and metricVal from
-// engine_vllm.go (same package). PreemptionsTotal is always nil — llama.cpp has no
-// preemption mechanism.
+// Reuses parsePrometheusTextFull and metricVal from engine_vllm.go (same
+// package). PreemptionsTotal is always nil — llama.cpp has no preemption
+// mechanism.
 func (e *LlamaCPPEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClient *http.Client) (*domain.BackendMetrics, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/metrics", nil)
 	if err != nil {
@@ -96,24 +96,26 @@ func (e *LlamaCPPEngine) ScrapeMetrics(ctx context.Context, baseURL string, http
 		return nil, fmt.Errorf("llamacpp ScrapeMetrics: /metrics returned HTTP %d", resp.StatusCode)
 	}
 
-	scalars, buckets, _ := parsePrometheusTextFull(resp.Body)
+	scalars, _, _, _ := parsePrometheusTextFull(resp.Body)
 
 	m := &domain.BackendMetrics{}
 	m.KVCacheUtilization = metricVal(scalars, "llamacpp:kv_cache_usage_ratio")
 	m.RunningRequests = metricVal(scalars, "llamacpp:requests_processing")
 	m.WaitingRequests = metricVal(scalars, "llamacpp:requests_deferred")
 	// PreemptionsTotal left nil — llama.cpp has no preemption mechanism.
-	m.AvgTTFTSeconds = histogramAvg(scalars,
-		"llamacpp:time_to_first_token_seconds_sum",
-		"llamacpp:time_to_first_token_seconds_count")
-	m.P90TTFTSeconds = histogramQuantile(buckets["llamacpp:time_to_first_token_seconds"], 0.9)
-	m.AvgITLSeconds = histogramAvg(scalars,
-		"llamacpp:time_per_output_token_seconds_sum",
-		"llamacpp:time_per_output_token_seconds_count")
-	m.P90ITLSeconds = histogramQuantile(buckets["llamacpp:time_per_output_token_seconds"], 0.9)
+	// TTFT and ITL are not supported on llama.cpp: it exposes no
+	// time-to-first-token or inter-token-latency histogram, so the TTFT/ITL
+	// scalar and histogram fields stay nil (no series) on this engine.
 	// Token throughput gauges — llama.cpp only.
 	m.PredictedTokensPerSecond = metricVal(scalars, "llamacpp:predicted_tokens_seconds")
 	m.PromptTokensPerSecond = metricVal(scalars, "llamacpp:prompt_tokens_seconds")
+	// Decode-phase counters for the universal output-speed formula:
+	// tokens_predicted_total is the cumulative count of sampled
+	// (decode-phase) tokens and tokens_predicted_seconds_total the seconds
+	// spent producing them, so their rate() ratio is the measured output
+	// speed.
+	m.DecodeTokensTotal = metricVal(scalars, "llamacpp:tokens_predicted_total")
+	m.DecodeSecondsTotal = metricVal(scalars, "llamacpp:tokens_predicted_seconds_total")
 	return m, nil
 }
 

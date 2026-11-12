@@ -1760,7 +1760,9 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		r.hardware.Update(session.PeerID, region, model, engine, organization, machine, payload.Hardware)
 	}
 	if payload.BackendMetrics != nil {
-		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
+		// deployment_id is registration metadata (the /register body), so it
+		// lives on the registry agent, not on the gRPC session metadata.
+		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, a.Metadata.DeploymentID, payload.BackendMetrics)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1909,19 +1911,19 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 
 	// O(1) lookup: session.PeerID was set by LinkPeerID during /register.
 	// Verify the agent is still in the registry (may have been removed by the health monitor).
-	agent := r.agents.Get(session.PeerID)
-	if agent == nil {
+	a := r.agents.Get(session.PeerID)
+	if a == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
 	if payload.ReportEveryMs > 0 {
-		agent.SetReportEvery(time.Duration(payload.ReportEveryMs) * time.Millisecond)
+		a.SetReportEvery(time.Duration(payload.ReportEveryMs) * time.Millisecond)
 	}
 	if payload.InFlight != nil {
-		agent.SetReportedLoad(*payload.InFlight)
+		a.SetReportedLoad(*payload.InFlight)
 	}
 	if payload.Routers != nil {
-		agent.SetRouterReport(payload.Routers)
+		a.SetRouterReport(payload.Routers)
 	}
 
 	region := session.Metadata.Region
@@ -1931,7 +1933,7 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	machine := session.Metadata.Machine
 
 	if payload.BackendMetrics != nil {
-		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
+		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, a.Metadata.DeploymentID, payload.BackendMetrics)
 	}
 	if payload.Hardware != nil {
 		r.hardware.Update(session.PeerID, region, model, engine, organization, machine, payload.Hardware)
