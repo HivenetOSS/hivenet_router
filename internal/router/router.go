@@ -34,6 +34,7 @@ import (
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
 	"hivenet_router/internal/wake"
+	pb "hivenet_router/proto"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
@@ -825,6 +826,7 @@ func (r *Router) startGRPCServer() {
 		r.sessionManager,
 		r.p2pHost,
 	)
+	authServer.SetSiteRouters(r.siteRouters)
 	if err := grpc.StartServer(r.cfg.GRPCPort, authServer, r.grpcTLSCert); err != nil {
 		log.Errorf("gRPC server error: %v", err)
 	}
@@ -1761,7 +1763,32 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, payload.BackendMetrics)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	reply := domain.HeartbeatReply{}
+	for _, sr := range r.siteRouters() {
+		reply.Routers = append(reply.Routers, domain.SiteRouter{GRPCAddr: sr.GetGrpcAddr(), PeerID: sr.GetPeerId()})
+	}
+	_ = json.NewEncoder(w).Encode(reply)
+}
+
+// maxSiteRouters bounds the list handed to agents.
+const maxSiteRouters = 32
+
+// siteRouters returns the live routers of this router's site that advertise
+// the address agents reach them at (--advertise-grpc-addr), for the agents to
+// connect to every one. Nil without a shared store.
+func (r *Router) siteRouters() []*pb.SiteRouter {
+	if r.shared == nil {
+		return nil
+	}
+	var out []*pb.SiteRouter
+	for _, sr := range r.shared.SiteRouters() {
+		if len(out) == maxSiteRouters {
+			break
+		}
+		out = append(out, &pb.SiteRouter{GrpcAddr: sr.Addr, PeerId: sr.PeerID})
+	}
+	return out
 }
 
 // agentDisconnected takes an agent whose last connection closed out of the
@@ -2047,6 +2074,7 @@ func (r *Router) setupShared() error {
 		TLSCAFile:      cfg.SyncValkeyTLSCA,
 		Prefix:         syncSite(cfg),
 		RouterID:       cfg.RouterID,
+		AdvertiseAddr:  cfg.AdvertiseGRPCAddr,
 		Interval:       cfg.SyncInterval,
 		MinRouters:     cfg.SyncMinRouters,
 		// A router cut off when the store lost its data reconnects within

@@ -228,6 +228,13 @@ type Config struct {
 	SyncSite           string // key prefix in the shared store; empty = SiteID, else "default"
 	RouterID           string
 
+	// AdvertiseGRPCAddr is the gRPC address (host:port) agents reach this
+	// router at. With a shared store each router publishes it, and every
+	// router hands the agents the list of the site's live routers, so an
+	// agent given one router connects to all of them. Empty: not advertised.
+	// Env: HIVENET_ROUTER_ADVERTISE_GRPC_ADDR  Flag: --advertise-grpc-addr
+	AdvertiseGRPCAddr string
+
 	// KeyStoreBackend selects the persistence backend for the dynamic API key
 	// registry (dynamic auth mode only; static keys live in auth.yaml).
 	//   "memory" (default) — the registry is RAM-only; state is lost on
@@ -544,6 +551,7 @@ func LoadFromEnv() *Config {
 		}
 	}
 	cfg.SyncSite = os.Getenv("HIVENET_ROUTER_SYNC_SITE")
+	cfg.AdvertiseGRPCAddr = os.Getenv("HIVENET_ROUTER_ADVERTISE_GRPC_ADDR")
 	if v := os.Getenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {

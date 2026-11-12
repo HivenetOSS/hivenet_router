@@ -120,6 +120,8 @@ type Agent struct {
 	sessionsMu sync.Mutex
 	sessions   map[peer.ID]int
 
+	routers routerSet // the router sessions, seeds and discovered (discovery.go)
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
@@ -245,18 +247,12 @@ func (a *Agent) Run() error {
 	go a.runBackendHealthChecker(nil)
 
 	// One independent session per router: a router that is down or restarts
-	// never interrupts the others.
+	// never interrupts the others. The routers of the site that advertise
+	// themselves are added as they are learned (see discovery.go).
 	routers := a.cfg.RouterList()
 	log.Infof("Connecting to %d router(s): %s", len(routers), strings.Join(routers, ", "))
-	var wg sync.WaitGroup
-	for _, addr := range routers {
-		wg.Add(1)
-		go func(addr string) {
-			defer wg.Done()
-			a.runRouterSession(&routerSession{addr: addr}, node, httpHost)
-		}(addr)
-	}
-	wg.Wait()
+	a.startRouters(routers, node, httpHost)
+	a.waitRouters()
 	log.Info("Agent stopped")
 	return nil
 }
@@ -264,10 +260,22 @@ func (a *Agent) Run() error {
 // routerSession is this agent's link to one router: its own authentication,
 // registration, heartbeat, routing signals and re-authentication.
 type routerSession struct {
-	addr   string       // router gRPC address
-	peer   peer.ID      // router peer ID, from the auth response
-	client *http.Client // namespaced client for the router protocol
-	token  atomic.Value // current session token (string)
+	stop   chan struct{} // closed when the agent drops this router (see pruneRouters); nil = never
+	up     atomic.Bool   // registered and serving
+	addr   string        // router gRPC address
+	peer   peer.ID       // router peer ID, from the auth response
+	client *http.Client  // namespaced client for the router protocol
+	token  atomic.Value  // current session token (string)
+}
+
+// dropped reports whether the agent dropped this router (see pruneRouters).
+func (rs *routerSession) dropped() bool {
+	select {
+	case <-rs.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (rs *routerSession) sessionToken() string {
@@ -287,17 +295,21 @@ const (
 // and start over with exponential backoff.
 func (a *Agent) runRouterSession(rs *routerSession, node host.Host, httpHost *p2phttp.Host) {
 	backoff := sessionBackoffMin
-	for !a.stopped() {
+	for !a.stopped() && !rs.dropped() {
 		if a.runSessionOnce(rs, node, httpHost) {
 			backoff = sessionBackoffMin // the session was up; start the backoff over
 		}
-		if a.stopped() {
+		if a.stopped() || rs.dropped() {
 			return
 		}
 		wait := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)+1))
 		log.Warnf("Router %s: reconnecting in %v", rs.addr, wait.Round(time.Millisecond))
-		if a.sleepOrStop(wait) {
+		select {
+		case <-a.stopCh:
 			return
+		case <-rs.stop:
+			return
+		case <-time.After(wait):
 		}
 		backoff = min(backoff*2, sessionBackoffMax)
 	}
@@ -317,6 +329,7 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 		return false
 	}
 	rs.peer, rs.client = routerPeer, client
+	a.setPeer(rs, routerPeer)
 	a.openSession(routerPeer)
 	defer a.closeSession(routerPeer)
 	// Runs first: its requests are stopped before the router leaves the report.
@@ -330,6 +343,9 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 		return false
 	}
 	log.Infof("Router %s: registered, ready for requests", rs.addr)
+	a.learnRouters(fromProto(authResp.GetSiteRouters()))
+	a.sessionUp(rs)
+	defer rs.up.Store(false)
 	a.runUntilDisconnect(rs, node, authResp)
 	log.Warnf("Router %s: disconnected", rs.addr)
 	return true
@@ -548,6 +564,11 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 	for {
 		select {
 		case <-a.stopCh:
+			return
+		case <-rs.stop:
+			// Dropped (see pruneRouters), possibly between authentication
+			// and registration: end the session rather than serve outside
+			// the set.
 			return
 		case <-ticker.C:
 			if err := a.sendHeartbeat(rs); err != nil {
@@ -832,7 +853,24 @@ func (a *Agent) sendHeartbeat(rs *routerSession) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("heartbeat rejected: HTTP %d", resp.StatusCode)
 	}
+	// The reply lists the site's live routers (older routers send nothing).
+	var reply domain.HeartbeatReply
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&reply) == nil {
+		list := make([]siteRouter, 0, len(reply.Routers))
+		for _, r := range reply.Routers {
+			list = append(list, siteRouter{addr: r.GRPCAddr, peerID: r.PeerID})
+		}
+		a.learnRouters(list)
+	}
 	return nil
+}
+
+func fromProto(rs []*pb.SiteRouter) []siteRouter {
+	out := make([]siteRouter, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, siteRouter{addr: r.GetGrpcAddr(), peerID: r.GetPeerId()})
+	}
+	return out
 }
 
 // chatHandler handles inference requests forwarded by the router via libp2p HTTP.

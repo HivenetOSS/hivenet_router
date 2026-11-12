@@ -368,3 +368,18 @@ func TestLoadFromEnv_AdmissionQueueDepth(t *testing.T) {
 		t.Fatalf("AdmissionQueueDepth = %d, want 100", got)
 	}
 }
+
+// The advertised address is what agents dial: a listen address (no host,
+// 0.0.0.0, ::) or a non-numeric port would make them dial themselves.
+func TestValidAdvertiseAddr(t *testing.T) {
+	for _, ok := range []string{"router-0.routers.svc:50051", "10.0.0.5:50051", "[2001:db8::1]:50051"} {
+		if err := config.ValidAdvertiseAddr(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{":50051", "0.0.0.0:50051", "[::]:50051", "router:grpc", "router:0", "router:70000", "router"} {
+		if config.ValidAdvertiseAddr(bad) == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

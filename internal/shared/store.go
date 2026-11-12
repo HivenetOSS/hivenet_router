@@ -75,6 +75,7 @@ type Config struct {
 	Prefix         string        // key prefix, one per site (the site ID)
 	RouterID       string        // stable router identity, e.g. the pod name
 	PeerID         string        // this router's libp2p peer ID, so other routers can ask the agents about it
+	AdvertiseAddr  string        // gRPC address agents reach this router at, shared with the agents; empty = not advertised
 	Interval       time.Duration // sync interval
 	DownAfter      time.Duration // unreachable this long → each router enforces its share
 	MinRouters     int           // routers assumed while the live count is unknown or Valkey is down
@@ -178,6 +179,8 @@ type Store struct {
 	// could lose it, so occupancy stays at this router's share until a
 	// replica acknowledges again.
 	unreplicated atomic.Bool
+
+	site atomic.Pointer[[]SiteRouter] // live routers that advertise an address, at the last tick
 
 	m *storeMetrics
 }
@@ -284,6 +287,35 @@ func New(cfg Config) (*Store, error) {
 // heartbeat so the other routers can ask the agents about it. Call before
 // Start.
 func (s *Store) SetPeerID(id string) { s.cfg.PeerID = id }
+
+// SiteRouter is a live router of the site that advertises the gRPC address
+// agents reach it at.
+type SiteRouter struct {
+	Addr   string // gRPC address
+	PeerID string // libp2p peer ID
+	run    string // the run that advertises it
+}
+
+// runStart returns when a run started (the ms after its "@"), 0 if unknown.
+func runStart(run string) int64 {
+	i := strings.LastIndexByte(run, '@')
+	if i < 0 {
+		return 0
+	}
+	n, _ := strconv.ParseInt(run[i+1:], 10, 64)
+	return n
+}
+
+// SiteRouters returns the live routers of the site that advertise an address,
+// as of the last successful tick (nil before it, and while the store is
+// unreachable). Agents use it to connect to
+// every router (see --advertise-grpc-addr).
+func (s *Store) SiteRouters() []SiteRouter {
+	if p := s.site.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // SetAgents sets how the router lists the agents it serves (their libp2p
 // peer IDs). The list is published with the heartbeat. Call before Start.
@@ -682,7 +714,8 @@ func (s *Store) Close() {
 	// others need not keep a share free for it.
 	if c, err := s.connected(); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Interval)
-		c.Do(ctx, c.B().Zrem().Key(s.key("routers")).Member(s.inc).Build())
+		c.DoMulti(ctx, c.B().Zrem().Key(s.key("routers")).Member(s.inc).Build(),
+			c.B().Hdel().Key(s.key("grpc")).Field(s.inc).Build())
 		cancel()
 	}
 	s.connMu.Lock()
@@ -747,8 +780,8 @@ func (s *Store) tick(ctx context.Context) {
 
 	snap := time.Now()
 	agentsPayload, agentsList := s.agentsPayload()
-	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers"), s.key("epochs"), s.key("agents"), s.key("born")},
-		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID, agentsPayload}).AsStrSlice()
+	hb, err := heartbeat.Exec(cctx, c, []string{s.key("routers"), s.key("peers"), s.key("epochs"), s.key("agents"), s.key("born"), s.key("grpc")},
+		[]string{s.inc, strconv.FormatInt(s.cfg.DownAfter.Milliseconds(), 10), s.cfg.PeerID, agentsPayload, s.cfg.AdvertiseAddr}).AsStrSlice()
 	if err != nil || len(hb) < 4 {
 		if err == nil {
 			err = errShortReply
@@ -790,15 +823,29 @@ func (s *Store) tick(ctx context.Context) {
 	}
 	var live, livePeers []string
 	var fetch []string // runs whose agent list changed
+	var site []SiteRouter
+	siteAt := map[string]int{} // address → index in site
 	s.liveMu.Lock()
-	for i := 4; i+2 < len(hb); i += 3 {
+	for i := 4; i+3 < len(hb); i += 4 {
 		live = append(live, hb[i])
 		livePeers = append(livePeers, hb[i+1])
+		if hb[i+3] != "" && hb[i+1] != "" {
+			sr := SiteRouter{Addr: hb[i+3], PeerID: hb[i+1], run: hb[i]}
+			// A router that crashed and came back at the same address is
+			// live twice until the old run times out: list only the newest.
+			if j, ok := siteAt[sr.Addr]; !ok {
+				siteAt[sr.Addr] = len(site)
+				site = append(site, sr)
+			} else if runStart(sr.run) > runStart(site[j].run) {
+				site[j] = sr
+			}
+		}
 		if hb[i] != s.inc && hb[i+2] != "" && hb[i+2] != s.agentVer[hb[i]] {
 			fetch = append(fetch, hb[i])
 		}
 	}
 	s.liveMu.Unlock()
+	s.site.Store(&site)
 
 	// The newest entry first: after a failover the new primary may not have
 	// the entries this router read last, and then the read position moves
@@ -1010,6 +1057,12 @@ func (s *Store) failTick(buf map[usageKey]*usageVal, err error) {
 	s.fullNext = true
 	s.mu.Unlock()
 	s.m.errors.Inc()
+	if time.Since(s.lastOK) >= s.cfg.DownAfter {
+		// The list of live routers can no longer be refreshed: stop handing
+		// it out, or agents keep dialing routers that died meanwhile. They
+		// treat an empty list as "change nothing".
+		s.site.Store(nil)
+	}
 	if time.Since(s.lastOK) >= s.cfg.DownAfter && s.degraded.Load() == 0 {
 		s.outages++
 		s.degraded.Store(s.outages)
@@ -1092,17 +1145,20 @@ func streamMillis(id string) int64 {
 }
 
 // heartbeat records this run as live (scored with Valkey's own clock, so the
-// routers' clocks do not matter), its libp2p peer ID and, when ARGV[4] is
-// set, the agents it serves ("version|id,id,…"). It drops runs silent for an
-// hour, with what was recorded about them.
+// routers' clocks do not matter), its libp2p peer ID, the gRPC address agents
+// reach it at (ARGV[5], when advertised) and, when ARGV[4] is set, the agents
+// it serves ("version|id,id,…"). It drops runs silent for an hour, with what
+// was recorded about them.
 //
 // It returns whether this run was in the live set ("1"/"0"), this run's
 // epoch, when the store's data was created (KEYS[5], set on the first
 // heartbeat after it was lost) and Valkey's time, both in ms, then for each
-// run seen within ARGV[2] ms: run, peer ID, version of its agent list. The epoch is new whenever this run was missing from the
+// run seen within ARGV[2] ms: run, peer ID, version of its agent list,
+// advertised gRPC address. The epoch is new whenever this run was missing from the
 // live set (first heartbeat, eviction, or lost data); grants must present it.
-// KEYS: live set, peer-ID hash, epoch hash, agent-list hash, birth key.
-// ARGV: run, live window (ms), peer ID, agent list.
+// KEYS: live set, peer-ID hash, epoch hash, agent-list hash, birth key,
+// gRPC-address hash.
+// ARGV: run, live window (ms), peer ID, agent list, gRPC address.
 var heartbeat = valkey.NewLuaScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
@@ -1117,11 +1173,13 @@ for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)) 
   redis.call('HDEL', KEYS[2], r)
   redis.call('HDEL', KEYS[3], r)
   redis.call('HDEL', KEYS[4], r)
+  redis.call('HDEL', KEYS[6], r)
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 3600000)
 if ARGV[3] ~= '' then redis.call('HSET', KEYS[2], ARGV[1], ARGV[3]) end
 if ARGV[4] ~= '' then redis.call('HSET', KEYS[4], ARGV[1], ARGV[4]) end
-for i = 2, 4 do redis.call('EXPIRE', KEYS[i], 3600) end
+if ARGV[5] ~= '' then redis.call('HSET', KEYS[6], ARGV[1], ARGV[5]) end
+for _, i in ipairs({2, 3, 4, 6}) do redis.call('EXPIRE', KEYS[i], 3600) end
 redis.call('SET', KEYS[5], now, 'NX')
 redis.call('EXPIRE', KEYS[5], 3600)
 local out = {present and '1' or '0', ep, redis.call('GET', KEYS[5]), tostring(now)}
@@ -1129,6 +1187,7 @@ for _, r in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], now - tonumber(ARGV[2]),
   out[#out + 1] = r
   out[#out + 1] = redis.call('HGET', KEYS[2], r) or ''
   out[#out + 1] = string.match(redis.call('HGET', KEYS[4], r) or '', '^(%d+)|') or ''
+  out[#out + 1] = redis.call('HGET', KEYS[6], r) or ''
 end
 return out`)
 

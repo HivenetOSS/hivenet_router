@@ -70,7 +70,7 @@ func main() {
 	organization := flag.String("organization", cfg.Organization, "Cloud/compute provider hosting this agent (e.g. AWS, OVH, Hivenet Compute)")
 	machine := flag.String("machine", cfg.Machine, "Machine name within the organization")
 	routerGRPC := flag.String("router-grpc", cfg.RouterGRPCAddr, "Router gRPC address (one router); see --routers")
-	routers := flag.String("routers", os.Getenv("HIVENET_AGENT_ROUTERS"), "Comma-separated gRPC addresses of every router of the site, each reaching one specific router (never a load balancer; in Kubernetes, headless-Service pod DNS); the agent keeps a session with each. Overrides --router-grpc (env: HIVENET_AGENT_ROUTERS)")
+	routers := flag.String("routers", os.Getenv("HIVENET_AGENT_ROUTERS"), "Comma-separated gRPC addresses of every router of the site, each reaching one specific router (never a load balancer; in Kubernetes, headless-Service pod DNS); the agent keeps a session with each, and also with every router these list as part of the site (routers with --advertise-grpc-addr). Overrides --router-grpc (env: HIVENET_AGENT_ROUTERS)")
 	routerP2P := flag.String("router-p2p", cfg.RouterP2PAddr, "Unused: each router sends its libp2p address in the auth response")
 	tagsStr := flag.String("tags", strings.Join(cfg.Tags, ","), "Comma-separated tags")
 	httpTimeout := flag.Duration("http-timeout", cfg.HTTPTimeout, "HTTP timeout for backend requests")

@@ -179,3 +179,50 @@ func TestUnansweredSentinelDoesNotHoldLoop(t *testing.T) {
 		t.Fatal("the sync loop is stuck connecting to a Sentinel that never answers")
 	}
 }
+
+// While the store is unreachable a router stops handing out the site's
+// routers: the list can no longer be refreshed, and agents would keep
+// dialing routers that died meanwhile.
+func TestSiteRoutersClearedWhileStoreDown(t *testing.T) {
+	mr := miniredis.RunT(t)
+	p := newCutProxy(t, mr.Addr())
+	st, err := shared.New(shared.Config{Addrs: []string{p.ln.Addr().String()}, Prefix: "pc", RouterID: "a",
+		Interval: interval, PeerID: "peer-a", AdvertiseAddr: "a.svc:50051"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	st.Start(ctx)
+	t.Cleanup(func() { cancel(); st.Close() })
+	waitFor(t, 5*time.Second, "the router to list itself", func() bool { return len(st.SiteRouters()) == 1 })
+	p.setCut(true)
+	waitFor(t, 5*time.Second, "the list to be dropped", func() bool { return st.SiteRouters() == nil })
+	p.setCut(false)
+	waitFor(t, 5*time.Second, "the list to come back", func() bool { return len(st.SiteRouters()) == 1 })
+}
+
+// A router that crashed and came back at the same address is live twice
+// until the old run times out: the list names only the newest run.
+func TestSiteRoutersListsTheNewestRun(t *testing.T) {
+	mr := miniredis.RunT(t)
+	start := func(id, peerID string) *shared.Store {
+		st, err := shared.New(shared.Config{Addrs: []string{mr.Addr()}, Prefix: "pc", RouterID: id,
+			Interval: interval, PeerID: peerID, AdvertiseAddr: "r0.svc:50051"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		st.Start(ctx)
+		t.Cleanup(func() { cancel(); st.Close() })
+		return st
+	}
+	old := start("r0", "peer-old")
+	waitFor(t, 5*time.Second, "the old run to be listed", func() bool { return len(old.SiteRouters()) == 1 })
+	time.Sleep(5 * time.Millisecond) // a later start time
+	st := start("r0-back", "peer-new")
+	waitFor(t, 5*time.Second, "both runs to be live", func() bool { return st.Size() == 2 })
+	l := st.SiteRouters()
+	if len(l) != 1 || l[0].PeerID != "peer-new" {
+		t.Fatalf("listed %v, want only the newest run", l)
+	}
+}

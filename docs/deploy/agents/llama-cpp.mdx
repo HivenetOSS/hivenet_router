@@ -262,7 +262,7 @@ The agent waits until llama.cpp is healthy and exposes a model before registerin
 | --- | --- |
 | `--engine llamacpp` | Selects the llama.cpp backend integration |
 | `--backend-url` | Base URL of the local llama.cpp server |
-| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
