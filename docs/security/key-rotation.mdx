@@ -89,7 +89,7 @@ Static client keys are stored as SHA-256 hashes in `auth.yaml`. The safest rotat
       mode: api-key
     ```
 
-    Using the same owner preserves one shared quota bucket during the overlap. Use different owners only when the two credentials should have independent quota accounting.
+    Quota buckets are per key, so during the overlap each key is counted against its own limits: the old and new key together can use up to twice the configured budget. The new key starts with a full budget. Keep the same owner so metrics, audit records and dashboards stay attributed to one tenant.
 
     Keep the model restrictions and quotas aligned unless the rotation is also an intentional access change.
   </Step>
@@ -187,7 +187,7 @@ curl -X DELETE \
   "http://localhost:8080/admin/api-keys/acme-prod?version=rev_00000043"
 ```
 
-Keys with the same owner share quota buckets, including during the overlap.
+Quota buckets are per key. Replacing the hash under the same ID keeps the key's buckets; creating a new ID gives the new key its own full budget during the overlap.
 
 ### Immediate replacement under one ID
 

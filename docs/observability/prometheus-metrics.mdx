@@ -1333,7 +1333,7 @@ tenant_id
 
 A value of `0` means unlimited.
 
-These gauges describe keys using the flat quota shape.
+These gauges describe keys using the flat quota shape. Limits are enforced per key; the gauge is the tenant's total ceiling, the sum of its flat-shape keys' limits (`0` if any of them is unlimited). When the tenant has a daily budget of its own (`tenant_tokens_per_day`), the TPD gauge is the lower of that budget and the sum. It is set at startup, on reload and whenever the key registry changes.
 
 ### Per-model quota limits
 
@@ -1356,7 +1356,7 @@ requests per minute per replica
 × healthy replicas
 ```
 
-It can change as agent health and fleet size change.
+It can change as agent health and fleet size change. When several keys of one tenant declare the same model, the RPM gauge shows the effective ceiling of the key that was admitted last; the TPD gauge is the sum over those keys.
 
 ### Tokens used today
 
@@ -1370,15 +1370,21 @@ Label:
 tenant_id
 ```
 
-The value resets at midnight UTC.
+The value is the tenant's tokens used today on chat completions and `/v1/messages`, summed over all its keys and models, whether or not a key has a daily budget: the prompt estimate charged at admission, then the completion tokens and any prompt tokens the backend reports beyond the estimate, charged after the response. It counts only tokens that were charged: a request refused for a daily budget adds nothing, and when a response overflows a budget only what fitted is counted. Embeddings and reranking are not charged to daily budgets and are not counted. It resets at midnight UTC. This is the counter a tenant's daily budget (`tenant_tokens_per_day`) is checked against.
 
-Token-budget utilization for flat quotas:
+The router refreshes it for every tenant on each `--sync-interval`. With [shared counters](/deploy/multiple-routers) the value is the site total, so every router of the site exports the same value. Aggregate it with `max`, not `sum`, which would count it once per router. While a router cannot read a tenant's site total from the store, it keeps that tenant's last value instead of reporting `0`.
 
 ```promql
-hivenet_tenant_tokens_used_today
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
+```
+
+Token-budget utilization, for tenants whose keys all use the flat quota shape (the limit gauge leaves out per-model keys, so a tenant with per-model keys can read above 100%; compare those against the per-model TPD gauges, or use the tenant's own budget):
+
+```promql
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
 /
 clamp_min(
-  hivenet_tenant_quota_tpd_limit,
+  max by (tenant_id) (hivenet_tenant_quota_tpd_limit),
   1
 )
 ```

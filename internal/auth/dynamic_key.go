@@ -51,6 +51,10 @@ type DynamicKeyProvider struct {
 	version  string                      // opaque version string, from the upstream key-sync service
 	onChange func()                      // optional, fires after a successful registry mutation
 
+	// tenants maps every tenant with a key in the registry to its daily
+	// budget (tenantBudgets; 0 = none). Rebuilt under mu on every change.
+	tenants map[string]int
+
 	// store is the persistence backend (nil = memory-only, the default).
 	// Wired once before the registry serves traffic; see SetKeyStore.
 	store KeyStore
@@ -73,9 +77,10 @@ type DynamicKeyProvider struct {
 // NewDynamicKeyProvider creates an empty key registry.
 func NewDynamicKeyProvider() *DynamicKeyProvider {
 	return &DynamicKeyProvider{
-		byHash: make(map[string]*DynamicKeyEntry),
-		byID:   make(map[string]*DynamicKeyEntry),
-		now:    time.Now,
+		byHash:  make(map[string]*DynamicKeyEntry),
+		byID:    make(map[string]*DynamicKeyEntry),
+		tenants: make(map[string]int),
+		now:     time.Now,
 	}
 }
 
@@ -129,8 +134,9 @@ func (r *DynamicKeyProvider) Authenticate(req *http.Request) (*AuthResult, error
 
 	r.mu.RLock()
 	entry, ok := r.byHash[hash]
+	budget := r.tenantBudgetLocked(entry)
 	r.mu.RUnlock()
-	return resultFor(entry, ok)
+	return resultFor(entry, ok, budget)
 }
 
 // AuthenticateKeyID authenticates by key ID instead of by bearer token. It is
@@ -140,12 +146,47 @@ func (r *DynamicKeyProvider) Authenticate(req *http.Request) (*AuthResult, error
 func (r *DynamicKeyProvider) AuthenticateKeyID(keyID string) (*AuthResult, error) {
 	r.mu.RLock()
 	entry, ok := r.byID[keyID]
+	budget := r.tenantBudgetLocked(entry)
 	r.mu.RUnlock()
-	return resultFor(entry, ok)
+	return resultFor(entry, ok, budget)
 }
 
-// resultFor applies the enabled and expiry checks shared by both lookups.
-func resultFor(entry *DynamicKeyEntry, ok bool) (*AuthResult, error) {
+// tenantBudgetLocked returns the daily budget of entry's tenant (0 for a nil
+// entry). Caller holds r.mu.
+func (r *DynamicKeyProvider) tenantBudgetLocked(entry *DynamicKeyEntry) int {
+	if entry == nil {
+		return 0
+	}
+	return r.tenants[entry.Owner]
+}
+
+// rebuildTenantsLocked recomputes every tenant's daily budget from the keys
+// in the registry, enabled or not: the budget belongs to the tenant, and a
+// key carries the value its control service last pushed. Caller holds r.mu
+// for writing.
+func (r *DynamicKeyProvider) rebuildTenantsLocked() {
+	byTenant := make(map[string][]QuotaLimits, len(r.tenants))
+	for _, e := range r.byID {
+		byTenant[e.Owner] = append(byTenant[e.Owner], e.Quota)
+	}
+	r.tenants = tenantBudgets(byTenant)
+}
+
+// TenantIDs returns every tenant with a key in the registry, in no
+// particular order. Cheaper than Tenants: no ceilings are computed.
+func (r *DynamicKeyProvider) TenantIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.tenants))
+	for t := range r.tenants {
+		out = append(out, t)
+	}
+	return out
+}
+
+// resultFor applies the enabled and expiry checks shared by both lookups;
+// tenantBudget is the daily budget of the entry's tenant.
+func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, error) {
 	if !ok {
 		return nil, ErrInvalidCredentials
 	}
@@ -156,12 +197,14 @@ func resultFor(entry *DynamicKeyEntry, ok bool) (*AuthResult, error) {
 		return nil, ErrInvalidCredentials
 	}
 
+	quota := entry.Quota
+	quota.TenantTokensPerDay = tenantBudget
 	return &AuthResult{
 		TenantID:      entry.Owner,
 		KeyID:         entry.ID,
 		KeyPreview:    entry.KeyPreview,
 		AllowedModels: entry.AllowedModels,
-		QuotaLimits:   entry.Quota,
+		QuotaLimits:   quota,
 	}, nil
 }
 
@@ -267,6 +310,7 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 
 	r.byHash[e.KeyHash] = entry
 	r.byID[e.ID] = entry
+	r.rebuildTenantsLocked()
 	r.version = version
 	r.mu.Unlock()
 
@@ -304,6 +348,7 @@ func (r *DynamicKeyProvider) Delete(version string, keyID string) error {
 			delete(r.byHash, entry.KeyHash)
 		}
 		delete(r.byID, keyID)
+		r.rebuildTenantsLocked()
 	}
 
 	r.version = version
@@ -381,6 +426,7 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 	unchanged := r.store != nil && sameEntries(r.byID, byID)
 	r.byHash = byHash
 	r.byID = byID
+	r.rebuildTenantsLocked()
 	r.version = version
 	r.mu.Unlock()
 	r.ks.confirmed.Store(true)
@@ -449,17 +495,12 @@ func (r *DynamicKeyProvider) GetKey(keyID string) (DynamicKeyEntry, bool) {
 	return entry, true
 }
 
-// Tenants returns the deduped per-tenant quota limits, used by the router to
-// pre-populate Prometheus quota gauges so the Grafana $tenant_id variable is
-// populated within the first scrape. Mirrors StaticKeyProvider.Tenants().
-//
-// A tenant may have multiple keys with different QuotaLimits — the actual
-// per-request limit is whichever quota is carried by the key the caller
-// authenticates with, applied by QuotaMiddleware on every request. This
-// function only seeds an initial value so the Grafana variable populates
-// before any traffic arrives; the per-request gauge writes will overwrite
-// it. Iterates byID in sorted order so the seeded value is deterministic
-// across restarts (the alphabetically last key ID wins per tenant).
+// Tenants returns every tenant's total ceiling: the limits of its keys
+// summed (see tenantCeilings). Used by the router to pre-populate the
+// per-tenant Prometheus quota gauges so the Grafana $tenant_id variable is
+// populated within the first scrape; re-published on every registry change.
+// Mirrors StaticKeyProvider.Tenants(). Enforcement is per key and never
+// reads this. Iterates byID in sorted order so the result is deterministic.
 func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -468,10 +509,14 @@ func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	out := make(map[string]QuotaLimits, len(ids))
+	byTenant := make(map[string][]QuotaLimits)
 	for _, id := range ids {
 		e := r.byID[id]
-		out[e.Owner] = e.Quota
+		byTenant[e.Owner] = append(byTenant[e.Owner], e.Quota)
+	}
+	out := make(map[string]QuotaLimits, len(byTenant))
+	for tenant, keys := range byTenant {
+		out[tenant] = tenantCeilings(keys)
 	}
 	return out
 }

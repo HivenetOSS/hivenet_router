@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,24 +28,35 @@ func init() { gin.SetMode(gin.TestMode) }
 // fakeLimiter lets each test pin the peeked remaining budget and the result of
 // the input-token charge; RPM and output checks always allow so they never
 // interfere. inputCalls records how many times the (deducting) AllowInputTokens
-// was invoked, so a test can assert a rejected request was never charged.
+// was invoked, so a test can assert a rejected request was never charged. Like
+// the real limiter, a charge against no daily budget at all is always allowed
+// (the handlers make it so the tenant's usage counts every key). Safe for
+// concurrent use: concurrent requests charge it.
 type fakeLimiter struct {
 	remaining    int // RemainingTokens peek result
 	inAllowed    bool
 	inRemaining  int
+	mu           sync.Mutex
 	inputCalls   int // number of AllowInputTokens (deducting) calls
 	chargedInput int // last token count passed to AllowInputTokens
 }
 
-func (f *fakeLimiter) AllowRequest(string, string, int) (bool, int, error) { return true, -1, nil }
-func (f *fakeLimiter) RemainingTokens(_, _ string, _ int) (int, error)     { return f.remaining, nil }
-func (f *fakeLimiter) AllowOutputTokens(string, string, int, int) (bool, int, error) {
+func (f *fakeLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
+	return true, -1, nil
+}
+func (f *fakeLimiter) RemainingTokens(auth.DailyBudget) (int, error) { return f.remaining, nil }
+func (f *fakeLimiter) AllowOutputTokens(auth.DailyBudget, int) (bool, int, error) {
 	return true, -1, nil
 }
 func (f *fakeLimiter) Reset() {}
-func (f *fakeLimiter) AllowInputTokens(_, _ string, _, count int) (bool, int, error) {
+func (f *fakeLimiter) AllowInputTokens(b auth.DailyBudget, count int) (bool, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.inputCalls++
 	f.chargedInput = count
+	if b.KeyTokensPerDay <= 0 && b.TenantTokensPerDay <= 0 {
+		return true, -1, nil
+	}
 	return f.inAllowed, f.inRemaining, nil
 }
 

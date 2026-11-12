@@ -225,10 +225,13 @@ func launchRouter(t *testing.T, cfg *config.Config) (baseURL string, r *router.R
 	}
 }
 
-// testKey is one static auth.yaml key: the raw token a client presents and
-// the tenant (metadata.owner) it belongs to.
+// testKey is one static auth.yaml key: the raw token a client presents, the
+// tenant (metadata.owner) it belongs to, and optional flat quota limits
+// (0 = unlimited).
 type testKey struct {
 	Token, Owner, Name string
+	RPM, TPD           int
+	TenantTPD          int // quota.tenant_tokens_per_day
 }
 
 // writeAuthYAML returns an api-key auth.yaml for the given keys, hashing each
@@ -241,6 +244,12 @@ func writeAuthYAML(keys ...testKey) string {
 		h := sha256.Sum256([]byte(k.Token))
 		fmt.Fprintf(&b, "    - key_hash: %q\n      metadata:\n        name: %q\n        owner: %q\n",
 			hex.EncodeToString(h[:]), k.Name, k.Owner)
+		if k.RPM > 0 || k.TPD > 0 || k.TenantTPD > 0 {
+			fmt.Fprintf(&b, "      quota:\n        requests_per_minute: %d\n        tokens_per_day: %d\n", k.RPM, k.TPD)
+			if k.TenantTPD > 0 {
+				fmt.Fprintf(&b, "        tenant_tokens_per_day: %d\n", k.TenantTPD)
+			}
+		}
 	}
 	b.WriteString("admin:\n  mode: api-key\n")
 	return b.String()

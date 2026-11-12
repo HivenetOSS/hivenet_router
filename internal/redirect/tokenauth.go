@@ -218,3 +218,12 @@ func (t *tokenAuth) Tenants() map[string]auth.QuotaLimits {
 	}
 	return nil
 }
+
+// TenantIDs passes through the wrapped provider's tenant list, which the
+// router reads (by type assertion) to publish each tenant's usage today.
+func (t *tokenAuth) TenantIDs() []string {
+	if l, ok := t.next.(interface{ TenantIDs() []string }); ok {
+		return l.TenantIDs()
+	}
+	return nil
+}

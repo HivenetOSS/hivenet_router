@@ -505,7 +505,7 @@ func NewRouterMetrics() *RouterMetrics {
 		tenantTokensUsedToday: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_tenant_tokens_used_today",
-				Help: "Tokens consumed by the tenant so far today (UTC calendar day). Resets at midnight UTC.",
+				Help: "Tokens the tenant's keys were charged today (UTC calendar day) on chat and messages, with or without a daily budget; with shared counters, the site total (aggregate with max, not sum). Resets at midnight UTC.",
 			},
 			[]string{"tenant_id"},
 		),

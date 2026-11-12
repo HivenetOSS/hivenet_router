@@ -39,14 +39,18 @@ type PendingRequest struct {
 	// default "/v1/chat/completions", so existing chat requests are unaffected.
 	Path string
 
-	// TokensPerDay is the tenant's configured daily token budget (0 = unlimited).
+	// TokensPerDay is the key's configured daily token budget (0 = unlimited).
 	// Copied from QuotaLimits at enqueue time so the processor can enforce it
 	// without re-reading the Gin context.
 	TokensPerDay int
 
+	// TenantTokensPerDay is the daily token budget of the key's tenant, shared
+	// by all its keys (0 = unlimited). Copied like TokensPerDay.
+	TenantTokensPerDay int
+
 	// QuotaModel selects the limiter bucket for AllowOutputTokens. Empty for
-	// legacy flat keys (one bucket per tenant); set to the requested model
-	// name for per-model keys (one bucket per (tenant, model)). Stamped by the
+	// flat keys (one bucket per key); set to the requested model name for
+	// per-model keys (one bucket per (key, model)). Stamped by the
 	// handler at enqueue time so the processor charges the SAME bucket the
 	// front-door admission charged AllowInputTokens against.
 	QuotaModel string
@@ -91,6 +95,13 @@ type PendingRequest struct {
 	// stashed so the handler can true up the reservation by the difference once
 	// the backend reports the exact prompt_tokens.
 	EstimatedInputTokens int
+
+	// ChargedInputTokens is what the daily budgets were charged for the prompt
+	// at admission (0 when nothing was, as for count_tokens). Once the backend
+	// reports its prompt_tokens, the processor charges what they exceed this by
+	// together with the completion (InputShortfall): the daily budgets count
+	// the prompt the backend processed, not only the router's estimate of it.
+	ChargedInputTokens int
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.
@@ -177,4 +188,15 @@ func (p *PendingRequest) ForwardID() string {
 		return p.ID
 	}
 	return p.ID + "-" + strconv.Itoa(int(n))
+}
+
+// InputShortfall is how many prompt tokens the backend reported beyond what
+// the daily budgets were charged at admission: 0 when none were charged,
+// when the backend reported none, or when the estimate was not below them.
+// An estimate above the backend's count is not refunded.
+func (p *PendingRequest) InputShortfall(promptTokens int) int {
+	if p.ChargedInputTokens <= 0 || promptTokens <= p.ChargedInputTokens {
+		return 0
+	}
+	return promptTokens - p.ChargedInputTokens
 }

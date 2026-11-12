@@ -14,14 +14,14 @@ import (
 // would exceed it.
 func TestMinute_ITPMAllowsWithinRateDeniesOver(t *testing.T) {
 	l := auth.NewMinuteRateLimiter()
-	if !l.AllowInputTokens("k1", "m", 1000, 600) {
+	if !l.AllowInputTokens("t", "k1", "m", 1000, 600) {
 		t.Fatal("first 600-token request must fit a 1000/min bucket")
 	}
-	if l.AllowInputTokens("k1", "m", 1000, 600) {
+	if l.AllowInputTokens("t", "k1", "m", 1000, 600) {
 		t.Error("second 600-token request must be denied (1200 > 1000/min)")
 	}
 	// A different key has its own independent bucket.
-	if !l.AllowInputTokens("k2", "m", 1000, 600) {
+	if !l.AllowInputTokens("t", "k2", "m", 1000, 600) {
 		t.Error("a different key's bucket must be independent")
 	}
 }
@@ -30,7 +30,7 @@ func TestMinute_ITPMAllowsWithinRateDeniesOver(t *testing.T) {
 func TestMinute_ITPMDisabledWhenZero(t *testing.T) {
 	l := auth.NewMinuteRateLimiter()
 	for i := 0; i < 100; i++ {
-		if !l.AllowInputTokens("k1", "m", 0, 1_000_000) {
+		if !l.AllowInputTokens("t", "k1", "m", 0, 1_000_000) {
 			t.Fatalf("limit 0 must disable the cap, denied at i=%d", i)
 		}
 	}
@@ -41,7 +41,7 @@ func TestMinute_ITPMDisabledWhenZero(t *testing.T) {
 // legitimate max-size prompt is never throttled by its own rate bucket.
 func TestMinute_FullContextInputFits(t *testing.T) {
 	l := auth.NewMinuteRateLimiter()
-	if !l.AllowInputTokens("k1", "m", 519_540, 262_144) {
+	if !l.AllowInputTokens("t", "k1", "m", 519_540, 262_144) {
 		t.Error("a full-context request (input = max_input_tokens) must fit the ITPM burst")
 	}
 }
@@ -53,7 +53,7 @@ func TestMinute_TinyFloodPassesITPM(t *testing.T) {
 	l := auth.NewMinuteRateLimiter()
 	admitted := 0
 	for i := 0; i < 1000; i++ {
-		if l.AllowInputTokens("k1", "m", 520_000, 100) {
+		if l.AllowInputTokens("t", "k1", "m", 520_000, 100) {
 			admitted++
 		}
 	}
@@ -67,16 +67,16 @@ func TestMinute_TinyFloodPassesITPM(t *testing.T) {
 // capped at one minute's capacity.
 func TestMinute_OTPMChargeDrainsAndExhausts(t *testing.T) {
 	l := auth.NewMinuteRateLimiter()
-	if l.OutputExhausted("k1", "m", 1000) {
+	if l.OutputExhausted("t", "k1", "m", 1000) {
 		t.Fatal("a fresh OTPM bucket must not be exhausted")
 	}
 	// A single huge response drains at most a full minute's capacity.
-	l.ChargeOutputTokens("k1", "m", 1000, 50_000)
-	if !l.OutputExhausted("k1", "m", 1000) {
+	l.ChargeOutputTokens("t", "k1", "m", 1000, 50_000)
+	if !l.OutputExhausted("t", "k1", "m", 1000) {
 		t.Error("after output over the per-minute rate, the OTPM bucket must be exhausted")
 	}
 	// A disabled OTPM cap is never exhausted.
-	if l.OutputExhausted("k1", "m", 0) {
+	if l.OutputExhausted("t", "k1", "m", 0) {
 		t.Error("limit 0 must disable OTPM (never exhausted)")
 	}
 }

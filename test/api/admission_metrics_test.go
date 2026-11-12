@@ -89,7 +89,7 @@ func TestAdmissionRejectReason(t *testing.T) {
 	t.Run("b4_otpm", func(t *testing.T) {
 		var reason string
 		minLim := auth.NewMinuteRateLimiter()
-		minLim.ChargeOutputTokens("k1", b2Model, 100, 100) // drain the key's OTPM bucket for this model
+		minLim.ChargeOutputTokens("t1", "k1", b2Model, 100, 100) // drain the key's OTPM bucket for this model
 		h := meteredHandler(make(chan *domain.PendingRequest, 1), serverless(0), nil, minLim, nil, &reason)
 		c, w := newCtx("/v1/chat/completions", b2Body(0))
 		withKey(c, auth.QuotaLimits{OutputTokensPerMinute: 100})

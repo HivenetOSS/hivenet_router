@@ -473,12 +473,6 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	// Wire the today-usage gauge so hivenet_tenant_tokens_used_today is updated
-	// on every successful token deduction, regardless of backend strategy.
-	type tokenUsageReporter interface{ SetOnTokensUsed(func(string, int)) }
-	if r, ok := rateLimiter.(tokenUsageReporter); ok {
-		r.SetOnTokensUsed(routerMetrics.TenantSetTokensUsedToday)
-	}
 	// Wire the flush-error counter so diskDB write failures increment
 	// hivenet_quota_backend_errors_total instead of being silently dropped.
 	type flushErrorReporter interface{ SetOnFlushError(func()) }
@@ -725,6 +719,7 @@ func (r *Router) Start() error {
 			c.Start(processorCtx)
 		}
 	}
+	go r.publishTenantUsage(processorCtx)
 	// A reservation an exit path forgot to release would hold its budget
 	// forever, with or without a shared store.
 	go r.reapLeakedReservations(processorCtx)
@@ -1015,6 +1010,66 @@ func (r *Router) watchPolicyReload() {
 	}
 }
 
+// publishTenantUsage refreshes hivenet_tenant_tokens_used_today for every
+// tenant on each sync interval. It is the gauge's only writer, so concurrent
+// charges can never publish out of order. With shared counters the value is
+// the site-wide usage the routers keep per tenant, so every router of a site
+// exports the same value (aggregate it with max by (tenant_id), not sum),
+// including for tenants it served nothing for. A tenant whose site total
+// cannot be read keeps its last value instead of reading 0.
+func (r *Router) publishTenantUsage(ctx context.Context) {
+	type tenantUsage interface {
+		TenantUsageToday(tenantID string) (int, bool)
+	}
+	type tenantLister interface{ TenantIDs() []string }
+	usage, ok := r.rateLimiter.(tenantUsage)
+	if !ok {
+		return
+	}
+	t := time.NewTicker(r.cfg.SyncInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		lister, ok := r.apiAuth.Load().(tenantLister)
+		if !ok {
+			continue
+		}
+		r.publishTenantUsageOnce(lister.TenantIDs(), usage.TenantUsageToday, time.Now().Add(r.cfg.SyncInterval))
+	}
+}
+
+// tenantUsageReads bounds the site totals read from the shared store at once
+// by publishTenantUsageOnce. A total is read once a day per tenant, and again
+// after this router may have missed usage; each read waits at most 200 ms.
+const tenantUsageReads = 8
+
+// publishTenantUsageOnce sets the usage gauge of each tenant, reading the
+// totals it does not hold yet concurrently. Reads not started by deadline wait
+// for the next tick, so a hanging store never holds the loop past one
+// interval per pending read.
+func (r *Router) publishTenantUsageOnce(tenants []string, usageOf func(string) (int, bool), deadline time.Time) {
+	sem := make(chan struct{}, tenantUsageReads)
+	var wg sync.WaitGroup
+	for _, tenant := range tenants {
+		if time.Now().After(deadline) {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			if used, known := usageOf(tenant); known {
+				r.metrics.TenantSetTokensUsedToday(tenant, used)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 // publishTenantQuotas pre-populates Prometheus quota gauges for every tenant
 // defined in the auth config. This ensures the Grafana $tenant_id variable is
 // populated within the first scrape (~5 s) instead of waiting for the first
@@ -1034,7 +1089,8 @@ func (r *Router) publishTenantQuotas() {
 		// reads as "this tenant has no flat ceiling — look at the per-model
 		// series instead."
 		r.metrics.TenantSetQuotaLimit(tenantID, limits.RequestsPerMinute)
-		r.metrics.TenantSetTPDLimit(tenantID, limits.TokensPerDay)
+		// Capped by the tenant's own daily budget, when it has one.
+		r.metrics.TenantSetTPDLimit(tenantID, limits.DailyTokenCeiling())
 		// Seed per-model gauges so the Grafana (tenant_id, model) variable
 		// populates within the first scrape. The RPM seed is per_replica
 		// directly — at startup the live replica count is unknown — and the

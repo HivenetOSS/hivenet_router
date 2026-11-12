@@ -548,20 +548,47 @@ The response can include a nonzero remaining value:
 X-RateLimit-Remaining-Tokens: 250
 ```
 
+When the budget that ran out is the tenant's (`quota.tenant_tokens_per_day`, shared by all the owner's keys) rather than the key's own, the message says so:
+
+```json
+{
+  "error": {
+    "code": "token_limit_exceeded",
+    "message": "your organization's daily token budget is exhausted",
+    "source": "router"
+  }
+}
+```
+
 The request may succeed before the UTC reset when you reduce:
 
 - prompt size
 - `max_tokens`
 - `max_completion_tokens`
 
+With [several routers sharing counters](/deploy/multiple-routers), a router may also refuse a request the budget still has room for: until the next sync it admits only its share of what is left, so the routers together never overshoot. That refusal, and one while the router cannot read today's usage from the shared store, is temporary. It carries `Retry-After: 1`, in the header and as `retry_after` in the body, and says so:
+
+```json
+{
+  "error": {
+    "code": "token_limit_exceeded",
+    "message": "the daily token budget is nearly spent and this router's share of it is used up for the moment; retry in a second",
+    "source": "router",
+    "retry_after": 1
+  }
+}
+```
+
+A refusal without `Retry-After` means the budget itself is spent until the UTC reset.
+
 #### After non-streaming inference
 
 The backend may complete the request before Hivenet Router knows the actual output-token count.
 
-When the completion no longer fits:
+When the completion, plus any prompt tokens the backend counted beyond the admission estimate, no longer fits:
 
 - the response body is discarded
-- Hivenet Router returns `429`
+- Hivenet Router returns `429`, naming the organization's budget when that is the one that ran out
 - the prompt-token deduction remains
 - actual usage and the selected agent are preserved in the audit record
 
