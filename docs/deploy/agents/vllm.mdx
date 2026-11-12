@@ -384,6 +384,9 @@ It sends the resulting engine data to the router, which exposes it through the r
 | Inter-token latency | `vllm:inter_token_latency_seconds` | Average, P90, and histogram metrics |
 | Prompt-token distribution | `vllm:request_prompt_tokens` | Workload-shape analysis |
 | Generated-token distribution | `vllm:request_generation_tokens` | Workload-shape analysis |
+| Decode time | `vllm:request_decode_time_seconds` | Per-request decode-phase histogram |
+| Decode-phase tokens | `vllm:request_generation_tokens` minus one per request | `hivenet_agent_engine_decode_tokens_total` |
+| Decode-phase seconds | `vllm:request_decode_time_seconds` sum | `hivenet_agent_engine_decode_seconds_total` |
 | Finish reason | `vllm:request_success_total` | Completion outcome analysis |
 
 View all engine metrics on the router:
@@ -404,6 +407,8 @@ hivenet_agent_engine_avg_ttft_seconds
 hivenet_agent_engine_p90_ttft_seconds
 hivenet_agent_engine_avg_itl_seconds
 hivenet_agent_engine_p90_itl_seconds
+hivenet_agent_engine_decode_tokens_total
+hivenet_agent_engine_decode_seconds_total
 ```
 
 View live values through the routing table:

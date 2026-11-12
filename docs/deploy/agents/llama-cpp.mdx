@@ -377,10 +377,12 @@ Start llama.cpp with `--metrics` to make this data available. Metrics are sent t
 | KV cache utilization | `llamacpp:kv_cache_usage_ratio` | `kv_cache_utilization` |
 | Running requests | `llamacpp:requests_processing` | `running_requests` |
 | Waiting requests | `llamacpp:requests_deferred` | `waiting_requests` |
-| Average and P90 TTFT | `llamacpp:time_to_first_token_seconds` | TTFT metrics |
-| Average and P90 ITL | `llamacpp:time_per_output_token_seconds` | ITL metrics |
 | Generation throughput | `llamacpp:predicted_tokens_seconds` | Predicted tokens per second |
 | Prompt throughput | `llamacpp:prompt_tokens_seconds` | Prompt tokens per second |
+| Decode-phase tokens | `llamacpp:tokens_predicted_total` | `hivenet_agent_engine_decode_tokens_total` |
+| Decode-phase seconds | `llamacpp:tokens_predicted_seconds_total` | `hivenet_agent_engine_decode_seconds_total` |
+
+llama.cpp does not expose TTFT or inter-token-latency histograms, so the TTFT and ITL fields stay nil and no histogram series are emitted for this engine. Output speed is still available from the decode-phase counters above.
 
 llama.cpp does not use the preemption mechanism measured for vLLM, so Hivenet Router does not populate a preemption metric for this engine.
 
@@ -397,12 +399,10 @@ Useful exported metrics include:
 hivenet_agent_engine_kv_cache_utilization
 hivenet_agent_engine_running_requests
 hivenet_agent_engine_waiting_requests
-hivenet_agent_engine_avg_ttft_seconds
-hivenet_agent_engine_p90_ttft_seconds
-hivenet_agent_engine_avg_itl_seconds
-hivenet_agent_engine_p90_itl_seconds
 hivenet_agent_engine_predicted_tps
 hivenet_agent_engine_prompt_tps
+hivenet_agent_engine_decode_tokens_total
+hivenet_agent_engine_decode_seconds_total
 ```
 
 View current values through the routing table:
@@ -420,7 +420,7 @@ curl http://192.168.1.100:8080/admin/routing-table \
         }'
 ```
 
-The routing table exposes scalar cache, queue, TTFT, and ITL values. llama.cpp prompt and generation throughput are available through Prometheus, not the current routing-table response.
+The routing table exposes scalar cache and queue values. llama.cpp prompt and generation throughput are available through Prometheus, not the current routing-table response.
 
 ## Use llama.cpp metrics in routing policies
 
@@ -440,15 +440,7 @@ exclude_if:
     gt: 0
 ```
 
-Exclude agents whose average time to first token is too high:
-
-```yaml
-exclude_if:
-  avg_ttft_seconds:
-    gt: 2
-```
-
-When a metric is unavailable, Hivenet Router skips that gate for the agent rather than excluding it.
+When a metric is unavailable, Hivenet Router skips that gate for the agent rather than excluding it. (TTFT-based gates never apply to llama.cpp agents, which report no TTFT.)
 
 See [Policy YAML reference](/routing/policy-yaml-reference) for the full schema.
 

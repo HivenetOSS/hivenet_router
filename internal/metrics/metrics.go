@@ -1649,6 +1649,12 @@ func (m *RouterMetrics) AgentEnginePunctualUpdated(peerID, model, engine, organi
 		m.enginePromptTPS.With(labels).Set(*bm.PromptTokensPerSecond)
 	}
 
+	// The engine's cumulative decode-phase counters (DecodeTokensTotal /
+	// DecodeSecondsTotal) are re-exported by the histogram collector below —
+	// prometheus.Counter has no Set, so they flow through the custom collector
+	// exactly like the histograms (same labels, same peer keying, same
+	// unregister cleanup).
+
 	// Feed the custom collector with any histogram snapshots the engine
 	// reported. Nil snapshots leave the prior value unchanged.
 	m.engineHistograms.update(peerID, model, engine, organization, machine, deploymentID, bm)

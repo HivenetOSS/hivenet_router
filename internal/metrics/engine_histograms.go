@@ -33,7 +33,9 @@ const unsetDeploymentID = "unset"
 
 // engineHistogramCollector re-exports per-peer engine histogram snapshots
 // (TTFT, ITL, prompt-token length, generation-token length, decode time) as proper
-// Prometheus histograms via prometheus.NewConstHistogram.
+// Prometheus histograms via prometheus.NewConstHistogram, plus the engine's own
+// cumulative decode-phase counters (decode tokens / decode seconds) as
+// Prometheus counters so rate() yields the deployment's measured output speed.
 //
 // Why a custom collector rather than HistogramVec.Observe: the agent scrapes
 // vLLM's /metrics endpoint and ships the full bucket counts in BackendMetrics.
@@ -52,6 +54,11 @@ type engineHistogramCollector struct {
 	promptDesc *prometheus.Desc
 	genDesc    *prometheus.Desc
 	decodeDesc *prometheus.Desc
+	// decodeTokensDesc / decodeSecondsDesc re-export the engine's own
+	// cumulative decode-phase counters (not router-computed), so rate() over
+	// them is the deployment's measured output speed on every engine.
+	decodeTokensDesc  *prometheus.Desc
+	decodeSecondsDesc *prometheus.Desc
 
 	// snapshots keyed by peer ID — one entry per peer. The label values live on
 	// the snapshot and are refreshed on every update, so a peer whose
@@ -73,6 +80,12 @@ type engineHistSnapshot struct {
 	prompt      *domain.HistogramSnapshot
 	gen         *domain.HistogramSnapshot
 	decode      *domain.HistogramSnapshot
+	// The engine's cumulative decode-phase counters, re-exported verbatim as
+	// Prometheus counters (type COUNTER). When the engine restarts the value
+	// drops; Prometheus treats the drop as a counter reset, which rate()
+	// accounts for.
+	decodeTokens  *float64
+	decodeSeconds *float64
 }
 
 func newEngineHistogramCollector() *engineHistogramCollector {
@@ -102,6 +115,16 @@ func newEngineHistogramCollector() *engineHistogramCollector {
 			"Per-request decode-phase duration histogram (seconds): first token to last token, excluding prefill. Re-exported from vllm:request_decode_time_seconds (vLLM only). The first token is produced by prefill, so measured output speed is (rate(hivenet_agent_engine_request_generation_tokens_sum) - rate(hivenet_agent_engine_request_generation_tokens_count)) / rate(this _sum).",
 			engineHistogramLabels, nil,
 		),
+		decodeTokensDesc: prometheus.NewDesc(
+			"hivenet_agent_engine_decode_tokens_total",
+			"Cumulative tokens the inference engine produced in the decode phase (first token excluded; prefill produces it) since the engine last restarted. vLLM: generation tokens minus one per request; SGLang: generation_tokens_total minus num_requests_total; llama.cpp: tokens_predicted_total. Paired with hivenet_agent_engine_decode_seconds_total, rate(tokens) / rate(seconds) is the deployment's measured output speed on every engine.",
+			engineHistogramLabels, nil,
+		),
+		decodeSecondsDesc: prometheus.NewDesc(
+			"hivenet_agent_engine_decode_seconds_total",
+			"Cumulative seconds the inference engine spent in the decode phase (first token to last token, excluding prefill) since it last restarted. vLLM: request_decode_time_seconds sum; SGLang: e2e sum minus TTFT sum; llama.cpp: tokens_predicted_seconds_total. The denominator of the measured output speed.",
+			engineHistogramLabels, nil,
+		),
 		snapshots: make(map[string]*engineHistSnapshot),
 	}
 }
@@ -113,11 +136,14 @@ func (c *engineHistogramCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.promptDesc
 	ch <- c.genDesc
 	ch <- c.decodeDesc
+	ch <- c.decodeTokensDesc
+	ch <- c.decodeSecondsDesc
 }
 
 // Collect implements prometheus.Collector. It emits one ConstHistogram per
 // (peer, metric) pair, skipping any metric whose snapshot is still nil (the
-// engine has not yet reported that histogram).
+// engine has not yet reported that histogram), plus the peer's decode-phase
+// counters when the engine reported them.
 func (c *engineHistogramCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -128,7 +154,30 @@ func (c *engineHistogramCollector) Collect(ch chan<- prometheus.Metric) {
 		c.emit(ch, c.promptDesc, snap.prompt, snap.labelValues)
 		c.emit(ch, c.genDesc, snap.gen, snap.labelValues)
 		c.emit(ch, c.decodeDesc, snap.decode, snap.labelValues)
+		c.emitCounter(ch, c.decodeTokensDesc, snap.decodeTokens, snap.labelValues)
+		c.emitCounter(ch, c.decodeSecondsDesc, snap.decodeSeconds, snap.labelValues)
 	}
+}
+
+// emitCounter builds and sends a single const counter metric, skipping nil
+// values. Errors from NewConstMetric are logged but do not stop other
+// metrics — one misbehaving value must not break the entire /metrics
+// response.
+func (c *engineHistogramCollector) emitCounter(
+	ch chan<- prometheus.Metric,
+	desc *prometheus.Desc,
+	value *float64,
+	labels []string,
+) {
+	if value == nil {
+		return
+	}
+	m, err := prometheus.NewConstMetric(desc, prometheus.CounterValue, *value, labels...)
+	if err != nil {
+		log.Warnf("engineHistogramCollector: NewConstMetric(%s) failed: %v", desc, err)
+		return
+	}
+	ch <- m
 }
 
 // emit builds and sends a single ConstHistogram from a HistogramSnapshot.
@@ -196,6 +245,12 @@ func (c *engineHistogramCollector) update(peerID, model, engine, organization, m
 	if bm.DecodeTimeHistogram != nil {
 		snap.decode = bm.DecodeTimeHistogram
 	}
+	if bm.DecodeTokensTotal != nil {
+		snap.decodeTokens = bm.DecodeTokensTotal
+	}
+	if bm.DecodeSecondsTotal != nil {
+		snap.decodeSeconds = bm.DecodeSecondsTotal
+	}
 }
 
 // remove clears every histogram for a peer, whatever labels it last carried.
@@ -208,9 +263,11 @@ func (c *engineHistogramCollector) remove(peerID string) {
 }
 
 // engineSnapshotKey deterministically combines the engine label set into a
-// single map key. Pipe is a safe separator — none of the label values contain
-// it (peer IDs are libp2p-style hex, org/machine are free-form but pipe-free
-// in practice).
+// single map key for the finish-reason tracker's per-peer state (the
+// histogram collector keys its snapshots by peer ID directly — see
+// engineHistogramCollector.snapshots). Pipe is a safe separator — none of
+// the label values contain it (peer IDs are libp2p-style hex, org/machine
+// are free-form but pipe-free in practice).
 func engineSnapshotKey(peerID, model, engine, organization, machine string) string {
 	return peerID + "|" + model + "|" + engine + "|" + organization + "|" + machine
 }

@@ -362,8 +362,11 @@ It sends the resulting engine data to the router, which exposes it through the r
 | Queued requests | `sglang:num_queue_reqs` | `waiting_requests` |
 | Average time to first token | `sglang:time_to_first_token_seconds` | Average TTFT |
 | P90 time to first token | `sglang:time_to_first_token_seconds` | P90 TTFT |
+| Average and P90 ITL (per request) | `sglang:request_time_per_output_token_seconds` | ITL metrics |
+| Decode-phase tokens | `sglang:generation_tokens_total` minus `sglang:num_requests_total` | `hivenet_agent_engine_decode_tokens_total` |
+| Decode-phase seconds | `sglang:e2e_request_latency_seconds` sum minus `sglang:time_to_first_token_seconds` sum | `hivenet_agent_engine_decode_seconds_total` |
 
-SGLang does not expose an inter-token-latency histogram through this integration. Hivenet Router therefore does not populate average or P90 ITL values for SGLang agents.
+SGLang splits its latency histograms across `is_streaming` label variants (streaming and non-streaming requests); the agent sums the variants into one series. ITL is SGLang's per-request time-per-output-token histogram — on a SGLang build that does not expose it, the ITL fields stay nil and no ITL series is emitted.
 
 SGLang also has no preemption metric equivalent to the one collected from vLLM.
 
@@ -382,6 +385,9 @@ hivenet_agent_engine_running_requests
 hivenet_agent_engine_waiting_requests
 hivenet_agent_engine_avg_ttft_seconds
 hivenet_agent_engine_p90_ttft_seconds
+hivenet_agent_engine_itl_seconds
+hivenet_agent_engine_decode_tokens_total
+hivenet_agent_engine_decode_seconds_total
 ```
 
 View current values through the routing table:
