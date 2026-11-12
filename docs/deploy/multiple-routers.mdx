@@ -142,7 +142,7 @@ The agent keeps one independent session with each router: authentication, regist
 
 Requirements:
 
-- Each address reaches **one specific router**, never the client load balancer or a Kubernetes ClusterIP Service. Through a load balancer the agent gets a single session to whichever router answers, and the other routers never see the agent; nothing reports it. In Kubernetes, use the pod DNS names of a headless Service (`router-0.router-headless:50051`, …).
+- Without [discovery](#let-agents-find-every-router), each address reaches **one specific router**, never the client load balancer or a Kubernetes ClusterIP Service. Through a load balancer the agent gets a single session to whichever router answers, and the other routers never see the agent; nothing reports it. In Kubernetes, use the pod DNS names of a headless Service (`router-0.router-headless:50051`, …). With discovery, the list is only where the agent starts: it finds every router from the first one it reaches.
 - List every router, and update the list when you add one, or let the agents [find every router](#let-agents-find-every-router). Every router divides the occupancy budgets by the live routers, whether or not agents reach it: a router no agent connects to lowers the others' share and cannot serve requests itself.
 - Every router of the site uses the same JWT secret.
 - Each router sends its libp2p address in the authentication response. A router behind NAT must set `--p2p-announce-addr` to an address the agents can reach.

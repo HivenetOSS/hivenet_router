@@ -247,7 +247,7 @@ The agent waits until the configured health endpoint returns HTTP `200`. If the 
 | `--backend-url` | Base URL used for chat-completion requests |
 | `--health-url` | Complete URL used to check backend readiness |
 | `--model` | Explicit model name registered with Hivenet Router |
-| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |

@@ -322,7 +322,7 @@ For a multi-machine deployment, these agent settings are particularly important:
 | Setting | Purpose |
 | --- | --- |
 | `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
-| `--routers` | Use instead of `--router-grpc` when the site runs several routers: a comma-separated list of every router's gRPC address. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router) |
+| `--routers` | Use instead of `--router-grpc` when the site runs several routers: a comma-separated list of every router's gRPC address, or of one of them when the routers set `--advertise-grpc-addr` (the agent finds the others). See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router) |
 | `--identity-path` | Preserves the agent’s peer identity across restarts |
 
 Agents initiate the connection to the router. You do not need to expose an inbound agent port or configure an agent announce address.

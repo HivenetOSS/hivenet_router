@@ -929,7 +929,7 @@ The agent never forwards the client's router credentials to the backend: `Author
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--routers` | `HIVENET_AGENT_ROUTERS` | Empty | Comma-separated gRPC addresses of every router of the site. The agent keeps one session with each. Overrides `--router-grpc` |
+| `--routers` | `HIVENET_AGENT_ROUTERS` | Empty | Comma-separated gRPC addresses of every router of the site, or of one of them when the routers set `--advertise-grpc-addr` (the agent then finds the others). The agent keeps one session with each router. Overrides `--router-grpc` |
 | `--router-grpc` | — | `localhost:50051` | gRPC address of a single router, used when `--routers` is empty; the response supplies the router’s libp2p connection details |
 | `--router-p2p` | — | `/ip4/127.0.0.1/tcp/9000` | Unused; retained for CLI compatibility |
 | `--identity-path` | — | `./agent_identity.key` | Persistent Ed25519 libp2p private-key file |
@@ -948,7 +948,7 @@ The accepted:
 
 flag is not read by the current connection sequence.
 
-Configure `--routers` with every router of the site, or `--router-grpc` for a single router, and make sure each router advertises a reachable libp2p address through:
+Configure `--routers` with every router of the site (or one of them when the routers set `--advertise-grpc-addr`), or `--router-grpc` for a single router, and make sure each router advertises a reachable libp2p address through:
 
 ```text
 --p2p-announce-addr
@@ -956,7 +956,7 @@ Configure `--routers` with every router of the site, or `--router-grpc` for a si
 
 when it is behind NAT.
 
-With `--routers`, the agent keeps an independent session with each router and reconnects each one with exponential backoff, from 1 s up to 30 s with jitter. A router that is down does not affect the other sessions, and a router that comes up later is picked up automatically. Every router must use the same JWT secret. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router).
+With `--routers`, the agent keeps an independent session with each router and reconnects each one with exponential backoff, from 1 s up to 30 s with jitter. A router that is down does not affect the other sessions, and a router that comes up later is picked up automatically. With `--advertise-grpc-addr` on the routers, the agent also opens a session with every router of the site that it was not given. Every router must use the same JWT secret. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router).
 
 ### Persistent identity
 
