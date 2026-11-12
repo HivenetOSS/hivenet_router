@@ -69,3 +69,14 @@ func TestReportFreshnessFollowsAgentInterval(t *testing.T) {
 		t.Fatalf("ReportMaxAge = %v, want 6s", got)
 	}
 }
+
+// A very long reporting interval does not keep a report in use for more than
+// reportMaxAgeCap: a stale "not connected" report must not outlive a reconnect
+// for long.
+func TestReportFreshnessIsCapped(t *testing.T) {
+	a := NewAgent("p", AgentMetadata{}, "")
+	a.SetReportEvery(time.Hour)
+	if got := a.ReportMaxAge(); got != reportMaxAgeCap {
+		t.Fatalf("ReportMaxAge = %v, want %v", got, reportMaxAgeCap)
+	}
+}

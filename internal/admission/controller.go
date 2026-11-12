@@ -197,7 +197,10 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	// While this router is held to its share of a site-wide budget (store
 	// down, grants not replicated), a request above that share could never
 	// fit: it is held to the share, admitted when nothing else is in flight
-	// here.
+	// here. Every router may do so at once, so while the store is down the
+	// engine may see up to n × budget: a deliberate trade-off, since the
+	// alternative is refusing every request above the share until the store
+	// is back.
 	if c.pool != nil && budget > 0 {
 		if ceil := c.pool.Ceiling(model, budget); ceil > 0 && w > ceil {
 			w, big = ceil, true

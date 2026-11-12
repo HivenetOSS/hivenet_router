@@ -326,7 +326,21 @@ func (c *Credits) Take(ctx context.Context, key string, w, budget int64, maxInfl
 // Ceiling implements admission.Pool: the most weight this wallet can hold
 // now. While the store is down nothing can be granted, so it is what the
 // wallet already holds within its cap. 0 means nothing fits.
+//
+// While degraded, a request above the ceiling is counted as the ceiling and
+// admitted only alone on this router (see admission.Controller). The ceiling
+// is then what the wallet held when the store went away, so it does not bound
+// the request's real size: what bounds the engine is that each router runs at
+// most one such request at a time (up to n × budget for n routers, only while
+// the store is down; the engine preempts if it really runs out).
 func (c *Credits) Ceiling(key string, budget int64) int64 {
+	// The common case: the store is fine and nothing holds this router below
+	// the budget. Answer without locking the wallet.
+	if !c.degraded() && !c.s.Unreplicated() && c.s.PendingCount() == 0 && c.s.UnknownRouters() == 0 {
+		if _, young := c.s.Young(); !young {
+			return budget
+		}
+	}
 	wl := c.lockWallet(key)
 	defer wl.mu.Unlock()
 	wl.budget = budget
