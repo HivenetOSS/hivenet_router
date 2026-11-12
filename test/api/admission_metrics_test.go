@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
@@ -46,7 +48,9 @@ func TestAdmissionRejectReason(t *testing.T) {
 
 	t.Run("b2", func(t *testing.T) {
 		var reason string
-		h := meteredHandler(make(chan *domain.PendingRequest, 1), &policy.Policy{AdmitBudgetTokens: 5}, nil, nil, nil, &reason)
+		q := make(chan *domain.PendingRequest, 1)
+		h := meteredHandler(q, &policy.Policy{AdmitBudgetTokens: 5}, nil, nil, nil, &reason)
+		holdBudget(t, h, q, b2Body(500), nil)
 		c, w := newCtx("/v1/chat/completions", b2Body(500)) // footprint 504 > 5
 		h.Passthrough(c)
 		assertReason(t, w.Code, http.StatusTooManyRequests, reason, "b2")
@@ -64,8 +68,10 @@ func TestAdmissionRejectReason(t *testing.T) {
 
 	t.Run("b4_occupancy", func(t *testing.T) {
 		var reason string
-		h := meteredHandler(make(chan *domain.PendingRequest, 1), serverless(1000), admission.NewController(1.0, 0), nil, nil, &reason)
-		c, w := newCtx("/v1/chat/completions", b2Body(500)) // footprint 504 > share budget 400
+		q := make(chan *domain.PendingRequest, 1)
+		h := meteredHandler(q, serverless(1000), admission.NewController(1.0, 0), nil, nil, &reason)
+		holdBudget(t, h, q, b2Body(396), func(c *gin.Context) { withKey(c, auth.QuotaLimits{MaxOccupancyShare: 0.40}) })
+		c, w := newCtx("/v1/chat/completions", b2Body(500)) // footprint 504 > share budget 400 left
 		withKey(c, auth.QuotaLimits{MaxOccupancyShare: 0.40})
 		h.Passthrough(c)
 		assertReason(t, w.Code, http.StatusTooManyRequests, reason, "b4_occupancy")

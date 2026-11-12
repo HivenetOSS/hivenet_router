@@ -346,7 +346,6 @@ with:
 ```bash
 ROUTER_IP=192.168.1.100
 AGENT_REGION=EU-Primary
-AGENT_CAPACITY=32
 ```
 
 Protect the file:
@@ -384,7 +383,6 @@ ExecStart=/opt/hivenet-router/hivenet-agent \
   --jwt-secret-file /etc/hivenet-router/jwt.secret \
   --engine vllm \
   --backend-url http://localhost:8888 \
-  --capacity ${AGENT_CAPACITY} \
   --region ${AGENT_REGION} \
   --identity-path /var/lib/hivenet-router/agent/identity.key
 
@@ -416,6 +414,7 @@ The important multi-machine settings are:
 | Setting | Purpose |
 | --- | --- |
 | `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+| `--routers` | Use instead of `--router-grpc` when the site runs several routers: a comma-separated list of every router's gRPC address. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router) |
 | `--identity-path` | Persistent key that keeps the peer ID stable across restarts |
 
 ## Configure the second agent
@@ -427,7 +426,6 @@ Create `/etc/hivenet-router/agent.env` with host-specific values:
 ```bash
 ROUTER_IP=192.168.1.100
 AGENT_REGION=EU-Secondary
-AGENT_CAPACITY=32
 ```
 
 Protect it:
@@ -506,7 +504,7 @@ With both agents registered, the response should resemble:
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "engine": "vllm",
       "version": "dev",
-      "capacity": 32,
+      "capacity": 0,
       "region": "EU-Primary",
       "is_healthy": true,
       "last_seen": 1760000000
@@ -516,7 +514,7 @@ With both agents registered, the response should resemble:
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "engine": "vllm",
       "version": "dev",
-      "capacity": 32,
+      "capacity": 0,
       "region": "EU-Secondary",
       "is_healthy": true,
       "last_seen": 1760000000
@@ -588,6 +586,8 @@ On the new host:
 The new agent registers automatically once it can reach the router and its backend is ready.
 
 ## Upgrade Hivenet Router
+
+Upgrade agents before routers. A router of this version takes the occupancy budget from the KV-cache size that vLLM and SGLang agents report; until an agent is upgraded, its model gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per replica instead. An agent serves the model it finds when it starts: restart it after the backend changes model.
 
 Build the new binaries on the build machine:
 
@@ -829,7 +829,7 @@ When the router itself is behind NAT or another translated network, configure th
 
 <Columns cols={3}>
   <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
-    Configure vLLM discovery, capacity, metrics, and multi-model deployments.
+    Configure vLLM discovery, load bounds, metrics, and multi-model deployments.
   </Card>
 
   <Card title="Configuration reference" icon="book" href="/reference/configuration-reference">

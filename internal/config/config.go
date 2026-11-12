@@ -140,6 +140,11 @@ type Config struct {
 	// 0 disables the wait queue (any ErrNoCapacity immediately escalates to the fallback chain).
 	QueueDepth int
 
+	// AdmissionQueueDepth is the per-model queue of requests waiting for room
+	// in the occupancy budget (B2). Negative (the default) uses QueueDepth.
+	// Env: HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH  Flag: --admission-queue-depth
+	AdmissionQueueDepth int
+
 	// AdmitFraction scales a model's KV token capacity into the occupancy admit
 	// budget: a request is admitted only while the weighted in-flight token sum
 	// stays within AdmitFraction × admit_budget_tokens. Below 1.0 it leaves head-
@@ -149,6 +154,19 @@ type Config struct {
 	// was held at 0.85 to absorb the error. Range (0,1]; values outside clamp to 1.
 	// Env: HIVENET_ROUTER_ADMIT_FRACTION
 	AdmitFraction float64
+
+	// AdmitFromEngineKV takes a model's occupancy budget (B2) from the KV-cache
+	// size its engines report when the policy sets no admit_budget_tokens.
+	// false leaves B2 off unless the policy sets it.
+	// Env: HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV (default true)
+	AdmitFromEngineKV bool
+
+	// DefaultMaxInflightPerReplica bounds the requests in flight per healthy
+	// replica of a model that has no occupancy budget: its policy sets neither
+	// admit_budget_tokens nor max_inflight and its engines report no KV-cache
+	// size (Ollama, llama.cpp, custom). 0 leaves such models unbounded.
+	// Env: HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA (default 8)
+	DefaultMaxInflightPerReplica int
 
 	// AdmitParkTimeout bounds how long an over-budget request waits for occupancy
 	// to free before it is rejected with 429. 0 rejects immediately.
@@ -281,36 +299,39 @@ func DefaultConfig() *Config {
 		P2PListenAddr:    "127.0.0.1",
 		P2PMaxConnsPerIP: 32, // > libp2p's default of 8; see field doc for the >= 2x fleet-size rule
 
-		RequestTimeout:         60 * time.Second,
-		HealthCheckInterval:    5 * time.Second,
-		UnhealthyAfter:         15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
-		RemoveAfter:            30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
-		HeartbeatInterval:      5 * time.Second,
-		QueueSize:              100,
-		MaxConcurrentForwards:  50,
-		DiskDBPath:             "./badger_disk",
-		KeyStoreBackend:        "memory",
-		KeyStorePath:           "./badger_keystore",
-		KeyStoreMaxAge:         15 * time.Minute,
-		FlushPeriod:            5 * time.Second,
-		DiskDBTTLDays:          30,
-		UniversalFlushInterval: 30 * time.Second,
-		SessionTTL:             1 * time.Hour,
-		ProtocolID:             "/hivenet_router/1.0.0",
-		MaxTriesPerStep:        3,
-		SemanticPinMax:         100_000,
-		SemanticPinMaxPerKey:   10_000,
-		QueueDepth:             30,
-		MaxRequestBytes:        10 << 20, // 10 MB
-		AdmitFraction:          0.90,     // learned estimator + true-up now cover the token-estimate error
-		AdmitParkTimeout:       250 * time.Millisecond,
-		SyncInterval:           time.Second,
-		RedirectTokenTTL:       60 * time.Second,
-		WakeHoldBudget:         5 * time.Minute,
-		WakeHoldMax:            100,
-		WakeHoldMaxPerKey:      20,
-		WakeHoldMaxTotal:       1000,
-		WakeKeepAlive:          15 * time.Second,
+		RequestTimeout:               60 * time.Second,
+		HealthCheckInterval:          5 * time.Second,
+		UnhealthyAfter:               15 * time.Second, // 3× HeartbeatInterval — tolerates one missed heartbeat
+		RemoveAfter:                  30 * time.Second, // 6× HeartbeatInterval — removes after ~5 missed heartbeats
+		HeartbeatInterval:            5 * time.Second,
+		QueueSize:                    100,
+		MaxConcurrentForwards:        50,
+		DiskDBPath:                   "./badger_disk",
+		KeyStoreBackend:              "memory",
+		KeyStorePath:                 "./badger_keystore",
+		KeyStoreMaxAge:               15 * time.Minute,
+		FlushPeriod:                  5 * time.Second,
+		DiskDBTTLDays:                30,
+		UniversalFlushInterval:       30 * time.Second,
+		SessionTTL:                   1 * time.Hour,
+		ProtocolID:                   "/hivenet_router/1.0.0",
+		MaxTriesPerStep:              3,
+		SemanticPinMax:               100_000,
+		SemanticPinMaxPerKey:         10_000,
+		QueueDepth:                   30,
+		AdmissionQueueDepth:          -1,
+		MaxRequestBytes:              10 << 20, // 10 MB
+		AdmitFraction:                0.90,     // learned estimator + true-up now cover the token-estimate error
+		AdmitParkTimeout:             250 * time.Millisecond,
+		AdmitFromEngineKV:            true,
+		DefaultMaxInflightPerReplica: 8,
+		SyncInterval:                 time.Second,
+		RedirectTokenTTL:             60 * time.Second,
+		WakeHoldBudget:               5 * time.Minute,
+		WakeHoldMax:                  100,
+		WakeHoldMaxPerKey:            20,
+		WakeHoldMaxTotal:             1000,
+		WakeKeepAlive:                15 * time.Second,
 
 		// Semantic decision log queue (the log itself is off unless a path is set).
 		SemanticDecisionLogBuffer: 4096,
@@ -382,9 +403,30 @@ func LoadFromEnv() *Config {
 			cfg.QueueDepth = n
 		}
 	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.AdmissionQueueDepth = n
+		}
+	}
 	if v := os.Getenv("HIVENET_ROUTER_ADMIT_FRACTION"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
 			cfg.AdmitFraction = f
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=%q: %w", v, err))
+		} else {
+			cfg.AdmitFromEngineKV = b
+		}
+	}
+	if v := os.Getenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=%q: must be 0 or more", v))
+		} else {
+			cfg.DefaultMaxInflightPerReplica = n
 		}
 	}
 	if v := os.Getenv("HIVENET_ROUTER_ADMIT_PARK_TIMEOUT"); v != "" {
@@ -553,6 +595,24 @@ func LoadFromEnv() *Config {
 	return cfg
 }
 
+// RouterList returns the routers the agent connects to: Routers, or the
+// single RouterGRPCAddr when Routers is empty. Duplicates are dropped.
+func (c *AgentConfig) RouterList() []string {
+	list := c.Routers
+	if len(list) == 0 && c.RouterGRPCAddr != "" {
+		list = []string{c.RouterGRPCAddr}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range list {
+		if r = strings.TrimSpace(r); r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // AgentConfig holds configuration specific to agents
 type AgentConfig struct {
 	Model          string // Model name override; auto-detected if empty
@@ -565,7 +625,10 @@ type AgentConfig struct {
 	Machine        string // Machine name within the organization
 	RouterGRPCAddr string
 	RouterP2PAddr  string
-	BackendURL     string
+	// Routers lists the gRPC addresses of every router of the site; the agent
+	// keeps one independent session with each. Empty means [RouterGRPCAddr].
+	Routers    []string
+	BackendURL string
 	// BackendAPIKey, when non-empty, is sent on every request the agent makes
 	// to its backend (health checks, model discovery, metrics, inference) as
 	// Authorization: Bearer <key>, replacing the client's credentials; any

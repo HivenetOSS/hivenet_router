@@ -15,7 +15,8 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Requests per minute | Yes | Within one sync interval of usage |
 | Input and output tokens per minute | Yes | Within one sync interval of usage |
 | Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
-| Occupancy budgets (B2, B4) | No | Each router applies its own budget |
+| Occupancy budgets (B2, B4) | No | Each router admits its share: the budget and `max_inflight` divided by the live routers, so the routers together stay within them |
+| Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
 | Dynamic API keys | No | Push key changes to every router |
 
 Every router keeps deciding in memory, exactly as a single router does. The only time a request waits on the store is the first request of the day for a key with a daily limit, which reads that key's total once: at most 200 ms, and requests for the same key share the read.
@@ -89,6 +90,34 @@ hivenet-router \
 <Warning>
   The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
 </Warning>
+
+## Connect agents to every router
+
+Give each agent the gRPC address of every router of the site with `--routers` (or `HIVENET_AGENT_ROUTERS`):
+
+```bash
+HIVENET_ROUTER_JWT_SECRET=<site-secret> hivenet-agent \
+  --engine vllm \
+  --backend-url http://127.0.0.1:8000 \
+  --routers router-0:50051,router-1:50051,router-2:50051
+```
+
+The agent keeps one independent session with each router: authentication, registration, heartbeat, routing signals and re-authentication. It reconnects each session on its own, with exponential backoff from 1 s up to 30 s, with jitter.
+
+- A router that is down or restarting does not affect the agent's sessions with the other routers.
+- A router that comes up later is picked up automatically.
+- The agent polls the engine metrics and checks the backend health once, for all sessions.
+
+Requirements:
+
+- Each address reaches **one specific router**, never the client load balancer or a Kubernetes ClusterIP Service. Through a load balancer the agent gets a single session to whichever router answers, and the other routers never see the agent; nothing reports it. In Kubernetes, use the pod DNS names of a headless Service (`router-0.router-headless:50051`, …).
+- List every router, and update the list when you add one. Every router divides the occupancy budgets by the live routers, whether or not agents reach it: a router no agent connects to lowers the others' share and cannot serve requests itself.
+- Every router of the site uses the same JWT secret.
+- Each router sends its libp2p address in the authentication response. A router behind NAT must set `--p2p-announce-addr` to an address the agents can reach.
+
+`--router-grpc` still connects an agent to a single router; it is used when `--routers` is empty.
+
+Each agent reports how many requests it has in flight from all routers. Every router ranks agents by the larger of that report and its own in-flight requests, so the routers spread work by the agent's real load.
 
 ## Monitor
 

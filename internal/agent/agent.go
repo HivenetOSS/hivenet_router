@@ -31,7 +31,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,11 +103,10 @@ type Agent struct {
 	// Updated every HardwareSampleInterval by runBackendHealthChecker.
 	backendHealthy atomic.Bool
 
-	// sessionToken holds the current session token for this agent session.
-	// Set once per session in runUntilDisconnect and refreshed in-place by the
-	// re-auth goroutine so sendHeartbeat and pushRoutingSignals always use a
-	// valid token without interrupting the heartbeat cadence.
-	sessionToken atomic.Value // stores string
+	// inFlight counts the requests this agent is serving right now, from all
+	// routers together. It is reported in every routing signal so each router
+	// sees the backend's real load, not only the requests it sent itself.
+	inFlight atomic.Int64
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -152,8 +153,7 @@ func (a *Agent) Run() error {
 	log.Info("Starting Hivenet Agent (daemon mode)")
 	log.Infof("Engine: %s", a.engine.Name())
 	log.Infof("Backend URL: %s", a.cfg.BackendURL)
-	log.Infof("Router gRPC: %s", a.cfg.RouterGRPCAddr)
-	log.Infof("Capacity: %d concurrent requests", a.cfg.Capacity)
+	log.Infof("Routers: %s", strings.Join(a.cfg.RouterList(), ", "))
 
 	// Load or create a persistent libp2p identity so the peer ID is stable
 	// across reconnects and process restarts.
@@ -192,80 +192,131 @@ func (a *Agent) Run() error {
 		a.collector.Close()
 	}()
 
+	// The backend, the libp2p node and the backend health check are shared by
+	// every router session: one model, one identity, one view of the engine.
+	model, err := a.waitForBackend()
+	if err != nil {
+		return nil // only returns on stop
+	}
+	a.cfg.Model = model
+	log.Infof("Model ready: %s", a.cfg.Model)
+
+	var node host.Host
+	var httpHost *p2phttp.Host
 	for {
-		if a.stopped() {
-			log.Info("Agent stopped")
-			return nil
+		node, httpHost, err = a.startP2PServer()
+		if err == nil {
+			break
 		}
-
-		// Step 1: Wait for backend and discover model
-		model, err := a.waitForBackend()
-		if err != nil {
-			return err // only returns on stop
-		}
-		a.cfg.Model = model
-		log.Infof("Model ready: %s", a.cfg.Model)
-
-		// Step 2: Create libp2p node and start HTTP server for inference
-		node, httpHost, err := a.startP2PServer()
-		if err != nil {
-			log.Warnf("Failed to start P2P server: %v, retrying in %v...", err, retryBaseInterval)
-			if a.sleepOrStop(retryBaseInterval) {
-				return nil
-			}
-			continue
-		}
-
-		// Step 3: Authenticate with router via gRPC
-		log.Info("Authenticating with router...")
-		authResp, err := a.authenticate(node.ID())
-		if err != nil {
-			log.Warnf("Authentication failed: %v, retrying in %v...", err, retryBaseInterval)
-			node.Close()
-			if a.sleepOrStop(retryBaseInterval) {
-				return nil
-			}
-			continue
-		}
-		log.Info("Authentication successful")
-
-		// Step 4: Connect to router peer and build a NamespacedClient for the router
-		// management protocol so that /register and /heartbeat are called with the
-		// correct protocol prefix prepended automatically.
-		log.Info("Registering with router via libp2p HTTP...")
-		routerClient, err := a.buildRouterClient(node, httpHost, authResp)
-		if err != nil {
-			log.Warnf("Failed to connect to router P2P: %v, retrying in %v...", err, retryBaseInterval)
-			node.Close()
-			if a.sleepOrStop(retryBaseInterval) {
-				return nil
-			}
-			continue
-		}
-
-		registerCtx, registerCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		registerErr := a.registerWithRouter(registerCtx, routerClient, node, authResp.SessionToken)
-		registerCancel()
-		if registerErr != nil {
-			log.Warnf("Registration failed: %v, retrying in %v...", registerErr, retryBaseInterval)
-			node.Close()
-			if a.sleepOrStop(retryBaseInterval) {
-				return nil
-			}
-			continue
-		}
-		log.Info("Registration successful")
-		log.Info("Ready for requests")
-
-		// Step 5: Send heartbeats until the router is unreachable or we're stopped
-		a.runUntilDisconnect(routerClient, node, authResp)
-
-		log.Warnf("Disconnected, will retry in %v...", retryBaseInterval)
-		node.Close()
+		log.Warnf("Failed to start P2P server: %v, retrying in %v...", err, retryBaseInterval)
 		if a.sleepOrStop(retryBaseInterval) {
 			return nil
 		}
 	}
+	defer node.Close()
+
+	a.backendHealthy.Store(true) // confirmed by waitForBackend
+	go a.runBackendHealthChecker(nil)
+
+	// One independent session per router: a router that is down or restarts
+	// never interrupts the others.
+	routers := a.cfg.RouterList()
+	log.Infof("Connecting to %d router(s): %s", len(routers), strings.Join(routers, ", "))
+	var wg sync.WaitGroup
+	for _, addr := range routers {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			a.runRouterSession(&routerSession{addr: addr}, node, httpHost)
+		}(addr)
+	}
+	wg.Wait()
+	log.Info("Agent stopped")
+	return nil
+}
+
+// routerSession is this agent's link to one router: its own authentication,
+// registration, heartbeat, routing signals and re-authentication.
+type routerSession struct {
+	addr   string       // router gRPC address
+	peer   peer.ID      // router peer ID, from the auth response
+	client *http.Client // namespaced client for the router protocol
+	token  atomic.Value // current session token (string)
+}
+
+func (rs *routerSession) sessionToken() string {
+	tok, _ := rs.token.Load().(string)
+	return tok
+}
+
+// Reconnect backoff per router: doubles from the first value up to the last,
+// with jitter so agents do not reconnect in lockstep after a router restart.
+const (
+	sessionBackoffMin = time.Second
+	sessionBackoffMax = 30 * time.Second
+)
+
+// runRouterSession keeps one router session alive until the agent stops:
+// authenticate, connect, register, then heartbeat until the router is lost,
+// and start over with exponential backoff.
+func (a *Agent) runRouterSession(rs *routerSession, node host.Host, httpHost *p2phttp.Host) {
+	backoff := sessionBackoffMin
+	for !a.stopped() {
+		if a.runSessionOnce(rs, node, httpHost) {
+			backoff = sessionBackoffMin // the session was up; start the backoff over
+		}
+		if a.stopped() {
+			return
+		}
+		wait := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)+1))
+		log.Warnf("Router %s: reconnecting in %v", rs.addr, wait.Round(time.Millisecond))
+		if a.sleepOrStop(wait) {
+			return
+		}
+		backoff = min(backoff*2, sessionBackoffMax)
+	}
+}
+
+// runSessionOnce runs one session with the router and reports whether it got
+// as far as registering.
+func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2phttp.Host) bool {
+	authResp, err := a.authenticate(rs.addr, node.ID())
+	if err != nil {
+		log.Warnf("Router %s: authentication failed: %v", rs.addr, err)
+		return false
+	}
+	client, routerPeer, err := a.buildRouterClient(node, httpHost, authResp)
+	if err != nil {
+		log.Warnf("Router %s: failed to connect over libp2p: %v", rs.addr, err)
+		return false
+	}
+	rs.peer, rs.client = routerPeer, client
+	defer a.dropRouter(node, routerPeer)
+
+	registerCtx, registerCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = a.registerWithRouter(registerCtx, client, node, authResp.SessionToken)
+	registerCancel()
+	if err != nil {
+		log.Warnf("Router %s: registration failed: %v", rs.addr, err)
+		return false
+	}
+	log.Infof("Router %s: registered, ready for requests", rs.addr)
+	a.runUntilDisconnect(rs, node, authResp)
+	log.Warnf("Router %s: disconnected", rs.addr)
+	return true
+}
+
+// dropRouter forgets a router whose session ended: it is no longer allowed
+// through the gater and its connection is closed, unless another session
+// (another address of the same router) still uses it. A new session adds it
+// back.
+func (a *Agent) dropRouter(node host.Host, routerPeer peer.ID) {
+	a.gater.RemoveRouter(routerPeer)
+	if a.gater.Allowed(routerPeer) {
+		return
+	}
+	node.ConnManager().Unprotect(routerPeer, "router")
+	_ = node.Network().ClosePeer(routerPeer)
 }
 
 // startP2PServer creates a libp2p node, mounts the inference handler on a single
@@ -283,6 +334,9 @@ func (a *Agent) startP2PServer() (host.Host, *p2phttp.Host, error) {
 	log.Infof("Local Peer ID: %s...", node.ID().String()[:min(len(node.ID().String()), 16)])
 
 	httpHost := &p2phttp.Host{StreamHost: node}
+	// libp2p creates its peer-metadata cache lazily and without a lock; the
+	// router sessions build their clients concurrently, so create it now.
+	httpHost.SetPeerMetadata(node.ID(), p2phttp.PeerMeta{})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", a.chatHandler)
@@ -314,14 +368,14 @@ func (a *Agent) routerOnly(next http.Handler) http.Handler {
 // Using NamespacedClient instead of NewConstrainedRoundTripper ensures the correct
 // URL path prefix is prepended to every request, preventing the 301-redirect/body-loss
 // issue that occurs with SetHTTPHandler's forced trailing-slash registration.
-func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authResp *pb.AuthResponse) (*http.Client, error) {
+func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authResp *pb.AuthResponse) (*http.Client, peer.ID, error) {
 	if len(authResp.Libp2PInfo.Addresses) == 0 {
-		return nil, fmt.Errorf("no router addresses provided")
+		return nil, "", fmt.Errorf("no router addresses provided")
 	}
 
 	routerPeerID, err := peer.Decode(authResp.Libp2PInfo.PeerId)
 	if err != nil {
-		return nil, fmt.Errorf("invalid router peer ID: %w", err)
+		return nil, "", fmt.Errorf("invalid router peer ID: %w", err)
 	}
 
 	var routerAddrs []multiaddr.Multiaddr
@@ -334,17 +388,18 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 		routerAddrs = append(routerAddrs, addr)
 	}
 	if len(routerAddrs) == 0 {
-		return nil, fmt.Errorf("no valid router addresses in auth response")
+		return nil, "", fmt.Errorf("no valid router addresses in auth response")
 	}
 
-	// Allow the router through the connection gater before dialing it. It is
-	// the only peer this agent will talk to.
-	a.gater.SetRouters(routerPeerID)
+	// Allow this router through the connection gater before dialing it,
+	// alongside the other routers this agent is connected to.
+	a.gater.AddRouter(routerPeerID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := node.Connect(ctx, peer.AddrInfo{ID: routerPeerID, Addrs: routerAddrs}); err != nil {
-		return nil, fmt.Errorf("failed to connect to router: %w", err)
+		a.gater.RemoveRouter(routerPeerID)
+		return nil, "", fmt.Errorf("failed to connect to router: %w", err)
 	}
 
 	// This connection is the agent's only link to the router: the router opens
@@ -363,10 +418,13 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 		peer.AddrInfo{ID: routerPeerID, Addrs: routerAddrs},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create namespaced client: %w", err)
+		// Connected and protected above: undo both, unless another session
+		// still uses this router.
+		a.dropRouter(node, routerPeerID)
+		return nil, "", fmt.Errorf("failed to create namespaced client: %w", err)
 	}
 
-	return &client, nil
+	return &client, routerPeerID, nil
 }
 
 // registerWithRouter POSTs the agent's peer information to /register.
@@ -411,25 +469,28 @@ func (a *Agent) registerWithRouter(ctx context.Context, routerClient *http.Clien
 // and starts the high-frequency routing-signal pusher for the duration of the session.
 // node is required by the re-auth goroutine to re-register with the new session token.
 // Returns when a heartbeat fails or the agent is stopped.
-func (a *Agent) runUntilDisconnect(routerClient *http.Client, node host.Host, authResp *pb.AuthResponse) {
+func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *pb.AuthResponse) {
 	interval := time.Duration(authResp.Config.HeartbeatInterval) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
 
-	// Initialise sessionToken so sendHeartbeat and pushRoutingSignals can read it.
-	a.sessionToken.Store(authResp.SessionToken)
+	// Initialise the session token so sendHeartbeat and pushRoutingSignals can read it.
+	rs.token.Store(authResp.SessionToken)
 
 	sessionTTL := time.Duration(authResp.Config.SessionTtl) * time.Second
 	if sessionTTL <= reAuthBefore {
 		sessionTTL = time.Hour // fallback: zero (old router) or too-short value from misconfigured router
 	}
 
-	// pushDone is closed when this session ends, stopping all session-scoped goroutines.
+	// pushDone is closed when this session ends, stopping all session-scoped
+	// goroutines; they have exited before the next session reuses rs.
 	pushDone := make(chan struct{})
-	go a.runRoutingSignalPusher(routerClient, pushDone)
-	go a.runBackendHealthChecker(pushDone)
-	go a.runReAuth(routerClient, node, pushDone, sessionTTL)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); a.runRoutingSignalPusher(rs, pushDone) }()
+	go func() { defer wg.Done(); a.runReAuth(rs, node, pushDone, sessionTTL) }()
+	defer wg.Wait()
 	defer close(pushDone)
 
 	ticker := time.NewTicker(interval)
@@ -440,8 +501,8 @@ func (a *Agent) runUntilDisconnect(routerClient *http.Client, node host.Host, au
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
-			if err := a.sendHeartbeat(routerClient); err != nil {
-				log.Warnf("Heartbeat failed: %v", err)
+			if err := a.sendHeartbeat(rs); err != nil {
+				log.Warnf("Router %s: heartbeat failed: %v", rs.addr, err)
 				return
 			}
 		}
@@ -456,6 +517,9 @@ type routingSignalPayload struct {
 	SessionToken   string                   `json:"session_token"`
 	BackendMetrics *domain.BackendMetrics   `json:"backend_metrics,omitempty"`
 	Hardware       *domain.HardwareSnapshot `json:"hardware,omitempty"`
+	// InFlight is the number of requests this agent is serving, from all
+	// routers together.
+	InFlight int64 `json:"in_flight"`
 }
 
 // runRoutingSignalPusher sends fresh engine and hardware snapshots to the router at
@@ -463,7 +527,7 @@ type routingSignalPayload struct {
 // Push failures are non-fatal: logged at debug level and skipped. The heartbeat
 // provides a fallback — if all pushes fail the router still gets metrics every
 // HeartbeatInterval. Exits when done or stopCh is closed.
-func (a *Agent) runRoutingSignalPusher(routerClient *http.Client, done <-chan struct{}) {
+func (a *Agent) runRoutingSignalPusher(rs *routerSession, done <-chan struct{}) {
 	interval := a.cfg.RoutingSignalInterval
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
@@ -475,7 +539,7 @@ func (a *Agent) runRoutingSignalPusher(routerClient *http.Client, done <-chan st
 	for {
 		select {
 		case <-ticker.C:
-			if err := a.pushRoutingSignals(routerClient); err != nil {
+			if err := a.pushRoutingSignals(rs); err != nil {
 				log.Debugf("routing signal push: %v", err)
 			}
 		case <-done:
@@ -486,29 +550,25 @@ func (a *Agent) runRoutingSignalPusher(routerClient *http.Client, done <-chan st
 	}
 }
 
-// pushRoutingSignals sends one routing-signal POST to /routing-signals.
-// Returns immediately (no retry) if bm and snap are both nil.
-func (a *Agent) pushRoutingSignals(routerClient *http.Client) error {
+// pushRoutingSignals sends one routing-signal POST to /routing-signals of
+// one router session, with the latest cached snapshot and this agent's
+// in-flight count. It does not retry: the next tick sends fresh values.
+func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 	a.snapshotMu.RLock()
 	snap := a.snapshot
 	a.snapshotMu.RUnlock()
 
-	bm := a.engineMetrics.Load()
-	if bm == nil && snap == nil {
-		return nil // nothing scraped yet
-	}
-
-	tok, _ := a.sessionToken.Load().(string)
 	body, err := json.Marshal(routingSignalPayload{
-		SessionToken:   tok,
-		BackendMetrics: bm,
+		SessionToken:   rs.sessionToken(),
+		BackendMetrics: a.engineMetrics.Load(),
 		Hardware:       snap,
+		InFlight:       a.inFlight.Load(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	resp, err := routerClient.Post("http://router/routing-signals", "application/json", bytes.NewReader(body))
+	resp, err := rs.client.Post("http://router/routing-signals", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -529,11 +589,9 @@ const backendFailureThreshold = 3
 // Requires backendFailureThreshold consecutive failures before flipping to false,
 // tolerating transient errors (timeouts, momentary GC pauses, brief GPU swaps).
 // A single success resets the counter and immediately flips back to true.
-// Runs for the duration of the session — exits when done or stopCh is closed.
+// One checker serves every router session; it exits when done (nil: never)
+// or stopCh is closed.
 func (a *Agent) runBackendHealthChecker(done <-chan struct{}) {
-	// Backend was confirmed healthy during waitForBackend — set initial state true.
-	a.backendHealthy.Store(true)
-
 	interval := a.cfg.HardwareSampleInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -689,14 +747,13 @@ type heartbeatPayload struct {
 // sendHeartbeat sends a single heartbeat POST to /heartbeat with the latest
 // hardware snapshot and engine backend metrics attached (relative to the router
 // protocol namespace).
-func (a *Agent) sendHeartbeat(routerClient *http.Client) error {
+func (a *Agent) sendHeartbeat(rs *routerSession) error {
 	a.snapshotMu.RLock()
 	snap := a.snapshot
 	a.snapshotMu.RUnlock()
 
-	tok, _ := a.sessionToken.Load().(string)
 	body, err := json.Marshal(heartbeatPayload{
-		SessionToken:   tok,
+		SessionToken:   rs.sessionToken(),
 		Hardware:       snap,
 		BackendMetrics: a.engineMetrics.Load(),
 		BackendHealthy: a.backendHealthy.Load(),
@@ -704,7 +761,7 @@ func (a *Agent) sendHeartbeat(routerClient *http.Client) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat payload: %w", err)
 	}
-	resp, err := routerClient.Post("http://router/heartbeat", "application/json", bytes.NewReader(body))
+	resp, err := rs.client.Post("http://router/heartbeat", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -718,6 +775,8 @@ func (a *Agent) sendHeartbeat(routerClient *http.Client) error {
 // chatHandler handles inference requests forwarded by the router via libp2p HTTP.
 // The path received here is stripped of the inference protocol prefix by SetHTTPHandler.
 func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
+	a.inFlight.Add(1)
+	defer a.inFlight.Add(-1)
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -900,6 +959,8 @@ func (a *Agent) healthHandler(w http.ResponseWriter, _ *http.Request) {
 // by a more specific handler (e.g. /v1/chat/completions) lands here and is
 // forwarded transparently to the backend at the same path.
 func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
+	a.inFlight.Add(1)
+	defer a.inFlight.Add(-1)
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 
@@ -1005,7 +1066,7 @@ func (a *Agent) waitForBackend() (string, error) {
 }
 
 // authenticate performs gRPC authentication with the router.
-func (a *Agent) authenticate(peerID peer.ID) (*pb.AuthResponse, error) {
+func (a *Agent) authenticate(routerAddr string, peerID peer.ID) (*pb.AuthResponse, error) {
 	if a.cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT secret is not configured — set --jwt-secret-file or HIVENET_ROUTER_JWT_SECRET")
 	}
@@ -1018,7 +1079,7 @@ func (a *Agent) authenticate(peerID peer.ID) (*pb.AuthResponse, error) {
 		return nil, fmt.Errorf("derive gRPC TLS credentials: %w", err)
 	}
 
-	client, err := rpcClient.NewClient(a.cfg.RouterGRPCAddr, expectedKey)
+	client, err := rpcClient.NewClient(routerAddr, expectedKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,28 +1130,28 @@ const reAuthBefore = 5 * time.Minute
 // gRPC and re-registers with the router to link the new session token to this
 // agent's peer ID. Runs for the duration of the session — exits when done or
 // stopCh is closed.
-func (a *Agent) runReAuth(routerClient *http.Client, node host.Host, done <-chan struct{}, sessionTTL time.Duration) {
+func (a *Agent) runReAuth(rs *routerSession, node host.Host, done <-chan struct{}, sessionTTL time.Duration) {
 	timer := time.NewTimer(sessionTTL - reAuthBefore)
 	defer timer.Stop()
 
 	for {
 		select {
 		case <-timer.C:
-			newAuthResp, err := a.authenticate(node.ID())
+			newAuthResp, err := a.authenticate(rs.addr, node.ID())
 			if err != nil {
 				log.Warnf("Re-authentication failed: %v — retrying in 30s", err)
 				timer.Reset(30 * time.Second)
 				continue
 			}
 			reAuthCtx, reAuthCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			reAuthErr := a.registerWithRouter(reAuthCtx, routerClient, node, newAuthResp.SessionToken)
+			reAuthErr := a.registerWithRouter(reAuthCtx, rs.client, node, newAuthResp.SessionToken)
 			reAuthCancel()
 			if reAuthErr != nil {
 				log.Warnf("Re-registration failed: %v — retrying in 30s", reAuthErr)
 				timer.Reset(30 * time.Second)
 				continue
 			}
-			a.sessionToken.Store(newAuthResp.SessionToken)
+			rs.token.Store(newAuthResp.SessionToken)
 			log.Info("Session token renewed")
 			if newTTL := time.Duration(newAuthResp.Config.SessionTtl) * time.Second; newTTL > reAuthBefore {
 				sessionTTL = newTTL

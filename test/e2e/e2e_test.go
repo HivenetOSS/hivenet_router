@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,14 +42,36 @@ const jwtSecret = "e2e-integration-secret-0123456789abcdef"
 const stubModel = "stub-model"
 
 // freePort asks the kernel for an unused TCP port on 127.0.0.1.
+// usedPorts holds every port freePort has handed out in this test binary:
+// the probe listener is closed before the router binds, so without it two
+// calls could return the same port.
+var (
+	usedPortsMu sync.Mutex
+	usedPorts   = map[int]bool{}
+)
+
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
+	usedPortsMu.Lock()
+	defer usedPortsMu.Unlock()
+	// Below the ephemeral range (32768 and up on Linux): a port taken from
+	// that range can be handed to an outgoing connection before the router
+	// binds it.
+	for i := 0; i < 200; i++ {
+		port := 20000 + rand.IntN(12000)
+		if usedPorts[port] {
+			continue
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			continue
+		}
+		l.Close() //nolint:errcheck
+		usedPorts[port] = true
+		return port
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("freePort: no free port")
+	return 0
 }
 
 // startStubBackend serves an OpenAI-compatible chat endpoint. Non-streaming

@@ -257,12 +257,11 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --jwt-secret-file /jwt.secret \
       --engine vllm \
       --backend-url http://localhost:8888 \
-      --capacity 32 \
       --region EU-Primary \
       --identity-path /data/agent_identity.key
     ```
 
-    The declared capacity matches the vLLM `--max-num-seqs` value used in this example.
+    The router bounds the work it sends to vLLM from the KV-cache size the agent reports. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
     Check the agent logs:
 
@@ -277,6 +276,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
     | Flag | Purpose |
     | --- | --- |
     | `--router-grpc` | Authenticates the agent and supplies the router’s libp2p connection details |
+    | `--routers` | Use instead of `--router-grpc` when the site runs several routers: a comma-separated list of every router's gRPC address. See [Run several routers](/deploy/multiple-routers#connect-agents-to-every-router) |
     | `--identity-path` | Preserves the agent’s peer ID across restarts |
   </Step>
   <Step title="Start vLLM and the agent on the second GPU host">
@@ -316,7 +316,6 @@ This guide uses Docker host networking and is intended for Linux hosts.
       --jwt-secret-file /jwt.secret \
       --engine vllm \
       --backend-url http://localhost:8888 \
-      --capacity 32 \
       --region EU-Secondary \
       --identity-path /data/agent_identity.key
     ```
@@ -343,7 +342,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
           "model": "meta-llama/Llama-3.1-8B-Instruct",
           "engine": "vllm",
           "version": "dev",
-          "capacity": 32,
+          "capacity": 0,
           "region": "EU-Primary",
           "is_healthy": true,
           "last_seen": 1760000000
@@ -353,7 +352,7 @@ This guide uses Docker host networking and is intended for Linux hosts.
           "model": "meta-llama/Llama-3.1-8B-Instruct",
           "engine": "vllm",
           "version": "dev",
-          "capacity": 32,
+          "capacity": 0,
           "region": "EU-Secondary",
           "is_healthy": true,
           "last_seen": 1760000000
@@ -559,7 +558,7 @@ The BadgerDB data in the mounted `badger` directory and agent identity files in 
   </Card>
 
   <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
-    Configure model discovery, metrics, capacity, and multi-model deployments.
+    Configure model discovery, metrics, load bounds, and multi-model deployments.
   </Card>
 
   <Card title="Routing concepts" icon="route" href="/routing/routing-concepts">

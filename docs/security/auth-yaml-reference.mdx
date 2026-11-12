@@ -468,7 +468,7 @@ quota:
   ```text
   max_occupancy_share × admit_budget_tokens × healthy_replicas
   ```
-  The per-key fairness controller intentionally does not apply `HIVENET_ROUTER_ADMIT_FRACTION`. The global B2 controller still applies that fraction and remains the safety limit for the pool.
+  When the policy sets no `admit_budget_tokens`, the share applies to the summed KV capacity the engines report instead. The per-key fairness controller intentionally does not apply `HIVENET_ROUTER_ADMIT_FRACTION`. The global B2 controller still applies that fraction and remains the safety limit for the pool.
 
 These limits do not run for `mode: reserved`, and `0` disables each limit. Their shares may be deliberately oversubscribed and do not need to add up to `1`. B4 rejections set `Retry-After: 1`; the ordinary request-per-minute limiter uses the same `rate_limit_exceeded` code without that header.
 

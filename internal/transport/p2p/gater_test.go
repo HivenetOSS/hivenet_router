@@ -108,3 +108,19 @@ func TestAgentHostRefusesPeersOtherThanRouter(t *testing.T) {
 		t.Fatal("agent must keep the router's connection")
 	}
 }
+
+// An agent connected to several routers allows each one and drops only the
+// router whose session ended.
+func TestGaterAddRemoveRouters(t *testing.T) {
+	g := NewRouterGater()
+	a, b := peer.ID("router-a"), peer.ID("router-b")
+	g.AddRouter(a)
+	g.AddRouter(b)
+	if !g.Allowed(a) || !g.Allowed(b) {
+		t.Fatal("both routers must be allowed")
+	}
+	g.RemoveRouter(a)
+	if g.Allowed(a) || !g.Allowed(b) {
+		t.Fatal("removing one router must keep the other")
+	}
+}

@@ -239,7 +239,9 @@ hivenet_agent_connection_resets_total
 
 ## Capacity and the wait queue
 
-Before moving to another fallback step, Hivenet Router can wait when eligible agents exist but all of them are at their declared capacity.
+Routers ignore the agent's `--capacity`, so network agents never wait for a capacity slot between fallback steps. A request that does not fit the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) waits before routing starts, in the per-model wait queue sized by `--queue-depth`.
+
+The rest of this section applies to agents with a declared capacity, such as agents in embedded or test setups. Before moving to another fallback step, Hivenet Router can wait when eligible agents exist but all of them are at their declared capacity.
 
 The queue is:
 
@@ -851,7 +853,7 @@ Fallback is a continuity mechanism. It should not quietly become the normal rout
   </Accordion>
 
   <Accordion title="Requests wait instead of falling back">
-    Matching agents are probably at capacity and queueing is enabled.
+    The model's occupancy budget is probably full and queueing is enabled. The request waits in the per-model wait queue before routing starts.
 
     Check:
 
@@ -860,7 +862,7 @@ Fallback is a continuity mechanism. It should not quietly become the normal rout
     --request-timeout
     ```
 
-    Disable queueing for immediate fallback:
+    Disable queueing to get a fast `429 concurrency_limit_exceeded` instead of waiting:
 
     ```bash
     --queue-depth 0

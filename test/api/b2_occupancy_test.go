@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/domain"
@@ -50,6 +52,25 @@ func newB2Handlers(q chan *domain.PendingRequest, ctrl *admission.Controller, gl
 	)
 }
 
+// holdBudget sends a request that takes the whole occupancy budget and stays
+// in flight (queued, unanswered), so the next request finds no room. A request
+// larger than the budget is admitted only when nothing else is in flight.
+func holdBudget(t *testing.T, h *api.Handlers, q chan *domain.PendingRequest, body []byte, prep func(*gin.Context)) {
+	t.Helper()
+	c, _ := newCtx("/v1/chat/completions", body)
+	if prep != nil {
+		prep(c)
+	}
+	go h.Passthrough(c)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the request holding the budget was not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func b2Body(maxTokens int) []byte {
 	if maxTokens > 0 {
 		return []byte(`{"model":"gemma","messages":[{"role":"user","content":"hi"}],"max_tokens":` + strconv.Itoa(maxTokens) + `}`)
@@ -64,7 +85,7 @@ func TestB2_OverBudget_429WithRetryAfter(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	ctrl := admission.NewController(1.0, 0) // no parking → immediate reject
 	h := newB2Handlers(q, ctrl, &policy.Policy{AdmitBudgetTokens: 50}, time.Second)
-	// footprint = input(4) + declared max_tokens(100) = 104 > 50.
+	holdBudget(t, h, q, b2Body(100), nil) // footprint 104 > 50: holds the whole budget
 	c, w := newCtx("/v1/chat/completions", b2Body(100))
 
 	h.Passthrough(c)
@@ -78,10 +99,11 @@ func TestB2_OverBudget_429WithRetryAfter(t *testing.T) {
 	if w.Header().Get("Retry-After") == "" {
 		t.Error("a 429 must carry a Retry-After header")
 	}
-	if len(q) != 0 {
+	// Only the request holding the budget is queued and holds a reservation.
+	if len(q) != 1 {
 		t.Errorf("a rejected request must not be queued, depth=%d", len(q))
 	}
-	if sumW, count := ctrl.Occupancy(b2Model); sumW != 0 || count != 0 {
+	if sumW, count := ctrl.Occupancy(b2Model); sumW != 50 || count != 1 {
 		t.Errorf("a rejected request must hold no reservation; got sumW=%d count=%d", sumW, count)
 	}
 }
@@ -352,6 +374,7 @@ func TestB2_ZeroHealthyReplicas_KeepsGateEnforcing(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	ctrl := admission.NewController(1.0, 0)
 	h := newB2PoolHandlers(q, ctrl, &policy.Policy{AdmitBudgetTokens: 50}, func(string) int { return 0 })
+	holdBudget(t, h, q, b2Body(100), nil)
 	c, w := newCtx("/v1/chat/completions", b2Body(100)) // footprint 104 > 50
 
 	h.Passthrough(c)
@@ -359,7 +382,7 @@ func TestB2_ZeroHealthyReplicas_KeepsGateEnforcing(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 with zero healthy replicas, got %d", w.Code)
 	}
-	if len(q) != 0 {
-		t.Errorf("an over-budget request must not be queued, depth=%d", len(q))
+	if len(q) != 1 {
+		t.Errorf("an over-budget request must not be queued, depth=%d (1 is the request holding the budget)", len(q))
 	}
 }

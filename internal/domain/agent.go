@@ -51,8 +51,17 @@ type Agent struct {
 	Healthy        bool
 	BackendHealthy bool // last reported backend health from heartbeat; false = model server down
 	ActiveRequests int
-	SessionToken   string
-	mu             sync.RWMutex
+
+	// With several routers each one forwards to the same agent. The agent
+	// reports how many requests it is serving in total (reportedInFlight,
+	// valid once hasReport); sentSinceReport counts what this router forwarded
+	// since that report, which the report could not include yet.
+	reportedInFlight int
+	sentSinceReport  int
+	hasReport        bool
+	reportedAt       time.Time
+	SessionToken     string
+	mu               sync.RWMutex
 }
 
 // NewAgent creates a new agent instance
@@ -88,6 +97,14 @@ func (a *Agent) RUnlock() {
 	a.mu.RUnlock()
 }
 
+// SetReportedLoad records the agent's own count of requests in flight, from
+// all routers together.
+func (a *Agent) SetReportedLoad(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reportedInFlight, a.sentSinceReport, a.hasReport, a.reportedAt = max(n, 0), 0, true, time.Now()
+}
+
 // DecrementLoad safely decrements active requests
 func (a *Agent) DecrementLoad() {
 	a.mu.Lock()
@@ -95,17 +112,34 @@ func (a *Agent) DecrementLoad() {
 	a.ActiveRequests--
 }
 
-// TryAcquireSlot atomically checks capacity and increments load if room is available.
-// Returns true and holds the slot; the caller must call DecrementLoad when done.
-// Returns false if the agent is already at capacity.
+// TryAcquireSlot increments the load and reports true; the caller must call
+// DecrementLoad when done. A positive Metadata.Capacity still caps the load
+// (embedded uses and tests); agents registered over the network carry none,
+// because the router admits by the engine's capacity, not a request count.
 func (a *Agent) TryAcquireSlot() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.ActiveRequests >= a.Metadata.Capacity {
+	if a.Metadata.Capacity > 0 && a.loadLocked() >= a.Metadata.Capacity {
 		return false
 	}
 	a.ActiveRequests++
+	a.sentSinceReport++
 	return true
+}
+
+// reportMaxAge is how long an agent's own load report is used. Reports come
+// every 500 ms; an older one (pushes failing) would let sentSinceReport grow
+// without bound, so the router falls back to what it has in flight there.
+const reportMaxAge = 3 * time.Second
+
+// loadLocked is the agent's load as this router best knows it: the larger of
+// what this router has in flight there and what the agent last reported plus
+// what this router sent since. Caller holds a.mu.
+func (a *Agent) loadLocked() int {
+	if !a.hasReport || time.Since(a.reportedAt) > reportMaxAge {
+		return a.ActiveRequests
+	}
+	return max(a.ActiveRequests, a.reportedInFlight+a.sentSinceReport)
 }
 
 // UpdateLastSeen updates the last seen timestamp
@@ -146,11 +180,11 @@ func (a *Agent) SetBackendHealthy(healthy bool) (prev bool) {
 	return prev
 }
 
-// GetLoad returns the current active request count
+// GetLoad returns the agent's current load (see loadLocked)
 func (a *Agent) GetLoad() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.ActiveRequests
+	return a.loadLocked()
 }
 
 // AgentRegistration represents persistent agent registration in storage
@@ -234,6 +268,13 @@ type BackendMetrics struct {
 	// KVCacheUtilization is the fraction of the pre-allocated GPU KV-cache in use (0.0–1.0).
 	// Source: vllm:kv_cache_usage_perc. Near 1.0 → preemptions imminent → route away.
 	KVCacheUtilization *float64 `json:"kv_cache_utilization,omitempty"`
+
+	// KVCapacityTokens is the engine's KV-cache size in tokens: how many tokens
+	// of context the replica can hold at once. The router derives the
+	// occupancy budget (B2) from it when a policy sets no admit_budget_tokens.
+	// Source: vllm:cache_config_info (num_gpu_blocks × block_size) or
+	// sglang:max_total_num_tokens. Nil when the engine does not report it.
+	KVCapacityTokens *float64 `json:"kv_capacity_tokens,omitempty"`
 
 	// RunningRequests is the number of requests currently being processed by the engine.
 	// Source: vllm:num_requests_running.
