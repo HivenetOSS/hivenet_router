@@ -3,7 +3,7 @@
 module hivenet_router
 
 // Minimum Go version required to build the project.
-go 1.27.3
+go 1.27.4
 
 // ── Direct dependencies ─────────────────────────────────────────────────────
 //
