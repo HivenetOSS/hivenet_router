@@ -34,6 +34,7 @@ import (
 	"hivenet_router/internal/transport/grpc"
 	"hivenet_router/internal/transport/p2p"
 	"hivenet_router/internal/wake"
+	pb "hivenet_router/proto"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
@@ -81,6 +82,12 @@ type agentRoutingSignalPayload struct {
 	// InFlight is the agent's count of requests in flight from all routers;
 	// absent from older agents.
 	InFlight *int `json:"in_flight,omitempty"`
+	// Routers lists the routers the agent is connected to right now (peer
+	// ID → requests in flight for it); absent from older agents.
+	Routers map[string]int64 `json:"routers,omitempty"`
+	// ReportEveryMs is how often the agent sends routing signals; absent
+	// from older agents.
+	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -170,6 +177,9 @@ type Router struct {
 	// shared publishes and applies limit usage across the routers of this
 	// site (nil unless --sync-store=valkey).
 	shared *shared.Store
+	// credits share the occupancy budgets (B2 global, B4 per key) across the
+	// routers of the site (nil unless --sync-store=valkey).
+	credits []*shared.Credits
 
 	// occupancy is the global KV-occupancy admit controller (B2), keyed per
 	// model; keyAdmission is the per-key occupancy-share controller (B4), keyed
@@ -603,6 +613,12 @@ func (r *Router) Start() error {
 	// stale scope is still open, causing every reconnect attempt to be rejected
 	// with an immediate TCP FIN before the Noise handshake.
 	r.p2pHost.Network().Notify(&libp2pnet.NotifyBundle{
+		// A new connection from an agent: see agentJoined.
+		ConnectedF: func(_ libp2pnet.Network, conn libp2pnet.Conn) {
+			if r.agents.Get(conn.RemotePeer()) != nil {
+				r.agentJoined()
+			}
+		},
 		DisconnectedF: func(n libp2pnet.Network, conn libp2pnet.Conn) {
 			peerID := conn.RemotePeer()
 			if len(n.ConnsToPeer(peerID)) != 0 {
@@ -703,8 +719,15 @@ func (r *Router) Start() error {
 	}
 
 	if r.shared != nil {
+		r.shared.SetPeerID(r.p2pHost.ID().String())
 		r.shared.Start(processorCtx)
+		for _, c := range r.credits {
+			c.Start(processorCtx)
+		}
 	}
+	// A reservation an exit path forgot to release would hold its budget
+	// forever, with or without a shared store.
+	go r.reapLeakedReservations(processorCtx)
 	r.metrics.ServeMetrics(r.cfg.MetricsPort)
 	r.publishTenantQuotas()
 	go r.startGRPCServer()
@@ -765,11 +788,15 @@ func (r *Router) Close() error {
 		r.p2pHost.Close()
 	}
 
-	// Publish the usage admitted since the last sync so the other routers
-	// count it, then disconnect from the shared store. This runs after the
-	// agents are gone, so no request can still finish and add usage that
-	// would never be published.
+	// No request can reach an agent any more: hand the occupancy credits back
+	// to the other routers, publish the usage admitted since the last sync,
+	// and disconnect from the shared store.
 	if r.shared != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		for _, c := range r.credits {
+			c.ReleaseAll(ctx)
+		}
+		cancel()
 		r.shared.Close()
 	}
 
@@ -799,6 +826,7 @@ func (r *Router) startGRPCServer() {
 		r.sessionManager,
 		r.p2pHost,
 	)
+	authServer.SetSiteRouters(r.siteRouters)
 	if err := grpc.StartServer(r.cfg.GRPCPort, authServer, r.grpcTLSCert); err != nil {
 		log.Errorf("gRPC server error: %v", err)
 	}
@@ -856,9 +884,6 @@ func (r *Router) startHTTPServer() {
 		handlers.SetEngineKVCapacity(r.EngineKVCapacityForModel)
 	}
 	handlers.SetDefaultMaxInflight(r.cfg.DefaultMaxInflightPerReplica)
-	if r.shared != nil {
-		handlers.SetRouterShare(r.shared.Size)
-	}
 	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
@@ -1719,6 +1744,7 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		if !wasHealthy || !prevBackendHealthy {
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
+			r.agentJoined()
 			r.executor.BroadcastCapacity(model)
 			if r.wake != nil {
 				r.wake.Wake(model)
@@ -1739,7 +1765,32 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 		r.enginePunctual.Update(session.PeerID, model, engine, organization, machine, a.Metadata.DeploymentID, payload.BackendMetrics)
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	reply := domain.HeartbeatReply{}
+	for _, sr := range r.siteRouters() {
+		reply.Routers = append(reply.Routers, domain.SiteRouter{GRPCAddr: sr.GetGrpcAddr(), PeerID: sr.GetPeerId()})
+	}
+	_ = json.NewEncoder(w).Encode(reply)
+}
+
+// maxSiteRouters bounds the list handed to agents.
+const maxSiteRouters = 32
+
+// siteRouters returns the live routers of this router's site that advertise
+// the address agents reach them at (--advertise-grpc-addr), for the agents to
+// connect to every one. Nil without a shared store.
+func (r *Router) siteRouters() []*pb.SiteRouter {
+	if r.shared == nil {
+		return nil
+	}
+	var out []*pb.SiteRouter
+	for _, sr := range r.shared.SiteRouters() {
+		if len(out) == maxSiteRouters {
+			break
+		}
+		out = append(out, &pb.SiteRouter{GrpcAddr: sr.Addr, PeerId: sr.PeerID})
+	}
+	return out
 }
 
 // agentDisconnected takes an agent whose last connection closed out of the
@@ -1800,7 +1851,35 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 		a.SetHealthy(false)
 	}
 	r.agents.Register(a)
+	if connected {
+		r.agentJoined()
+	}
 	return connected
+}
+
+// agentJoined tells the shared store that an agent became usable here (it
+// registered, connected again, or came back healthy). A router cut off from
+// the store then stops admitting from the credits it holds: the agent may
+// have told the other routers it had no connection to this one, and they may
+// have taken those credits back.
+func (r *Router) agentJoined() {
+	if r.shared != nil {
+		r.shared.AgentJoined()
+	}
+}
+
+// servedAgents lists the agents connected to this router, published with its
+// heartbeat so the other routers know which agents to ask about it. An agent
+// whose backend is unhealthy is listed too: it may still be running this
+// router's requests.
+func (r *Router) servedAgents() []string {
+	var ids []string
+	for _, a := range r.agents.List() {
+		if r.peerConnected(a.ID) {
+			ids = append(ids, a.ID.String())
+		}
+	}
+	return ids
 }
 
 // peerConnected reports whether the router has a live libp2p connection to
@@ -1837,8 +1916,14 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
+	if payload.ReportEveryMs > 0 {
+		a.SetReportEvery(time.Duration(payload.ReportEveryMs) * time.Millisecond)
+	}
 	if payload.InFlight != nil {
 		a.SetReportedLoad(*payload.InFlight)
+	}
+	if payload.Routers != nil {
+		a.SetRouterReport(payload.Routers)
 	}
 
 	region := session.Metadata.Region
@@ -1991,8 +2076,12 @@ func (r *Router) setupShared() error {
 		TLSCAFile:      cfg.SyncValkeyTLSCA,
 		Prefix:         syncSite(cfg),
 		RouterID:       cfg.RouterID,
+		AdvertiseAddr:  cfg.AdvertiseGRPCAddr,
 		Interval:       cfg.SyncInterval,
 		MinRouters:     cfg.SyncMinRouters,
+		// A router cut off when the store lost its data reconnects within
+		// ten rounds, and its requests end within the request timeout.
+		SettleAfter: cfg.RequestTimeout + 10*cfg.SyncInterval + 5*time.Second,
 	})
 	if err != nil {
 		return fmt.Errorf("shared counters: %w", err)
@@ -2001,9 +2090,103 @@ func (r *Router) setupShared() error {
 	st.AddApplier(limiter)
 	r.minuteLimiter.SetFleet(st)
 	st.AddApplier(r.minuteLimiter)
+
+	// Occupancy budgets: credits from a site-wide pool. A silent router keeps
+	// its credits until a newer run replaces it, or until every agent it
+	// served reports no connection to it.
+	st.SetAgents(r.servedAgents)
+	st.SetRouterReports(r.reportedRouters)
+	occ := st.NewCredits("occ", r.agentsLeftRouter)
+	kocc := st.NewCredits("kocc", r.agentsLeftRouter)
+	r.occupancy.SetPool(occ)
+	r.keyAdmission.SetPool(kocc)
+	r.credits = []*shared.Credits{occ, kocc}
+
+	// Redirect tokens are single-use across the site, not per router.
+	if r.redirect != nil {
+		r.redirect.Replay = &siteReplay{store: st, local: redirect.NewReplayGuard()}
+	}
 	r.metrics.Register(st.Collectors()...)
 	r.shared = st
 	log.Infof("Shared counters on: %s", shared.Config{Addrs: addrs, SentinelMaster: cfg.SyncSentinelMaster,
 		RouterID: cfg.RouterID, Prefix: syncSite(cfg), Interval: cfg.SyncInterval, MinRouters: cfg.SyncMinRouters})
 	return nil
+}
+
+// reportedRouters lists the routers the agents reported a connection to in
+// a report that is still fresh (see domain.Agent.ReportMaxAge).
+func (r *Router) reportedRouters() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range r.agents.List() {
+		for _, p := range a.ReportedRouters() {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// agentsLeftRouter reports whether every agent in agents reported to this
+// router, in a report that is still fresh, that it has no connection to the
+// router with libp2p peer ID routerPeer. An agent this router does not know,
+// or that has not reported recently, may still serve that router: the answer
+// is then false. With no agents the router served nothing.
+func (r *Router) agentsLeftRouter(routerPeer string, agents []string) bool {
+	for _, id := range agents {
+		pid, err := peer.Decode(id)
+		if err != nil {
+			return false
+		}
+		a := r.agents.Get(pid)
+		if a == nil {
+			return false
+		}
+		if fresh, connected := a.ConnectedTo(routerPeer); !fresh || connected {
+			return false
+		}
+	}
+	return true
+}
+
+// reapLeakedReservations releases occupancy reservations older than any
+// request can live. It should find nothing: each one it finds is an exit path
+// that skipped its release, and is logged and counted.
+func (r *Router) reapLeakedReservations(ctx context.Context) {
+	maxAge := r.cfg.RequestTimeout + time.Minute
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n := r.occupancy.ReapStale(maxAge) + r.keyAdmission.ReapStale(maxAge)
+			if n > 0 {
+				log.Warnf("Released %d occupancy reservation(s) older than %v: a request exit path skipped its release", n, maxAge)
+				r.metrics.AdmissionReaped(n)
+			}
+		}
+	}
+}
+
+// siteReplay makes redirect tokens single-use across every router of the
+// site through the shared store, and falls back to this router's memory when
+// the store cannot answer.
+type siteReplay struct {
+	store *shared.Store
+	local *redirect.ReplayGuard
+}
+
+func (g *siteReplay) First(ctx context.Context, id string, until, now time.Time) bool {
+	// Always recorded here too, so a token used while the store answered
+	// is still refused by this router if the store is down at its replay.
+	local := g.local.First(ctx, id, until, now)
+	first, err := g.store.FirstUse(ctx, id, until)
+	if err != nil {
+		return local
+	}
+	return first && local
 }

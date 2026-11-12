@@ -20,6 +20,7 @@
 package redirect
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -711,13 +712,20 @@ func BodySHA(body []byte) string {
 // and identifies the request: one request may be redirected more than once,
 // each time with a new token.
 //
-// ponytail: in memory, so a token can be used once per router of the target
-// site, not once per site. Contract 3 v2 moves this to the
-// site's shared Valkey with Epic A.
+// It is in memory, so on its own a token can be used once per router of the
+// target site; with several routers the router wraps it in a guard
+// backed by the shared store (see Replayer).
 type ReplayGuard struct {
 	mu        sync.Mutex
 	seen      map[string]time.Time
 	lastSweep time.Time
+}
+
+// Replayer makes redirect tokens single-use: First records id until the given
+// time and reports whether this is its first use. ctx is the request's: a
+// check against a shared store stops when the client is gone.
+type Replayer interface {
+	First(ctx context.Context, id string, until, now time.Time) bool
 }
 
 // NewReplayGuard returns an empty guard.
@@ -725,7 +733,7 @@ func NewReplayGuard() *ReplayGuard { return &ReplayGuard{seen: map[string]time.T
 
 // First records id until the given time and reports whether this is its
 // first use. Expired entries are swept at most every 10 seconds.
-func (g *ReplayGuard) First(id string, until, now time.Time) bool {
+func (g *ReplayGuard) First(_ context.Context, id string, until, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if now.Sub(g.lastSweep) > 10*time.Second {

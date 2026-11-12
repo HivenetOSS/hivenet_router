@@ -180,3 +180,47 @@ func TestDeclaredCapacityIsIgnored(t *testing.T) {
 		t.Fatalf("backend saw at most %d request at once: the declared capacity of 1 still caps the agent", peak.Load())
 	}
 }
+
+// A router that goes away mid-request can no longer receive the response: the
+// agent stops the request so the engine frees its KV cache at once, instead of
+// finishing work no one will read. Routers rely on this before handing a lost
+// router's occupancy credits to the others.
+func TestAgentStopsRequestsOfLostRouter(t *testing.T) {
+	started := make(chan struct{}, 1)
+	stopped := make(chan struct{}, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = io.ReadAll(r.Body) // the server notices a closed client only once the body is read
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			stopped <- struct{}{}
+		case <-time.After(30 * time.Second):
+		}
+	}))
+	t.Cleanup(backend.Close)
+
+	r := startSiteRouter(t)
+	startMultiHomeAgent(t, []*siteRouter{r}, backend.URL, 0)
+	waitFor(t, 20*time.Second, "agent registered", func() bool { return modelHealthy(r.baseURL) })
+
+	go func() {
+		if resp, err := postChat(r.baseURL, false); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never reached the backend")
+	}
+	r.stop()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the backend kept running the request of a router that is gone")
+	}
+}

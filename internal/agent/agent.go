@@ -33,6 +33,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +49,7 @@ import (
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	p2phttp "github.com/libp2p/go-libp2p/p2p/http"
 	"github.com/multiformats/go-multiaddr"
@@ -107,6 +109,18 @@ type Agent struct {
 	// routers together. It is reported in every routing signal so each router
 	// sees the backend's real load, not only the requests it sent itself.
 	inFlight atomic.Int64
+
+	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
+	// requests in flight per router peer, and sessions counts the sessions
+	// open with each router peer (one router may be listed under several
+	// addresses). Together they tell each router which routers this agent is
+	// connected to right now (see routerReport).
+	node       host.Host
+	inFlightBy sync.Map // peer.ID → *routerRequests
+	sessionsMu sync.Mutex
+	sessions   map[peer.ID]int
+
+	routers routerSet // the router sessions, seeds and discovered (discovery.go)
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -214,23 +228,31 @@ func (a *Agent) Run() error {
 		}
 	}
 	defer node.Close()
+	a.node = node
+	// A router whose connection is gone cannot receive a response: stop its
+	// requests so the engine frees their KV cache. libp2p HTTP half-closes
+	// each request stream, so the request context alone never sees it go.
+	node.Network().Notify(&network.NotifyBundle{
+		DisconnectedF: func(n network.Network, c network.Conn) {
+			p := c.RemotePeer()
+			go func() {
+				if n.Connectedness(p) != network.Connected {
+					a.cancelFrom(p)
+				}
+			}()
+		},
+	})
 
 	a.backendHealthy.Store(true) // confirmed by waitForBackend
 	go a.runBackendHealthChecker(nil)
 
 	// One independent session per router: a router that is down or restarts
-	// never interrupts the others.
+	// never interrupts the others. The routers of the site that advertise
+	// themselves are added as they are learned (see discovery.go).
 	routers := a.cfg.RouterList()
 	log.Infof("Connecting to %d router(s): %s", len(routers), strings.Join(routers, ", "))
-	var wg sync.WaitGroup
-	for _, addr := range routers {
-		wg.Add(1)
-		go func(addr string) {
-			defer wg.Done()
-			a.runRouterSession(&routerSession{addr: addr}, node, httpHost)
-		}(addr)
-	}
-	wg.Wait()
+	a.startRouters(routers, node, httpHost)
+	a.waitRouters()
 	log.Info("Agent stopped")
 	return nil
 }
@@ -238,10 +260,22 @@ func (a *Agent) Run() error {
 // routerSession is this agent's link to one router: its own authentication,
 // registration, heartbeat, routing signals and re-authentication.
 type routerSession struct {
-	addr   string       // router gRPC address
-	peer   peer.ID      // router peer ID, from the auth response
-	client *http.Client // namespaced client for the router protocol
-	token  atomic.Value // current session token (string)
+	stop   chan struct{} // closed when the agent drops this router (see pruneRouters); nil = never
+	up     atomic.Bool   // registered and serving
+	addr   string        // router gRPC address
+	peer   peer.ID       // router peer ID, from the auth response
+	client *http.Client  // namespaced client for the router protocol
+	token  atomic.Value  // current session token (string)
+}
+
+// dropped reports whether the agent dropped this router (see pruneRouters).
+func (rs *routerSession) dropped() bool {
+	select {
+	case <-rs.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (rs *routerSession) sessionToken() string {
@@ -261,17 +295,21 @@ const (
 // and start over with exponential backoff.
 func (a *Agent) runRouterSession(rs *routerSession, node host.Host, httpHost *p2phttp.Host) {
 	backoff := sessionBackoffMin
-	for !a.stopped() {
+	for !a.stopped() && !rs.dropped() {
 		if a.runSessionOnce(rs, node, httpHost) {
 			backoff = sessionBackoffMin // the session was up; start the backoff over
 		}
-		if a.stopped() {
+		if a.stopped() || rs.dropped() {
 			return
 		}
 		wait := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)+1))
 		log.Warnf("Router %s: reconnecting in %v", rs.addr, wait.Round(time.Millisecond))
-		if a.sleepOrStop(wait) {
+		select {
+		case <-a.stopCh:
 			return
+		case <-rs.stop:
+			return
+		case <-time.After(wait):
 		}
 		backoff = min(backoff*2, sessionBackoffMax)
 	}
@@ -291,6 +329,10 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 		return false
 	}
 	rs.peer, rs.client = routerPeer, client
+	a.setPeer(rs, routerPeer)
+	a.openSession(routerPeer)
+	defer a.closeSession(routerPeer)
+	// Runs first: its requests are stopped before the router leaves the report.
 	defer a.dropRouter(node, routerPeer)
 
 	registerCtx, registerCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -301,20 +343,43 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 		return false
 	}
 	log.Infof("Router %s: registered, ready for requests", rs.addr)
+	a.learnRouters(fromProto(authResp.GetSiteRouters()))
+	a.sessionUp(rs)
+	defer rs.up.Store(false)
 	a.runUntilDisconnect(rs, node, authResp)
 	log.Warnf("Router %s: disconnected", rs.addr)
 	return true
 }
 
+// openSession and closeSession count the sessions open with a router peer:
+// it stays in the report until the last one ends.
+func (a *Agent) openSession(p peer.ID) {
+	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
+	if a.sessions == nil {
+		a.sessions = map[peer.ID]int{}
+	}
+	a.sessions[p]++
+}
+
+func (a *Agent) closeSession(p peer.ID) {
+	a.sessionsMu.Lock()
+	defer a.sessionsMu.Unlock()
+	if a.sessions[p]--; a.sessions[p] <= 0 {
+		delete(a.sessions, p)
+	}
+}
+
 // dropRouter forgets a router whose session ended: it is no longer allowed
-// through the gater and its connection is closed, unless another session
-// (another address of the same router) still uses it. A new session adds it
-// back.
+// through the gater, its requests in flight are stopped and its connection is
+// closed, unless another session (another address of the same router) still
+// uses it. A new session adds it back.
 func (a *Agent) dropRouter(node host.Host, routerPeer peer.ID) {
 	a.gater.RemoveRouter(routerPeer)
 	if a.gater.Allowed(routerPeer) {
 		return
 	}
+	a.cancelFrom(routerPeer)
 	node.ConnManager().Unprotect(routerPeer, "router")
 	_ = node.Network().ClosePeer(routerPeer)
 }
@@ -500,6 +565,11 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 		select {
 		case <-a.stopCh:
 			return
+		case <-rs.stop:
+			// Dropped (see pruneRouters), possibly between authentication
+			// and registration: end the session rather than serve outside
+			// the set.
+			return
 		case <-ticker.C:
 			if err := a.sendHeartbeat(rs); err != nil {
 				log.Warnf("Router %s: heartbeat failed: %v", rs.addr, err)
@@ -520,6 +590,13 @@ type routingSignalPayload struct {
 	// InFlight is the number of requests this agent is serving, from all
 	// routers together.
 	InFlight int64 `json:"in_flight"`
+	// Routers maps the libp2p peer ID of every router this agent is
+	// connected to right now to the requests it is serving for that router.
+	// A router missing from every agent's map has no path to the GPUs.
+	Routers map[string]int64 `json:"routers"`
+	// ReportEveryMs is how often this agent sends these signals, so the
+	// router knows how old a report may be before it is stale.
+	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
 }
 
 // runRoutingSignalPusher sends fresh engine and hardware snapshots to the router at
@@ -528,10 +605,7 @@ type routingSignalPayload struct {
 // provides a fallback — if all pushes fail the router still gets metrics every
 // HeartbeatInterval. Exits when done or stopCh is closed.
 func (a *Agent) runRoutingSignalPusher(rs *routerSession, done <-chan struct{}) {
-	interval := a.cfg.RoutingSignalInterval
-	if interval <= 0 {
-		interval = 500 * time.Millisecond
-	}
+	interval := a.routingSignalInterval()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -550,6 +624,14 @@ func (a *Agent) runRoutingSignalPusher(rs *routerSession, done <-chan struct{}) 
 	}
 }
 
+// routingSignalInterval is how often routing signals are pushed.
+func (a *Agent) routingSignalInterval() time.Duration {
+	if a.cfg.RoutingSignalInterval <= 0 {
+		return 500 * time.Millisecond
+	}
+	return a.cfg.RoutingSignalInterval
+}
+
 // pushRoutingSignals sends one routing-signal POST to /routing-signals of
 // one router session, with the latest cached snapshot and this agent's
 // in-flight count. It does not retry: the next tick sends fresh values.
@@ -563,6 +645,8 @@ func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 		BackendMetrics: a.engineMetrics.Load(),
 		Hardware:       snap,
 		InFlight:       a.inFlight.Load(),
+		Routers:        a.routerReport(),
+		ReportEveryMs:  a.routingSignalInterval().Milliseconds(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -769,7 +853,24 @@ func (a *Agent) sendHeartbeat(rs *routerSession) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("heartbeat rejected: HTTP %d", resp.StatusCode)
 	}
+	// The reply lists the site's live routers (older routers send nothing).
+	var reply domain.HeartbeatReply
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&reply) == nil {
+		list := make([]siteRouter, 0, len(reply.Routers))
+		for _, r := range reply.Routers {
+			list = append(list, siteRouter{addr: r.GRPCAddr, peerID: r.PeerID})
+		}
+		a.learnRouters(list)
+	}
 	return nil
+}
+
+func fromProto(rs []*pb.SiteRouter) []siteRouter {
+	out := make([]siteRouter, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, siteRouter{addr: r.GetGrpcAddr(), peerID: r.GetPeerId()})
+	}
+	return out
 }
 
 // chatHandler handles inference requests forwarded by the router via libp2p HTTP.
@@ -777,6 +878,8 @@ func (a *Agent) sendHeartbeat(rs *routerSession) error {
 func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	a.inFlight.Add(1)
 	defer a.inFlight.Add(-1)
+	r, done := a.track(r)
+	defer done()
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -961,6 +1064,8 @@ func (a *Agent) healthHandler(w http.ResponseWriter, _ *http.Request) {
 func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	a.inFlight.Add(1)
 	defer a.inFlight.Add(-1)
+	r, done := a.track(r)
+	defer done()
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 
@@ -1183,5 +1288,110 @@ func (a *Agent) sleepOrStop(d time.Duration) bool {
 func forwardableHeaders(h http.Header) http.Header {
 	out := h.Clone()
 	domain.StripClientCredentials(out)
+	return out
+}
+
+// routerRequests are the requests in flight from one router.
+type routerRequests struct {
+	n       atomic.Int64
+	mu      sync.Mutex
+	next    uint64
+	cancels map[uint64]context.CancelFunc
+	dead    bool // cancelFrom ran: the router is lost, nothing more is tracked here
+}
+
+// track counts one request in flight for the router it came from, so
+// cancelFrom can stop it, and returns the request to serve and the function
+// that ends it. The request ends when the router's timeout for it runs out
+// (domain.HeaderTimeout): the router has given up on it by then, and libp2p
+// does not tell the agent.
+func (a *Agent) track(r *http.Request) (*http.Request, func()) {
+	ctx, stop := r.Context(), context.CancelFunc(func() {})
+	if ms, err := strconv.ParseInt(r.Header.Get(domain.HeaderTimeout), 10, 64); err == nil && ms > 0 {
+		ctx, stop = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+	}
+	r.Header.Del(domain.HeaderTimeout) // not for the backend
+	router := p2phttp.ClientPeerID(r)
+	if router == "" {
+		return r.WithContext(ctx), stop
+	}
+	ctx, end := a.trackFrom(ctx, router)
+	return r.WithContext(ctx), func() { end(); stop() }
+}
+
+// trackFrom counts one request in flight from router, under a context that
+// cancelFrom cancels if the router is lost. It returns that context and the
+// function that ends the request.
+func (a *Agent) trackFrom(ctx context.Context, router peer.ID) (context.Context, func()) {
+	v, _ := a.inFlightBy.LoadOrStore(router, &routerRequests{cancels: map[uint64]context.CancelFunc{}})
+	rr := v.(*routerRequests)
+	ctx, cancel := context.WithCancel(ctx)
+	rr.mu.Lock()
+	if rr.dead {
+		// The router was lost between the lookup and the lock: it gave this
+		// request up and the others may reclaim its credits, so it does not
+		// run.
+		rr.mu.Unlock()
+		cancel()
+		return ctx, func() {}
+	}
+	id := rr.next
+	rr.next++
+	rr.cancels[id] = cancel
+	rr.n.Add(1)
+	rr.mu.Unlock()
+	return ctx, func() {
+		rr.n.Add(-1)
+		rr.mu.Lock()
+		delete(rr.cancels, id)
+		rr.mu.Unlock()
+		cancel()
+	}
+}
+
+// cancelFrom stops every request in flight from a router the agent lost.
+func (a *Agent) cancelFrom(router peer.ID) {
+	v, ok := a.inFlightBy.Load(router)
+	if !ok {
+		return
+	}
+	rr := v.(*routerRequests)
+	rr.mu.Lock()
+	rr.dead = true // a request that found rr before this is cancelled in track
+	n := len(rr.cancels)
+	for id, cancel := range rr.cancels {
+		cancel()
+		delete(rr.cancels, id)
+	}
+	// Requests still ending hold rr; a router that comes back starts afresh.
+	a.inFlightBy.CompareAndDelete(router, rr)
+	rr.mu.Unlock()
+	if n > 0 {
+		log.Warnf("Router %s lost: stopped %d request(s) in flight from it", router, n)
+	}
+}
+
+// routerReport lists the routers this agent is connected to right now (a
+// registered session and a live libp2p connection), with the requests it is
+// serving for each.
+func (a *Agent) routerReport() map[string]int64 {
+	out := map[string]int64{}
+	a.sessionsMu.Lock()
+	peers := make([]peer.ID, 0, len(a.sessions))
+	for p := range a.sessions {
+		peers = append(peers, p)
+	}
+	a.sessionsMu.Unlock()
+	for _, p := range peers {
+		if a.node != nil && a.node.Network().Connectedness(p) != network.Connected {
+			a.cancelFrom(p) // its requests must be stopped before it leaves the report
+			continue
+		}
+		var n int64
+		if v, ok := a.inFlightBy.Load(p); ok {
+			n = v.(*routerRequests).n.Load()
+		}
+		out[p.String()] = n
+	}
 	return out
 }

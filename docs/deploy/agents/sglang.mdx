@@ -233,7 +233,7 @@ The agent waits for SGLang to become healthy and expose a model before registeri
 | --- | --- |
 | `--engine sglang` | Selects the SGLang backend integration |
 | `--backend-url` | Base URL of the local SGLang server |
-| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |

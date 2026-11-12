@@ -142,7 +142,9 @@ This applies when the policy sets neither `admit_budget_tokens` nor `max_infligh
   Upgrade agents before routers. Until an agent is upgraded it reports no KV-cache size, so its model gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` requests in flight per replica instead of the budget from the engine.
 </Warning>
 
-With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), each router admits its share of the token budget and of the request backstop: the limit divided by the live routers, rounded down and at least `1` per router. Together the routers never exceed it, except with more routers than the request backstop: each router still admits one request. Occupancy is not yet shared through the store.
+With several routers sharing a [sync store](/deploy/multiple-routers) (`--sync-store=valkey`), the token budget and the request backstop are shared exactly: each router admits against credits it holds from a site-wide pool, and the routers together never hold more than the budget. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits).
+
+A reservation older than the request timeout plus one minute is released by a periodic check and counted in `hivenet_admission_reaped_total`: a request never lives that long, so it was leaked by an exit path that skipped its release.
 
 The healthy-replica count is recomputed for each request and floored at `1`. This keeps the gate active when no healthy replica is currently reported, while routing can still return the more specific availability error.
 
@@ -158,7 +160,7 @@ estimated input tokens + declared maximum output tokens
 
 If output is undeclared, the reservation starts with the input estimate and grows as output streams. When the backend reports exact input usage, the router replaces the estimated input portion with the exact count. Success, error, timeout, and client disconnect all release the reservation.
 
-A request whose footprint is larger than the whole token budget is not rejected. It is held to the whole budget and admitted when nothing else of that model is in flight on this router. While it waits, smaller requests of that model wait behind it, so the model drains and it is not starved. The per-key occupancy share (B4) treats a request larger than the key's share the same way.
+A request whose footprint is larger than the whole token budget is not rejected. It is held to the whole budget and admitted when nothing else of that model is in flight on this router. While it waits, smaller requests of that model wait behind it, so the model drains and it is not starved. With [several routers sharing the budget](/deploy/multiple-routers), one router cannot drain the others, so a smaller request waits behind it at most `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then goes ahead. Such a request needs credits the other routers are using, so it waits until they hand back what they do not need (each sync round), and may still get `429` when its wait ends on a busy site. While a router is held to its share of the budget (store unreachable, or grants not acknowledged by a replica), a request larger than that share is held to the share, and admitted when nothing else of that model is in flight on that router. Every router may do this at the same time, so while the store is unreachable the engine may see up to the number of routers × the budget; the engine preempts if it really runs out of KV cache. Refusing such requests until the store is back would be the alternative. The per-key occupancy share (B4) treats a request larger than the key's share the same way.
 
 When a request does not fit, it waits in the model's wait queue:
 

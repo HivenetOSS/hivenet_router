@@ -4,6 +4,7 @@
 package redirect
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,7 +25,7 @@ type Redirector struct {
 	Self   string // this site's ID (the routers' --site-id)
 	Map    *Map
 	Signer *Signer
-	Replay *ReplayGuard
+	Replay Replayer
 
 	// OnRedirect, if set, is called for every 307 written.
 	OnRedirect func(model, site string, hop int)
@@ -37,8 +38,8 @@ type Redirector struct {
 // Use marks the token jti, valid until exp, as used and reports whether this
 // was its first use. It is the last token check (contract 3 v3 §4), made only
 // once the key and the body have passed.
-func (r *Redirector) Use(jti string, exp int64, now time.Time) bool {
-	return r.Replay.First(jti, time.Unix(exp, 0).Add(ClockSkew), now)
+func (r *Redirector) Use(ctx context.Context, jti string, exp int64, now time.Time) bool {
+	return r.Replay.First(ctx, jti, time.Unix(exp, 0).Add(ClockSkew), now)
 }
 
 // Reject reports a refused redirect token.

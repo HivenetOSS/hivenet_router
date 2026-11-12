@@ -252,7 +252,7 @@ The agent waits until Ollama responds and the selected model is available. If Ol
 | `--engine ollama` | Selects the Ollama integration |
 | `--model` | Pins the agent to one Ollama model |
 | `--backend-url` | Base URL of the local Ollama server |
-| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
 | `--region` | Region metadata available to routing policies |
 | `--identity-path` | Persistent private key that keeps the peer ID stable |

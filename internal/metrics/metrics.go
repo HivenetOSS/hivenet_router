@@ -6,6 +6,7 @@ package metrics
 import (
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"hivenet_router/internal/domain"
@@ -26,6 +27,9 @@ var agentLabels = []string{"peer_id", "region", "engine", "model", "capacity", "
 // RouterMetrics holds all Prometheus collectors for the routing table.
 // It is safe for concurrent use after construction.
 type RouterMetrics struct {
+	reapOnce        sync.Once
+	admissionReaped prometheus.Counter
+
 	// registry is the private Prometheus registry used by this instance.
 	// Using a private registry (instead of the global default) allows multiple
 	// RouterMetrics instances to coexist in the same process (e.g. in tests)
@@ -1863,4 +1867,17 @@ func (m *RouterMetrics) ServeMetrics(addr string) {
 // subsystems (shared counters) that own their metrics.
 func (m *RouterMetrics) Register(cs ...prometheus.Collector) {
 	m.registry.MustRegister(cs...)
+}
+
+// AdmissionReaped counts reservations released by the leak reaper. The
+// counter registers on first use.
+func (m *RouterMetrics) AdmissionReaped(n int) {
+	m.reapOnce.Do(func() {
+		m.admissionReaped = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "hivenet_admission_reaped_total",
+			Help: "Occupancy reservations released because they outlived any request: an exit path skipped its release.",
+		})
+		m.registry.MustRegister(m.admissionReaped)
+	})
+	m.admissionReaped.Add(float64(n))
 }

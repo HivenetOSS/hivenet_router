@@ -331,7 +331,7 @@ Agents with a declared capacity, such as agents in embedded or test setups, can 
 
 The agent's `--capacity` flag is deprecated and ignored by routers. The router bounds work per model with the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
 
-For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica; set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, each router admits its share of the budget.
+For vLLM and SGLang, the budget defaults to the KV capacity the engines report × `HIVENET_ROUTER_ADMIT_FRACTION`. For other engines, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica; set `admit_budget_tokens` or `max_inflight` in the policy through representative load testing. With several routers sharing `--sync-store=valkey`, the budget is shared across them through occupancy credits.
 
 ## Request and response buffering
 

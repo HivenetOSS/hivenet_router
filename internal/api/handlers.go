@@ -245,12 +245,6 @@ type Handlers struct {
 	// leaves the budget to the policy (SetEngineKVCapacity).
 	engineKVCapacity func(model string) int
 
-	// routerShare returns how many routers share this site's backends (1 when
-	// alone). Until occupancy is shared through the store, each router admits
-	// its share of the occupancy budget so the routers together never exceed
-	// it (SetRouterShare).
-	routerShare func() int
-
 	// defaultMaxInflight bounds requests in flight per healthy replica of a
 	// model with no occupancy budget (SetDefaultMaxInflight). 0 disables it.
 	defaultMaxInflight int
@@ -721,17 +715,6 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 		// Only agents count: a model served by a provider alone is not held.
 		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 && h.agentReplicas(req.Model) > 0 {
 			inflight = h.defaultMaxInflight * replicas
-		}
-		// Several routers serve the same backends: each admits its share.
-		if h.routerShare != nil {
-			if n := h.routerShare(); n > 1 {
-				if budget > 0 {
-					budget = max(budget/n, 1)
-				}
-				if inflight > 0 {
-					inflight = max(inflight/n, 1)
-				}
-			}
 		}
 		return budget, inflight
 	}
@@ -1668,7 +1651,3 @@ func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCa
 // SetDefaultMaxInflight sets the requests in flight allowed per healthy
 // replica of a model nothing else bounds; 0 leaves such models unbounded.
 func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }
-
-// SetRouterShare sets how many routers share the site's backends; each admits
-// that share of the occupancy budget.
-func (h *Handlers) SetRouterShare(fn func() int) { h.routerShare = fn }

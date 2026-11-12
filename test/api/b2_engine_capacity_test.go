@@ -61,22 +61,6 @@ func TestB2_PolicyBudgetOverridesEngine(t *testing.T) {
 	}
 }
 
-// Several routers serve the same backends: each admits its share of the
-// budget, so together they never exceed it.
-func TestB2_SplitAcrossRouters(t *testing.T) {
-	q := make(chan *domain.PendingRequest, 1)
-	ctrl := admission.NewController(1.0, 0)
-	h := newB2Handlers(q, ctrl, &policy.Policy{}, time.Second)
-	h.SetEngineKVCapacity(func(string) int { return 300 })
-	h.SetRouterShare(func() int { return 3 }) // share = 100
-	holdBudget(t, h, q, b2Body(200), nil)
-	c, w := newCtx("/v1/chat/completions", b2Body(200))
-	h.Passthrough(c)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("want 429: a footprint of ~204 exceeds this router's share of 100, got %d", w.Code)
-	}
-}
-
 // A model nothing bounds (no policy budget, no KV size from its engines, e.g.
 // Ollama) is held to the default requests in flight per replica.
 func TestDefaultMaxInflightWhenNothingBounds(t *testing.T) {
