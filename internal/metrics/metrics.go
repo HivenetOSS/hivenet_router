@@ -1838,3 +1838,9 @@ func (m *RouterMetrics) ServeMetrics(addr string) {
 		}
 	}()
 }
+
+// Register adds extra collectors to this instance's registry. Used by optional
+// subsystems (shared counters) that own their metrics.
+func (m *RouterMetrics) Register(cs ...prometheus.Collector) {
+	m.registry.MustRegister(cs...)
+}
