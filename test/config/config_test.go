@@ -308,6 +308,26 @@ func TestSyncIntervalDefault(t *testing.T) {
 	}
 }
 
+// Admission defaults: the occupancy budget follows the engine's KV size, and
+// models nothing bounds get 8 requests in flight per replica. Both can be
+// changed from the environment.
+func TestAdmissionDefaultsFromEnv(t *testing.T) {
+	cfg := config.LoadFromEnv()
+	if !cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 8 {
+		t.Fatalf("defaults: from engine KV %v, max in flight %d", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica)
+	}
+	t.Setenv("HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV", "false")
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "0")
+	cfg = config.LoadFromEnv()
+	if cfg.AdmitFromEngineKV || cfg.DefaultMaxInflightPerReplica != 0 || len(cfg.EnvErrors) != 0 {
+		t.Fatalf("not read from the environment: %v %d %v", cfg.AdmitFromEngineKV, cfg.DefaultMaxInflightPerReplica, cfg.EnvErrors)
+	}
+	t.Setenv("HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA", "-1")
+	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 1 {
+		t.Fatalf("want 1 env error for a negative cap, got %v", cfg.EnvErrors)
+	}
+}
+
 // TestLoadFromEnv_WakeHold: the hold-at-zero settings. A bad value refuses
 // startup via EnvErrors and keeps the default.
 func TestLoadFromEnv_WakeHold(t *testing.T) {
@@ -334,6 +354,32 @@ func TestLoadFromEnv_WakeHold(t *testing.T) {
 					t.Errorf("errors %v, want exactly one", c.EnvErrors)
 				}
 			})
+		}
+	}
+}
+
+// The occupancy queue follows --queue-depth unless set on its own.
+func TestLoadFromEnv_AdmissionQueueDepth(t *testing.T) {
+	if got := config.DefaultConfig().AdmissionQueueDepth; got != -1 {
+		t.Fatalf("default AdmissionQueueDepth = %d, want -1 (follow QueueDepth)", got)
+	}
+	t.Setenv("HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH", "100")
+	if got := config.LoadFromEnv().AdmissionQueueDepth; got != 100 {
+		t.Fatalf("AdmissionQueueDepth = %d, want 100", got)
+	}
+}
+
+// The advertised address is what agents dial: a listen address (no host,
+// 0.0.0.0, ::) or a non-numeric port would make them dial themselves.
+func TestValidAdvertiseAddr(t *testing.T) {
+	for _, ok := range []string{"router-0.routers.svc:50051", "10.0.0.5:50051", "[2001:db8::1]:50051"} {
+		if err := config.ValidAdvertiseAddr(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{":50051", "0.0.0.0:50051", "[::]:50051", "router:grpc", "router:0", "router:70000", "router"} {
+		if config.ValidAdvertiseAddr(bad) == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

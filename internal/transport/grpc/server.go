@@ -35,7 +35,13 @@ type AuthServer struct {
 	jwtValidator   *auth.JWTValidator   // Validates agent JWT credentials
 	sessionManager *auth.SessionManager // Manages short-lived agent sessions
 	p2pHost        host.Host            // Router's libp2p host
+
+	siteRouters func() []*pb.SiteRouter // the site's live routers; nil = none
 }
+
+// SetSiteRouters sets how the server lists the live routers of the site for
+// the agents (see AuthResponse.site_routers). Call before serving.
+func (s *AuthServer) SetSiteRouters(fn func() []*pb.SiteRouter) { s.siteRouters = fn }
 
 // NewAuthServer creates a new authentication server
 func NewAuthServer(
@@ -105,6 +111,9 @@ func (s *AuthServer) Authenticate(ctx context.Context, req *pb.AuthRequest) (*pb
 			Protocol:  s.cfg.ProtocolID,
 		},
 
+		// The other routers of the site, so the agent connects to every one.
+		SiteRouters: s.listSiteRouters(),
+
 		// Router-side configuration hints for the agent
 		Config: &pb.RouterConfig{
 			HeartbeatInterval: int32(s.cfg.HeartbeatInterval.Seconds()),
@@ -122,8 +131,8 @@ func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
 	if meta.Model == "" {
 		return fmt.Errorf("model is required")
 	}
-	if meta.Capacity <= 0 {
-		return fmt.Errorf("capacity must be positive")
+	if meta.Capacity < 0 {
+		return fmt.Errorf("capacity must not be negative")
 	}
 	if meta.Version == "" {
 		return fmt.Errorf("version is required")
@@ -176,4 +185,11 @@ func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, hand
 		}
 	}()
 	return handler(ctx, req)
+}
+
+func (s *AuthServer) listSiteRouters() []*pb.SiteRouter {
+	if s.siteRouters == nil {
+		return nil
+	}
+	return s.siteRouters()
 }

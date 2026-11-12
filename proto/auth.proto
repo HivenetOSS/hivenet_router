@@ -34,6 +34,15 @@ message AuthResponse {
     string session_token = 3;
     LibP2PInfo libp2p_info = 4;
     RouterConfig config = 5;
+    // The live routers of this router's site that advertise the address
+    // agents reach them at (--advertise-grpc-addr). An agent opens a session
+    // with each; empty when none advertises or the site has no shared store.
+    repeated SiteRouter site_routers = 6;
+}
+
+message SiteRouter {
+    string grpc_addr = 1;  // address the agent dials for authentication
+    string peer_id = 2;    // the router's libp2p peer ID
 }
 
 message LibP2PInfo {

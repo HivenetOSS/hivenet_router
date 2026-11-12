@@ -1,6 +1,6 @@
 ---
 title: "Models"
-description: "List Hivenet Router models available to the current API key and inspect their capabilities, agent distribution, health, and declared capacity."
+description: "List Hivenet Router models available to the current API key and inspect their capabilities, agent distribution, and health."
 sidebarTitle: "Models"
 ---
 
@@ -53,7 +53,7 @@ A response resembles:
       "agents": {
         "total": 2,
         "healthy": 2,
-        "total_capacity": 40,
+        "total_capacity": 0,
         "engines": [
           "vllm"
         ],
@@ -72,7 +72,7 @@ A response resembles:
       "agents": {
         "total": 1,
         "healthy": 1,
-        "total_capacity": 20,
+        "total_capacity": 0,
         "engines": [
           "infinity"
         ],
@@ -99,7 +99,7 @@ The order of models, engines, regions, and agents is not guaranteed. Sort the re
 | `hide_llm` | Optional metadata supplied by agents using `--hide-llm` |
 | `agents.total` | Number of registered agents serving the model |
 | `agents.healthy` | Number of those agents currently marked healthy |
-| `agents.total_capacity` | Sum of the declared capacity of all registered agents |
+| `agents.total_capacity` | Sum of the declared capacity of all registered agents; `0` for network-registered agents, because routers ignore the agent's `--capacity` |
 | `agents.engines` | Distinct backend engine names reported by the agents |
 | `agents.regions` | Distinct region values reported by the agents |
 
@@ -209,7 +209,7 @@ A response resembles:
   "agents": {
     "total": 2,
     "healthy": 2,
-    "total_capacity": 40,
+    "total_capacity": 0,
     "engines": [
       "vllm"
     ],
@@ -225,7 +225,7 @@ A response resembles:
         "region": "EU",
         "organization": "ml-team",
         "machine": "gpu-worker-1",
-        "capacity": 20,
+        "capacity": 0,
         "is_healthy": true,
         "last_seen": 1760000000
       },
@@ -236,7 +236,7 @@ A response resembles:
         "region": "US",
         "organization": "ml-team",
         "machine": "gpu-worker-2",
-        "capacity": 20,
+        "capacity": 0,
         "is_healthy": true,
         "last_seen": 1760000000
       }
@@ -257,7 +257,7 @@ Peer IDs and timestamps will differ.
 | `region` | Operator-defined region metadata |
 | `organization` | Operator-defined organization metadata |
 | `machine` | Operator-defined machine identifier |
-| `capacity` | Maximum concurrent requests declared by the agent |
+| `capacity` | Maximum concurrent requests declared by the agent; `0` for network-registered agents |
 | `is_healthy` | Current router health state for the agent |
 | `last_seen` | Unix timestamp of the most recent recorded heartbeat |
 
@@ -453,7 +453,7 @@ A model can remain in the catalog while all of its registered agents are unhealt
   "agents": {
     "total": 2,
     "healthy": 0,
-    "total_capacity": 40,
+    "total_capacity": 0,
     "engines": [
       "vllm"
     ],
@@ -546,7 +546,7 @@ Errors use the standard envelope:
     Common causes include:
 
     - all agents are unhealthy
-    - all healthy agents are at capacity
+    - the model's occupancy budget is full
     - a routing policy excludes the agents
     - the requested capability does not match
     - the API key cannot invoke the model

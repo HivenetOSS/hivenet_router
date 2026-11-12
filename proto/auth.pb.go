@@ -214,12 +214,16 @@ func (x *AgentMetadata) GetGpuModel() string {
 }
 
 type AuthResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	SessionToken  string                 `protobuf:"bytes,3,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
-	Libp2PInfo    *LibP2PInfo            `protobuf:"bytes,4,opt,name=libp2p_info,json=libp2pInfo,proto3" json:"libp2p_info,omitempty"`
-	Config        *RouterConfig          `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Success      bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message      string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	SessionToken string                 `protobuf:"bytes,3,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
+	Libp2PInfo   *LibP2PInfo            `protobuf:"bytes,4,opt,name=libp2p_info,json=libp2pInfo,proto3" json:"libp2p_info,omitempty"`
+	Config       *RouterConfig          `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
+	// The live routers of this router's site that advertise the address
+	// agents reach them at (--advertise-grpc-addr). An agent opens a session
+	// with each; empty when none advertises or the site has no shared store.
+	SiteRouters   []*SiteRouter `protobuf:"bytes,6,rep,name=site_routers,json=siteRouters,proto3" json:"site_routers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -289,6 +293,65 @@ func (x *AuthResponse) GetConfig() *RouterConfig {
 	return nil
 }
 
+func (x *AuthResponse) GetSiteRouters() []*SiteRouter {
+	if x != nil {
+		return x.SiteRouters
+	}
+	return nil
+}
+
+type SiteRouter struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GrpcAddr      string                 `protobuf:"bytes,1,opt,name=grpc_addr,json=grpcAddr,proto3" json:"grpc_addr,omitempty"` // address the agent dials for authentication
+	PeerId        string                 `protobuf:"bytes,2,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`       // the router's libp2p peer ID
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SiteRouter) Reset() {
+	*x = SiteRouter{}
+	mi := &file_proto_auth_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SiteRouter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SiteRouter) ProtoMessage() {}
+
+func (x *SiteRouter) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_auth_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SiteRouter.ProtoReflect.Descriptor instead.
+func (*SiteRouter) Descriptor() ([]byte, []int) {
+	return file_proto_auth_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SiteRouter) GetGrpcAddr() string {
+	if x != nil {
+		return x.GrpcAddr
+	}
+	return ""
+}
+
+func (x *SiteRouter) GetPeerId() string {
+	if x != nil {
+		return x.PeerId
+	}
+	return ""
+}
+
 type LibP2PInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PeerId        string                 `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
@@ -300,7 +363,7 @@ type LibP2PInfo struct {
 
 func (x *LibP2PInfo) Reset() {
 	*x = LibP2PInfo{}
-	mi := &file_proto_auth_proto_msgTypes[3]
+	mi := &file_proto_auth_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +375,7 @@ func (x *LibP2PInfo) String() string {
 func (*LibP2PInfo) ProtoMessage() {}
 
 func (x *LibP2PInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_auth_proto_msgTypes[3]
+	mi := &file_proto_auth_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +388,7 @@ func (x *LibP2PInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LibP2PInfo.ProtoReflect.Descriptor instead.
 func (*LibP2PInfo) Descriptor() ([]byte, []int) {
-	return file_proto_auth_proto_rawDescGZIP(), []int{3}
+	return file_proto_auth_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *LibP2PInfo) GetPeerId() string {
@@ -361,7 +424,7 @@ type RouterConfig struct {
 
 func (x *RouterConfig) Reset() {
 	*x = RouterConfig{}
-	mi := &file_proto_auth_proto_msgTypes[4]
+	mi := &file_proto_auth_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -373,7 +436,7 @@ func (x *RouterConfig) String() string {
 func (*RouterConfig) ProtoMessage() {}
 
 func (x *RouterConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_auth_proto_msgTypes[4]
+	mi := &file_proto_auth_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -386,7 +449,7 @@ func (x *RouterConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouterConfig.ProtoReflect.Descriptor instead.
 func (*RouterConfig) Descriptor() ([]byte, []int) {
-	return file_proto_auth_proto_rawDescGZIP(), []int{4}
+	return file_proto_auth_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RouterConfig) GetHeartbeatInterval() int32 {
@@ -425,7 +488,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_proto_auth_proto_msgTypes[5]
+	mi := &file_proto_auth_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -437,7 +500,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_auth_proto_msgTypes[5]
+	mi := &file_proto_auth_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -450,7 +513,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_proto_auth_proto_rawDescGZIP(), []int{5}
+	return file_proto_auth_proto_rawDescGZIP(), []int{6}
 }
 
 type HealthResponse struct {
@@ -463,7 +526,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_proto_auth_proto_msgTypes[6]
+	mi := &file_proto_auth_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -475,7 +538,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_auth_proto_msgTypes[6]
+	mi := &file_proto_auth_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -488,7 +551,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_proto_auth_proto_rawDescGZIP(), []int{6}
+	return file_proto_auth_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HealthResponse) GetHealthy() bool {
@@ -529,14 +592,19 @@ const file_proto_auth_proto_rawDesc = "" +
 	"\n" +
 	"capability\x18\f \x01(\tR\n" +
 	"capability\x12\x1b\n" +
-	"\tgpu_model\x18\r \x01(\tR\bgpuModel\"\xda\x01\n" +
+	"\tgpu_model\x18\r \x01(\tR\bgpuModel\"\x99\x02\n" +
 	"\fAuthResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +
 	"\rsession_token\x18\x03 \x01(\tR\fsessionToken\x12;\n" +
 	"\vlibp2p_info\x18\x04 \x01(\v2\x1a.hivenet_router.LibP2PInfoR\n" +
 	"libp2pInfo\x124\n" +
-	"\x06config\x18\x05 \x01(\v2\x1c.hivenet_router.RouterConfigR\x06config\"_\n" +
+	"\x06config\x18\x05 \x01(\v2\x1c.hivenet_router.RouterConfigR\x06config\x12=\n" +
+	"\fsite_routers\x18\x06 \x03(\v2\x1a.hivenet_router.SiteRouterR\vsiteRouters\"B\n" +
+	"\n" +
+	"SiteRouter\x12\x1b\n" +
+	"\tgrpc_addr\x18\x01 \x01(\tR\bgrpcAddr\x12\x17\n" +
+	"\apeer_id\x18\x02 \x01(\tR\x06peerId\"_\n" +
 	"\n" +
 	"LibP2PInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1c\n" +
@@ -568,29 +636,31 @@ func file_proto_auth_proto_rawDescGZIP() []byte {
 	return file_proto_auth_proto_rawDescData
 }
 
-var file_proto_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_proto_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_proto_auth_proto_goTypes = []any{
 	(*AuthRequest)(nil),    // 0: hivenet_router.AuthRequest
 	(*AgentMetadata)(nil),  // 1: hivenet_router.AgentMetadata
 	(*AuthResponse)(nil),   // 2: hivenet_router.AuthResponse
-	(*LibP2PInfo)(nil),     // 3: hivenet_router.LibP2PInfo
-	(*RouterConfig)(nil),   // 4: hivenet_router.RouterConfig
-	(*HealthRequest)(nil),  // 5: hivenet_router.HealthRequest
-	(*HealthResponse)(nil), // 6: hivenet_router.HealthResponse
+	(*SiteRouter)(nil),     // 3: hivenet_router.SiteRouter
+	(*LibP2PInfo)(nil),     // 4: hivenet_router.LibP2PInfo
+	(*RouterConfig)(nil),   // 5: hivenet_router.RouterConfig
+	(*HealthRequest)(nil),  // 6: hivenet_router.HealthRequest
+	(*HealthResponse)(nil), // 7: hivenet_router.HealthResponse
 }
 var file_proto_auth_proto_depIdxs = []int32{
 	1, // 0: hivenet_router.AuthRequest.metadata:type_name -> hivenet_router.AgentMetadata
-	3, // 1: hivenet_router.AuthResponse.libp2p_info:type_name -> hivenet_router.LibP2PInfo
-	4, // 2: hivenet_router.AuthResponse.config:type_name -> hivenet_router.RouterConfig
-	0, // 3: hivenet_router.AuthService.Authenticate:input_type -> hivenet_router.AuthRequest
-	5, // 4: hivenet_router.AuthService.HealthCheck:input_type -> hivenet_router.HealthRequest
-	2, // 5: hivenet_router.AuthService.Authenticate:output_type -> hivenet_router.AuthResponse
-	6, // 6: hivenet_router.AuthService.HealthCheck:output_type -> hivenet_router.HealthResponse
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	4, // 1: hivenet_router.AuthResponse.libp2p_info:type_name -> hivenet_router.LibP2PInfo
+	5, // 2: hivenet_router.AuthResponse.config:type_name -> hivenet_router.RouterConfig
+	3, // 3: hivenet_router.AuthResponse.site_routers:type_name -> hivenet_router.SiteRouter
+	0, // 4: hivenet_router.AuthService.Authenticate:input_type -> hivenet_router.AuthRequest
+	6, // 5: hivenet_router.AuthService.HealthCheck:input_type -> hivenet_router.HealthRequest
+	2, // 6: hivenet_router.AuthService.Authenticate:output_type -> hivenet_router.AuthResponse
+	7, // 7: hivenet_router.AuthService.HealthCheck:output_type -> hivenet_router.HealthResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proto_auth_proto_init() }
@@ -604,7 +674,7 @@ func file_proto_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_auth_proto_rawDesc), len(file_proto_auth_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

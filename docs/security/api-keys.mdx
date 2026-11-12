@@ -329,7 +329,7 @@ A serverless key can also declare `max_occupancy_share` at the key level, alongs
 max_occupancy_share: 0.4
 ```
 
-The value limits the key's token-weighted work to `share × admit_budget_tokens × healthy_replicas`. It deliberately does not apply `HIVENET_ROUTER_ADMIT_FRACTION`; the global occupancy gate remains the pool-safety limit.
+The value limits the key's token-weighted work to `share × admit_budget_tokens × healthy_replicas`, or to `share ×` the engines' summed KV capacity when the policy sets no `admit_budget_tokens`. It deliberately does not apply `HIVENET_ROUTER_ADMIT_FRACTION`; the global occupancy gate remains the pool-safety limit.
 
 For every reachable serverless model, a nonzero `input_tokens_per_minute` must be at least the policy's `max_input_tokens`. The router validates this and the occupancy-share range at startup, during reloads, and on dynamic admin key writes.
 
