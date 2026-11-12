@@ -7,6 +7,7 @@
 package redirect_test
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -625,13 +626,13 @@ func TestReplayGuard(t *testing.T) {
 	g := redirect.NewReplayGuard()
 	now := time.Now()
 	until := now.Add(time.Minute)
-	if !g.First("j-1", until, now) || g.First("j-1", until, now.Add(30*time.Second)) {
+	if !g.First(context.Background(), "j-1", until, now) || g.First(context.Background(), "j-1", until, now.Add(30*time.Second)) {
 		t.Fatal("a token ID must be accepted once")
 	}
-	if !g.First("j-2", until, now) {
+	if !g.First(context.Background(), "j-2", until, now) {
 		t.Fatal("another token ID is independent")
 	}
-	if !g.First("j-1", until, now.Add(2*time.Minute)) {
+	if !g.First(context.Background(), "j-1", until, now.Add(2*time.Minute)) {
 		t.Fatal("once its token can no longer verify, the entry is gone")
 	}
 }
@@ -836,11 +837,11 @@ func TestTokenAuth_SingleUseIsLast(t *testing.T) {
 		}
 		first = res.Redirect
 	}
-	if !rd.Use(first.TokenID, first.Exp, now) || rd.Use(first.TokenID, first.Exp, now) {
+	if !rd.Use(context.Background(), first.TokenID, first.Exp, now) || rd.Use(context.Background(), first.TokenID, first.Exp, now) {
 		t.Fatal("a token is used once")
 	}
 	res, err := p.Authenticate(request(sameRID, ""))
-	if err != nil || !rd.Use(res.Redirect.TokenID, res.Redirect.Exp, now) {
+	if err != nil || !rd.Use(context.Background(), res.Redirect.TokenID, res.Redirect.Exp, now) {
 		t.Fatalf("another token with the same request ID must be usable: %v", err)
 	}
 	if len(rejects) != 0 {

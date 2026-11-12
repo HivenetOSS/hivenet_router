@@ -82,6 +82,7 @@ func main() {
 	semanticPinMaxPerKey := flag.Int("semantic-pin-max-per-key", cfg.SemanticPinMaxPerKey, "Max semantic task pins per API key; LRU-evicted beyond (env: HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY)")
 	maxTriesPerStep := flag.Int("max-tries-per-step", cfg.MaxTriesPerStep, "Default maximum forward attempts per policy step (used when a step does not set max_tries)")
 	defaultQueueDepth := flag.Int("queue-depth", cfg.QueueDepth, "Max concurrent waiters per model in the capacity wait queue; 0 disables the queue")
+	admissionQueueDepth := flag.Int("admission-queue-depth", cfg.AdmissionQueueDepth, "Max requests per model waiting for room in the occupancy budget; 0 disables the queue, -1 uses --queue-depth (env: HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH)")
 	sessionTTL := flag.Duration("session-ttl", cfg.SessionTTL, "Session token TTL (must be > 5m; env: HIVENET_ROUTER_SESSION_TTL)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	authConfigFile := flag.String("auth-config-file", cfg.AuthConfigFile, "Path to auth.yaml (env: HIVENET_ROUTER_AUTH_CONFIG)")
@@ -101,6 +102,7 @@ func main() {
 	syncPasswordFile := flag.String("sync-valkey-password-file", "", "Path to a file holding the Valkey (and Sentinel) password (env: HIVENET_ROUTER_SYNC_VALKEY_PASSWORD)")
 	syncTLS := flag.Bool("sync-valkey-tls", cfg.SyncValkeyTLS, "Connect to Valkey and Sentinel with TLS (env: HIVENET_ROUTER_SYNC_VALKEY_TLS)")
 	syncTLSCA := flag.String("sync-valkey-tls-ca-file", cfg.SyncValkeyTLSCA, "PEM CA bundle that verifies Valkey and Sentinel with --sync-valkey-tls; empty uses the system roots (env: HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE)")
+	advertiseGRPC := flag.String("advertise-grpc-addr", cfg.AdvertiseGRPCAddr, "gRPC address (host:port) agents reach this router at; with --sync-store the routers share it so agents find every router of the site (env: HIVENET_ROUTER_ADVERTISE_GRPC_ADDR)")
 	syncSite := flag.String("sync-site", cfg.SyncSite, "Name of this site in the shared store: every router of the site uses the same one. Defaults to --site-id, else \"default\". Unlike --site-id it does not turn on cross-site redirect (env: HIVENET_ROUTER_SYNC_SITE)")
 	syncMinRouters := flag.Int("sync-min-routers", max(cfg.SyncMinRouters, 1), "Routers of this site assumed while Valkey is unreachable or before it first answers; set it to the number of routers, so each one enforces its share (env: HIVENET_ROUTER_SYNC_MIN_ROUTERS)")
 	syncInterval := flag.Duration("sync-interval", cfg.SyncInterval, "How often the routers exchange usage, between 100ms and 10s (env: HIVENET_ROUTER_SYNC_INTERVAL)")
@@ -152,6 +154,10 @@ func main() {
 		log.Fatalf("--queue-depth must be >= 0, got %d", *defaultQueueDepth)
 	}
 	cfg.QueueDepth = *defaultQueueDepth
+	if *admissionQueueDepth < -1 {
+		log.Fatalf("--admission-queue-depth must be >= -1, got %d", *admissionQueueDepth)
+	}
+	cfg.AdmissionQueueDepth = *admissionQueueDepth
 	if *sessionTTL <= 5*time.Minute {
 		log.Fatalf("--session-ttl must be greater than 5m (re-auth safety margin), got %v", *sessionTTL)
 	}
@@ -230,6 +236,15 @@ func main() {
 	cfg.SyncValkeyTLSCA = *syncTLSCA
 	cfg.SyncInterval = *syncInterval
 	cfg.SyncSite = strings.TrimSpace(*syncSite)
+	cfg.AdvertiseGRPCAddr = strings.TrimSpace(*advertiseGRPC)
+	if cfg.AdvertiseGRPCAddr != "" {
+		if err := config.ValidAdvertiseAddr(cfg.AdvertiseGRPCAddr); err != nil {
+			log.Fatalf("--advertise-grpc-addr: %v", err)
+		}
+		if cfg.SyncStore == "" || cfg.SyncStore == "none" {
+			log.Warnf("--advertise-grpc-addr has no effect without --sync-store: the routers have nowhere to share it")
+		}
+	}
 	cfg.SyncMinRouters = *syncMinRouters
 	cfg.RouterID = strings.TrimSpace(*routerID)
 	if *syncPasswordFile != "" {
@@ -331,6 +346,9 @@ func main() {
 		log.Info("  Queue depth/model:   disabled")
 	} else {
 		log.Infof("  Queue depth/model:   %d", cfg.QueueDepth)
+	}
+	if cfg.AdmissionQueueDepth >= 0 {
+		log.Infof("  Admission queue:     %d", cfg.AdmissionQueueDepth)
 	}
 	if cfg.SemanticDecisionLog != "" {
 		log.Infof("  Semantic decisions:  %s", cfg.SemanticDecisionLog)

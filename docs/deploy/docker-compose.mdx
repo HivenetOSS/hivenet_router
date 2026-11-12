@@ -322,7 +322,6 @@ Repeat these steps on every machine that runs an inference backend.
     ```bash
     ROUTER_GRPC=192.168.1.100:8902 \
     AGENT_REGION=EU-Primary \
-    AGENT_CAPACITY=32 \
     MACHINE=gpu-eu-1 \
       docker compose \
       --env-file .env \
@@ -334,7 +333,6 @@ Repeat these steps on every machine that runs an inference backend.
 
     - `ROUTER_GRPC` with the router’s gRPC authentication address
     - `AGENT_REGION` with the region label you want to expose
-    - `AGENT_CAPACITY` with the concurrency the backend can support
     - `MACHINE` with a stable machine identifier
 
     The agent authenticates through gRPC, receives the router’s libp2p connection details, and initiates the persistent transport connection. It needs outbound access to router ports `8902` and `8903`; it does not expose an inbound Hivenet Router port.
@@ -373,7 +371,7 @@ The agent Compose file accepts:
 | `ROUTER_GRPC` | Yes | None | Router gRPC authentication address |
 | `HIVENET_ROUTER_JWT_SECRET` | Yes | None | Shared router-agent secret used during Compose substitution |
 | `AGENT_REGION` | No | `EU-France` | Region exposed as agent metadata |
-| `AGENT_CAPACITY` | No | `10` | Maximum concurrent requests declared by the agent |
+| `AGENT_CAPACITY` | No | `10` | Deprecated: passed as `--capacity`, which routers ignore |
 | `MACHINE` | No | `Unknown` | Machine identifier used in metadata and metrics |
 
 `ROUTER_GRPC` must be reachable from the agent host. After authentication, the router supplies the libp2p connection details the agent uses for its outbound transport connection.
@@ -774,7 +772,7 @@ docker compose --env-file .env up -d
   </Card>
 
   <Card title="vLLM agent" icon="microchip" href="/deploy/agents/vllm">
-    Configure a vLLM backend, model discovery, metrics, and capacity.
+    Configure a vLLM backend, model discovery, metrics, and load bounds.
   </Card>
 
   <Card title="Grafana dashboards" icon="chart-line" href="/observability/grafana-dashboards">

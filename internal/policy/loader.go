@@ -105,6 +105,7 @@ func LoadBytes(data []byte) (*Policy, error) {
 	if err := Validate(&p); err != nil {
 		return nil, err
 	}
+	warnCapacityGate(&p)
 	return &p, nil
 }
 
@@ -129,7 +130,25 @@ func LoadModelDocBytes(data []byte) (*Policy, error) {
 	if err := validateSemantic(&p); err != nil {
 		return nil, err
 	}
+	warnCapacityGate(&p)
 	return &p, nil
+}
+
+// warnCapacityGate warns when a policy gates on capacity_utilization: agents
+// registered over the network declare no capacity, so for them the gate has
+// no value and always passes.
+func warnCapacityGate(p *Policy) {
+	steps := []PolicyStep{p.RoutingPolicy}
+	for _, f := range p.FallbackChain {
+		steps = append(steps, f.PolicyStep)
+	}
+	for _, st := range steps {
+		if _, ok := st.ExcludeIf["capacity_utilization"]; ok {
+			log.Warnf("policy: exclude_if.capacity_utilization only applies to agents with a declared capacity; " +
+				"agents registered over the network have none, so this gate never excludes them (use kv_cache_utilization or waiting_requests)")
+			return
+		}
+	}
 }
 
 // Validate checks all policy steps for correctness and returns the first error

@@ -126,7 +126,7 @@ Clients should therefore handle:
 | `token_limit_exceeded` | `429` | `router` | Daily token admission or output accounting rejected the request |
 | `concurrency_limit_exceeded` | `429` | `router` | Model occupancy or in-flight budget remained full, or the healthy serving pool breached `shed_if` |
 | `no_agents_available` | `503` | `router` | The policy chain found no eligible agent |
-| `no_capacity` | `503` | `router` | Eligible agents exist but their declared request slots are full |
+| `no_capacity` | `503` | `router` | Eligible agents exist but are full or busy |
 | `agent_disconnected` | `503` | `router` | The selected agent could not be reached |
 | `backend_unavailable` | `503` | `backend` | Backend was unreachable, loading, overloaded, or temporarily unavailable |
 | `queue_full` | `503` | `router` | The router’s global pending-request channel remained full |
@@ -614,7 +614,7 @@ Retry-After: 1
 
 This response is used when either:
 
-- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available within `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`; or
+- the request would exceed the model's token-weighted occupancy budget or `max_inflight` limit and capacity did not become available while it waited: up to half the request timeout in the per-model wait queue (`--queue-depth`), or up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` when that queue is full or disabled; or
 - aggregate healthy-pool engine pressure breached a configured `shed_if` threshold before queueing.
 
 ```json
@@ -688,7 +688,10 @@ A policy or capability mismatch requires configuration changes instead.
 HTTP 503
 ```
 
-Healthy, filter-compatible agents exist, but every eligible agent has reached its declared concurrency capacity.
+Healthy, filter-compatible agents exist, but none could take the request. This happens when:
+
+- every eligible agent has reached its declared capacity. Only agents with a declared capacity, such as in embedded or test setups, have one; routers ignore the agent's `--capacity` flag.
+- the forward hit a libp2p resource limit on the agent connection. The router treats the agent as busy and retries on another agent; `no_capacity` is returned when no other agent takes the request.
 
 ```json
 {
@@ -702,7 +705,7 @@ Healthy, filter-compatible agents exist, but every eligible agent has reached it
 
 Before returning the error, Hivenet Router may:
 
-- wait in the per-model capacity queue
+- wait in the per-model capacity queue (agents with a declared capacity only)
 - retry selection after a slot becomes available
 - advance through fallback steps
 
@@ -710,7 +713,6 @@ Retry after a short randomized delay.
 
 A sustained rate indicates that you should investigate:
 
-- agent `--capacity`
 - fleet size
 - request duration
 - engine queues
@@ -772,9 +774,9 @@ This is controlled by:
 --queue-size
 ```
 
-It is distinct from the per-model capacity wait queue.
+It is distinct from the per-model wait queues.
 
-When the per-model queue is full, the routing session advances through fallback steps. That condition does not directly return `queue_full`; the final response is normally `no_capacity` or `no_agents_available`.
+When the per-model capacity queue of agents with a declared capacity is full, the routing session advances through fallback steps. That condition does not directly return `queue_full`; the final response is normally `no_capacity` or `no_agents_available`.
 
 Retry with exponential backoff and investigate:
 
@@ -796,7 +798,7 @@ The router’s end-to-end deadline expired.
 The deadline can include:
 
 - waiting for processor concurrency
-- waiting in the per-model capacity queue
+- waiting in a per-model wait queue
 - policy selection
 - retries
 - agent redial
