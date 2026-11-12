@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"hivenet_router/internal/config"
+	"hivenet_router/internal/shared"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
 
@@ -102,6 +104,32 @@ type dailyBucket struct {
 	mu   sync.Mutex
 	used int
 	day  int // UTC days since Unix epoch
+
+	// Shared counters only. loadedDay is the day the site total was read
+	// from the fleet; epoch/base snapshot the usage when an outage began, so
+	// during it this router spends only its share of what was left.
+	loadedDay  int
+	loadedSync uint64 // the fleet's ResyncEpoch when the total was read
+	mark       string // last usage entry the loaded total includes
+	epoch      uint64
+	base       int
+
+	// Admission lease (shared counters only): between two syncs this router
+	// may admit at most its share of what was left at the last sync.
+	leaseSeq   uint64
+	leaseSpent int
+	leaseCap   int
+
+	// What the silent routers may still spend on their own (their share of
+	// what was left when they went silent), kept free by this router.
+	silentEp      uint64
+	silentReserve int
+
+	// Peer usage applied during the last sync (peerSeq is the sync it was
+	// applied in). The lease assumes the other routers keep spending at that
+	// rate until the next sync, which their usage has not reached us yet for.
+	peerSeq  uint64
+	peerLast int
 }
 
 // InMemoryLimiter enforces quotas entirely in process memory.
@@ -122,7 +150,19 @@ type InMemoryLimiter struct {
 	// hole where a tenant could spend its entire minute's quota in one instant.
 	// Set once at startup via SetRPMBurstWindow before any request is handled.
 	rpmBurstSeconds int
+
+	// fleet, when set, shares usage with the other routers of the site.
+	// Set once at startup via SetFleet.
+	fleet  Fleet
+	leases leases
+	// dailyReads lets the requests that need the same daily total share one
+	// read of the shared store.
+	dailyReads singleflight.Group
 }
+
+// SetFleet shares this limiter's usage with the other routers of the
+// site. Must be called before the limiter handles any requests.
+func (l *InMemoryLimiter) SetFleet(f Fleet) { l.fleet = f }
 
 // SetRPMBurstWindow sets the RPM burst window in seconds (see rpmBurstSeconds).
 // Must be called before the limiter handles any requests.
@@ -168,8 +208,15 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 	if rpm <= 0 {
 		return true, -1, nil
 	}
-	lim := l.getOrCreateRPM(bucketKey(tenantID, model), rpm)
-	if !lim.Allow() {
+	bucket := bucketKey(tenantID, model)
+	lim := l.getOrCreateRPM(bucket, rpm)
+	if l.fleet != nil {
+		ok, charged := allowShared(l.fleet, &l.leases, bucket, lim, 1, false)
+		if !ok {
+			return false, 0, nil
+		}
+		l.fleet.Record(shared.KindRPM, bucket, rpm, charged)
+	} else if !lim.Allow() {
 		return false, 0, nil
 	}
 	remaining := int(lim.Tokens())
@@ -180,7 +227,7 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 }
 
 func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n)
+	return l.allowTokens(tenantID, model, tpd, n, true)
 }
 
 // AllowOutputTokens shares the same deduction logic as AllowInputTokens — the
@@ -189,7 +236,7 @@ func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (
 // behaves. Both delegate to allowTokens so the daily-counter semantics stay in
 // exactly one place.
 func (l *InMemoryLimiter) AllowOutputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n)
+	return l.allowTokens(tenantID, model, tpd, n, false)
 }
 
 // RemainingTokens reports the remaining daily budget for (tenant, model) without
@@ -201,6 +248,9 @@ func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int,
 		return -1, nil
 	}
 	b := l.getOrCreateDaily(bucketKey(tenantID, model))
+	if !l.loadFleetDaily(bucketKey(tenantID, model), b) {
+		return 0, nil // site total unknown: refuse until the store answers
+	}
 	today := utcDayIndex()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -208,39 +258,229 @@ func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int,
 		b.day = today
 		b.used = 0
 	}
-	rem := tpd - b.used
+	rem := l.dailyAllowance(b, tpd) - b.used
 	if rem < 0 {
 		rem = 0
 	}
 	return rem, nil
 }
 
-func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int) (bool, int, error) {
+// admission marks the pre-forward input charge. Only admission is held to this
+// router's share of the budget (outage allowance, per-sync lease): output is
+// charged after the response exists, so it is judged against the site
+// total alone and never rejected because of this router's share.
+func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admission bool) (bool, int, error) {
 	if tpd <= 0 || n <= 0 {
 		return true, -1, nil
 	}
 	bucket := bucketKey(tenantID, model)
 	b := l.getOrCreateDaily(bucket)
+	if !l.loadFleetDaily(bucket, b) {
+		return false, 0, nil // site total unknown: refuse until the store answers
+	}
 	today := utcDayIndex()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.day != today {
 		// New calendar day — reset the counter.
 		b.day = today
-		b.used = 0
+		b.used, b.base = 0, 0
+	}
+	if admission {
+		if allowance := l.dailyAllowance(b, tpd); allowance < tpd && b.used+n > allowance {
+			return false, 0, nil // outage: this router's share of the rest is spent
+		}
+		if !l.dailyLease(b, tpd, n) {
+			return false, 0, nil // this router's share since the last sync is spent
+		}
 	}
 	if b.used+n > tpd {
 		// Clamp to the limit so the gauge reaches 100% and all subsequent
 		// checks also fail immediately (no gap between used and tpd).
 		if b.used < tpd {
+			if !admission && l.fleet != nil {
+				// Output tokens are already spent: the other routers must
+				// see this bucket full too.
+				l.fleet.Record(shared.KindDaily, bucket, tpd, tpd-b.used)
+			}
 			b.used = tpd
 			l.reportUsage(tenantID, b.used)
 		}
 		return false, 0, nil
 	}
 	b.used += n
+	if admission {
+		b.leaseSpent += n
+	}
+	if l.fleet != nil {
+		l.fleet.Record(shared.KindDaily, bucket, tpd, n)
+	}
 	l.reportUsage(tenantID, b.used)
 	return true, tpd - b.used, nil
+}
+
+// loadFleetDaily reads the site's usage today for a daily bucket the
+// first time this router touches it each day, and again after this router may
+// have missed other routers' usage (see Fleet.ResyncEpoch). It reports false
+// when a first read fails: the router does not know how much is left, so it
+// refuses (fail closed) rather than grant a full day's budget on top of the
+// others'. A failed read again keeps the total it has. While the store is down
+// the read fails at once; while it hangs, it waits at most 200 ms, and the
+// requests for the same bucket share one read.
+//
+// A bucket this router knew yesterday needs no read at midnight: a new day
+// starts at zero for every router, and during an outage each one then spends
+// at most its share of it.
+func (l *InMemoryLimiter) loadFleetDaily(bucket string, b *dailyBucket) bool {
+	if l.fleet == nil {
+		return true
+	}
+	today := utcDayIndex()
+	sync := l.fleet.ResyncEpoch()
+	degraded := l.fleet.DegradedEpoch() != 0
+	b.mu.Lock()
+	if b.loadedDay == today && (b.loadedSync == sync || degraded) {
+		b.mu.Unlock()
+		return true
+	}
+	if b.loadedDay == today-1 && degraded {
+		b.day, b.used, b.base, b.loadedDay, b.mark, b.loadedSync = today, 0, 0, today, "", sync
+		b.mu.Unlock()
+		return true
+	}
+	known := b.loadedDay == today
+	b.mu.Unlock()
+	v, err, _ := l.dailyReads.Do(bucket, func() (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		total, mark, err := l.fleet.DailyTotal(ctx, bucket)
+		return dailyRead{total, mark}, err
+	})
+	if err != nil {
+		return known
+	}
+	r := v.(dailyRead)
+	b.mu.Lock()
+	if b.loadedDay != today || b.loadedSync != sync {
+		// The total holds every router's usage up to mark, ours included
+		// (published or not).
+		b.day, b.used, b.base, b.loadedDay, b.mark, b.loadedSync = today, r.total, 0, today, r.mark, sync
+	}
+	b.mu.Unlock()
+	return true
+}
+
+type dailyRead struct {
+	total int
+	mark  string
+}
+
+// dailyAllowance is the daily limit this router may spend up to. While the
+// shared store is down it is the usage when the outage began plus this
+// router's share of what was left, so the routers together stay within tpd.
+// Caller holds b.mu.
+func (l *InMemoryLimiter) dailyAllowance(b *dailyBucket, tpd int) int {
+	if l.fleet == nil {
+		return tpd
+	}
+	e := l.fleet.DegradedEpoch()
+	if e == 0 {
+		return tpd
+	}
+	if b.epoch != e {
+		b.epoch, b.base = e, b.used
+	}
+	n := l.fleet.Size()
+	if n <= 1 || b.base >= tpd {
+		return tpd
+	}
+	return b.base + (tpd-b.base)/n
+}
+
+// dailyLease applies the per-sync share to a daily budget: until the next
+// sync this router may admit at most (what was left at the last sync) ÷ live
+// routers, so routers that cannot see each other's latest spend still stay
+// within the budget together. The first admission in a window always passes
+// if the budget has room, so a request larger than the share is not starved.
+// Caller holds b.mu.
+func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
+	if l.fleet == nil || l.fleet.DegradedEpoch() != 0 {
+		return true
+	}
+	nr := l.fleet.Size()
+	silent := l.fleet.Silent()
+	if ep := l.fleet.SilentEpoch(); b.silentEp != ep {
+		// The silent routers changed: keep free the share of what is left
+		// that each may still spend while cut off (it enforces 1/N of it).
+		b.silentEp, b.silentReserve = ep, 0
+		if silent > 0 && b.used < tpd {
+			b.silentReserve = (tpd - b.used) * silent / (nr + silent)
+		}
+	}
+	if nr <= 1 && silent == 0 {
+		return true
+	}
+	if b.used+n > tpd-b.silentReserve {
+		return false
+	}
+	if seq := l.fleet.SyncSeq(); b.leaseSeq != seq {
+		// What is left, minus what the others are likely spending right now
+		// (as much as they spent in the last sync window), split evenly.
+		inFlight := 0
+		if b.peerSeq+1 == seq {
+			inFlight = b.peerLast
+		}
+		b.leaseSeq, b.leaseSpent = seq, 0
+		b.leaseCap = max(1, (tpd-b.used-inFlight-b.silentReserve)/max(nr, 1))
+	}
+	return b.leaseSpent == 0 || b.leaseSpent+n <= b.leaseCap
+}
+
+// ApplyPeerUsage takes usage another router of the site admitted. day is
+// the UTC day of a daily usage, id the stream entry that carried it.
+func (l *InMemoryLimiter) ApplyPeerUsage(kind byte, bucket string, limit, n int, age time.Duration, day int, id string) {
+	switch kind {
+	case shared.KindRPM:
+		if limit <= 0 {
+			return
+		}
+		lim := l.peerRPM(bucket, limit)
+		window := time.Duration(float64(lim.Burst()) / float64(lim.Limit()) * float64(time.Second))
+		debit(lim, decayed(n, age, window))
+	case shared.KindDaily:
+		today := utcDayIndex()
+		if day != today {
+			return // another day's budget
+		}
+		v, ok := l.dailyBuckets.Load(bucket)
+		if !ok {
+			return // read in full with the total when this router first needs it
+		}
+		b := v.(*dailyBucket)
+		b.mu.Lock()
+		if b.loadedDay != today || !shared.StreamBefore(b.mark, id) {
+			b.mu.Unlock()
+			return // already in the total this router read
+		}
+		b.used += n
+		if l.fleet != nil {
+			if seq := l.fleet.SyncSeq(); b.peerSeq != seq {
+				b.peerSeq, b.peerLast = seq, 0
+			}
+			b.peerLast += n
+		}
+		b.mu.Unlock()
+	}
+}
+
+// peerRPM returns the bucket another router's usage applies to. An existing
+// bucket keeps this router's limit: a peer may still run older limits while
+// auth.yaml rolls out.
+func (l *InMemoryLimiter) peerRPM(bucket string, rpm int) *rate.Limiter {
+	if v, ok := l.rpmLimiters.Load(bucket); ok {
+		return v.(*rate.Limiter)
+	}
+	return l.getOrCreateRPM(bucket, rpm)
 }
 
 func (l *InMemoryLimiter) getOrCreateRPM(bucket string, rpm int) *rate.Limiter {
@@ -277,7 +517,15 @@ func (l *InMemoryLimiter) getOrCreateDaily(tenantID string) *dailyBucket {
 
 // Reset clears all per-tenant limiters so new limits loaded from auth.yaml take
 // effect immediately on the next request.
+//
+// With shared counters the buckets are kept: every call passes the current
+// limits, a rate bucket follows them in place, and dropping the usage would
+// hand out a fresh budget (or, during an outage, refuse every daily key).
 func (l *InMemoryLimiter) Reset() {
+	l.leases.reset()
+	if l.fleet != nil {
+		return
+	}
 	l.rpmLimiters.Range(func(k, _ any) bool { l.rpmLimiters.Delete(k); return true })
 	l.dailyBuckets.Range(func(k, _ any) bool { l.dailyBuckets.Delete(k); return true })
 }
@@ -305,6 +553,7 @@ func (l *InMemoryLimiter) SweepIdle() int {
 		lim := v.(*rate.Limiter)
 		if lim.TokensAt(now) >= float64(lim.Burst()) {
 			l.rpmLimiters.Delete(k)
+			l.leases.drop(k.(string))
 			removed++
 		}
 		return true
@@ -313,7 +562,9 @@ func (l *InMemoryLimiter) SweepIdle() int {
 	l.dailyBuckets.Range(func(k, v any) bool {
 		b := v.(*dailyBucket)
 		b.mu.Lock()
-		stale := b.day != today
+		// Yesterday's buckets are kept while the shared store is down: the
+		// midnight reset needs them (see loadFleetDaily).
+		stale := b.day < today-1 || (b.day == today-1 && (l.fleet == nil || l.fleet.DegradedEpoch() == 0))
 		b.mu.Unlock()
 		if stale {
 			l.dailyBuckets.Delete(k)

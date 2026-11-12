@@ -274,6 +274,40 @@ func TestLoadFromEnv_Redirect(t *testing.T) {
 	}
 }
 
+// Shared-counter settings come from the environment; a malformed interval or
+// TLS flag is collected as an error instead of being silently ignored.
+func TestSyncSettingsFromEnv(t *testing.T) {
+	t.Setenv("HIVENET_ROUTER_SYNC_STORE", "valkey")
+	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_ADDRS", "s0:26379,s1:26379")
+	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER", "hivenet")
+	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_TLS", "true")
+	t.Setenv("HIVENET_ROUTER_SYNC_INTERVAL", "500ms")
+	t.Setenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS", "3")
+	t.Setenv("HIVENET_ROUTER_SYNC_SITE", "site-a")
+	t.Setenv("HIVENET_ROUTER_ROUTER_ID", "router-0")
+	cfg := config.LoadFromEnv()
+	if cfg.SyncStore != "valkey" || cfg.SyncValkeyAddrs != "s0:26379,s1:26379" || cfg.SyncSentinelMaster != "hivenet" ||
+		!cfg.SyncValkeyTLS || cfg.SyncInterval != 500*time.Millisecond || cfg.SyncMinRouters != 3 || cfg.SyncSite != "site-a" || cfg.RouterID != "router-0" {
+		t.Fatalf("sync settings not read from the environment: %+v", cfg)
+	}
+	if len(cfg.EnvErrors) != 0 {
+		t.Fatalf("unexpected env errors: %v", cfg.EnvErrors)
+	}
+
+	t.Setenv("HIVENET_ROUTER_SYNC_INTERVAL", "1sec")
+	t.Setenv("HIVENET_ROUTER_SYNC_VALKEY_TLS", "maybe")
+	t.Setenv("HIVENET_ROUTER_SYNC_MIN_ROUTERS", "0")
+	if cfg := config.LoadFromEnv(); len(cfg.EnvErrors) != 3 {
+		t.Fatalf("want 3 env errors for a bad interval, TLS flag and router count, got %v", cfg.EnvErrors)
+	}
+}
+
+func TestSyncIntervalDefault(t *testing.T) {
+	if cfg := config.LoadFromEnv(); cfg.SyncInterval != time.Second || cfg.SyncStore != "" {
+		t.Fatalf("defaults: interval %v store %q", cfg.SyncInterval, cfg.SyncStore)
+	}
+}
+
 // TestLoadFromEnv_WakeHold: the hold-at-zero settings. A bad value refuses
 // startup via EnvErrors and keeps the default.
 func TestLoadFromEnv_WakeHold(t *testing.T) {

@@ -712,6 +712,8 @@ badger
 
 Any other value stops router startup.
 
+With several routers, use `--sync-store=valkey` instead: it shares the limits across routers and keeps today's totals in the shared store. The router refuses to start with both. See [Run several routers](/deploy/multiple-routers).
+
 ### Provider credentials
 
 Provider fallback credentials are read when the router starts:
@@ -777,6 +779,16 @@ The complete current router flag set is:
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
 | `--session-ttl` | `HIVENET_ROUTER_SESSION_TTL` | `1h` |
+| `--sync-store` | `HIVENET_ROUTER_SYNC_STORE` | `none` |
+| `--sync-valkey-addrs` | `HIVENET_ROUTER_SYNC_VALKEY_ADDRS` | Empty |
+| `--sync-valkey-sentinel-master` | `HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER` | Empty |
+| `--sync-site` | `HIVENET_ROUTER_SYNC_SITE` | `--site-id`, else `default` |
+| `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` (holds the password itself) | Empty |
+| `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` |
+| `--sync-valkey-tls-ca-file` | `HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE` | Empty |
+| `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` |
+| `--sync-min-routers` | `HIVENET_ROUTER_SYNC_MIN_ROUTERS` | `1` |
+| `--router-id` | `HIVENET_ROUTER_ROUTER_ID` | Hostname |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` contains the raw value | Required |
 | `--auth-config-file` | `HIVENET_ROUTER_AUTH_CONFIG` | Empty |
 
