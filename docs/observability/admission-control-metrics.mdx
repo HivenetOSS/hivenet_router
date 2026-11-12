@@ -12,7 +12,7 @@ The admission-control metrics show why requests are rejected and how close each 
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by an admission gate |
 | `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current weighted in-flight token sum |
-| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas` |
+| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas`, or × the engines' summed KV capacity when `admit_budget_tokens` is unset; divided by the live routers with `--sync-store=valkey` |
 | `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
 | `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas`; `0` means no count backstop |
 

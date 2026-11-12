@@ -100,7 +100,7 @@ The response includes information such as:
 - the current length of the router’s global request channel
 - individual agent health
 
-This is an operational summary, not a model-specific readiness or free-capacity check. Use the routing table to inspect each agent’s model, backend health, active requests, and declared capacity.
+This is an operational summary, not a model-specific readiness or free-capacity check. Use the routing table to inspect each agent’s model, backend health, and active requests.
 
 ## Current routing state
 
@@ -122,8 +122,7 @@ curl \
       engine: .metadata.engine,
       region: .metadata.region,
       status: .status,
-      active_requests: .status.active_requests,
-      capacity: .metadata.capacity
+      active_requests: .status.active_requests
     }'
 ```
 
@@ -265,7 +264,6 @@ This can apply to any backend:
 
 - health
 - active requests
-- declared capacity
 - successful and failed requests
 - token counts
 - disconnections
@@ -314,7 +312,7 @@ Hivenet Router exposes several latency views that answer different questions.
 | RTTVAR | Variation around the agent’s SRTT |
 | TTFT | Time until the inference engine produces its first token |
 | ITL | Time between generated output tokens |
-| Per-model capacity-queue wait | Time spent waiting for an eligible agent to release a declared capacity slot |
+| Per-model capacity-queue wait | Time spent waiting for an eligible agent to release a declared capacity slot (agents with a declared capacity only) |
 
 Do not treat these values as interchangeable.
 
@@ -328,7 +326,6 @@ Some operational metrics can also act as routing-policy gates.
 
 Hivenet Router can exclude agents based on values such as:
 
-- capacity utilization
 - success rate
 - SRTT
 - KV-cache utilization

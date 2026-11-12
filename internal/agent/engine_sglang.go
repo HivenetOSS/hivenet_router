@@ -104,6 +104,7 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 	m := &domain.BackendMetrics{}
 	// sglang:token_usage is the fraction of the KV/token cache in use (0.0–1.0).
 	m.KVCacheUtilization = metricVal(scalars, "sglang:token_usage")
+	m.KVCapacityTokens = metricVal(scalars, "sglang:max_total_num_tokens")
 	m.RunningRequests = metricVal(scalars, "sglang:num_running_reqs")
 	// SGLang uses num_queue_reqs for the scheduler waiting queue.
 	m.WaitingRequests = metricVal(scalars, "sglang:num_queue_reqs")

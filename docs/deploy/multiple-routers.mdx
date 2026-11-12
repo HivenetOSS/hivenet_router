@@ -1,0 +1,145 @@
+---
+title: "Run several routers"
+description: "Run two or more Hivenet Router instances behind one load balancer and enforce each API key's request and token limits across all of them through a shared Valkey store."
+sidebarTitle: "Several routers"
+---
+
+You can run several routers behind one load balancer, so the site keeps serving when one router stops. Each router counts the requests and tokens it admits. Without a shared store every router enforces every limit on its own, so a key spread over three routers gets up to three times its limit.
+
+With `--sync-store=valkey` the routers of one site share their usage through a [Valkey](https://valkey.io) store and enforce each limit together.
+
+## What is shared
+
+| Limit | Shared | How it holds |
+| --- | --- | --- |
+| Requests per minute | Yes | Within one sync interval of usage |
+| Input and output tokens per minute | Yes | Within one sync interval of usage |
+| Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
+| Occupancy budgets (B2, B4) | No | Each router admits its share: the budget and `max_inflight` divided by the live routers, so the routers together stay within them |
+| Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
+| Dynamic API keys | No | Push key changes to every router |
+
+Every router keeps deciding in memory, exactly as a single router does. The only time a request waits on the store is the first request of the day for a key with a daily limit, which reads that key's total once: at most 200 ms, and requests for the same key share the read.
+
+## How it works
+
+Every `--sync-interval` (default `1s`) each router:
+
+1. publishes the usage it admitted since the last round as one entry on a stream in Valkey (nothing when it admitted nothing);
+2. reads the entries the other routers published and subtracts them from its own buckets;
+3. writes its own running total of today's tokens for each daily bucket it used (a bucket's total is the sum over routers, so a write lost in a failover is healed by the next one);
+4. records a heartbeat, which tells every router how many routers are live.
+
+Between two rounds a router cannot see the others' latest usage. To keep the routers together within a limit, each router admits at most its share of what was left at the last round: the remainder divided by the number of live routers. The first request of each round always passes if the limit has room, so a request larger than the share is not starved.
+
+A router that starts or restarts replays the last minute of usage and reads today's totals, so it does not hand out a fresh budget. Usage already in the totals it reads is not counted again.
+
+The store load depends on request rate, not on the number of keys: each round carries only the buckets that changed. At 1,000 requests per second per router, each request on its own key, a round is about 36 KB.
+
+## When the store is unreachable
+
+| Situation | Behavior |
+| --- | --- |
+| Store unreachable for three sync intervals | Each router enforces its share of every limit (limit ÷ routers last seen, never fewer than `--sync-min-routers`), so the routers together stay within the limit. `hivenet_sync_up` drops to `0` |
+| One router cut off from the store while the others still reach it | The cut-off router enforces its share of every limit on its own. The others count it as silent (it stopped heartbeating but no newer run replaced it) and keep its share free: they use (routers − silent) ÷ routers of each rate limit, and leave it its share of what was left of each daily budget. A router that shuts down cleanly leaves the live set and is not counted. A router that crashes and restarts with the same router ID (by default the hostname, so a container restart in the same pod) is replaced at the next round. One that disappears without a clean shutdown and never comes back with the same ID, such as a pod on a lost node, counts as silent for up to an hour: the others cannot tell it from a cut-off router that is still spending its share |
+| Router starts while the store is unreachable | Same as above: it enforces its share with `--sync-min-routers` routers until the store answers |
+| Store back | Routers publish the usage they held back, with the time it was admitted, and return to shared limits. Usage a rate bucket has refilled since is not charged again |
+| A router cannot read today's total for a key with a daily limit (it never saw the key today and the store is unreachable) | The router refuses that key's requests at once with `429 token_limit_exceeded` until it can read the total. Keys without a daily limit are not affected. While the store is unreachable the refusal is immediate; while it hangs, the read waits at most 200 ms |
+| Midnight UTC, or `auth.yaml` reloaded, while the store is unreachable | Keys the router already knew keep working: a new day starts at zero for every router, and a reload keeps today's usage. Each router spends at most its share |
+| The store is unreachable for ten sync intervals | The router reconnects from the configured addresses, in case Valkey or the Sentinels came back at new addresses |
+
+Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
+
+## Deploy Valkey
+
+Use one Valkey per site, reachable only from the routers. For high availability run one primary, two replicas and three Sentinels on separate hosts. Sentinel promotes a replica when the primary fails; routers ask the Sentinels for the current primary.
+
+The store holds only recent usage and today's totals. Persistence is optional: after a total loss the routers rebuild from what they hold in memory.
+
+## Configure the routers
+
+Give every router of the site the same `--sync-site` (it prefixes every key in the store, as a hash tag: `hivenet:{site-a}:…`; up to 64 letters, digits, `.`, `_` or `-`; it defaults to `--site-id`, else `default`) and a stable `--router-id`. **Set `--sync-min-routers` to the number of routers**: the router cannot know it while the store is unreachable, and with the default `1` routers that start during an outage each enforce the whole limit (the router logs a warning). In Kubernetes, set it to the StatefulSet's replica count; a StatefulSet pod name works as `--router-id`; the default is the hostname.
+
+```bash
+hivenet-router \
+  --sync-site site-a \
+  --sync-store valkey \
+  --sync-valkey-addrs sentinel-0:26379,sentinel-1:26379,sentinel-2:26379 \
+  --sync-valkey-sentinel-master hivenet \
+  --sync-valkey-password-file /run/secrets/valkey-password \
+  --sync-min-routers 3
+```
+
+`--sync-site` names the site in the store only. `--site-id` does too when `--sync-site` is not set, but it also turns on [cross-site redirect](/routing/cross-site-redirect), which needs redirect secrets, allowed domains, and dynamic API keys or auth mode `none`.
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--sync-store` | `HIVENET_ROUTER_SYNC_STORE` | `none` | `none` or `valkey` |
+| `--sync-valkey-addrs` | `HIVENET_ROUTER_SYNC_VALKEY_ADDRS` | Empty | Comma-separated `host:port` of the Sentinels, or of Valkey without Sentinel |
+| `--sync-valkey-sentinel-master` | `HIVENET_ROUTER_SYNC_VALKEY_SENTINEL_MASTER` | Empty | Sentinel master set name; empty connects to Valkey directly |
+| `--sync-site` | `HIVENET_ROUTER_SYNC_SITE` | `--site-id`, else `default` | Name of the site in the store; the same on every router of the site |
+| `--sync-valkey-password-file` | `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD` | Empty | File holding the password for Valkey and Sentinel; the environment variable holds the password itself |
+| `--sync-valkey-tls` | `HIVENET_ROUTER_SYNC_VALKEY_TLS` | `false` | Connect with TLS |
+| `--sync-valkey-tls-ca-file` | `HIVENET_ROUTER_SYNC_VALKEY_TLS_CA_FILE` | Empty | PEM CA bundle that verifies Valkey and the Sentinels with TLS; empty uses the system roots |
+| `--sync-interval` | `HIVENET_ROUTER_SYNC_INTERVAL` | `1s` | Between `100ms` and `10s`. Shorter intervals make limits stricter between rounds and cost more round trips |
+| `--sync-min-routers` | `HIVENET_ROUTER_SYNC_MIN_ROUTERS` | `1` | Routers of the site assumed while the store is unreachable or before it first answers. Set it to the number of routers you run |
+| `--router-id` | `HIVENET_ROUTER_ROUTER_ID` | Hostname | Stable identity of this router |
+
+`--sync-store=valkey` replaces `HIVENET_ROUTER_QUOTA_BACKEND=badger`: the store keeps today's totals. The router refuses to start with both.
+
+<Warning>
+  The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
+</Warning>
+
+## Connect agents to every router
+
+Give each agent the gRPC address of every router of the site with `--routers` (or `HIVENET_AGENT_ROUTERS`):
+
+```bash
+HIVENET_ROUTER_JWT_SECRET=<site-secret> hivenet-agent \
+  --engine vllm \
+  --backend-url http://127.0.0.1:8000 \
+  --routers router-0:50051,router-1:50051,router-2:50051
+```
+
+The agent keeps one independent session with each router: authentication, registration, heartbeat, routing signals and re-authentication. It reconnects each session on its own, with exponential backoff from 1 s up to 30 s, with jitter.
+
+- A router that is down or restarting does not affect the agent's sessions with the other routers.
+- A router that comes up later is picked up automatically.
+- The agent polls the engine metrics and checks the backend health once, for all sessions.
+
+Requirements:
+
+- Each address reaches **one specific router**, never the client load balancer or a Kubernetes ClusterIP Service. Through a load balancer the agent gets a single session to whichever router answers, and the other routers never see the agent; nothing reports it. In Kubernetes, use the pod DNS names of a headless Service (`router-0.router-headless:50051`, …).
+- List every router, and update the list when you add one. Every router divides the occupancy budgets by the live routers, whether or not agents reach it: a router no agent connects to lowers the others' share and cannot serve requests itself.
+- Every router of the site uses the same JWT secret.
+- Each router sends its libp2p address in the authentication response. A router behind NAT must set `--p2p-announce-addr` to an address the agents can reach.
+
+`--router-grpc` still connects an agent to a single router; it is used when `--routers` is empty.
+
+Each agent reports how many requests it has in flight from all routers. Every router ranks agents by the larger of that report and its own in-flight requests, so the routers spread work by the agent's real load.
+
+## Monitor
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `hivenet_sync_up` | gauge | `1` while the store answers; `0` while each router enforces its share |
+| `hivenet_sync_peers` | gauge | Other live routers, as last seen |
+| `hivenet_sync_lag_seconds` | gauge | Age of the latest peer usage when applied |
+| `hivenet_sync_tick_seconds` | histogram | Duration of one sync round |
+| `hivenet_sync_errors_total` | counter | Sync rounds that failed to reach the store |
+
+Suggested alerts:
+
+```yaml
+- alert: HivenetSyncDown
+  expr: hivenet_sync_up == 0
+  for: 1m
+  labels: {severity: critical}
+- alert: HivenetSyncPeersMissing
+  expr: hivenet_sync_peers < 2
+  for: 5m
+  labels: {severity: warning}
+```
+
+Adjust `hivenet_sync_peers` to the number of routers you run minus one.

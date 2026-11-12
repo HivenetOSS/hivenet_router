@@ -1,6 +1,6 @@
 ---
 title: "llama.cpp agent"
-description: "Connect a llama.cpp server to Hivenet Router, set a stable model name, declare capacity, and expose cache, latency, and throughput metrics."
+description: "Connect a llama.cpp server to Hivenet Router, set a stable model name, bound its load, and expose cache, latency, and throughput metrics."
 sidebarTitle: "llama.cpp"
 ---
 
@@ -225,7 +225,6 @@ Using an explicit alias makes client configuration and routing policies less dep
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /jwt.secret \
-      --capacity 5 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -247,7 +246,6 @@ Using an explicit alias makes client configuration and routing policies less dep
       --backend-url http://localhost:8888 \
       --router-grpc 192.168.1.100:50051 \
       --jwt-secret-file /opt/hivenet-router/jwt.secret \
-      --capacity 5 \
       --region EU-France \
       --organization ml-team \
       --machine gpu-worker-1 \
@@ -264,9 +262,8 @@ The agent waits until llama.cpp is healthy and exposes a model before registerin
 | --- | --- |
 | `--engine llamacpp` | Selects the llama.cpp backend integration |
 | `--backend-url` | Base URL of the local llama.cpp server |
-| `--router-grpc` | Router endpoint used for agent authentication |
+| `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers` with every router's address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
-| `--capacity` | Maximum concurrent requests Hivenet Router may assign |
 | `--region` | Region metadata available to routing policies |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
@@ -318,25 +315,14 @@ The agent then sends `Authorization: Bearer <key>` on every request to llama.cpp
 The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
 </Note>
 
-## Set agent capacity
+## How load is bounded
 
-`--capacity` limits how many concurrent requests Hivenet Router may assign to the agent.
+llama.cpp does not report a KV-cache size, so the router sets no automatic token budget for this agent. Instead, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica of the model. To choose your own bound, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).
 
-It does not change llama.cpp’s own parallelism, slot count, context allocation, or batch configuration.
-
-Conservative starting values from the original deployment guidance are:
-
-| Workload | Starting capacity |
-| --- | --- |
-| GPU inference | `5` to `10` |
-| CPU-only inference | `2` to `5` |
-
-Treat these as starting points rather than universal limits. Test with your model, quantization, context size, and hardware.
-
-When the agent reaches its declared capacity, Hivenet Router considers another matching agent or a configured fallback step.
+With `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA=0` and no policy bound, llama.cpp's own queue and [front-door shedding](/routing/admission-control#b3-front-door-shedding) protect it. llama.cpp's own slot count still applies.
 
 <Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. `--capacity` therefore limits concurrent generations routed through Hivenet Router, including ongoing streams. Verify llama.cpp concurrency under sustained streaming load before raising it.
+  `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
 
 ## Verify the connection
@@ -584,7 +570,7 @@ Support depends on the build and hardware. Remove it if the server fails to star
   <Accordion title="Responses are slow">
     Possible adjustments include:
 
-    - reduce `--capacity` on the Hivenet Router agent
+    - set or lower `max_inflight` or `admit_budget_tokens` in the model's policy
     - reduce llama.cpp’s context size
     - use a smaller model or quantization
     - increase GPU offloading
@@ -653,7 +639,7 @@ Support depends on the build and hardware. Remove it if the server fails to star
     --http-timeout 10m
     ```
 
-    Also check the declared agent capacity and llama.cpp queue state.
+    Also check the policy's `max_inflight` or `admit_budget_tokens` and llama.cpp queue state.
   </Accordion>
 
   <Accordion title="GPU metrics are missing">

@@ -13,7 +13,6 @@ routing_policy:
   exclude_if:
     kv_cache_utilization: { gt: 0.90 }
     waiting_requests:     { gt: 20 }
-    capacity_utilization: { gt: 0.90 }
     success_rate:         { lt: 0.95 }
     gpu_temperature_c:    { gt: 80 }
     consecutive_failures: { gte: 3 }

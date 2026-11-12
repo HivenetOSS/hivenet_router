@@ -52,7 +52,7 @@ An agent connects one inference backend to the router.
 It:
 
 - authenticates with the router
-- registers its engine, model, capability, capacity, region, and tags
+- registers its engine, model, capability, region, and tags
 - forwards inference requests to its local backend
 - checks backend health
 - collects CPU, memory, and GPU metrics
@@ -103,7 +103,7 @@ A typical inference request moves through Hivenet Router like this:
     The routing strategy ranks the remaining agents.
   </Step>
   <Step title="Capacity acquisition">
-    The router acquires capacity on the selected agent.
+    The router acquires a slot on the selected agent, which counts the request in its load.
   </Step>
   <Step title="Forward to agent">
     The request is forwarded to the agent over the encrypted libp2p data plane.
@@ -128,10 +128,10 @@ Routing policies use three stages.
 | Stage | Purpose | Examples |
 | --- | --- | --- |
 | Static matching | Select agents whose metadata matches the request | Model, engine, region, organization, machine, GPU model, or tags |
-| Dynamic gates | Exclude agents based on current operating conditions | Capacity, success rate, latency, KV cache, queue state, temperature, CPU, or memory |
+| Dynamic gates | Exclude agents based on current operating conditions | Success rate, latency, KV cache, queue state, temperature, CPU, or memory |
 | Strategy ranking | Order the remaining candidates | `least-loaded` |
 
-`least-loaded` is currently the only implemented ranking strategy. It ranks agents by the proportion of their declared capacity that is in use.
+`least-loaded` is currently the only implemented ranking strategy. It ranks agents by their load: the requests in flight to each agent, from this router or, as the agent reports, from every router of the site.
 
 If you do not configure a policy file, Hivenet Router uses its built-in least-loaded policy without static filters or dynamic gates.
 

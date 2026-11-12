@@ -31,7 +31,7 @@ func TestAdmitOccupancy_ReleasedSeesNewReplicas(t *testing.T) {
 	replicas.Store(1)
 	pool := func() (int, int) { return 100 * int(replicas.Load()), 0 }
 
-	first, _ := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 100, false, pool)
+	first := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 100, false, pool)
 	if first == nil {
 		t.Fatal("first request not admitted")
 	}
@@ -42,9 +42,9 @@ func TestAdmitOccupancy_ReleasedSeesNewReplicas(t *testing.T) {
 		replicas.Store(2) // a second agent registers; nothing is released
 	}()
 	start := time.Now()
-	res, fits := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 100, false, pool)
-	if res == nil || !fits {
-		t.Fatalf("second request: admitted %v, fits %v; want admitted once the replica joined", res != nil, fits)
+	res := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 100, false, pool)
+	if res == nil {
+		t.Fatal("second request not admitted once the replica joined")
 	}
 	defer res.Release()
 	if waited := time.Since(start); waited > 3*admitRecheck {
@@ -53,16 +53,14 @@ func TestAdmitOccupancy_ReleasedSeesNewReplicas(t *testing.T) {
 }
 
 // TestAdmitOccupancy_ReleasedTooLarge checks that a released request larger
-// than the whole budget is refused at once, as one that can never fit.
+// than the whole budget is held to the budget and admitted when nothing else
+// is in flight.
 func TestAdmitOccupancy_ReleasedTooLarge(t *testing.T) {
 	ctrl := admission.NewController(1.0, 0)
 	pool := func() (int, int) { return 100, 0 }
-	start := time.Now()
-	res, fits := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 500, false, pool)
-	if res != nil || fits {
-		t.Fatalf("admitted %v, fits %v; want refused as never fitting", res != nil, fits)
+	res := admitOccupancy(releasedCtx(time.Minute), ctrl, "m", 500, false, pool)
+	if res == nil {
+		t.Fatal("a request larger than the budget was not admitted alone")
 	}
-	if time.Since(start) > 100*time.Millisecond {
-		t.Error("a request that can never fit waited")
-	}
+	res.Release()
 }

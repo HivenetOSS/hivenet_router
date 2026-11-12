@@ -57,7 +57,11 @@ func serverless(admitBudget int) *policy.Policy {
 func TestB4_PerKeyOccupancyShare_DeniesOverShare(t *testing.T) {
 	q := make(chan *domain.PendingRequest, 1)
 	h := newB4Handlers(q, serverless(1000)) // global budget 1000
-	// share 0.40 → per-key budget 400; footprint = input(4) + max_tokens(500) = 504 > 400.
+	// share 0.40 → per-key budget 400. The key already holds 400 (input 4 +
+	// max_tokens 396); the next 504 does not fit its share, though the global
+	// budget has room.
+	share := func(c *gin.Context) { withKey(c, auth.QuotaLimits{MaxOccupancyShare: 0.40}) }
+	holdBudget(t, h, q, b2Body(396), share)
 	c, w := newCtx("/v1/chat/completions", b2Body(500))
 	withKey(c, auth.QuotaLimits{MaxOccupancyShare: 0.40})
 
@@ -69,7 +73,7 @@ func TestB4_PerKeyOccupancyShare_DeniesOverShare(t *testing.T) {
 	if !strings.Contains(w.Body.String(), string(domain.ErrCodeRateLimitExceeded)) {
 		t.Errorf("expected %q in body, got %s", domain.ErrCodeRateLimitExceeded, w.Body.String())
 	}
-	if len(q) != 0 {
+	if len(q) != 1 { // the request holding the key's share
 		t.Errorf("a denied request must not be queued, depth=%d", len(q))
 	}
 }

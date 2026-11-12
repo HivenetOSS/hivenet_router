@@ -122,8 +122,8 @@ func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
 	if meta.Model == "" {
 		return fmt.Errorf("model is required")
 	}
-	if meta.Capacity <= 0 {
-		return fmt.Errorf("capacity must be positive")
+	if meta.Capacity < 0 {
+		return fmt.Errorf("capacity must not be negative")
 	}
 	if meta.Version == "" {
 		return fmt.Errorf("version is required")

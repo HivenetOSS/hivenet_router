@@ -99,6 +99,7 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 
 	m := &domain.BackendMetrics{}
 	m.KVCacheUtilization = metricVal(scalars, "vllm:kv_cache_usage_perc")
+	m.KVCapacityTokens = metricVal(scalars, kvCapacityScalar)
 	m.RunningRequests = metricVal(scalars, "vllm:num_requests_running")
 	m.WaitingRequests = metricVal(scalars, "vllm:num_requests_waiting")
 	m.PreemptionsTotal = metricVal(scalars, "vllm:num_preemptions_total")
@@ -220,6 +221,7 @@ func parsePrometheusTextFull(r io.Reader) (
 	scalars = make(map[string]float64)
 	buckets = make(map[string][]bucketPoint)
 	finishReasons = make(map[string]uint64)
+	kvByEngine := map[string]float64{} // KV tokens per vLLM engine (data parallel)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
@@ -283,10 +285,28 @@ func parsePrometheusTextFull(r io.Reader) (
 			}
 		}
 
+		// vLLM publishes its KV-cache geometry as labels of an info metric,
+		// one series per engine with data parallelism: the capacity is the
+		// sum over the distinct engines.
+		if name == "vllm:cache_config_info" {
+			if t, ok := kvCapacityFromLabels(labelSet); ok {
+				kvByEngine[parseLabels(labelSet)["engine"]] = t
+			}
+			continue
+		}
+
 		// Scalar metric: keep only the first occurrence per name.
 		if _, seen := scalars[name]; !seen {
 			scalars[name] = v
 		}
+	}
+
+	if len(kvByEngine) > 0 {
+		total := 0.0
+		for _, t := range kvByEngine {
+			total += t
+		}
+		scalars[kvCapacityScalar] = total
 	}
 
 	// Sort each bucket slice by le ascending so histogramQuantile can interpolate.
@@ -296,6 +316,50 @@ func parsePrometheusTextFull(r io.Reader) (
 		buckets[base] = pts
 	}
 	return
+}
+
+// kvCapacityScalar is the synthetic scalar name under which the parser stores
+// the KV-cache size in tokens derived from vllm:cache_config_info.
+const kvCapacityScalar = "vllm:kv_capacity_tokens"
+
+// kvCapacityFromLabels returns the KV-cache size in tokens from the label set
+// of vllm:cache_config_info. Recent vLLM reports it as kv_cache_size_tokens;
+// for hybrid models (attention + mamba) that is the attention KV only, well
+// below num_gpu_blocks × block_size, whose blocks also hold mamba state.
+// Older vLLM lacks it: then num_gpu_blocks × block_size, matching label names
+// exactly (hybrid models also carry other *_block_size labels).
+func kvCapacityFromLabels(labelSet string) (float64, bool) {
+	labels := parseLabels(labelSet)
+	if t, err := strconv.ParseFloat(labels["kv_cache_size_tokens"], 64); err == nil && t > 0 {
+		return t, true
+	}
+	blocks, err1 := strconv.ParseFloat(labels["num_gpu_blocks"], 64)
+	size, err2 := strconv.ParseFloat(labels["block_size"], 64)
+	if err1 != nil || err2 != nil || blocks <= 0 || size <= 0 {
+		return 0, false
+	}
+	return blocks * size, true
+}
+
+// parseLabels splits a Prometheus label set (`a="1",b="x"`) into a map.
+// Values with escaped quotes are not needed here and are kept verbatim.
+func parseLabels(labelSet string) map[string]string {
+	out := map[string]string{}
+	for labelSet != "" {
+		eq := strings.IndexByte(labelSet, '=')
+		if eq <= 0 || eq+1 >= len(labelSet) || labelSet[eq+1] != '"' {
+			break
+		}
+		key := strings.TrimSpace(labelSet[:eq])
+		rest := labelSet[eq+2:]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			break
+		}
+		out[key] = rest[:end]
+		labelSet = strings.TrimPrefix(rest[end+1:], ",")
+	}
+	return out
 }
 
 // extractFinishedReason extracts the finished_reason label value from a

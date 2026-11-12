@@ -239,6 +239,22 @@ type Handlers struct {
 	// it), driving the front-door shed gate. Nil disables the gate (e.g. tests).
 	enginePressure func(model string) (kvUtil, waiting *float64)
 
+	// engineKVCapacity returns the summed KV-cache size, in tokens, that the
+	// healthy agents serving a model report. A policy without
+	// admit_budget_tokens takes its occupancy budget (B2) from it. Nil or 0
+	// leaves the budget to the policy (SetEngineKVCapacity).
+	engineKVCapacity func(model string) int
+
+	// routerShare returns how many routers share this site's backends (1 when
+	// alone). Until occupancy is shared through the store, each router admits
+	// its share of the occupancy budget so the routers together never exceed
+	// it (SetRouterShare).
+	routerShare func() int
+
+	// defaultMaxInflight bounds requests in flight per healthy replica of a
+	// model with no occupancy budget (SetDefaultMaxInflight). 0 disables it.
+	defaultMaxInflight int
+
 	// keyAdmission enforces the serverless per-key occupancy share — a per-key
 	// token-weighted in-flight budget parallel to the global one. Nil disables it.
 	keyAdmission *admission.Controller
@@ -432,6 +448,11 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// per-key RPM flood limit alone.
 	countOnly := path == "/v1/messages/count_tokens"
 	var reservation admission.Reservations
+	// The request timeout counts from here, so a wait for room in the
+	// occupancy budget is part of it. A request released by a wake already
+	// waited for room within its hold budget: its timeout starts once it is
+	// admitted.
+	deadlineFrom := m.start
 	if !countOnly {
 		if !h.enforceRequestCaps(c, &req, inputEstimate) {
 			return
@@ -446,6 +467,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		reservation, admitted = h.enforceOccupancyBudget(c, &req, inputEstimate)
 		if !admitted {
 			return
+		}
+		if _, released := c.Get(ctxKeyHoldDeadline); released {
+			deadlineFrom = time.Now()
 		}
 	}
 	defer reservation.Release()
@@ -476,6 +500,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	}
 
 	pending := domain.NewPendingRequest(m.requestID, &req, h.timeout)
+	pending.Deadline = deadlineFrom.Add(h.timeout)
 	pending.Ctx = c.Request.Context()
 	pending.TenantID = m.tenantID
 	pending.KeyID = m.keyID
@@ -626,6 +651,15 @@ func (h *Handlers) healthyReplicas(model string) int {
 	return 1
 }
 
+// agentReplicas is the number of healthy agents serving model, 0 when none
+// (a model served only by a provider, or scaled to zero).
+func (h *Handlers) agentReplicas(model string) int {
+	if h.healthyAgentCount == nil {
+		return 0
+	}
+	return h.healthyAgentCount(model)
+}
+
 // enforceOccupancyBudget applies the KV-occupancy admit budget: the request is
 // admitted only while the model's weighted in-flight token sum plus this
 // request's footprint stays within admit_fraction × admit_budget_tokens, and the
@@ -675,18 +709,40 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// admissions (existing reservations release their recorded weight unchanged).
 	pool := func() (int, int) {
 		replicas := h.healthyReplicas(req.Model)
-		return pol.AdmitBudgetTokens * replicas, pol.MaxInflight * replicas
+		budget := pol.AdmitBudgetTokens * replicas
+		// Without admit_budget_tokens the budget is the KV capacity the
+		// engines report for the healthy replicas.
+		if budget == 0 && h.engineKVCapacity != nil {
+			budget = h.engineKVCapacity(req.Model)
+		}
+		inflight := pol.MaxInflight * replicas
+		// Nothing bounds this model (no policy budget, no KV size reported,
+		// e.g. Ollama or llama.cpp): fall back to a per-replica request cap.
+		// Only agents count: a model served by a provider alone is not held.
+		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 && h.agentReplicas(req.Model) > 0 {
+			inflight = h.defaultMaxInflight * replicas
+		}
+		// Several routers serve the same backends: each admits its share.
+		if h.routerShare != nil {
+			if n := h.routerShare(); n > 1 {
+				if budget > 0 {
+					budget = max(budget/n, 1)
+				}
+				if inflight > 0 {
+					inflight = max(inflight/n, 1)
+				}
+			}
+		}
+		return budget, inflight
 	}
-	poolBudget, _ := pool()
+	poolBudget, poolInflight := pool()
 
 	// Global occupancy budget (all replicas).
-	if h.admission != nil && (pol.AdmitBudgetTokens > 0 || pol.MaxInflight > 0) {
-		res, fits := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
+	if h.admission != nil && (poolBudget > 0 || poolInflight > 0) {
+		res := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
-			// A request too large to ever fit gets the usual 429 even when
-			// released by a wake: retrying after the wake cannot help.
-			if !fits || !rejectReleased(c, req.Model) {
+			if !rejectReleased(c, req.Model) {
 				c.Header("Retry-After", "1")
 				writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeConcurrencyLimit,
 					"server at capacity for this model, please retry", domain.SourceRouter)
@@ -704,7 +760,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// "this fraction of what the pool can hold" as replicas come and go. This is
 	// anti-abuse fairness, not box safety (the global budget above is), so the
 	// shares are intentionally oversubscribed and no admit fraction is applied.
-	if pol.IsServerless() && pol.AdmitBudgetTokens > 0 && h.keyAdmission != nil {
+	if pol.IsServerless() && poolBudget > 0 && h.keyAdmission != nil {
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
@@ -1057,7 +1113,7 @@ func (h *Handlers) awaitResponse(c *gin.Context, pending *domain.PendingRequest,
 		h.writeSuccessResponse(c, pending, req, m, resp)
 	case err := <-pending.Error:
 		writeErrorResponse(c, pending, err)
-	case <-time.After(h.timeout):
+	case <-time.After(time.Until(pending.Deadline)):
 		// No response — nothing billed. Agent ID is logged when already dispatched.
 		c.Set(auditKeyInputTokens, int64(0))
 		c.Set(auditKeyOutputTokens, int64(0))
@@ -1604,3 +1660,15 @@ func (fw *sseFlushingWriter) Write(p []byte) (n int, err error) {
 	}
 	return
 }
+
+// SetEngineKVCapacity sets where a policy without admit_budget_tokens takes its
+// occupancy budget from: the summed KV capacity of a model's healthy replicas.
+func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCapacity = fn }
+
+// SetDefaultMaxInflight sets the requests in flight allowed per healthy
+// replica of a model nothing else bounds; 0 leaves such models unbounded.
+func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }
+
+// SetRouterShare sets how many routers share the site's backends; each admits
+// that share of the occupancy budget.
+func (h *Handlers) SetRouterShare(fn func() int) { h.routerShare = fn }

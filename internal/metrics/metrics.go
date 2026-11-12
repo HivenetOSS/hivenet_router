@@ -247,6 +247,10 @@ type RouterMetrics struct {
 	// concurrency slot per model. Label: model.
 	queueDepth *prometheus.GaugeVec
 
+	// admissionQueueDepth is the number of requests waiting for room in the
+	// occupancy budget (B2) per model. Label: model.
+	admissionQueueDepth *prometheus.GaugeVec
+
 	// queueWaitSeconds is the time each request spends in the per-model wait
 	// queue before a slot becomes available and it is dispatched.
 	// Label: model.
@@ -885,6 +889,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		admissionQueueDepth: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_admission_queue_depth",
+				Help: "Current number of requests waiting for room in the occupancy budget per model.",
+			},
+			[]string{"model"},
+		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
@@ -1021,6 +1032,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.policyProviderFallbackRouted,
 		// Wait queue metrics
 		m.queueDepth,
+		m.admissionQueueDepth,
 		m.queueWaitSeconds,
 		// Policy management
 		m.policyReloadTotal,
@@ -1694,6 +1706,11 @@ func (m *RouterMetrics) QueueDepthUpdated(model string, depth int) {
 	m.queueDepth.With(prometheus.Labels{"model": model}).Set(float64(depth))
 }
 
+// AdmissionQueueDepthUpdated sets the per-model occupancy-budget queue gauge.
+func (m *RouterMetrics) AdmissionQueueDepthUpdated(model string, depth int) {
+	m.admissionQueueDepth.With(prometheus.Labels{"model": model}).Set(float64(depth))
+}
+
 // QueueWaitObserved records a successful wait duration in the per-model histogram.
 // Implements policy.QueueMetrics.
 func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64) {
@@ -1840,4 +1857,10 @@ func (m *RouterMetrics) ServeMetrics(addr string) {
 			log.Errorf("metrics server error: %v", err)
 		}
 	}()
+}
+
+// Register adds extra collectors to this instance's registry. Used by optional
+// subsystems (shared counters) that own their metrics.
+func (m *RouterMetrics) Register(cs ...prometheus.Collector) {
+	m.registry.MustRegister(cs...)
 }
