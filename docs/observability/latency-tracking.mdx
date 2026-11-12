@@ -70,7 +70,7 @@ This boundary can be close to time to first token, but it is not the same measur
 
 It does not include the time needed to generate and deliver the complete response.
 
-The router’s `--max-concurrent` forwarding slot is released at this response-header boundary. The agent’s declared capacity slot is not. Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. The SRTT sample is recorded at stream start, but the agent’s active-request count covers the whole generation.
+The router’s `--max-concurrent` forwarding slot is released at this response-header boundary. The agent’s slot is not. Hivenet Router holds the agent slot until the stream fully drains, whether the stream ends normally or the client disconnects. The SRTT sample is recorded at stream start, but the agent’s active-request count covers the whole generation.
 
 ### Non-streaming Chat Completions
 
@@ -102,7 +102,7 @@ Use SRTT to compare agents serving similar workloads and request shapes.
 SRTT does not include:
 
 - client-to-router network latency
-- time spent waiting in Hivenet Router’s per-model capacity queue
+- time spent waiting in Hivenet Router’s per-model wait queue
 - time needed to send a complete stream to the client
 - delays caused by a slow client reading streamed output
 - application processing before the request reaches Hivenet Router

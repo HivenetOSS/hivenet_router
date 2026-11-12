@@ -165,27 +165,22 @@ const admitRecheck = time.Second
 // admitOccupancy admits a request against ctrl, with the pool's budget and
 // in-flight limit from pool. A request released by a wake waits for room
 // until its hold budget ends, not only the short default park: it already
-// waited for the model, and the burst of a wake is expected. It reports
-// fits=false when the request alone is larger than the budget: it can never
-// be admitted, so waiting or a model_waking answer would be wrong.
-func admitOccupancy(c *gin.Context, ctrl *admission.Controller, key string, footprint int, grows bool, pool func() (budgetTokens, maxInflight int)) (res *admission.Reservation, fits bool) {
+// waited for the model, and the burst of a wake is expected.
+func admitOccupancy(c *gin.Context, ctrl *admission.Controller, key string, footprint int, grows bool, pool func() (budgetTokens, maxInflight int)) *admission.Reservation {
 	ctx := c.Request.Context()
 	budget, inflight := pool()
 	v, released := c.Get(ctxKeyHoldDeadline)
 	if !released {
-		return ctrl.Admit(ctx, key, footprint, grows, budget, inflight), ctrl.Fits(footprint, budget)
+		return ctrl.Admit(ctx, key, footprint, grows, budget, inflight)
 	}
 	deadline := v.(time.Time)
 	for {
-		if !ctrl.Fits(footprint, budget) {
-			return nil, false
-		}
 		wait := min(time.Until(deadline), admitRecheck)
 		if res := ctrl.AdmitWithin(ctx, key, footprint, grows, budget, inflight, wait); res != nil {
-			return res, true
+			return res
 		}
 		if ctx.Err() != nil || time.Until(deadline) <= 0 {
-			return nil, true
+			return nil
 		}
 		budget, inflight = pool()
 	}

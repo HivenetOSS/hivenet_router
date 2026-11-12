@@ -21,28 +21,47 @@ import (
 // reach the agent's libp2p port could open an inference stream directly and
 // bypass the router's API keys, quotas and policy.
 //
-// Allowed peers are learned from the gRPC auth response (the router's peer
-// ID). SetRouters replaces the whole set on every new session, so today an
-// agent trusts exactly one router. An agent connected to several routers at
-// once will need an additive method; SetRouters alone would drop the others.
+// Allowed peers are learned from the gRPC auth responses (each router's peer
+// ID). An agent connected to several routers adds each one as its session
+// comes up (AddRouter) and removes it when the session ends (RemoveRouter).
 type RouterGater struct {
 	mu      sync.RWMutex
-	allowed map[peer.ID]struct{}
+	allowed map[peer.ID]int // sessions that allow each router
 }
 
 // NewRouterGater returns a gater that allows no peer until SetRouters is called.
 func NewRouterGater() *RouterGater {
-	return &RouterGater{allowed: map[peer.ID]struct{}{}}
+	return &RouterGater{allowed: map[peer.ID]int{}}
 }
 
 // SetRouters replaces the set of allowed router peer IDs.
 func (g *RouterGater) SetRouters(ids ...peer.ID) {
-	allowed := make(map[peer.ID]struct{}, len(ids))
+	allowed := make(map[peer.ID]int, len(ids))
 	for _, id := range ids {
-		allowed[id] = struct{}{}
+		allowed[id] = 1
 	}
 	g.mu.Lock()
 	g.allowed = allowed
+	g.mu.Unlock()
+}
+
+// AddRouter allows one more router, keeping the others. Each call is one
+// session; the router stays allowed until every session has removed it (two
+// addresses can reach the same router).
+func (g *RouterGater) AddRouter(id peer.ID) {
+	g.mu.Lock()
+	g.allowed[id]++
+	g.mu.Unlock()
+}
+
+// RemoveRouter ends one session's allowance for a router.
+func (g *RouterGater) RemoveRouter(id peer.ID) {
+	g.mu.Lock()
+	if g.allowed[id] <= 1 {
+		delete(g.allowed, id)
+	} else {
+		g.allowed[id]--
+	}
 	g.mu.Unlock()
 }
 

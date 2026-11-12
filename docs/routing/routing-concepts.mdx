@@ -19,7 +19,7 @@ A request moves through these stages:
 3. Match the required capability.
 4. Apply the policy’s static `match` filters.
 5. Remove agents that already failed during this policy step.
-6. Remove agents at their declared capacity.
+6. Remove agents at their declared capacity, for agents that declare one.
 7. Apply live `exclude_if` gates.
 8. Rank the remaining agents.
 9. Acquire a capacity slot and forward the request.
@@ -37,7 +37,7 @@ The three configurable policy layers are:
 | Dynamic gates | `exclude_if` | Remove agents using live operational signals |
 | Ranking | `strategy` | Choose among the remaining candidates |
 
-Model, health, capability, previous failures, and capacity are hard constraints. They apply even when the policy does not mention them.
+Model, health, capability, previous failures, and declared capacity (for agents that declare one) are hard constraints. They apply even when the policy does not mention them.
 
 ## Default routing behavior
 
@@ -261,7 +261,7 @@ These signals can apply to every agent when the underlying history is available.
 
 | Field | Meaning | Example |
 | --- | --- | --- |
-| `capacity_utilization` | Active requests divided by declared capacity | `{ gt: 0.8 }` |
+| `capacity_utilization` | Active requests divided by declared capacity; not available for network-registered agents | `{ gt: 0.8 }` |
 | `success_rate` | Lifetime successful-request fraction | `{ lt: 0.95 }` |
 | `srtt` | Smoothed round-trip time in milliseconds | `{ gt: 500 }` |
 | `consecutive_failures` | Forward failures since the last success | `{ gte: 3 }` |
@@ -277,17 +277,7 @@ exclude_if:
 
 This gate removes an agent once more than 80% of its declared capacity is in use.
 
-The hard capacity gate still removes an agent when:
-
-```text
-active requests >= declared capacity
-```
-
-even when no capacity-utilization rule is configured.
-
-<Note>
-  For streaming responses, Hivenet Router holds the agent capacity slot until the stream fully drains, whether the stream ends normally or the client disconnects. The active-request count therefore includes ongoing streams routed through Hivenet Router, and capacity gates apply for the whole generation.
-</Note>
+Routers ignore the agent's `--capacity`, so agents that register over the network declare no capacity. For them this signal is missing and the rule passes. Use `kv_cache_utilization` and `waiting_requests` instead, and bound the pool with the [occupancy budget](/routing/admission-control#b2-pool-occupancy).
 
 ### Success rate
 
@@ -386,29 +376,26 @@ The only implemented strategy is:
 strategy: least-loaded
 ```
 
-`least-loaded` ranks agents by:
+`least-loaded` ranks agents by their load, in requests. The load is the larger of:
 
-```text
-active requests / declared capacity
-```
+- the requests this router has in flight to the agent
+- the agent's own count of in-flight requests from all routers, reported about every 500 ms, plus the requests this router sent since that report
 
-The agent with the lowest ratio is selected first.
+The agent with the lowest load is selected first. With several routers, every router therefore sees the work the others sent.
 
 For example:
 
-| Agent | Active requests | Capacity | Load ratio |
-| --- | --: | --: | --: |
-| A | 4 | 20 | `0.20` |
-| B | 8 | 20 | `0.40` |
-| C | 5 | 10 | `0.50` |
+| Agent | Load |
+| --- | --: |
+| A | 4 |
+| B | 8 |
+| C | 5 |
 
 Agent A ranks first.
 
-Agents must register a positive capacity. Non-positive values are rejected before the agent joins the routing pool.
+When two agents have the same load, Hivenet Router currently resolves the tie using the deterministic peer-ID order returned by the registry. This is stable for a given set of peer IDs, but it is not round-robin and should not be used as client affinity.
 
-When two agents have the same ratio, Hivenet Router currently resolves the tie using the deterministic peer-ID order returned by the registry. This is stable for a given set of peer IDs, but it is not round-robin and should not be used as client affinity.
-
-Because streaming requests hold their agent slot until the stream fully drains, an agent serving active streams has a higher load ratio than an idle one. `least-loaded` therefore spreads concurrent streaming traffic across agents instead of repeatedly selecting the first agent in peer-ID order.
+Because streaming requests hold their agent slot until the stream fully drains, an agent serving active streams has a higher load than an idle one. `least-loaded` therefore spreads concurrent streaming traffic across agents instead of repeatedly selecting the first agent in peer-ID order.
 
 The following strategies are not implemented:
 
@@ -480,7 +467,7 @@ A sustained increase may indicate repeated network interruption or agent reconne
 
 ## Capacity wait queue
 
-When healthy, policy-matching agents exist but all of them are at capacity, Hivenet Router can place the request in a per-model wait queue.
+When a request does not fit the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), Hivenet Router places it in a per-model wait queue before routing starts. Requests beyond the queue depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`.
 
 Defaults:
 
@@ -508,9 +495,9 @@ Change the request timeout:
 --request-timeout 2m
 ```
 
-While waiting, the request resumes when an agent releases a capacity slot, at the end of the response for a streamed one. A newly registered or recovered agent wakes every waiting request for its model.
+While waiting, the request resumes when an in-flight request of the model finishes and frees room in the budget. It does not reserve a particular agent while it waits.
 
-Hivenet Router then evaluates the candidates again. The request does not reserve a particular agent while it waits.
+Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free capacity slot between fallback steps. Routers ignore the `--capacity` of network agents.
 
 If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond the queue depth.
 
@@ -633,7 +620,7 @@ For each policy step, Hivenet Router evaluates agents in this order:
 3. **Capability gate**<br />Remove agents that do not serve the required `llm`, `embedding`, or `reranker` capability.
 4. **Static match**<br />Apply `region`, `engine`, `tags`, `organization`, `machine`, and `gpu_model`.
 5. **Previous failures**<br />Remove agents that already produced a forward failure in the current step.
-6. **Capacity gate**<br />Remove agents whose active requests are greater than or equal to their declared capacity.
+6. **Capacity gate**<br />Remove agents whose load is greater than or equal to their declared capacity. Agents registered over the network declare none and skip this gate.
 7. **Dynamic gates**<br />Apply the configured `exclude_if` thresholds.
 8. **Strategy ranking**<br />Rank the remaining candidates with `least-loaded`.
 9. **Atomic slot acquisition**<br />Attempt to reserve one capacity slot on the selected agent.
@@ -777,9 +764,9 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
   </Accordion>
 
   <Accordion title="Requests wait instead of falling back">
-    Matching agents may exist but be at capacity.
+    The model's occupancy budget may be full.
 
-    Hivenet Router waits in the per-model queue before advancing to fallback. Reduce or disable the queue when immediate fallback is more appropriate:
+    Hivenet Router waits in the per-model queue before routing starts. Reduce or disable the queue when a fast `429` is more appropriate:
 
     ```bash
     --queue-depth 0

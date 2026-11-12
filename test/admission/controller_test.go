@@ -10,6 +10,7 @@ package admission_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,11 +63,14 @@ func TestAdmitFractionScalesBudget(t *testing.T) {
 		t.Fatal("900 must fit a raw 1000 budget at fraction 1.0")
 	}
 	scaled := admission.NewController(0.85, 0)
-	if r := scaled.Admit(context.Background(), model, 900, false, 1000, 0); r != nil {
-		t.Error("900 must be rejected at fraction 0.85 (effective budget 850)")
+	if r := scaled.Admit(context.Background(), model, 800, false, 1000, 0); r == nil {
+		t.Fatal("800 must fit the effective budget of 850")
 	}
-	if r := scaled.Admit(context.Background(), model, 850, false, 1000, 0); r == nil {
-		t.Error("850 must be admitted at the effective budget of 850")
+	if r := scaled.Admit(context.Background(), model, 100, false, 1000, 0); r != nil {
+		t.Error("900 in flight must be rejected at fraction 0.85 (effective budget 850)")
+	}
+	if r := scaled.Admit(context.Background(), model, 50, false, 1000, 0); r == nil {
+		t.Error("850 in flight must be admitted at the effective budget of 850")
 	}
 }
 
@@ -124,18 +128,90 @@ func TestParkAdmitsAfterRelease(t *testing.T) {
 	}
 }
 
-// TestHopelessRequestRejectedFast verifies a request whose footprint alone
-// exceeds the budget is rejected immediately, not parked for the full window —
-// no release can ever make it fit.
-func TestHopelessRequestRejectedFast(t *testing.T) {
-	c := admission.NewController(1.0, 2*time.Second)
-	start := time.Now()
-	r := c.Admit(context.Background(), model, 2000, false, 1000, 0) // 2000 > budget 1000
-	if r != nil {
-		t.Fatal("a request larger than the budget can never fit and must be rejected")
+// TestOversizedRequestAdmittedAlone verifies a request whose footprint alone
+// exceeds the budget (a large max_tokens) is held to the whole budget: it is
+// admitted when nothing else is in flight, and nothing else fits beside it.
+func TestOversizedRequestAdmittedAlone(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	small := c.Admit(context.Background(), model, 10, false, 1000, 0)
+	if small == nil {
+		t.Fatal("small request refused")
 	}
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Errorf("a hopeless request must not park for the full window; took %v", elapsed)
+	if r := c.Admit(context.Background(), model, 2000, false, 1000, 0); r != nil {
+		t.Fatal("an oversized request must wait until nothing else is in flight")
+	}
+	small.Release()
+	big := c.Admit(context.Background(), model, 2000, false, 1000, 0)
+	if big == nil {
+		t.Fatal("an oversized request must be admitted when the budget is empty")
+	}
+	if r := c.Admit(context.Background(), model, 1, false, 1000, 0); r != nil {
+		t.Fatal("nothing fits beside an oversized request")
+	}
+	big.Release()
+	if sum, n := c.Occupancy(model); sum != 0 || n != 0 {
+		t.Fatalf("occupancy after release: %d tokens, %d requests", sum, n)
+	}
+}
+
+// A request larger than the budget is not starved by a steady stream of
+// small ones: while it waits, they wait behind it, the model drains and it
+// gets in.
+func TestOversizedRequestNotStarved(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if r := c.Admit(context.Background(), model, 300, false, 1000, 0); r != nil {
+					time.Sleep(20 * time.Millisecond)
+					r.Release()
+				}
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	big := c.AdmitWithin(context.Background(), model, 5000, false, 1000, 0, 2*time.Second)
+	close(stop)
+	wg.Wait()
+	if big == nil {
+		t.Fatal("an oversized request was starved by small ones")
+	}
+	big.Release()
+}
+
+// TestQueueWaitsForRoom verifies a request over the budget waits in the queue
+// (up to its depth) until room frees, instead of the short park window, and a
+// request beyond the depth gets only the short park.
+func TestQueueWaitsForRoom(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	c.SetQueue(1, 5*time.Second, nil)
+	hold := c.Admit(context.Background(), model, 1000, false, 1000, 0)
+	if hold == nil {
+		t.Fatal("first request refused")
+	}
+	got := make(chan bool, 1)
+	go func() { got <- c.Admit(context.Background(), model, 500, false, 1000, 0) != nil }()
+	time.Sleep(50 * time.Millisecond) // the first waiter is queued
+	if r := c.Admit(context.Background(), model, 500, false, 1000, 0); r != nil {
+		t.Fatal("a request beyond the queue depth must not be admitted")
+	}
+	hold.Release()
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("the queued request was refused after room freed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued request was not admitted after room freed")
 	}
 }
 
@@ -144,11 +220,11 @@ func TestHopelessRequestRejectedFast(t *testing.T) {
 // a footprint above the floor is rejected, at the floor is admitted.
 func TestSmallBudgetFlooredNotDisabled(t *testing.T) {
 	c := admission.NewController(0.85, 0) // 0.85 × 1 = 0.85 → would truncate to 0
-	if r := c.Admit(context.Background(), model, 2, false, 1, 0); r != nil {
-		t.Error("footprint 2 must be rejected against a budget floored at 1 (not admitted as unlimited)")
-	}
 	if r := c.Admit(context.Background(), model, 1, false, 1, 0); r == nil {
 		t.Error("footprint 1 must be admitted at the floored budget of 1")
+	}
+	if r := c.Admit(context.Background(), model, 1, false, 1, 0); r != nil {
+		t.Error("a second request must be rejected against a budget floored at 1 (not admitted as unlimited)")
 	}
 }
 
@@ -492,6 +568,33 @@ func TestSweepIdle_RespectsTTL(t *testing.T) {
 	}
 }
 
+// A reservation that outlives any request (an exit path skipped its release)
+// is reaped, and its budget comes back.
+func TestReapStaleReleasesLeakedReservations(t *testing.T) {
+	c := admission.NewController(1, 0)
+	leaked := c.Admit(context.Background(), "m", 60, false, 100, 0)
+	if leaked == nil {
+		t.Fatal("first admission refused")
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) != nil {
+		t.Fatal("budget should be full")
+	}
+	if n := c.ReapStale(time.Hour); n != 0 {
+		t.Fatalf("reaped %d young reservation(s)", n)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := c.ReapStale(10 * time.Millisecond); n != 1 {
+		t.Fatalf("reaped %d, want 1", n)
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) == nil {
+		t.Fatal("budget did not come back after the reap")
+	}
+	leaked.Release() // the late release is a harmless no-op
+	if sumW, _ := c.Occupancy("m"); sumW != 60 {
+		t.Fatalf("occupancy %d after a late release of a reaped reservation, want 60", sumW)
+	}
+}
+
 // TestAdmitWithinWaitsPastTheDefaultPark checks the park duration a caller
 // chooses: a request released by a wake waits longer than the default park
 // and is admitted when room frees, where Admit would have refused it.
@@ -516,5 +619,135 @@ func TestAdmitWithinWaitsPastTheDefaultPark(t *testing.T) {
 	r2.Release()
 	if r := c.AdmitWithin(ctx, model, 0, false, 0, 1, 0); r == nil {
 		t.Fatal("with room, AdmitWithin admits at once even with no park")
+	}
+}
+
+// TestBigLeavingWakesSmall verifies a small request parked only because an
+// oversized one waited is admitted as soon as the oversized one gives up.
+func TestBigLeavingWakesSmall(t *testing.T) {
+	c := admission.NewController(1.0, 10*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	hold := c.Admit(context.Background(), model, 900, false, 1000, 0)
+	if hold == nil {
+		t.Fatal("first request refused")
+	}
+	defer hold.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	bigDone := make(chan struct{})
+	go func() {
+		defer close(bigDone)
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	got := make(chan time.Time, 1)
+	go func() {
+		if r := c.Admit(context.Background(), model, 50, false, 1000, 0); r != nil {
+			got <- time.Now()
+			r.Release()
+		}
+		close(got)
+	}()
+	time.Sleep(50 * time.Millisecond) // the small one parks behind it
+	left := time.Now()
+	cancel()
+	<-bigDone
+	select {
+	case at, ok := <-got:
+		if !ok {
+			t.Fatal("small request refused")
+		}
+		if d := at.Sub(left); d > 500*time.Millisecond {
+			t.Fatalf("small request admitted %v after the big one left", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("small request still parked after the big one left")
+	}
+}
+
+// sitePool is a site-wide budget that other routers also use (held).
+type sitePool struct {
+	mu   sync.Mutex
+	used int64
+}
+
+func (p *sitePool) Take(_ context.Context, _ string, weight, budget int64, _ int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.used+weight > budget {
+		return false
+	}
+	p.used += weight
+	return true
+}
+
+func (p *sitePool) Ceiling(_ string, budget int64) int64 { return budget }
+
+func (p *sitePool) Adjust(_ string, dw int64, _ int) {
+	p.mu.Lock()
+	p.used += dw
+	p.mu.Unlock()
+}
+
+// TestSitePoolBoundsWaitBehindBig verifies that with a site-wide pool, which
+// this router alone cannot drain, a small request waits behind an oversized
+// one only the short park, not the whole queue wait.
+func TestSitePoolBoundsWaitBehindBig(t *testing.T) {
+	c := admission.NewController(1.0, 100*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	pool := &sitePool{used: 500} // another router's requests
+	c.SetPool(pool)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	start := time.Now()
+	r := c.Admit(context.Background(), model, 50, false, 1000, 0)
+	if r == nil {
+		t.Fatal("small request refused")
+	}
+	r.Release()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("small request waited %v behind an oversized one on a site-wide pool", d)
+	}
+}
+
+// countingPool refuses every take and counts them.
+type countingPool struct{ takes atomic.Int64 }
+
+func (p *countingPool) Take(context.Context, string, int64, int64, int) bool {
+	p.takes.Add(1)
+	return false
+}
+func (p *countingPool) Adjust(string, int64, int)            {}
+func (p *countingPool) Ceiling(_ string, budget int64) int64 { return budget }
+
+// TestParkedRequestsPollPoolOncePerModel verifies that requests parked on a
+// site-wide pool re-check it about once per poll interval per model, not
+// each on its own: a rejection storm must not turn into a storm of checks.
+func TestParkedRequestsPollPoolOncePerModel(t *testing.T) {
+	c := admission.NewController(1.0, 300*time.Millisecond)
+	p := &countingPool{}
+	c.SetPool(p)
+	var wg sync.WaitGroup
+	const waiters = 200
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Admit(context.Background(), model, 10, false, 1000, 0)
+		}()
+	}
+	wg.Wait()
+	// Two checks each on arrival (before parking and on entering the wait),
+	// then about one per 20 ms poll for the model over 300 ms; one check per
+	// waiter per poll would be ~3,000.
+	if n := p.takes.Load(); n > 2*waiters+100 {
+		t.Fatalf("%d pool checks for %d parked requests over 300 ms", n, waiters)
 	}
 }
