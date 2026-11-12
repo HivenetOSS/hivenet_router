@@ -174,6 +174,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	if e.ID == "" {
 		return fmt.Errorf("auth: key entry: id must not be empty")
 	}
+	if err := validateIdentifier(fmt.Sprintf("key entry %q", e.ID), "id", e.ID); err != nil {
+		return err
+	}
 	if e.KeyHash == "" {
 		return fmt.Errorf("auth: key entry %q: key_hash must not be empty", e.ID)
 	}
@@ -188,6 +191,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	}
 	if e.Owner == "" {
 		return fmt.Errorf("auth: key entry %q: owner must not be empty", e.ID)
+	}
+	if err := validateIdentifier(fmt.Sprintf("key entry %q", e.ID), "owner", e.Owner); err != nil {
+		return err
 	}
 	if e.Name == "" {
 		return fmt.Errorf("auth: key entry %q: name must not be empty", e.ID)

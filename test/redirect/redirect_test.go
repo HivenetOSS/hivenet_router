@@ -887,7 +887,8 @@ func TestWrap_KeepsTenantListing(t *testing.T) {
 	}
 }
 
-// TestCheckAuthMode: static auth.yaml keys have no key ID, so redirect is
+// TestCheckAuthMode: a sibling cannot resolve a static auth.yaml key from a
+// redirect token (it is not in the dynamic registry), so redirect is
 // refused with them; any mode is fine while redirect is disabled.
 func TestCheckAuthMode(t *testing.T) {
 	static, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{{KeyHash: keyHash(rawKey), Metadata: auth.KeyMetadata{Owner: "t", Name: "n"}}})

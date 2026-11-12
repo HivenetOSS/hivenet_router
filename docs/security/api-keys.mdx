@@ -178,7 +178,7 @@ Duplicate `key_hash` values are rejected when static configuration is loaded.
 
 Use the exact lowercase SHA-256 output produced by `hivenet-router keygen` or `sha256sum`. Do not edit a hash manually.
 
-`metadata.name` and `metadata.owner` must not be empty.
+`metadata.name` and `metadata.owner` must not be empty. The owner must be valid UTF-8 and must not contain control characters (such as NUL, tab or newline) or DEL; spaces are allowed.
 
 ## Static key expiration
 
@@ -351,9 +351,7 @@ This has an important consequence:
 
 The request-rate limiter uses a token bucket. It begins with up to one minute's configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the burst window; `0` preserves the full-minute capacity.
 
-<Warning>
-  Dynamic keys have stable IDs, so serverless occupancy and token-rate state is isolated per key. Static-key authentication currently leaves the key ID empty, causing static keys to share the `anonymous` B4 state for a model. See the [auth YAML reference](/security/auth-yaml-reference) before using static keys with serverless limits.
-</Warning>
+Serverless occupancy and token-rate state is isolated per key. Dynamic keys use their registry ID. Static `auth.yaml` keys use a key ID derived one-way from `key_hash`: `static-` followed by 16 hex characters.
 
 The daily token counter resets at midnight UTC.
 
