@@ -43,6 +43,8 @@ The dynamic key endpoints return HTTP `501` unless the router is using dynamic A
 
 ## Configure admin authentication
 
+The admin API is for operators, not browsers: its responses carry no CORS headers, and a CORS preflight to `/admin/*` is not answered, so a web page on another origin cannot read admin responses.
+
 Admin authentication is separate from client authentication for `/v1/*`.
 
 Enable it in `auth.yaml`:

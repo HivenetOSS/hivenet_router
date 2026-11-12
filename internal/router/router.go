@@ -877,7 +877,10 @@ func (r *Router) startHTTPServer() {
 	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
-	handlers.SetIsolation(api.Isolation{RequireModelAllowlist: r.cfg.RequireModelAllowlist})
+	handlers.SetIsolation(api.Isolation{
+		RequireModelAllowlist: r.cfg.RequireModelAllowlist,
+		HideAgentIdentity:     r.cfg.HideAgentIdentity,
+	})
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)

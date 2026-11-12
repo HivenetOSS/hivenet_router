@@ -568,6 +568,12 @@ type Isolation struct {
 	// list any model (instead of every model). For shared multi-tenant
 	// routers, where an unrestricted key would reach other customers' models.
 	RequireModelAllowlist bool
+
+	// HideAgentIdentity leaves out of GET /v1/models/:model what identifies
+	// an agent (peer ID, organization, machine, version, last seen), so a
+	// customer cannot map the fleet, including other customers' reserved
+	// replicas. GET /admin/models/:model keeps the full list.
+	HideAgentIdentity bool
 }
 
 // SetIsolation sets the tenant-isolation switches. Call before serving.
@@ -1392,11 +1398,14 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 	}
 
 	// Populate the per-agent list for the detail view (all agents included).
+	// The client view can leave out what identifies an agent; applyAllowSet
+	// is false only for the admin view.
+	hideIdentity := applyAllowSet && h.isolation.HideAgentIdentity
 	for _, a := range agents {
 		if a.Model != modelID {
 			continue
 		}
-		m.Agents.List = append(m.Agents.List, domain.ModelAgentEntry{
+		entry := domain.ModelAgentEntry{
 			PeerID:       a.PeerID,
 			Engine:       a.Metadata.Engine,
 			Version:      a.Metadata.Version,
@@ -1406,7 +1415,11 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 			Capacity:     a.Capacity,
 			IsHealthy:    a.IsHealthy,
 			LastSeen:     a.LastSeen.Unix(),
-		})
+		}
+		if hideIdentity {
+			entry.PeerID, entry.Organization, entry.Machine, entry.Version, entry.LastSeen = "", "", "", "", 0
+		}
+		m.Agents.List = append(m.Agents.List, entry)
 	}
 
 	c.JSON(http.StatusOK, m)

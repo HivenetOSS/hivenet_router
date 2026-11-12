@@ -82,8 +82,8 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 5.1 | Every `/admin` route rejects missing credentials and every tenant's API key. | done | `TestIsolation_AdminRoutesRejectAPIKeys` |
 | 5.2 | The admin key cannot be used as an API key. | done | `TestIsolation_AdminKeyIsNotAnAPIKey` |
 | 5.3 | Admin auth fails closed unless insecure admin is explicitly allowed. | done | `TestProvidersFromConfig_AdminNoAuth_FailsClosed` |
-| 5.4 | `/admin` responses carry no CORS headers; `/v1` CORS is unchanged (part of doc-18 G4). | planned (PR-6) | `TestIsolation_CORSNotOnAdmin` |
-| 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine). | planned (PR-6) | `TestIsolation_ModelDetailHidesAgentIdentity` |
+| 5.4 | `/admin` responses carry no CORS headers; `/v1` CORS is unchanged (part of doc-18 G4). | done | `TestIsolation_CORSNotOnAdmin` |
+| 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine, version, last seen); the admin view keeps it. | done | `TestIsolation_ModelDetailHidesAgentIdentity` |
 | 5.6 | Model discovery never names models outside the key's allowlist. | done | `TestIsolation_TenantFromKeyOnly` (identity), `handlers_models_test.go` (filtering) |
 | 5.7 | A per-customer admin role. | out of scope | none: admin stays operator-only |
 | 5.8 | Multi-tenant mode refuses insecure admin. | planned (PR-8) | `TestValidateIsolationConfig` |
