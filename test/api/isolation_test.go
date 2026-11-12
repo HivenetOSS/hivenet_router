@@ -11,9 +11,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
+	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
 )
@@ -461,5 +464,41 @@ func TestEmbeddings_HonoursEffectiveAllowlist(t *testing.T) {
 		if w.Code != http.StatusForbidden || len(q) != 0 {
 			t.Errorf("%s for a model outside the per_model allowlist: status %d queued %d, want 403 and nothing queued", tc.path, w.Code, len(q))
 		}
+	}
+}
+
+// TestIsolation_DecisionLogAttributable: each semantic-alias decision record
+// carries the caller's tenant and key, so one customer's routing decisions
+// can be selected from the shared decision log.
+func TestIsolation_DecisionLogAttributable(t *testing.T) {
+	path := t.TempDir() + "/decisions.jsonl"
+	dl, err := semantic.OpenDecisionLog(path, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newAliasHandlers(t, nil)
+	h.SetDecisionLog(dl)
+	auth := func(c *gin.Context) {
+		c.Set("tenant_id", "tenant-a")
+		c.Set("key_id", "key-a1")
+		c.Next()
+	}
+	var out seen
+	if w := post(aliasRouter(h, auth, &out), "/v1/chat/completions", `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if err := dl.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &rec); err != nil {
+		t.Fatalf("decision log %q: %v", raw, err)
+	}
+	if rec["tenant_id"] != "tenant-a" || rec["key_id"] != "key-a1" {
+		t.Errorf("decision record tenant_id %v key_id %v, want tenant-a / key-a1", rec["tenant_id"], rec["key_id"])
 	}
 }

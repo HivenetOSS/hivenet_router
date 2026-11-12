@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -579,4 +580,162 @@ func TestIsolation_CacheSaltPerTenant(t *testing.T) {
 			t.Error("a vLLM agent is counted as having a gap")
 		}
 	})
+}
+
+// postFull posts body to path with key and returns the status and the
+// router's X-Request-ID.
+func postFull(t *testing.T, base, key, path, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, base+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	resp.Body.Close()
+	return resp.StatusCode, resp.Header.Get("X-Request-ID")
+}
+
+// auditLines returns the audit log's records keyed by request_id.
+func auditLines(t *testing.T) map[string]map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(auditLogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]map[string]any{}
+	for _, line := range strings.Split(string(b), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			if id, _ := rec["request_id"].(string); id != "" {
+				out[id] = rec
+			}
+		}
+	}
+	return out
+}
+
+// TestIsolation_LogsAttributable: every authenticated request's audit line
+// names the caller's tenant and its own key ID (static keys' derived ID,
+// never empty), so a customer's activity can be selected from a shared log.
+func TestIsolation_LogsAttributable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, (&bodyRecorder{}).start(t, stubModel).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, isoKeyA, stubModel)
+	})
+	small := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":5}`, stubModel)
+	want := map[string][2]string{} // request ID → tenant, key ID
+	for tenant, key := range map[string]string{"tenant-a": isoKeyA, "tenant-b": isoKeyB} {
+		for _, path := range []string{"/v1/chat/completions", "/v1/messages"} {
+			code, id := postFull(t, base, key, path, small)
+			if code != http.StatusOK || id == "" {
+				t.Fatalf("%s %s: status %d request ID %q", tenant, path, code, id)
+			}
+			want[id] = [2]string{tenant, derivedStaticKeyID(key)}
+		}
+	}
+	waitFor(t, 5*time.Second, "audit lines written", func() bool {
+		lines := auditLines(t)
+		for id := range want {
+			if lines[id] == nil {
+				return false
+			}
+		}
+		return true
+	})
+	lines := auditLines(t)
+	for id, w := range want {
+		if got := lines[id]; got["tenant_id"] != w[0] || got["key_id"] != w[1] {
+			t.Errorf("audit line %s: tenant_id %v key_id %v, want %s / %s", id, got["tenant_id"], got["key_id"], w[0], w[1])
+		}
+	}
+}
+
+// TestIsolation_AuditFileMode: the audit log, which names every tenant and
+// key, is readable by the router's user only, even when the file already
+// existed with a wider mode.
+func TestIsolation_AuditFileMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, _ := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey})
+	postFull(t, base, isoKeyA, "/v1/chat/completions", `{"model":"none"}`) // any audited request opens the file
+	fi, err := os.Stat(auditLogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("audit log mode %o, want 600", perm)
+	}
+}
+
+// TestIsolation_LogsContentFree: no log the router or agent writes (audit,
+// application at debug level, access) contains a prompt, a completion, an
+// API key, a client-sent cache_salt, the salt secret or a derived salt.
+// This guards doc-18 G7 (content-free logging is a convention) by test.
+func TestIsolation_LogsContentFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const (
+		promptCanary = "canary-prompt-7f3a9c"
+		clientSalt   = "canary-client-salt-41d2"
+		badKey       = "sk-canary-not-a-key-90b1"
+		saltSecret   = "canary-salt-secret-5e8b0123456789abcdef"
+	)
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey, Mutate: func(c *config.Config) {
+		c.CacheSalt = true
+		c.CacheSaltSecret = saltSecret
+	}})
+	be := &bodyRecorder{}
+	backend := be.start(t, "chat-vllm")
+	startEngineAgent(t, rcfg, backend.URL, &agent.VLLMEngine{}, "chat-vllm", domain.CapabilityLLM)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool { return modelHealthyAs(base, isoKeyA, "chat-vllm") })
+
+	for _, body := range []string{
+		fmt.Sprintf(`{"model":"chat-vllm","cache_salt":%q,"messages":[{"role":"user","content":%q}],"max_tokens":5}`, clientSalt, promptCanary),
+		fmt.Sprintf(`{"model":"chat-vllm","stream":true,"messages":[{"role":"user","content":%q}],"max_tokens":5}`, promptCanary),
+	} {
+		if code, _ := postFull(t, base, isoKeyA, "/v1/chat/completions", body); code != http.StatusOK {
+			t.Fatalf("status %d", code)
+		}
+	}
+	if code, _ := postFull(t, base, isoKeyA, "/v1/messages", fmt.Sprintf(`{"model":"chat-vllm","max_tokens":5,"messages":[{"role":"user","content":%q}]}`, promptCanary)); code != http.StatusOK {
+		t.Fatalf("messages status %d", code)
+	}
+	if code, _ := postFull(t, base, badKey, "/v1/chat/completions", `{"model":"chat-vllm"}`); code != http.StatusUnauthorized {
+		t.Fatalf("bad key status %d", code)
+	}
+	var derived map[string]any
+	_ = json.Unmarshal(be.last().body, &derived)
+	salt, _ := derived["cache_salt"].(string)
+	if salt == "" {
+		t.Fatal("backend saw no salt; the test would not check the derived salt")
+	}
+
+	time.Sleep(200 * time.Millisecond) // let the last log lines land
+	secrets := map[string]string{
+		"prompt": promptCanary, "completion": "PONG", "API key": isoKeyA, "rejected key": badKey,
+		"client salt": clientSalt, "salt secret": saltSecret, "derived salt": salt,
+	}
+	for _, path := range []string{auditLogPath(), appLogPath(), accessLogPath()} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) == 0 {
+			t.Errorf("%s is empty; the check would prove nothing", filepath.Base(path))
+		}
+		for what, s := range secrets {
+			if strings.Contains(string(b), s) {
+				t.Errorf("%s contains the %s", filepath.Base(path), what)
+			}
+		}
+	}
 }
