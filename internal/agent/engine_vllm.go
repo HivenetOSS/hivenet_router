@@ -95,7 +95,7 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 		return nil, fmt.Errorf("vllm ScrapeMetrics: /metrics returned HTTP %d", resp.StatusCode)
 	}
 
-	scalars, buckets, finishReasons := parsePrometheusTextFull(resp.Body)
+	scalars, buckets, finishReasons, _ := parsePrometheusTextFull(resp.Body)
 
 	m := &domain.BackendMetrics{}
 	m.KVCacheUtilization = metricVal(scalars, "vllm:kv_cache_usage_perc")
@@ -140,6 +140,22 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 	decodeSum := metricVal(scalars, "vllm:request_decode_time_seconds_sum")
 	decodeCount := metricVal(scalars, "vllm:request_decode_time_seconds_count")
 	m.DecodeTimeHistogram = bucketsToSnapshot(buckets["vllm:request_decode_time_seconds"], decodeSum, decodeCount)
+
+	// Decode-phase counters for the universal output-speed formula:
+	// rate(hivenet_agent_engine_decode_tokens_total) /
+	// rate(hivenet_agent_engine_decode_seconds_total). Decode time covers one
+	// fewer token than the generated count (the first token is produced by
+	// prefill), so subtract one token per request.
+	if genSum != nil && genCount != nil {
+		decodeTokens := *genSum - *genCount
+		if decodeTokens < 0 {
+			decodeTokens = 0
+		}
+		m.DecodeTokensTotal = &decodeTokens
+	}
+	if decodeSum != nil {
+		m.DecodeSecondsTotal = decodeSum
+	}
 
 	// Finish-reason breakdown. parsePrometheusTextFull captures this from
 	// vllm:request_success_total{finished_reason=...} label variants — the
@@ -201,6 +217,7 @@ type bucketPoint struct {
 //   - scalars: metric name → first observed float value
 //   - buckets: histogram base name → cumulative bucket slice sorted by le ascending
 //   - finishReasons: vllm:request_success_total finished_reason label value → cumulative count
+//   - sums: metric name → sum of the value across every label variant
 //
 // Lines that are skipped: comment lines (#), parse errors, and lines whose metric
 // value is NaN or ±Inf (math.IsInf sign=0 checks both directions). Note that
@@ -208,19 +225,26 @@ type bucketPoint struct {
 // and they are collected normally via the bucket path.
 //
 // Lines with the _bucket suffix are collected into buckets keyed by the base
-// name (without _bucket). vllm:request_success_total lines are collected into
-// finishReasons keyed by the finished_reason label (the default scalar map
-// uses first-occurrence semantics, so it cannot hold multiple label variants).
-// All other lines go into scalars with first-occurrence semantics. A 1 MB
-// scanner buffer is used — enough for any /metrics response.
+// name (without _bucket), one point per line — so a histogram split across
+// label variants (SGLang's is_streaming) yields one point per variant per le
+// and must be merged with mergeBucketVariants before use. vllm:request_success_total
+// lines are collected into finishReasons keyed by the finished_reason label (the
+// default scalar map uses first-occurrence semantics, so it cannot hold multiple
+// label variants). All other lines go into scalars with first-occurrence
+// semantics and into sums accumulated over every variant — for an engine that
+// exposes a single series per metric the two agree, and sums is what an engine
+// with split variants (SGLang) must read for _sum/_count and counter totals.
+// A 1 MB scanner buffer is used — enough for any /metrics response.
 func parsePrometheusTextFull(r io.Reader) (
 	scalars map[string]float64,
 	buckets map[string][]bucketPoint,
 	finishReasons map[string]uint64,
+	sums map[string]float64,
 ) {
 	scalars = make(map[string]float64)
 	buckets = make(map[string][]bucketPoint)
 	finishReasons = make(map[string]uint64)
+	sums = make(map[string]float64)
 	kvByEngine := map[string]float64{} // KV tokens per vLLM engine (data parallel)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
@@ -295,10 +319,12 @@ func parsePrometheusTextFull(r io.Reader) (
 			continue
 		}
 
-		// Scalar metric: keep only the first occurrence per name.
+		// Scalar metric: keep only the first occurrence per name, and
+		// accumulate the sum across every label variant.
 		if _, seen := scalars[name]; !seen {
 			scalars[name] = v
 		}
+		sums[name] += v
 	}
 
 	if len(kvByEngine) > 0 {
@@ -307,6 +333,7 @@ func parsePrometheusTextFull(r io.Reader) (
 			total += t
 		}
 		scalars[kvCapacityScalar] = total
+		sums[kvCapacityScalar] = total
 	}
 
 	// Sort each bucket slice by le ascending so histogramQuantile can interpolate.
@@ -452,6 +479,37 @@ func metricVal(vals map[string]float64, name string) *float64 {
 		return nil
 	}
 	return &v
+}
+
+// metricSum returns a pointer to the sum across every label variant of name
+// (the sums map from parsePrometheusTextFull), or nil if absent.
+func metricSum(sums map[string]float64, name string) *float64 {
+	v, ok := sums[name]
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
+// mergeBucketVariants sums the cumulative counts of every label-variant series
+// of one histogram at each le bound — SGLang splits its latency histograms
+// across is_streaming variants — into a single cumulative bucket slice. The
+// +Inf catch-all is summed like any other bound (bucketsToSnapshot drops it
+// anyway). Returns nil when the histogram carries no points.
+func mergeBucketVariants(pts []bucketPoint) []bucketPoint {
+	if len(pts) == 0 {
+		return nil
+	}
+	byLe := make(map[float64]float64, len(pts))
+	for _, p := range pts {
+		byLe[p.le] += p.count
+	}
+	out := make([]bucketPoint, 0, len(byLe))
+	for le, count := range byLe {
+		out = append(out, bucketPoint{le: le, count: count})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].le < out[j].le })
+	return out
 }
 
 // histogramAvg computes sum/count for a Prometheus histogram.

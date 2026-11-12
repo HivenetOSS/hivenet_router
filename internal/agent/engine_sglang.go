@@ -80,9 +80,10 @@ func (e *SGLangEngine) DiscoverModels(_ context.Context, baseURL string, httpCli
 // non-fatal: the returned error is logged by the poller and the heartbeat proceeds
 // without backend metrics.
 //
-// Reuses parsePrometheusTextFull, histogramQuantile, histogramAvg, and metricVal from
-// engine_vllm.go (same package). PreemptionsTotal is always nil — SGLang has no
-// preemption mechanism.
+// Reuses parsePrometheusTextFull, histogramQuantile, histogramAvg, metricVal,
+// metricSum, mergeBucketVariants, and bucketsToSnapshot from engine_vllm.go
+// (same package). PreemptionsTotal is always nil — SGLang has no preemption
+// mechanism.
 func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClient *http.Client) (*domain.BackendMetrics, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/metrics", nil)
 	if err != nil {
@@ -99,7 +100,7 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 		return nil, fmt.Errorf("sglang ScrapeMetrics: /metrics returned HTTP %d", resp.StatusCode)
 	}
 
-	scalars, buckets, _ := parsePrometheusTextFull(resp.Body)
+	scalars, buckets, _, sums := parsePrometheusTextFull(resp.Body)
 
 	m := &domain.BackendMetrics{}
 	// sglang:token_usage is the fraction of the KV/token cache in use (0.0–1.0).
@@ -109,11 +110,57 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 	// SGLang uses num_queue_reqs for the scheduler waiting queue.
 	m.WaitingRequests = metricVal(scalars, "sglang:num_queue_reqs")
 	// PreemptionsTotal left nil — SGLang has no preemption mechanism.
-	// AvgITLSeconds / P90ITLSeconds left nil — SGLang does not expose an ITL histogram.
-	m.AvgTTFTSeconds = histogramAvg(scalars,
+	//
+	// SGLang splits its latency histograms across is_streaming label variants
+	// (streaming and non-streaming requests), so every bound carries one point
+	// per variant. Merge the variants at each le, and read the _sum/_count
+	// series from the parser's variant sums — the first-occurrence scalar map
+	// would hold only the first variant's value.
+	ttftPts := mergeBucketVariants(buckets["sglang:time_to_first_token_seconds"])
+	m.AvgTTFTSeconds = histogramAvg(sums,
 		"sglang:time_to_first_token_seconds_sum",
 		"sglang:time_to_first_token_seconds_count")
-	m.P90TTFTSeconds = histogramQuantile(buckets["sglang:time_to_first_token_seconds"], 0.9)
+	m.P90TTFTSeconds = histogramQuantile(ttftPts, 0.9)
+	m.TTFTHistogram = bucketsToSnapshot(ttftPts,
+		metricSum(sums, "sglang:time_to_first_token_seconds_sum"),
+		metricSum(sums, "sglang:time_to_first_token_seconds_count"))
+
+	// ITL: SGLang's per-request time-per-output-token histogram, the
+	// counterpart of vLLM's per-request inter-token-latency histogram. The
+	// per-step sglang:inter_token_latency_seconds observes one value per
+	// token, not one per request, so it is deliberately not used.
+	itlPts := mergeBucketVariants(buckets["sglang:request_time_per_output_token_seconds"])
+	m.AvgITLSeconds = histogramAvg(sums,
+		"sglang:request_time_per_output_token_seconds_sum",
+		"sglang:request_time_per_output_token_seconds_count")
+	m.P90ITLSeconds = histogramQuantile(itlPts, 0.9)
+	m.ITLHistogram = bucketsToSnapshot(itlPts,
+		metricSum(sums, "sglang:request_time_per_output_token_seconds_sum"),
+		metricSum(sums, "sglang:request_time_per_output_token_seconds_count"))
+
+	// Decode-phase counters for the universal output-speed formula. The first
+	// token is produced by prefill, so each request contributes one fewer
+	// decoded token than the generation total, and its decode time is the e2e
+	// latency minus the TTFT. Both are summed across the is_streaming
+	// variants via the parser's variant sums.
+	if gen := metricSum(sums, "sglang:generation_tokens_total"); gen != nil {
+		if reqs := metricSum(sums, "sglang:num_requests_total"); reqs != nil {
+			decodeTokens := *gen - *reqs
+			if decodeTokens < 0 {
+				decodeTokens = 0
+			}
+			m.DecodeTokensTotal = &decodeTokens
+		}
+	}
+	if e2e := metricSum(sums, "sglang:e2e_request_latency_seconds_sum"); e2e != nil {
+		if ttft := metricSum(sums, "sglang:time_to_first_token_seconds_sum"); ttft != nil {
+			decodeSeconds := *e2e - *ttft
+			if decodeSeconds < 0 {
+				decodeSeconds = 0
+			}
+			m.DecodeSecondsTotal = &decodeSeconds
+		}
+	}
 	return m, nil
 }
 

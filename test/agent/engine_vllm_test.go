@@ -195,6 +195,63 @@ func TestVLLM_ScrapeMetrics_NoDecodeTime(t *testing.T) {
 	}
 }
 
+// TestVLLM_ScrapeMetrics_DecodeCounters pins the universal output-speed
+// numerator/denominator for vLLM: decode tokens = generation tokens minus one
+// per request (the first token is produced by prefill), decode seconds = the
+// decode-time histogram's sum.
+func TestVLLM_ScrapeMetrics_DecodeCounters(t *testing.T) {
+	metricsText := `vllm:request_generation_tokens_bucket{le="512"} 8
+vllm:request_generation_tokens_bucket{le="1024"} 10
+vllm:request_generation_tokens_bucket{le="+Inf"} 10
+vllm:request_generation_tokens_sum 800.0
+vllm:request_generation_tokens_count 10
+vllm:request_decode_time_seconds_bucket{le="5.0"} 10
+vllm:request_decode_time_seconds_bucket{le="+Inf"} 10
+vllm:request_decode_time_seconds_sum 16.0
+vllm:request_decode_time_seconds_count 10
+`
+	url, cl := vllmBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			io.WriteString(w, metricsText)
+		}
+	})
+
+	m, err := (&agent.VLLMEngine{}).ScrapeMetrics(context.Background(), url, cl)
+	if err != nil {
+		t.Fatalf("ScrapeMetrics: %v", err)
+	}
+	// Decode tokens = generation sum (800) minus one per request (10) = 790.
+	if m.DecodeTokensTotal == nil {
+		t.Fatal("DecodeTokensTotal is nil")
+	} else if *m.DecodeTokensTotal != 790 {
+		t.Errorf("DecodeTokensTotal = %v, want 790", *m.DecodeTokensTotal)
+	}
+	// Decode seconds = decode-time histogram sum.
+	if m.DecodeSecondsTotal == nil {
+		t.Fatal("DecodeSecondsTotal is nil")
+	} else if *m.DecodeSecondsTotal != 16.0 {
+		t.Errorf("DecodeSecondsTotal = %v, want 16.0", *m.DecodeSecondsTotal)
+	}
+}
+
+// TestVLLM_ScrapeMetrics_NoDecodeCounters pins that when the engine reports no
+// generation or decode series, the decode counters stay nil (no series) rather
+// than a false zero the router would read as "no tokens".
+func TestVLLM_ScrapeMetrics_NoDecodeCounters(t *testing.T) {
+	url, cl := vllmBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			io.WriteString(w, "vllm:num_requests_running 1\n")
+		}
+	})
+	m, err := (&agent.VLLMEngine{}).ScrapeMetrics(context.Background(), url, cl)
+	if err != nil {
+		t.Fatalf("ScrapeMetrics: %v", err)
+	}
+	if m.DecodeTokensTotal != nil || m.DecodeSecondsTotal != nil {
+		t.Errorf("decode counters = %v/%v, want nil/nil", m.DecodeTokensTotal, m.DecodeSecondsTotal)
+	}
+}
+
 func TestVLLM_ForwardChat(t *testing.T) {
 	e := &agent.VLLMEngine{}
 

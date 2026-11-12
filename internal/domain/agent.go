@@ -419,6 +419,25 @@ type BackendMetrics struct {
 	// deployment's measured output speed (decode tokens / decode seconds).
 	DecodeTimeHistogram *HistogramSnapshot `json:"decode_time_histogram,omitempty"`
 
+	// DecodeTokensTotal is the engine's cumulative count of tokens produced in
+	// the decode phase — every generated token except the first one, which
+	// prefill produces — since the engine last restarted. Each engine computes
+	// it from its own metrics: vLLM from generation tokens minus one per
+	// request, SGLang from generation_tokens_total minus num_requests_total,
+	// llama.cpp from tokens_predicted_total. Re-exported as
+	// hivenet_agent_engine_decode_tokens_total; with DecodeSecondsTotal it
+	// yields rate(tokens) / rate(seconds), the deployment's measured output
+	// speed on every engine.
+	DecodeTokensTotal *float64 `json:"decode_tokens_total,omitempty"`
+
+	// DecodeSecondsTotal is the engine's cumulative seconds spent in the
+	// decode phase (first token to last token, excluding prefill) since it
+	// last restarted. Sources: vLLM request_decode_time_seconds sum, SGLang
+	// e2e sum minus TTFT sum, llama.cpp tokens_predicted_seconds_total.
+	// Re-exported as hivenet_agent_engine_decode_seconds_total — the
+	// denominator of the measured output speed.
+	DecodeSecondsTotal *float64 `json:"decode_seconds_total,omitempty"`
+
 	// FinishReasonCounts maps vLLM finished_reason label values (stop, length,
 	// abort, etc.) to cumulative request counts observed on the engine since it
 	// last restarted. The router computes deltas across snapshots and increments
