@@ -84,7 +84,7 @@ func TestRPMSharedAcrossRouters(t *testing.T) {
 	const rpm = 120 // burst = a full minute
 	allowed := 0
 	for i := 0; i < 600; i++ {
-		if ok, _, _ := rs[i%3].rate.AllowRequest("t", "", rpm); ok {
+		if ok, _, _ := rs[i%3].rate.AllowRequest("t", "key", "", rpm); ok {
 			allowed++
 		}
 		if i%30 == 0 {
@@ -105,7 +105,7 @@ func TestRPMWithoutSharingMultiplies(t *testing.T) {
 	ls := []*auth.InMemoryLimiter{auth.NewInMemoryLimiter(), auth.NewInMemoryLimiter(), auth.NewInMemoryLimiter()}
 	allowed := 0
 	for i := 0; i < 600; i++ {
-		if ok, _, _ := ls[i%3].AllowRequest("t", "", 120); ok {
+		if ok, _, _ := ls[i%3].AllowRequest("t", "key", "", 120); ok {
 			allowed++
 		}
 	}
@@ -122,7 +122,7 @@ func TestDailySharedAcrossRouters(t *testing.T) {
 	const tpd, cost = 3000, 10
 	spent := 0
 	for i := 0; i < 2000; i++ {
-		if ok, _, _ := rs[i%3].rate.AllowInputTokens("t", "", tpd, cost); ok {
+		if ok, _, _ := rs[i%3].rate.AllowInputTokens("t", "key", "", tpd, cost); ok {
 			spent += cost
 		}
 		if i%60 == 0 {
@@ -146,13 +146,13 @@ func TestOutputNeverRefusedByRouterShare(t *testing.T) {
 	rs := newFleet(t, mr, 3)
 	const tpd = 3000
 	// Spend this router's share for the current sync window.
-	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 900); !ok {
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "key", "", tpd, 900); !ok {
 		t.Fatal("first admission refused")
 	}
-	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 900); ok {
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "key", "", tpd, 900); ok {
 		t.Skip("sync window rolled over between the two calls; share not exercised")
 	}
-	if ok, _, _ := rs[0].rate.AllowOutputTokens("t", "", tpd, 500); !ok {
+	if ok, _, _ := rs[0].rate.AllowOutputTokens("t", "key", "", tpd, 500); !ok {
 		t.Fatal("output refused although the daily budget has room")
 	}
 }
@@ -194,7 +194,7 @@ func TestStoreDownEachRouterEnforcesItsShare(t *testing.T) {
 	const rpm = 120
 	allowed := 0
 	for i := 0; i < 200; i++ {
-		if ok, _, _ := rs[0].rate.AllowRequest("t", "", rpm); ok {
+		if ok, _, _ := rs[0].rate.AllowRequest("t", "key", "", rpm); ok {
 			allowed++
 		}
 	}
@@ -214,10 +214,10 @@ func TestDailyFailsClosedWithoutTotals(t *testing.T) {
 	addr := mr.Addr()
 	mr.Close()
 	r := newRouter(t, addr, "r0")
-	if ok, _, _ := r.rate.AllowInputTokens("t", "", 1000, 10); ok {
+	if ok, _, _ := r.rate.AllowInputTokens("t", "key", "", 1000, 10); ok {
 		t.Fatal("admitted a daily-limited request without the site total")
 	}
-	if ok, _, _ := r.rate.AllowInputTokens("t", "", 0, 10); !ok {
+	if ok, _, _ := r.rate.AllowInputTokens("t", "key", "", 0, 10); !ok {
 		t.Fatal("refused a key without a daily limit")
 	}
 }
@@ -229,18 +229,18 @@ func TestJoiningRouterKnowsRecentUsage(t *testing.T) {
 	a := newFleet(t, mr, 1)[0]
 	const rpm, tpd = 60, 1000
 	for i := 0; i < rpm; i++ {
-		a.rate.AllowRequest("t", "", rpm)
+		a.rate.AllowRequest("t", "key", "", rpm)
 	}
-	if ok, _, _ := a.rate.AllowInputTokens("t", "", tpd, 900); !ok {
+	if ok, _, _ := a.rate.AllowInputTokens("t", "key", "", tpd, 900); !ok {
 		t.Fatal("first daily admission refused")
 	}
 	time.Sleep(3 * interval) // let r0 publish
 	b := newRouter(t, mr.Addr(), "r1")
 	waitFor(t, 2*time.Second, "r1 to sync", func() bool { return b.store.SyncSeq() > 0 })
-	if ok, _, _ := b.rate.AllowRequest("t", "", rpm); ok {
+	if ok, _, _ := b.rate.AllowRequest("t", "key", "", rpm); ok {
 		t.Fatal("joining router admitted a key whose minute is already spent")
 	}
-	if ok, _, _ := b.rate.AllowInputTokens("t", "", tpd, 200); ok {
+	if ok, _, _ := b.rate.AllowInputTokens("t", "key", "", tpd, 200); ok {
 		t.Fatal("joining router admitted beyond today's site total")
 	}
 }
@@ -275,7 +275,7 @@ func TestStartWithStoreDownUsesMinRouters(t *testing.T) {
 	const rpm = 90
 	allowed := 0
 	for i := 0; i < rpm; i++ {
-		if ok, _, _ := lim.AllowRequest("t", "", rpm); ok {
+		if ok, _, _ := lim.AllowRequest("t", "key", "", rpm); ok {
 			allowed++
 		}
 	}
@@ -293,7 +293,7 @@ func TestDailyNeverWaitsForStore(t *testing.T) {
 	r := newRouter(t, addr, "r0")
 	start := time.Now()
 	for i := 0; i < 5; i++ {
-		r.rate.AllowInputTokens("t", "", 1000, 10)
+		r.rate.AllowInputTokens("t", "key", "", 1000, 10)
 	}
 	if d := time.Since(start); d > 50*time.Millisecond {
 		t.Fatalf("five daily checks took %v with Valkey down", d)
@@ -306,15 +306,15 @@ func TestDailyTotalNotCountedTwice(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newFleet(t, mr, 2)
 	const tpd = 1000
-	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 400); !ok {
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "key", "", tpd, 400); !ok {
 		t.Fatal("first admission refused")
 	}
 	time.Sleep(3 * interval) // published, and replayed by r1's next ticks
-	if ok, _, _ := rs[1].rate.AllowInputTokens("t", "", tpd, 1); !ok {
+	if ok, _, _ := rs[1].rate.AllowInputTokens("t", "key", "", tpd, 1); !ok {
 		t.Fatal("r1 refused")
 	}
 	time.Sleep(3 * interval)
-	rem, _ := rs[1].rate.RemainingTokens("t", "", tpd)
+	rem, _ := rs[1].rate.RemainingTokens("t", "key", "", tpd)
 	if rem < 590 || rem > 600 {
 		t.Fatalf("r1 sees %d left, want 599 (1000 - 400 - 1)", rem)
 	}
@@ -326,13 +326,13 @@ func TestLateJoinerDoesNotCountReplayTwice(t *testing.T) {
 	mr := miniredis.RunT(t)
 	a := newFleet(t, mr, 1)[0]
 	const tpd = 2000
-	if ok, _, _ := a.rate.AllowInputTokens("t", "", tpd, 1000); !ok {
+	if ok, _, _ := a.rate.AllowInputTokens("t", "key", "", tpd, 1000); !ok {
 		t.Fatal("first admission refused")
 	}
 	time.Sleep(3 * interval)
 	b := newRouter(t, mr.Addr(), "r1")
 	waitFor(t, 2*time.Second, "r1 to sync", func() bool { return b.store.SyncSeq() > 1 })
-	if ok, _, _ := b.rate.AllowInputTokens("t", "", tpd, 900); !ok {
+	if ok, _, _ := b.rate.AllowInputTokens("t", "key", "", tpd, 900); !ok {
 		t.Fatal("r1 refused 900 of the 1000 left: the replayed usage was counted twice")
 	}
 }
@@ -346,7 +346,7 @@ func TestHeldBackUsageAgesFromAdmission(t *testing.T) {
 	mr.SetError("down")
 	time.Sleep(4 * interval)
 	for i := 0; i < 20; i++ {
-		rs[0].rate.AllowRequest("t", "", rpm)
+		rs[0].rate.AllowRequest("t", "key", "", rpm)
 	}
 	time.Sleep(2500 * time.Millisecond) // the 20 requests have refilled
 	mr.SetError("")
@@ -354,7 +354,7 @@ func TestHeldBackUsageAgesFromAdmission(t *testing.T) {
 	time.Sleep(3 * interval)
 	allowed := 0
 	for i := 0; i < 50; i++ {
-		if ok, _, _ := rs[1].rate.AllowRequest("t", "", rpm); ok {
+		if ok, _, _ := rs[1].rate.AllowRequest("t", "key", "", rpm); ok {
 			allowed++
 		}
 	}
@@ -369,16 +369,16 @@ func TestResetDuringOutageKeepsDaily(t *testing.T) {
 	mr := miniredis.RunT(t)
 	r := newFleet(t, mr, 1)[0]
 	const tpd = 1000
-	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 600); !ok {
+	if ok, _, _ := r.rate.AllowInputTokens("t", "key", "", tpd, 600); !ok {
 		t.Fatal("first admission refused")
 	}
 	mr.SetError("down")
 	waitFor(t, 2*time.Second, "outage", func() bool { return r.store.DegradedEpoch() != 0 })
 	r.rate.Reset()
-	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 100); !ok {
+	if ok, _, _ := r.rate.AllowInputTokens("t", "key", "", tpd, 100); !ok {
 		t.Fatal("daily key refused after a reload during an outage")
 	}
-	if ok, _, _ := r.rate.AllowInputTokens("t", "", tpd, 500); ok {
+	if ok, _, _ := r.rate.AllowInputTokens("t", "key", "", tpd, 500); ok {
 		t.Fatal("reload during an outage handed out a fresh daily budget")
 	}
 }
@@ -388,7 +388,7 @@ func TestResetDuringOutageKeepsDaily(t *testing.T) {
 func TestCloseStopsLoop(t *testing.T) {
 	mr := miniredis.RunT(t)
 	r := newFleet(t, mr, 1)[0]
-	r.rate.AllowRequest("t", "", 60)
+	r.rate.AllowRequest("t", "key", "", 60)
 	r.store.Close()
 	seq := r.store.SyncSeq()
 	time.Sleep(3 * interval)
@@ -403,7 +403,7 @@ func TestDailyTotalsRewrittenAfterFailover(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rs := newFleet(t, mr, 2)
 	const tpd = 1000
-	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "", tpd, 700); !ok {
+	if ok, _, _ := rs[0].rate.AllowInputTokens("t", "key", "", tpd, 700); !ok {
 		t.Fatal("first admission refused")
 	}
 	time.Sleep(3 * interval)
@@ -418,7 +418,7 @@ func TestDailyTotalsRewrittenAfterFailover(t *testing.T) {
 	time.Sleep(3 * interval)
 	late := newRouter(t, mr.Addr(), "r2")
 	waitFor(t, 2*time.Second, "r2 to sync", func() bool { return late.store.SyncSeq() > 0 })
-	if ok, _, _ := late.rate.AllowInputTokens("t", "", tpd, 400); ok {
+	if ok, _, _ := late.rate.AllowInputTokens("t", "key", "", tpd, 400); ok {
 		t.Fatal("a router joining after the failover saw today's 700 tokens as unspent")
 	}
 }
@@ -459,10 +459,10 @@ func TestSilentRouterShareKeptFree(t *testing.T) {
 	allowed, spent := 0, 0
 	for i := 0; i < 600; i++ {
 		r := rs[1+i%2]
-		if ok, _, _ := r.rate.AllowRequest("t", "", rpm); ok {
+		if ok, _, _ := r.rate.AllowRequest("t", "key", "", rpm); ok {
 			allowed++
 		}
-		if ok, _, _ := r.rate.AllowInputTokens("d", "", tpd, cost); ok {
+		if ok, _, _ := r.rate.AllowInputTokens("d", "key", "", tpd, cost); ok {
 			spent += cost
 		}
 		if i%30 == 0 {
@@ -491,5 +491,60 @@ func TestClosedRouterIsNotSilent(t *testing.T) {
 	time.Sleep(6 * interval)
 	if n := rs[1].store.Silent(); n != 0 {
 		t.Fatalf("a router that shut down counts as silent (%d)", n)
+	}
+}
+
+// TestPerKeyBudgetsSharedAcrossRouters: with shared counters each key's daily
+// budget holds across all the routers of a site, within the same bound as a
+// shared budget (TestDailySharedAcrossRouters), and two keys of one tenant
+// keep separate budgets: one key spending its budget on every router leaves
+// the other key's budget whole (tenant isolation, checklist 2.1 site-wide).
+func TestPerKeyBudgetsSharedAcrossRouters(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 3)
+	const tpd, cost = 3000, 10
+	spent := 0
+	for i := 0; i < 2000; i++ {
+		if ok, _, _ := rs[i%3].rate.AllowInputTokens("t", "k1", "", tpd, cost); ok {
+			spent += cost
+		}
+		if i%60 == 0 {
+			time.Sleep(interval + interval/2)
+		}
+	}
+	if spent > tpd+tpd/50 || spent < tpd*3/4 {
+		t.Fatalf("key k1 spent %d across 3 routers against its budget of %d", spent, tpd)
+	}
+	for i, r := range rs {
+		if rem, _ := r.rate.RemainingTokens("t", "k2", "", tpd); rem != tpd {
+			t.Errorf("router %d: key k2 of the same tenant has %d left, want its full %d", i, rem, tpd)
+		}
+	}
+}
+
+// TestTenantUsageSiteWide: every router reports the same site-wide usage
+// today for a tenant, summed over its keys and models and over the routers
+// that served them, including routers that served nothing for it; another
+// tenant's usage never adds to it, and refused charges are not counted.
+func TestTenantUsageSiteWide(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 3)
+	rs[0].rate.AllowInputTokens("acme", "k1", "", 10_000, 100) //nolint:errcheck
+	rs[1].rate.AllowInputTokens("acme", "k2", "m", 10_000, 40) //nolint:errcheck
+	rs[1].rate.AllowOutputTokens("acme", "k1", "", 10_000, 10) //nolint:errcheck
+	rs[0].rate.AllowInputTokens("other", "k9", "", 10_000, 7)  //nolint:errcheck
+	rs[0].rate.AllowInputTokens("acme", "k3", "", 50, 500)     //nolint:errcheck // refused: over k3's budget
+	waitFor(t, 3*time.Second, "every router to report acme's site total", func() bool {
+		for _, r := range rs {
+			if r.rate.TenantUsageToday("acme") != 150 {
+				return false
+			}
+		}
+		return true
+	})
+	for i, r := range rs {
+		if got := r.rate.TenantUsageToday("other"); got != 7 {
+			t.Errorf("router %d: other's usage %d, want 7", i, got)
+		}
 	}
 }

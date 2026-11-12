@@ -75,7 +75,7 @@ type atomicLimiter struct {
 	n atomic.Int64
 }
 
-func (l *atomicLimiter) AllowRequest(string, string, int) (bool, int, error) {
+func (l *atomicLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
 	l.n.Add(1)
 	return true, -1, nil
 }

@@ -274,7 +274,7 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 const effectiveTPDContextKey = "effective_tpd"
 
 // quotaModelContextKey carries the model name used by the limiter buckets so
-// AllowInputTokens / AllowOutputTokens charge the same (tenant, model) bucket
+// AllowInputTokens / AllowOutputTokens charge the same (key, model) bucket
 // QuotaMiddleware admitted from. Empty for the legacy flat shape.
 const quotaModelContextKey = "quota_model"
 
@@ -330,14 +330,13 @@ func setRemainingRequests(c *gin.Context, remaining int) {
 	}
 }
 
-// enforceFlatQuota runs the legacy per-tenant umbrella RPM check — bit-for-bit
-// what the middleware did before per-model quotas existed. Returns false (and
-// has already written the 429) when the request is denied.
+// enforceFlatQuota runs the flat-shape RPM check on the calling key's own
+// bucket. Returns false (and has already written the 429) when the request is
+// denied. The per-tenant limit gauges are not written here: limits are per key,
+// so the tenant gauges carry the sum over the tenant's keys, seeded by
+// publishTenantQuotas whenever the key set changes.
 func enforceFlatQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.RouterMetrics, caller quotaCaller, limits auth.QuotaLimits) bool {
-	m.TenantSetQuotaLimit(caller.tenantID, limits.RequestsPerMinute)
-	m.TenantSetTPDLimit(caller.tenantID, limits.TokensPerDay)
-
-	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, "", limits.RequestsPerMinute)
+	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, caller.keyID, "", limits.RequestsPerMinute)
 	if !allowed {
 		model := peekModel(c)
 		c.Set(auditKeyModel, model)
@@ -369,7 +368,7 @@ func effectivePerModelRPM(entry auth.PerModelQuotaLimits, model string, healthyA
 // the body and the matching entry is resolved by exact match — strict
 // enumeration, no wildcard. Returns false (and has already written the 429)
 // when the request is denied; sets the effective_tpd / quota_model context
-// keys so the downstream handler charges the SAME (tenant, model) bucket
+// keys so the downstream handler charges the SAME (key, model) bucket
 // admission ran against.
 func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.RouterMetrics, caller quotaCaller, limits auth.QuotaLimits, healthyAgentCount func(string) int) bool {
 	model := peekModel(c)
@@ -384,12 +383,10 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 		return false
 	}
 
-	// Emit per-(tenant, model) gauges so dashboards can render the right
-	// ceiling for THIS model rather than seeing the per-tenant gauges
-	// oscillate as different models hit the same key. Per-model keys leave
-	// the legacy per-tenant gauges alone — they were seeded to 0 at startup
-	// and stay there, which is the dashboard signal "use the per-model series."
-	m.TenantSetPerModelTPDLimit(caller.tenantID, model, entry.TokensPerDay)
+	// The per-(tenant, model) TPD gauge is seeded by publishTenantQuotas
+	// (summed over the tenant's keys). The RPM gauge is written here because
+	// its value depends on the live replica count; with several per-model
+	// keys in one tenant it shows the last admitting key's ceiling.
 
 	effectiveRPM, skipQuota := effectivePerModelRPM(entry, model, healthyAgentCount)
 	if skipQuota {
@@ -406,7 +403,7 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 	}
 	m.TenantSetPerModelQuotaLimit(caller.tenantID, model, effectiveRPM)
 
-	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, model, effectiveRPM)
+	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, caller.keyID, model, effectiveRPM)
 	if !allowed {
 		denyRPM(c, m, caller, model, "rate limit exceeded")
 		return false
@@ -417,15 +414,15 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 	return true
 }
 
-// QuotaMiddleware enforces per-tenant RPM limits using a RateLimiter.
+// QuotaMiddleware enforces per-key RPM limits using a RateLimiter.
 // Applied on the /v1/* group after AuthMiddleware. Returns 429 with
-// rate_limit_exceeded on RPM exhaustion. Records configured RPM/TPD as
-// Prometheus gauges per request, and sets X-RateLimit-Remaining-Requests.
+// rate_limit_exceeded on RPM exhaustion, records the per-model RPM gauge, and
+// sets X-RateLimit-Remaining-Requests for the calling key.
 //
 // Two quota shapes are supported on a per-key basis:
 //
 //   - Legacy flat (QuotaLimits.PerModel == nil): one umbrella RPM + TPD that
-//     applies to every model. The limiter buckets are per-tenant. Enforced
+//     applies to every model. The limiter buckets are per key. Enforced
 //     by enforceFlatQuota.
 //
 //   - Per-model (QuotaLimits.PerModel != nil): the middleware peeks the

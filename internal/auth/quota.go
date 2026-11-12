@@ -17,7 +17,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// DailyQuotaStore persists per-tenant daily token usage to durable storage.
+// DailyQuotaStore persists per-key daily token usage to durable storage.
 // Implemented by *storage.BadgerStorage; the interface avoids an import cycle
 // since Go satisfies interfaces implicitly.
 type DailyQuotaStore interface {
@@ -25,51 +25,75 @@ type DailyQuotaStore interface {
 	SetTokensUsed(key string, count int64, ttl time.Duration) error
 }
 
-// RateLimiter enforces per-tenant quotas: requests per minute and daily token budget.
-// All methods are safe for concurrent use.
+// RateLimiter enforces per-key quotas: requests per minute and daily token
+// budget. All methods are safe for concurrent use.
 //
-// The model parameter selects the bucket: an empty string uses the legacy
-// per-tenant bucket (one bucket per tenant); a non-empty string uses a
-// per-(tenant, model) bucket. Callers driving the legacy flat shape pass "";
-// callers driving the per-model shape pass the requested model name so each
-// (tenant, model) pair gets its own independent budget.
+// Every bucket belongs to one key: limits are configured per key, so each key
+// is counted against its own ceiling and never drains another key's budget,
+// even within one tenant. tenantID is part of the bucket too, so a key ID
+// reassigned to another tenant starts fresh, and per-tenant usage can be
+// reported. The model parameter selects the bucket shape: an empty string
+// uses the flat per-key bucket; a non-empty string uses a per-(key, model)
+// bucket. Callers driving the flat shape pass ""; callers driving the
+// per-model shape pass the requested model name.
+//
+// With shared counters (SetFleet) every bucket is site-wide: the routers of a
+// site spend one budget together.
 type RateLimiter interface {
-	// AllowRequest checks and deducts 1 unit from the tenant's RPM bucket for
+	// AllowRequest checks and deducts 1 unit from the key's RPM bucket for
 	// the given model. Returns (true, remaining, nil) when allowed; (false, 0,
 	// nil) when the bucket is exhausted; remaining is -1 when requestsPerMinute
 	// is 0 (unlimited).
-	AllowRequest(tenantID, model string, requestsPerMinute int) (allowed bool, remaining int, err error)
+	AllowRequest(tenantID, keyID, model string, requestsPerMinute int) (allowed bool, remaining int, err error)
 
-	// AllowInputTokens checks and deducts count tokens from the tenant's daily
+	// AllowInputTokens checks and deducts count tokens from the key's daily
 	// budget for the given model. Called before the request is forwarded to an
 	// agent (prompt estimation).
-	AllowInputTokens(tenantID, model string, tokensPerDay, count int) (allowed bool, remaining int, err error)
+	AllowInputTokens(tenantID, keyID, model string, tokensPerDay, count int) (allowed bool, remaining int, err error)
 
-	// AllowOutputTokens checks and deducts count tokens from the tenant's
-	// daily budget for the given model. Called after the agent returns a
-	// response (actual completion token count).
-	AllowOutputTokens(tenantID, model string, tokensPerDay, count int) (allowed bool, remaining int, err error)
+	// AllowOutputTokens checks and deducts count tokens from the key's daily
+	// budget for the given model. Called after the agent returns a response
+	// (actual completion token count).
+	AllowOutputTokens(tenantID, keyID, model string, tokensPerDay, count int) (allowed bool, remaining int, err error)
 
-	// RemainingTokens reports the remaining daily budget for (tenant, model)
+	// RemainingTokens reports the remaining daily budget for (key, model)
 	// WITHOUT deducting anything. Returns -1 when tokensPerDay is 0 (unlimited).
 	// Used by the pre-queue admission check so an over-budget request can be
 	// rejected without being charged.
-	RemainingTokens(tenantID, model string, tokensPerDay int) (remaining int, err error)
+	RemainingTokens(tenantID, keyID, model string, tokensPerDay int) (remaining int, err error)
 
 	// Reset clears all cached limiter state. Call on SIGHUP after auth config reload
 	// so updated quota limits take effect immediately.
 	Reset()
 }
 
-// bucketKey builds the composite limiter-bucket key. An empty model preserves
-// the legacy "one bucket per tenant" shape; a non-empty model gives each
-// (tenant, model) pair an independent bucket. The "\x00" separator can never
-// appear in a model name (model identifiers are printable ASCII).
-func bucketKey(tenantID, model string) string {
+// bucketVersion and tenantUsageVersion mark the shape of a bucket key. Bucket
+// keys name shared-store and Badger counters too, so routers running
+// different shapes during a rolling upgrade never read or add to each
+// other's counters: the per-tenant keys of earlier versions carry no marker,
+// and a new shape gets a new marker.
+const (
+	bucketVersion      = "k1"
+	tenantUsageVersion = "u1"
+)
+
+// bucketKey builds the composite limiter-bucket key: version marker, tenant,
+// key and, for the per-model shape, model, joined by NUL. An empty model
+// gives the flat per-key bucket. The separator is unambiguous: key IDs and
+// owners are validated to contain no control characters
+// (validateIdentifier), and model names are printable.
+func bucketKey(tenantID, keyID, model string) string {
+	k := bucketVersion + "\x00" + tenantID + "\x00" + keyID
 	if model == "" {
-		return tenantID
+		return k
 	}
-	return tenantID + "\x00" + model
+	return k + "\x00" + model
+}
+
+// tenantUsageKey names the daily counter that sums a tenant's usage over all
+// its keys and models (reporting only: no limit is checked against it).
+func tenantUsageKey(tenantID string) string {
+	return tenantUsageVersion + "\x00" + tenantID
 }
 
 // NewRateLimiter builds a RateLimiter based on cfg.QuotaBackend.
@@ -99,7 +123,8 @@ func NewRateLimiter(cfg *config.Config, store DailyQuotaStore) (RateLimiter, err
 
 // ── InMemoryLimiter ──────────────────────────────────────────────────────────
 
-// dailyBucket tracks token consumption for a single tenant within one calendar day.
+// dailyBucket tracks token consumption for one bucket (a key, or a key and
+// model) — or, under tenantUsageKey, a whole tenant — within one calendar day.
 type dailyBucket struct {
 	mu   sync.Mutex
 	used int
@@ -136,12 +161,13 @@ type dailyBucket struct {
 // RPM enforcement uses golang.org/x/time/rate token buckets.
 // Daily token enforcement uses calendar-day counters that reset at midnight UTC.
 type InMemoryLimiter struct {
-	rpmLimiters  sync.Map // tenantID → *rate.Limiter
-	dailyBuckets sync.Map // tenantID → *dailyBucket
+	rpmLimiters  sync.Map // bucketKey → *rate.Limiter
+	dailyBuckets sync.Map // bucketKey or tenantUsageKey → *dailyBucket
 
-	// onTokensUsed is called after every successful token deduction with the
-	// tenant ID and the new cumulative used count for today. Nil-safe.
-	// Set once at startup via SetOnTokensUsed before any requests arrive.
+	// onTokensUsed is called when a tenant's usage today changes, with the
+	// tenant ID and its tokens used today summed over all its keys and models
+	// (site-wide with shared counters). Nil-safe. Set once at startup via
+	// SetOnTokensUsed before any requests arrive.
 	onTokensUsed func(tenantID string, used int)
 
 	// rpmBurstSeconds sizes the per-tenant RPM token bucket's burst as that many
@@ -184,19 +210,60 @@ func (l *InMemoryLimiter) rpmBurst(rpm int) int {
 	return 1
 }
 
-// SetOnTokensUsed registers a callback that fires after every successful token
-// deduction. The callback receives the tenant ID and the cumulative tokens used
-// today. Intended for updating the hivenet_tenant_tokens_used_today gauge.
-// Must be called before the limiter handles any requests.
+// SetOnTokensUsed registers a callback that fires when a tenant's usage today
+// changes. The callback receives the tenant ID and the tenant's tokens used
+// today, summed over all its keys and models. Intended for updating the
+// hivenet_tenant_tokens_used_today gauge. Must be called before the limiter
+// handles any requests.
 func (l *InMemoryLimiter) SetOnTokensUsed(fn func(tenantID string, used int)) {
 	l.onTokensUsed = fn
 }
 
-// reportUsage fires the onTokensUsed callback if one is registered.
-func (l *InMemoryLimiter) reportUsage(tenantID string, used int) {
-	if l.onTokensUsed != nil {
+// addTenantUsage adds n served tokens to the tenant's usage today. With shared
+// counters it publishes them so every router sees the site total, and counts
+// them locally only once this router has read that total (TenantUsageToday
+// reads it off the request path); the read includes this router's
+// unpublished usage, so nothing is counted twice.
+func (l *InMemoryLimiter) addTenantUsage(tenantID string, n int) {
+	key := tenantUsageKey(tenantID)
+	if l.fleet != nil {
+		l.fleet.Record(shared.KindDaily, key, 0, n)
+	}
+	b := l.getOrCreateDaily(key)
+	today := utcDayIndex()
+	b.mu.Lock()
+	if b.day != today {
+		b.day, b.used, b.base = today, 0, 0
+	}
+	known := l.fleet == nil || b.loadedDay == today
+	if known {
+		b.used += n
+	}
+	used := b.used
+	b.mu.Unlock()
+	if known && l.onTokensUsed != nil {
 		l.onTokensUsed(tenantID, used)
 	}
+}
+
+// TenantUsageToday returns the tenant's tokens used today over all its keys
+// and models: the site total with shared counters (read from the shared store
+// the first time each day, then kept current by the other routers' usage),
+// else this router's. The router publishes it for every tenant on each sync
+// interval, so every router of a site exports the same value.
+func (l *InMemoryLimiter) TenantUsageToday(tenantID string) int {
+	key := tenantUsageKey(tenantID)
+	b := l.getOrCreateDaily(key)
+	if !l.loadFleetDaily(key, b) {
+		return 0
+	}
+	today := utcDayIndex()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.day != today {
+		b.day, b.used, b.base = today, 0, 0
+	}
+	return b.used
 }
 
 // NewInMemoryLimiter creates an empty InMemoryLimiter.
@@ -204,11 +271,11 @@ func NewInMemoryLimiter() *InMemoryLimiter {
 	return &InMemoryLimiter{}
 }
 
-func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, int, error) {
+func (l *InMemoryLimiter) AllowRequest(tenantID, keyID, model string, rpm int) (bool, int, error) {
 	if rpm <= 0 {
 		return true, -1, nil
 	}
-	bucket := bucketKey(tenantID, model)
+	bucket := bucketKey(tenantID, keyID, model)
 	lim := l.getOrCreateRPM(bucket, rpm)
 	if l.fleet != nil {
 		ok, charged := allowShared(l.fleet, &l.leases, bucket, lim, 1, false)
@@ -226,8 +293,8 @@ func (l *InMemoryLimiter) AllowRequest(tenantID, model string, rpm int) (bool, i
 	return true, remaining, nil
 }
 
-func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n, true)
+func (l *InMemoryLimiter) AllowInputTokens(tenantID, keyID, model string, tpd, n int) (bool, int, error) {
+	return l.allowTokens(tenantID, keyID, model, tpd, n, true)
 }
 
 // AllowOutputTokens shares the same deduction logic as AllowInputTokens — the
@@ -235,20 +302,21 @@ func (l *InMemoryLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (
 // caller invokes it (admission vs. post-response), not how the bucket update
 // behaves. Both delegate to allowTokens so the daily-counter semantics stay in
 // exactly one place.
-func (l *InMemoryLimiter) AllowOutputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	return l.allowTokens(tenantID, model, tpd, n, false)
+func (l *InMemoryLimiter) AllowOutputTokens(tenantID, keyID, model string, tpd, n int) (bool, int, error) {
+	return l.allowTokens(tenantID, keyID, model, tpd, n, false)
 }
 
-// RemainingTokens reports the remaining daily budget for (tenant, model) without
+// RemainingTokens reports the remaining daily budget for (key, model) without
 // deducting. Returns -1 when tpd <= 0 (unlimited). It rolls the counter over at
 // the UTC day boundary, like the deducting paths, so the peek reflects today's
 // usage.
-func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int, error) {
+func (l *InMemoryLimiter) RemainingTokens(tenantID, keyID, model string, tpd int) (int, error) {
 	if tpd <= 0 {
 		return -1, nil
 	}
-	b := l.getOrCreateDaily(bucketKey(tenantID, model))
-	if !l.loadFleetDaily(bucketKey(tenantID, model), b) {
+	bucket := bucketKey(tenantID, keyID, model)
+	b := l.getOrCreateDaily(bucket)
+	if !l.loadFleetDaily(bucket, b) {
 		return 0, nil // site total unknown: refuse until the store answers
 	}
 	today := utcDayIndex()
@@ -269,15 +337,26 @@ func (l *InMemoryLimiter) RemainingTokens(tenantID, model string, tpd int) (int,
 // router's share of the budget (outage allowance, per-sync lease): output is
 // charged after the response exists, so it is judged against the site
 // total alone and never rejected because of this router's share.
-func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admission bool) (bool, int, error) {
+func (l *InMemoryLimiter) allowTokens(tenantID, keyID, model string, tpd, n int, admission bool) (bool, int, error) {
 	if tpd <= 0 || n <= 0 {
 		return true, -1, nil
 	}
-	bucket := bucketKey(tenantID, model)
+	bucket := bucketKey(tenantID, keyID, model)
 	b := l.getOrCreateDaily(bucket)
 	if !l.loadFleetDaily(bucket, b) {
 		return false, 0, nil // site total unknown: refuse until the store answers
 	}
+	allowed, remaining := l.chargeDaily(bucket, b, tpd, n, admission)
+	if allowed {
+		// Count only what was charged, after releasing the key's bucket.
+		l.addTenantUsage(tenantID, n)
+	}
+	return allowed, remaining, nil
+}
+
+// chargeDaily applies one charge to a key's daily bucket and reports whether
+// it fit and what is left.
+func (l *InMemoryLimiter) chargeDaily(bucket string, b *dailyBucket, tpd, n int, admission bool) (bool, int) {
 	today := utcDayIndex()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -288,10 +367,10 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admiss
 	}
 	if admission {
 		if allowance := l.dailyAllowance(b, tpd); allowance < tpd && b.used+n > allowance {
-			return false, 0, nil // outage: this router's share of the rest is spent
+			return false, 0 // outage: this router's share of the rest is spent
 		}
 		if !l.dailyLease(b, tpd, n) {
-			return false, 0, nil // this router's share since the last sync is spent
+			return false, 0 // this router's share since the last sync is spent
 		}
 	}
 	if b.used+n > tpd {
@@ -304,9 +383,8 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admiss
 				l.fleet.Record(shared.KindDaily, bucket, tpd, tpd-b.used)
 			}
 			b.used = tpd
-			l.reportUsage(tenantID, b.used)
 		}
-		return false, 0, nil
+		return false, 0
 	}
 	b.used += n
 	if admission {
@@ -315,8 +393,7 @@ func (l *InMemoryLimiter) allowTokens(tenantID, model string, tpd, n int, admiss
 	if l.fleet != nil {
 		l.fleet.Record(shared.KindDaily, bucket, tpd, n)
 	}
-	l.reportUsage(tenantID, b.used)
-	return true, tpd - b.used, nil
+	return true, tpd - b.used
 }
 
 // loadFleetDaily reads the site's usage today for a daily bucket the
@@ -506,16 +583,16 @@ func (l *InMemoryLimiter) getOrCreateRPM(bucket string, rpm int) *rate.Limiter {
 	return actual.(*rate.Limiter)
 }
 
-func (l *InMemoryLimiter) getOrCreateDaily(tenantID string) *dailyBucket {
-	if v, ok := l.dailyBuckets.Load(tenantID); ok {
+func (l *InMemoryLimiter) getOrCreateDaily(bucket string) *dailyBucket {
+	if v, ok := l.dailyBuckets.Load(bucket); ok {
 		return v.(*dailyBucket)
 	}
 	b := &dailyBucket{day: utcDayIndex()}
-	actual, _ := l.dailyBuckets.LoadOrStore(tenantID, b)
+	actual, _ := l.dailyBuckets.LoadOrStore(bucket, b)
 	return actual.(*dailyBucket)
 }
 
-// Reset clears all per-tenant limiters so new limits loaded from auth.yaml take
+// Reset clears all per-key limiters so new limits loaded from auth.yaml take
 // effect immediately on the next request.
 //
 // With shared counters the buckets are kept: every call passes the current
@@ -589,17 +666,18 @@ func utcDayIndex() int {
 // persistence because the per-minute window is always shorter than any restart.
 //
 // Daily token counters are:
-//   - Lazy-loaded from BadgerDB on the first request for each tenant each day.
+//   - Lazy-loaded from BadgerDB on the first request for each bucket each day.
 //   - Held in memory as the hot path for all subsequent checks.
 //   - Flushed to BadgerDB on every StartPeriodicFlush tick and on Reset/shutdown.
 //
-// Key schema in diskDB: "quotaTPD:{tenantID}:{dayIndex}" with a 48 h TTL.
+// Key schema in diskDB: "quotaTPD:{bucket}:{dayIndex}" with a 48 h TTL, where
+// bucket is a versioned bucketKey or tenantUsageKey.
 // The 48 h TTL provides one full day of overlap so a counter written late at
 // night is still readable early the next morning if the router restarts.
 type BadgerLimiter struct {
 	*InMemoryLimiter
 	store    DailyQuotaStore
-	initOnce sync.Map // "tenantID:dayIndex" → *sync.Once  (lazy preload gate)
+	initOnce sync.Map // "bucket:dayIndex" → *sync.Once  (lazy preload gate)
 
 	// onFlushError is called whenever a diskDB write fails during Flush.
 	// Intended for incrementing the QuotaBackendError Prometheus counter.
@@ -622,30 +700,36 @@ func (l *BadgerLimiter) SetOnFlushError(fn func()) {
 	l.onFlushError = fn
 }
 
-func (l *BadgerLimiter) AllowInputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	l.ensurePreloaded(tenantID, model)
-	return l.InMemoryLimiter.AllowInputTokens(tenantID, model, tpd, n)
+func (l *BadgerLimiter) AllowInputTokens(tenantID, keyID, model string, tpd, n int) (bool, int, error) {
+	l.ensurePreloaded(bucketKey(tenantID, keyID, model))
+	l.ensurePreloaded(tenantUsageKey(tenantID))
+	return l.InMemoryLimiter.AllowInputTokens(tenantID, keyID, model, tpd, n)
 }
 
-func (l *BadgerLimiter) AllowOutputTokens(tenantID, model string, tpd, n int) (bool, int, error) {
-	l.ensurePreloaded(tenantID, model)
-	return l.InMemoryLimiter.AllowOutputTokens(tenantID, model, tpd, n)
+func (l *BadgerLimiter) AllowOutputTokens(tenantID, keyID, model string, tpd, n int) (bool, int, error) {
+	l.ensurePreloaded(bucketKey(tenantID, keyID, model))
+	l.ensurePreloaded(tenantUsageKey(tenantID))
+	return l.InMemoryLimiter.AllowOutputTokens(tenantID, keyID, model, tpd, n)
 }
 
-func (l *BadgerLimiter) RemainingTokens(tenantID, model string, tpd int) (int, error) {
-	l.ensurePreloaded(tenantID, model)
-	return l.InMemoryLimiter.RemainingTokens(tenantID, model, tpd)
+func (l *BadgerLimiter) RemainingTokens(tenantID, keyID, model string, tpd int) (int, error) {
+	l.ensurePreloaded(bucketKey(tenantID, keyID, model))
+	return l.InMemoryLimiter.RemainingTokens(tenantID, keyID, model, tpd)
 }
 
-// ensurePreloaded initialises the (tenant, model) daily bucket from BadgerDB
-// exactly once per calendar day. Subsequent calls for the same (tenant, model,
-// day) are no-ops. sync.Once guarantees exactly-once execution under heavy
-// concurrency. The BadgerDB key includes the model so per-model token budgets
-// survive restarts independently — and the legacy flat path (model == "")
-// keeps its original key shape for back-compat with restarted routers.
-func (l *BadgerLimiter) ensurePreloaded(tenantID, model string) {
+// TenantUsageToday is InMemoryLimiter.TenantUsageToday with the tenant's
+// counter first read back from BadgerDB after a restart.
+func (l *BadgerLimiter) TenantUsageToday(tenantID string) int {
+	l.ensurePreloaded(tenantUsageKey(tenantID))
+	return l.InMemoryLimiter.TenantUsageToday(tenantID)
+}
+
+// ensurePreloaded initialises a daily bucket (a key's, or a tenant's usage)
+// from BadgerDB exactly once per calendar day. Subsequent calls for the same
+// (bucket, day) are no-ops. sync.Once guarantees exactly-once execution under
+// heavy concurrency.
+func (l *BadgerLimiter) ensurePreloaded(bucket string) {
 	today := utcDayIndex()
-	bucket := bucketKey(tenantID, model)
 	mapKey := fmt.Sprintf("%s:%d", bucket, today)
 
 	once := &sync.Once{}
@@ -663,26 +747,22 @@ func (l *BadgerLimiter) ensurePreloaded(tenantID, model string) {
 		// concurrent increments that arrived before the preload completed).
 		if b.day == today {
 			b.used = max(b.used, int(stored))
-			l.reportUsage(tenantID, b.used)
 		}
 		b.mu.Unlock()
 	})
 }
 
 // badgerTPDKey builds the BadgerDB key for a daily TPD counter from the
-// already-composed in-memory bucket key. The "{bucket}:{day}" shape is the
-// same for legacy and per-model paths because bucketKey collapses to plain
-// tenantID when model == "" — so legacy on-disk counters written before
-// per-model support landed are still found by the same prefix lookup, with
-// no migration needed.
+// already-composed in-memory bucket key. The bucket's version marker keeps
+// counters of different bucket shapes apart: per-tenant counters written
+// before buckets were per key are never read again and expire through their
+// 48 h TTL, so upgrading restarts today's per-key counts from zero once.
 //
-// Critically, using bucketKey here (instead of a ':'-joined "tenant:model"
-// string) means tenant or model values that themselves contain ':' cannot
-// collide across distinct (tenant, model) pairs — e.g. ("a:b", "c") and
-// ("a", "b:c") would format to the same string under a naive ':' join, which
-// would silently merge their daily-token counters on disk. The NUL byte in
-// bucketKey can never appear in a tenant ID or model identifier (both are
-// printable ASCII), so the mapping is unambiguous.
+// Using bucketKey (instead of a ':'-joined string) means identifiers that
+// contain ':' cannot collide across distinct buckets — e.g. ("a:b", "c") and
+// ("a", "b:c") would format to the same string under a naive ':' join. The
+// NUL separator cannot appear in any identifier (validateIdentifier), so the
+// mapping is unambiguous.
 func badgerTPDKey(bucket string, day int) string {
 	return fmt.Sprintf("quotaTPD:%s:%d", bucket, day)
 }
@@ -691,9 +771,7 @@ func badgerTPDKey(bucket string, day int) string {
 // Called on periodic tick and on shutdown/Reset.
 //
 // The in-memory dailyBuckets map is already keyed by the composite bucket
-// string (legacy buckets collapse to bare tenantID, per-model buckets are
-// "tenantID\x00model"), so badgerTPDKey consumes it directly — no need to
-// split and rejoin. This also makes the persisted key shape match
+// string, so badgerTPDKey consumes it directly — no need to split and rejoin. This also makes the persisted key shape match
 // ensurePreloaded's reads byte-for-byte by construction.
 func (l *BadgerLimiter) Flush() {
 	today := utcDayIndex()
@@ -756,6 +834,6 @@ func (l *BadgerLimiter) StartPeriodicFlush(ctx context.Context, interval time.Du
 func (l *BadgerLimiter) Reset() {
 	l.Flush()
 	l.InMemoryLimiter.Reset()
-	// Clear the preload gate so tenants are re-loaded from BadgerDB on next access.
+	// Clear the preload gate so buckets are re-loaded from BadgerDB on next access.
 	l.initOnce.Range(func(k, _ any) bool { l.initOnce.Delete(k); return true })
 }

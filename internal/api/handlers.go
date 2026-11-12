@@ -183,7 +183,7 @@ type Handlers struct {
 	// May be nil when metrics are not configured.
 	policyReloadObserver func(trigger, result string)
 
-	// limiter enforces per-tenant token budgets. The input check (AllowInputTokens)
+	// limiter enforces per-key token budgets. The input check (AllowInputTokens)
 	// runs here after the request body is parsed; the output check runs in the processor.
 	// May be nil when auth is disabled.
 	limiter auth.RateLimiter
@@ -523,9 +523,8 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 // reqMeta bundles the request-scoped identifiers and budget shared across the
 // Passthrough pipeline so the helpers below avoid long parameter lists.
 //
-// quotaModel selects the limiter bucket: empty for legacy-flat keys (one
-// bucket per tenant), non-empty for per-model keys (one bucket per
-// (tenant, model)). Stashed by QuotaMiddleware so the handler does not redo
+// quotaModel selects the limiter bucket: empty for flat keys (one bucket per
+// key), non-empty for per-model keys (one bucket per (key, model)). Stashed by QuotaMiddleware so the handler does not redo
 // the resolution.
 type reqMeta struct {
 	requestID    string
@@ -949,7 +948,7 @@ func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unres
 //
 //   - Per-model keys: QuotaMiddleware sets effectiveTPDContextKey and
 //     quotaModelContextKey to the resolved entry — used here verbatim so the
-//     handler charges the same (tenant, model) bucket admission used.
+//     handler charges the same (key, model) bucket admission used.
 //   - Legacy flat keys: neither context key is set; fall back to
 //     QuotaLimits.TokensPerDay and an empty model (legacy tenant-only bucket).
 //
@@ -966,7 +965,7 @@ func quotaBudgetFromContext(c *gin.Context) (tpd int, model string) {
 		}
 	}
 	if model == "" {
-		// Legacy flat shape — read the per-tenant TPD from the umbrella limits.
+		// Flat shape — read the key's TPD from the umbrella limits.
 		if raw, ok := c.Get("quota_limits"); ok {
 			if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel == nil {
 				tpd = limits.TokensPerDay
@@ -1009,7 +1008,7 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	}
 
 	// Admission check — peek, do not charge. If we cannot read the budget, fail open.
-	remaining, err := h.limiter.RemainingTokens(m.tenantID, m.quotaModel, m.tpd)
+	remaining, err := h.limiter.RemainingTokens(m.tenantID, m.keyID, m.quotaModel, m.tpd)
 	if err != nil {
 		log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
 		return true
@@ -1028,7 +1027,7 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	// Admitted — charge the prompt estimate now (the processor charges the actual
 	// completion after the response). A concurrent request may have consumed the
 	// budget between the peek and here, so honour a late deduction failure.
-	allowed, remainingAfter, err := h.limiter.AllowInputTokens(m.tenantID, m.quotaModel, m.tpd, promptTokens)
+	allowed, remainingAfter, err := h.limiter.AllowInputTokens(m.tenantID, m.keyID, m.quotaModel, m.tpd, promptTokens)
 	if err != nil {
 		log.Warnf("Input token check error for request %s: %v (fail-open)", m.requestID, err)
 	}

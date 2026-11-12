@@ -5,6 +5,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,7 +17,8 @@ import (
 // fakeFleet is a Fleet whose state each test sets by hand.
 type fakeFleet struct {
 	mu       sync.Mutex
-	recorded map[byte]int
+	recorded map[byte]int // per kind, key buckets only
+	tenant   int          // tenant-usage tokens published
 	degraded uint64
 	resync   uint64
 	reads    atomic.Int32
@@ -24,9 +26,13 @@ type fakeFleet struct {
 	total    int
 }
 
-func (f *fakeFleet) Record(kind byte, _ string, _, n int) {
+func (f *fakeFleet) Record(kind byte, bucket string, _, n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if strings.HasPrefix(bucket, tenantUsageVersion+"\x00") {
+		f.tenant += n
+		return
+	}
 	if f.recorded == nil {
 		f.recorded = map[byte]int{}
 	}
@@ -54,19 +60,19 @@ func TestSweepKeepsYesterdayWhileDegraded(t *testing.T) {
 	f := &fakeFleet{degraded: 1}
 	l := NewInMemoryLimiter()
 	l.SetFleet(f)
-	b := l.getOrCreateDaily(bucketKey("t", ""))
+	b := l.getOrCreateDaily(bucketKey("t", "key", ""))
 	b.day, b.loadedDay = utcDayIndex()-1, utcDayIndex()-1
 	l.SweepIdle()
-	if _, ok := l.dailyBuckets.Load(bucketKey("t", "")); !ok {
+	if _, ok := l.dailyBuckets.Load(bucketKey("t", "key", "")); !ok {
 		t.Fatal("yesterday's bucket swept during an outage")
 	}
-	if ok, _, _ := l.AllowInputTokens("t", "", 1000, 10); !ok {
+	if ok, _, _ := l.AllowInputTokens("t", "key", "", 1000, 10); !ok {
 		t.Fatal("daily key refused after midnight during an outage")
 	}
 	f.degraded = 0
 	b.day = utcDayIndex() - 1
 	l.SweepIdle()
-	if _, ok := l.dailyBuckets.Load(bucketKey("t", "")); ok {
+	if _, ok := l.dailyBuckets.Load(bucketKey("t", "key", "")); ok {
 		t.Fatal("yesterday's bucket kept while the store answers")
 	}
 }
@@ -77,14 +83,19 @@ func TestOutputOverflowIsShared(t *testing.T) {
 	f := &fakeFleet{}
 	l := NewInMemoryLimiter()
 	l.SetFleet(f)
-	if ok, _, _ := l.AllowInputTokens("t", "", 1000, 900); !ok {
+	if ok, _, _ := l.AllowInputTokens("t", "key", "", 1000, 900); !ok {
 		t.Fatal("input refused")
 	}
-	if ok, _, _ := l.AllowOutputTokens("t", "", 1000, 300); ok {
+	if ok, _, _ := l.AllowOutputTokens("t", "key", "", 1000, 300); ok {
 		t.Fatal("output past the limit reported as allowed")
 	}
 	if got := f.recorded[shared.KindDaily]; got != 1000 {
 		t.Fatalf("published %d daily tokens, want 1000 (900 + the 100 left)", got)
+	}
+	// The tenant's usage counts only what was served: the 900 input tokens,
+	// not the refused output.
+	if f.tenant != 900 {
+		t.Fatalf("published %d tenant-usage tokens, want 900", f.tenant)
 	}
 }
 
@@ -96,7 +107,7 @@ func TestDailyReadShared(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); l.AllowInputTokens("t", "", 1000, 1) }()
+		go func() { defer wg.Done(); l.AllowInputTokens("t", "key", "", 1000, 1) }()
 	}
 	wg.Wait()
 	if n := f.reads.Load(); n != 1 {
@@ -110,15 +121,15 @@ func TestDailyReadAgainAfterResync(t *testing.T) {
 	f := &fakeFleet{total: 100}
 	l := NewInMemoryLimiter()
 	l.SetFleet(f)
-	if rem, _ := l.RemainingTokens("t", "", 1000); rem != 900 {
+	if rem, _ := l.RemainingTokens("t", "key", "", 1000); rem != 900 {
 		t.Fatalf("remaining %d, want 900", rem)
 	}
 	f.total, f.resync = 600, 1
-	if rem, _ := l.RemainingTokens("t", "", 1000); rem != 400 {
+	if rem, _ := l.RemainingTokens("t", "key", "", 1000); rem != 400 {
 		t.Fatalf("remaining %d after a resync, want 400", rem)
 	}
 	f.resync, f.readWait = 2, time.Second // the read times out
-	if rem, _ := l.RemainingTokens("t", "", 1000); rem != 400 {
+	if rem, _ := l.RemainingTokens("t", "key", "", 1000); rem != 400 {
 		t.Fatalf("remaining %d when the reload failed, want the last total's 400", rem)
 	}
 }

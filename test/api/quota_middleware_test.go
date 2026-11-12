@@ -35,27 +35,28 @@ type recLimiter struct {
 
 type recCall struct {
 	tenant string
+	key    string
 	model  string
 	rpm    int
 }
 
-func (l *recLimiter) AllowRequest(tenant, model string, rpm int) (bool, int, error) {
+func (l *recLimiter) AllowRequest(tenant, key, model string, rpm int) (bool, int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.requests = append(l.requests, recCall{tenant, model, rpm})
+	l.requests = append(l.requests, recCall{tenant, key, model, rpm})
 	if l.allowRPM {
 		return true, l.remaining, nil
 	}
 	return false, 0, nil
 }
-func (l *recLimiter) AllowInputTokens(string, string, int, int) (bool, int, error) {
+func (l *recLimiter) AllowInputTokens(string, string, string, int, int) (bool, int, error) {
 	return true, -1, nil
 }
-func (l *recLimiter) AllowOutputTokens(string, string, int, int) (bool, int, error) {
+func (l *recLimiter) AllowOutputTokens(string, string, string, int, int) (bool, int, error) {
 	return true, -1, nil
 }
-func (l *recLimiter) RemainingTokens(string, string, int) (int, error) { return -1, nil }
-func (l *recLimiter) Reset()                                           {}
+func (l *recLimiter) RemainingTokens(string, string, string, int) (int, error) { return -1, nil }
+func (l *recLimiter) Reset()                                                   {}
 
 // stamp injects the auth context the QuotaMiddleware reads (so tests don't
 // need to spin up a real Provider). label identifies the key for clearer

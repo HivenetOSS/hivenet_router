@@ -87,7 +87,7 @@ type RequestProcessor struct {
 	// providers maps provider engine name ("openai", "anthropic") to its implementation.
 	// Populated at startup from config; only configured providers are present (missing key means not configured).
 	providers map[string]provider.Provider
-	// limiter enforces the per-tenant daily token budget on the output side.
+	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
 	// peers drops dead libp2p connections to an agent on a connection-level forward
@@ -779,7 +779,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// to b.used when it returns allowed=false, but the prompt deduction stands.
 	if p.limiter != nil && pending.TokensPerDay > 0 && chatResp.Usage.CompletionTokens > 0 {
 		allowed, remaining, limErr := p.limiter.AllowOutputTokens(
-			pending.TenantID, pending.QuotaModel, pending.TokensPerDay, chatResp.Usage.CompletionTokens)
+			pending.TenantID, pending.KeyID, pending.QuotaModel, pending.TokensPerDay, chatResp.Usage.CompletionTokens)
 		if limErr != nil {
 			// Redis error — fail-open: treat as allowed and proceed.
 			log.Warnf("Output token check error for request %s: %v (fail-open)", pending.ID, limErr)
@@ -915,7 +915,7 @@ func (p *RequestProcessor) drainStream(
 	pending.StreamedCompletionTokens.Store(int64(completion))
 	pending.StreamedPromptExact.Store(meter.HaveUsage())
 	if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
-		allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
+		allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.KeyID, pending.QuotaModel, pending.TokensPerDay, completion)
 		if err != nil {
 			log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
 		} else if !allowed {
