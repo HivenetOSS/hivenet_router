@@ -71,7 +71,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.2 | No log contains a prompt, response, credential, salt secret or salt (doc-18 G7, as a regression test). | done | `TestIsolation_LogsContentFree` |
 | 4.3 | The audit log file is readable by its owner only (0600). | done | `TestIsolation_AuditFileMode` |
 | 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage and limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
-| 4.5 | `/metrics` can require a bearer token (doc-18 G3). | planned (PR-7) | `TestMetricsHandler_BearerToken` |
+| 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | done | `TestMetricsHandler_BearerToken`, `TestIsWildcardAddr` |
 | 4.6 | Multi-tenant mode refuses to start with an open `/metrics`. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |
 
