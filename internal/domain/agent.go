@@ -59,9 +59,15 @@ type Agent struct {
 	reportedInFlight int
 	sentSinceReport  int
 	hasReport        bool
-	reportedAt       time.Time
-	SessionToken     string
-	mu               sync.RWMutex
+
+	// routers is the agent's last list of the routers it is connected to
+	// (libp2p peer ID → requests in flight for it), reported at routersAt.
+	routers      map[string]int64
+	routersAt    time.Time
+	reportedAt   time.Time
+	reportEvery  time.Duration // how often the agent reports; 0 = unknown
+	SessionToken string
+	mu           sync.RWMutex
 }
 
 // NewAgent creates a new agent instance
@@ -105,6 +111,62 @@ func (a *Agent) SetReportedLoad(n int) {
 	a.reportedInFlight, a.sentSinceReport, a.hasReport, a.reportedAt = max(n, 0), 0, true, time.Now()
 }
 
+// SetReportEvery records how often the agent sends its reports.
+func (a *Agent) SetReportEvery(d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reportEvery = d
+}
+
+// ReportMaxAge is how old the agent's report may be and still be used: three
+// report intervals, never less than reportMaxAge nor more than
+// reportMaxAgeCap. An agent that reports slowly would otherwise always look
+// stale.
+func (a *Agent) ReportMaxAge() time.Duration {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.reportMaxAgeLocked()
+}
+
+func (a *Agent) reportMaxAgeLocked() time.Duration {
+	return min(max(reportMaxAge, 3*a.reportEvery), reportMaxAgeCap)
+}
+
+// SetRouterReport records which routers the agent is connected to right now.
+func (a *Agent) SetRouterReport(routers map[string]int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.routers, a.routersAt = routers, time.Now()
+}
+
+// ConnectedTo reports whether the agent's report, if it is still fresh (see
+// ReportMaxAge), lists the router; fresh is false when there is no such
+// report.
+func (a *Agent) ConnectedTo(routerPeer string) (fresh, connected bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.routers == nil || time.Since(a.routersAt) > a.reportMaxAgeLocked() {
+		return false, false
+	}
+	_, connected = a.routers[routerPeer]
+	return true, connected
+}
+
+// ReportedRouters returns the routers (libp2p peer IDs) the agent reported a
+// connection to in a report that is still fresh (see ReportMaxAge).
+func (a *Agent) ReportedRouters() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.routers == nil || time.Since(a.routersAt) > a.reportMaxAgeLocked() {
+		return nil
+	}
+	out := make([]string, 0, len(a.routers))
+	for p := range a.routers {
+		out = append(out, p)
+	}
+	return out
+}
+
 // DecrementLoad safely decrements active requests
 func (a *Agent) DecrementLoad() {
 	a.mu.Lock()
@@ -127,16 +189,24 @@ func (a *Agent) TryAcquireSlot() bool {
 	return true
 }
 
-// reportMaxAge is how long an agent's own load report is used. Reports come
-// every 500 ms; an older one (pushes failing) would let sentSinceReport grow
-// without bound, so the router falls back to what it has in flight there.
+// reportMaxAge is the least time an agent's report is used. Reports come
+// every 500 ms by default; an older one (pushes failing) would let
+// sentSinceReport grow without bound, so the router falls back to what it
+// has in flight there. An agent that reports less often gets three of its
+// intervals (see ReportMaxAge).
 const reportMaxAge = 3 * time.Second
+
+// reportMaxAgeCap bounds how long a report is used, whatever interval the
+// agent asks for. A report that says "not connected to router X" can make the
+// other routers reclaim X's credits; an agent misconfigured with a very long
+// interval would keep such a report alive long after it reconnected to X.
+const reportMaxAgeCap = 30 * time.Second
 
 // loadLocked is the agent's load as this router best knows it: the larger of
 // what this router has in flight there and what the agent last reported plus
 // what this router sent since. Caller holds a.mu.
 func (a *Agent) loadLocked() int {
-	if !a.hasReport || time.Since(a.reportedAt) > reportMaxAge {
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
 		return a.ActiveRequests
 	}
 	return max(a.ActiveRequests, a.reportedInFlight+a.sentSinceReport)

@@ -10,6 +10,7 @@ package admission_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -567,6 +568,33 @@ func TestSweepIdle_RespectsTTL(t *testing.T) {
 	}
 }
 
+// A reservation that outlives any request (an exit path skipped its release)
+// is reaped, and its budget comes back.
+func TestReapStaleReleasesLeakedReservations(t *testing.T) {
+	c := admission.NewController(1, 0)
+	leaked := c.Admit(context.Background(), "m", 60, false, 100, 0)
+	if leaked == nil {
+		t.Fatal("first admission refused")
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) != nil {
+		t.Fatal("budget should be full")
+	}
+	if n := c.ReapStale(time.Hour); n != 0 {
+		t.Fatalf("reaped %d young reservation(s)", n)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := c.ReapStale(10 * time.Millisecond); n != 1 {
+		t.Fatalf("reaped %d, want 1", n)
+	}
+	if c.Admit(context.Background(), "m", 60, false, 100, 0) == nil {
+		t.Fatal("budget did not come back after the reap")
+	}
+	leaked.Release() // the late release is a harmless no-op
+	if sumW, _ := c.Occupancy("m"); sumW != 60 {
+		t.Fatalf("occupancy %d after a late release of a reaped reservation, want 60", sumW)
+	}
+}
+
 // TestAdmitWithinWaitsPastTheDefaultPark checks the park duration a caller
 // chooses: a request released by a wake waits longer than the default park
 // and is admitted when room frees, where Admit would have refused it.
@@ -635,5 +663,91 @@ func TestBigLeavingWakesSmall(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("small request still parked after the big one left")
+	}
+}
+
+// sitePool is a site-wide budget that other routers also use (held).
+type sitePool struct {
+	mu   sync.Mutex
+	used int64
+}
+
+func (p *sitePool) Take(_ context.Context, _ string, weight, budget int64, _ int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.used+weight > budget {
+		return false
+	}
+	p.used += weight
+	return true
+}
+
+func (p *sitePool) Ceiling(_ string, budget int64) int64 { return budget }
+
+func (p *sitePool) Adjust(_ string, dw int64, _ int) {
+	p.mu.Lock()
+	p.used += dw
+	p.mu.Unlock()
+}
+
+// TestSitePoolBoundsWaitBehindBig verifies that with a site-wide pool, which
+// this router alone cannot drain, a small request waits behind an oversized
+// one only the short park, not the whole queue wait.
+func TestSitePoolBoundsWaitBehindBig(t *testing.T) {
+	c := admission.NewController(1.0, 100*time.Millisecond)
+	c.SetQueue(4, 5*time.Second, nil)
+	pool := &sitePool{used: 500} // another router's requests
+	c.SetPool(pool)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if r := c.Admit(ctx, model, 5000, false, 1000, 0); r != nil {
+			r.Release()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond) // the big one is waiting
+	start := time.Now()
+	r := c.Admit(context.Background(), model, 50, false, 1000, 0)
+	if r == nil {
+		t.Fatal("small request refused")
+	}
+	r.Release()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("small request waited %v behind an oversized one on a site-wide pool", d)
+	}
+}
+
+// countingPool refuses every take and counts them.
+type countingPool struct{ takes atomic.Int64 }
+
+func (p *countingPool) Take(context.Context, string, int64, int64, int) bool {
+	p.takes.Add(1)
+	return false
+}
+func (p *countingPool) Adjust(string, int64, int)            {}
+func (p *countingPool) Ceiling(_ string, budget int64) int64 { return budget }
+
+// TestParkedRequestsPollPoolOncePerModel verifies that requests parked on a
+// site-wide pool re-check it about once per poll interval per model, not
+// each on its own: a rejection storm must not turn into a storm of checks.
+func TestParkedRequestsPollPoolOncePerModel(t *testing.T) {
+	c := admission.NewController(1.0, 300*time.Millisecond)
+	p := &countingPool{}
+	c.SetPool(p)
+	var wg sync.WaitGroup
+	const waiters = 200
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Admit(context.Background(), model, 10, false, 1000, 0)
+		}()
+	}
+	wg.Wait()
+	// Two checks each on arrival (before parking and on entering the wait),
+	// then about one per 20 ms poll for the model over 300 ms; one check per
+	// waiter per poll would be ~3,000.
+	if n := p.takes.Load(); n > 2*waiters+100 {
+		t.Fatalf("%d pool checks for %d parked requests over 300 ms", n, waiters)
 	}
 }

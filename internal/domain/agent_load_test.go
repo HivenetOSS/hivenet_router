@@ -3,7 +3,10 @@
 
 package domain
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // Before any report the load is this router's own in-flight count.
 func TestLoadWithoutReport(t *testing.T) {
@@ -46,5 +49,34 @@ func TestCapacityOnlyWhenDeclared(t *testing.T) {
 	b.SetReportedLoad(1)
 	if b.TryAcquireSlot() {
 		t.Fatal("slot granted although the reported load fills the declared capacity")
+	}
+}
+
+// An agent that reports less often than the default keeps its report fresh
+// for three of its own intervals, so its router list is not always stale.
+func TestReportFreshnessFollowsAgentInterval(t *testing.T) {
+	a := NewAgent("p", AgentMetadata{}, "")
+	a.SetRouterReport(map[string]int64{"r1": 0})
+	a.routersAt = a.routersAt.Add(-4 * time.Second) // a report 4 s old
+	if fresh, _ := a.ConnectedTo("r1"); fresh {
+		t.Fatal("a 4 s old report is fresh at the default 500 ms interval")
+	}
+	a.SetReportEvery(2 * time.Second)
+	if fresh, connected := a.ConnectedTo("r1"); !fresh || !connected {
+		t.Fatal("a 4 s old report from an agent reporting every 2 s is stale")
+	}
+	if got := a.ReportMaxAge(); got != 6*time.Second {
+		t.Fatalf("ReportMaxAge = %v, want 6s", got)
+	}
+}
+
+// A very long reporting interval does not keep a report in use for more than
+// reportMaxAgeCap: a stale "not connected" report must not outlive a reconnect
+// for long.
+func TestReportFreshnessIsCapped(t *testing.T) {
+	a := NewAgent("p", AgentMetadata{}, "")
+	a.SetReportEvery(time.Hour)
+	if got := a.ReportMaxAge(); got != reportMaxAgeCap {
+		t.Fatalf("ReportMaxAge = %v, want %v", got, reportMaxAgeCap)
 	}
 }

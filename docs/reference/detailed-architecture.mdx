@@ -64,7 +64,7 @@ Hivenet Router does not depend on Kubernetes for registration, discovery, or rou
 <Warning>
   Each router keeps its own agent registry, request queues, routing-policy state, sessions, and dynamic API keys. These are not replicated between router processes.
 
-  With several routers, every agent connects to every router (`--routers`) and keeps one session with each. Rate and daily limits are shared through `--sync-store=valkey`; each router admits its share of the occupancy budgets.
+  With several routers, every agent connects to every router (`--routers`) and keeps one session with each. Rate and daily limits, the occupancy budgets and redirect-token single use are shared through `--sync-store=valkey`.
 </Warning>
 
 ## Main network surfaces
@@ -629,7 +629,7 @@ token budget = floor(admit fraction × admit_budget_tokens × healthy replicas)
 request backstop = max_inflight × healthy replicas
 ```
 
-When the policy sets no `admit_budget_tokens`, the token budget is the admit fraction × the KV capacity, in tokens, that the healthy replicas' engines report (vLLM and SGLang). With several routers sharing `--sync-store=valkey`, each router admits the token budget and request backstop divided by the live routers.
+When the policy sets no `admit_budget_tokens`, the token budget is the admit fraction × the KV capacity, in tokens, that the healthy replicas' engines report (vLLM and SGLang). With several routers sharing `--sync-store=valkey`, the token budget and request backstop are shared through occupancy credits: each router admits against credits held from a site-wide pool.
 
 The B4 occupancy share uses `share × admit_budget_tokens × healthy replicas`, or the share of the engine-reported KV capacity, without the admit fraction. B4 is a per-key fairness control; B2 remains the pool-safety limit.
 
