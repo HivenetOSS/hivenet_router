@@ -113,8 +113,10 @@ func TestDiscoverySeedUnderAnotherName(t *testing.T) {
 		t.Fatal("listed router not added")
 	}
 	b.authenticated("router-1.svc:1", "p1")
-	b.setUp("router-1.svc:1", true)
-	b.pruneOnce(time.Now())
+	b.routers.mu.Lock()
+	rs := b.routers.entries["router-1.svc:1"].rs
+	b.routers.mu.Unlock()
+	b.sessionUp(rs) // closes the duplicate at once, not at the next prune
 	if b.routerAddrs()["10.0.0.6:1"] {
 		t.Fatal("second session to a router a seed reaches was kept")
 	}

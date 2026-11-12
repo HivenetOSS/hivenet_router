@@ -344,7 +344,7 @@ func (a *Agent) runSessionOnce(rs *routerSession, node host.Host, httpHost *p2ph
 	}
 	log.Infof("Router %s: registered, ready for requests", rs.addr)
 	a.learnRouters(fromProto(authResp.GetSiteRouters()))
-	rs.up.Store(true)
+	a.sessionUp(rs)
 	defer rs.up.Store(false)
 	a.runUntilDisconnect(rs, node, authResp)
 	log.Warnf("Router %s: disconnected", rs.addr)

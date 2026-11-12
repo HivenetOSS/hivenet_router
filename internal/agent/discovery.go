@@ -106,6 +106,16 @@ func (a *Agent) setPeer(rs *routerSession, p peer.ID) {
 	}
 }
 
+// sessionUp marks a session registered and serving. A seed that comes up
+// closes at once the discovered session to the same router (opened while the
+// seed was down, for example a router back with a new peer ID): the router
+// keeps one session per agent, so the two would keep replacing each other
+// until the next prune.
+func (a *Agent) sessionUp(rs *routerSession) {
+	rs.up.Store(true)
+	a.pruneOnce(time.Now())
+}
+
 // learnRouters takes a router's list of the site's live routers. An empty list
 // changes nothing: it may only mean the store is unreachable.
 func (a *Agent) learnRouters(list []siteRouter) {

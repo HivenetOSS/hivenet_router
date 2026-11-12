@@ -293,6 +293,17 @@ func (s *Store) SetPeerID(id string) { s.cfg.PeerID = id }
 type SiteRouter struct {
 	Addr   string // gRPC address
 	PeerID string // libp2p peer ID
+	run    string // the run that advertises it
+}
+
+// runStart returns when a run started (the ms after its "@"), 0 if unknown.
+func runStart(run string) int64 {
+	i := strings.LastIndexByte(run, '@')
+	if i < 0 {
+		return 0
+	}
+	n, _ := strconv.ParseInt(run[i+1:], 10, 64)
+	return n
 }
 
 // SiteRouters returns the live routers of the site that advertise an address,
@@ -813,12 +824,21 @@ func (s *Store) tick(ctx context.Context) {
 	var live, livePeers []string
 	var fetch []string // runs whose agent list changed
 	var site []SiteRouter
+	siteAt := map[string]int{} // address → index in site
 	s.liveMu.Lock()
 	for i := 4; i+3 < len(hb); i += 4 {
 		live = append(live, hb[i])
 		livePeers = append(livePeers, hb[i+1])
 		if hb[i+3] != "" && hb[i+1] != "" {
-			site = append(site, SiteRouter{Addr: hb[i+3], PeerID: hb[i+1]})
+			sr := SiteRouter{Addr: hb[i+3], PeerID: hb[i+1], run: hb[i]}
+			// A router that crashed and came back at the same address is
+			// live twice until the old run times out: list only the newest.
+			if j, ok := siteAt[sr.Addr]; !ok {
+				siteAt[sr.Addr] = len(site)
+				site = append(site, sr)
+			} else if runStart(sr.run) > runStart(site[j].run) {
+				site[j] = sr
+			}
 		}
 		if hb[i] != s.inc && hb[i+2] != "" && hb[i+2] != s.agentVer[hb[i]] {
 			fetch = append(fetch, hb[i])
