@@ -5,14 +5,12 @@ package agent
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -530,70 +528,19 @@ func (e *VLLMEngine) ForwardChat(ctx context.Context, baseURL string, httpClient
 	return forwardOpenAIChatCompletion(ctx, baseURL, httpClient, model, req.RawBytes, e.Name(), options...)
 }
 
-// MessageStartToken implements promptTokenEngine: it renders one and two
-// messages through vLLM's /tokenize (chat template, no generation prompt) and
-// returns the first token of the second message, provided that token also
-// opens the first message (e.g. <|im_start|>, <|start_header_id|>). Templates
-// where messages have no common opening token return an error.
+// MessageStartToken implements messageStartProber with vLLM's /tokenize.
 func (e *VLLMEngine) MessageStartToken(ctx context.Context, baseURL string, httpClient *http.Client, model string) (int, error) {
-	render := func(msgs []map[string]string) ([]int, error) {
-		body, _ := json.Marshal(map[string]any{"model": model, "messages": msgs, "add_generation_prompt": false})
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/tokenize", bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("tokenize: HTTP %d", resp.StatusCode)
-		}
-		var out struct {
-			Tokens []int `json:"tokens"`
-		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-			return nil, err
-		}
-		return out.Tokens, nil
-	}
-	one, err := render([]map[string]string{{"role": "user", "content": "ping"}})
-	if err != nil {
-		return -1, err
-	}
-	two, err := render([]map[string]string{{"role": "user", "content": "ping"}, {"role": "assistant", "content": "pong"}})
-	if err != nil {
-		return -1, err
-	}
-	return messageStartFromProbes(one, two)
+	return probeMessageStart(func(msgs []map[string]string) ([]int, error) {
+		return postTokens(ctx, httpClient, baseURL+"/tokenize", map[string]any{"model": model, "messages": msgs, "add_generation_prompt": false})
+	})
 }
 
-// messageStartFromProbes returns the token that opens the second message of
-// two (the first token after the longest common prefix with one), if that
-// token also appears in one, i.e. opens the first message too.
-func messageStartFromProbes(one, two []int) (int, error) {
-	p := 0
-	for p < len(one) && p < len(two) && one[p] == two[p] {
-		p++
-	}
-	if p >= len(two) {
-		return -1, fmt.Errorf("probe: no second message")
-	}
-	cand := two[p]
-	if slices.Contains(one, cand) && countOf(two, cand) == countOf(one, cand)+1 {
-		return cand, nil
-	}
-	return -1, fmt.Errorf("probe: messages have no common opening token")
+// TokenizeChat implements chatTokenizer: the prompt tokens of a chat request
+// body, chat template applied, through vLLM's /tokenize.
+func (e *VLLMEngine) TokenizeChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, body []byte) ([]int, error) {
+	return tokenizeChatBody(ctx, httpClient, baseURL+"/tokenize", model, body)
 }
 
-func countOf(v []int, x int) int {
-	n := 0
-	for _, t := range v {
-		if t == x {
-			n++
-		}
-	}
-	return n
-}
+// promptTokensInResponse marks vLLM as returning prompt token IDs in the
+// response (return_token_ids).
+func (e *VLLMEngine) promptTokensInResponse() {}

@@ -79,6 +79,7 @@ func main() {
 	p2pListenPort := flag.Int("p2p-listen-port", cfg.P2PListenPort, "Local libp2p port, bound to 127.0.0.1 only (0 = random). The agent needs no inbound port: it dials the router.")
 	hardwareSampleInterval := flag.Duration("hardware-sample-interval", cfg.HardwareSampleInterval, "How often the background hardware sampler collects GPU/CPU/memory metrics")
 	engineSampleInterval := flag.Duration("engine-sample-interval", cfg.EngineSampleInterval, "How often the engine metrics poller scrapes the backend /metrics endpoint (vLLM, SGLang, llama.cpp)")
+	kvEventsEndpoint := flag.String("kv-events-endpoint", os.Getenv("HIVENET_AGENT_KV_EVENTS_ENDPOINT"), "Local ZMQ address for the engine's KV-cache events (vLLM/SGLang --kv-events-config with the same endpoint), e.g. tcp://127.0.0.1:5557: the agent listens and the engine connects (or the agent connects to an engine bound to tcp://*). Empty disables. Local addresses only: the events carry prompt token IDs (env: HIVENET_AGENT_KV_EVENTS_ENDPOINT)")
 	routingSignalInterval := flag.Duration("routing-signal-interval", cfg.RoutingSignalInterval, "How often the agent pushes fresh engine+hardware metrics to the router's /routing-signals endpoint (default 500ms)")
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	backendAPIKeyFile := flag.String("backend-api-key-file", "", "Path to file containing an API key sent as 'Authorization: Bearer' on every backend request, replacing the client's credentials (env: HIVENET_ROUTER_BACKEND_API_KEY)")
@@ -117,6 +118,7 @@ func main() {
 	cfg.HardwareSampleInterval = *hardwareSampleInterval
 	cfg.EngineSampleInterval = *engineSampleInterval
 	cfg.RoutingSignalInterval = *routingSignalInterval
+	cfg.KVEventsEndpoint = *kvEventsEndpoint
 	cfg.GPUDevicesFile = *gpuDevicesFile
 	cfg.GPUModel = *gpuModel
 	cfg.DeploymentID = *deploymentID

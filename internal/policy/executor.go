@@ -490,6 +490,15 @@ func (s *Session) SetPrefix(pr *PrefixRequest) { s.prefix = pr }
 // gave up): its prompt no longer waits in that agent's prefill queue.
 func (s *Session) ReleasePrefill() { s.prefix.release() }
 
+// PrefillTokens is the prompt tokens the last Select expects the chosen agent
+// to prefill (0 when the strategy does not estimate it).
+func (s *Session) PrefillTokens() int {
+	if s.prefix == nil {
+		return 0
+	}
+	return s.prefix.reservedToks
+}
+
 // Select picks the next eligible agent, advancing through fallback steps as needed.
 // Returns ErrAllStepsExhausted when the entire chain is consumed.
 //

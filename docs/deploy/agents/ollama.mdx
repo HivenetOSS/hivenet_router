@@ -396,6 +396,10 @@ curl -X POST http://192.168.1.100:8080/v1/chat/completions \
 
 Applications call Hivenet Router’s OpenAI-compatible endpoint. The agent forwards the request to the Ollama backend.
 
+## Prefix-aware routing
+
+Ollama returns no prompt token IDs. With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent reports the keyed text anchors of the requests it served, so later requests that start the same way are sent back to it while they are recent.
+
 ## Available observability
 
 The Ollama integration does not scrape an engine-specific Prometheus endpoint.

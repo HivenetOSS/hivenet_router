@@ -21,6 +21,14 @@ type EngineOptions struct {
 	// StreamFilter, when set, wraps the writer a streamed response is copied
 	// to; its second result is called once the copy ends.
 	StreamFilter func(io.Writer) (io.Writer, func())
+	// FirstByte, when set, is called once, when the first bytes of a
+	// streamed answer arrive from the backend.
+	FirstByte func()
+}
+
+// WithFirstByte sets EngineOptions.FirstByte.
+func WithFirstByte(f func()) EngineOption {
+	return func(opts *EngineOptions) { opts.FirstByte = f }
 }
 
 // WithStreamFilter sets EngineOptions.StreamFilter.
