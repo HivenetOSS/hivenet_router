@@ -34,6 +34,10 @@ type PendingRequest struct {
 	// Metadata.Capability matches this value are considered. Defaults to "llm".
 	Capability string
 
+	// PrefixAnchors is HeaderPrefixAnchors for this request, empty when its
+	// policy does not route on prefixes.
+	PrefixAnchors string
+
 	// Path is the agent-facing HTTP path the processor forwards this request to
 	// (e.g. "/v1/messages" for the Anthropic passthrough). Empty means the
 	// default "/v1/chat/completions", so existing chat requests are unaffected.
@@ -112,6 +116,12 @@ type Reservation interface {
 // by then, so an engine still running it would hold capacity no one counts.
 // A duration, not a time, so the hosts' clocks do not matter.
 const HeaderTimeout = "X-Hivenet-Timeout-Ms"
+
+// HeaderPrefixAnchors carries, from router to agent, the request's prefix
+// anchors (prefixhash.EncodeAnchors): keyed hashes of its message prefixes,
+// never text. The agent reports which blocks each anchor maps to once the
+// engine has the prompt's tokens, and never forwards the header.
+const HeaderPrefixAnchors = "X-Hivenet-Prefix-Anchors"
 
 // TimeoutHeader is the value of HeaderTimeout for a request due at deadline.
 func TimeoutHeader(deadline time.Time) string {

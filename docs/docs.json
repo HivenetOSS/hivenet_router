@@ -73,7 +73,8 @@
           "routing/hold-at-zero",
           "routing/policy-gates",
           "routing/admission-control",
-            "routing/semantic-routing"
+            "routing/semantic-routing",
+          "routing/prefix-aware-routing"
         ]
       },
       {

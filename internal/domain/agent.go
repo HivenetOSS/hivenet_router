@@ -212,6 +212,20 @@ func (a *Agent) loadLocked() int {
 	return max(a.ActiveRequests, a.reportedInFlight+a.sentSinceReport)
 }
 
+// InFlight is the agent's load without the requests this router sent since
+// the agent's last report: the larger of what this router has in flight
+// there and what the agent last reported. Unlike GetLoad it does not count a
+// request that already finished as busy until the next report, so a burst of
+// short requests does not make an idle agent look busy.
+func (a *Agent) InFlight() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
+		return a.ActiveRequests
+	}
+	return max(a.ActiveRequests, a.reportedInFlight)
+}
+
 // UpdateLastSeen updates the last seen timestamp
 func (a *Agent) UpdateLastSeen() {
 	a.mu.Lock()

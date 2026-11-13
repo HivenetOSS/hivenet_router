@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"io"
 	"net/http"
 	"time"
 )
@@ -17,6 +18,14 @@ type EngineOptions struct {
 	// while being written back to the router. It is applied as a rolling (per-chunk)
 	// deadline so a stalled reader cannot leave the write blocked forever. 0 disables it.
 	StreamWriteTimeout time.Duration
+	// StreamFilter, when set, wraps the writer a streamed response is copied
+	// to; its second result is called once the copy ends.
+	StreamFilter func(io.Writer) (io.Writer, func())
+}
+
+// WithStreamFilter sets EngineOptions.StreamFilter.
+func WithStreamFilter(f func(io.Writer) (io.Writer, func())) EngineOption {
+	return func(opts *EngineOptions) { opts.StreamFilter = f }
 }
 
 func WithHttpHeader(header http.Header) EngineOption {

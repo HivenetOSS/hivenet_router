@@ -26,6 +26,8 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixhash"
+	"hivenet_router/internal/prefixindex"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
@@ -126,6 +128,9 @@ type Router struct {
 	grpcTLSCert    tls.Certificate
 	agents         *AgentRegistry
 	executor       *policy.Executor
+	// prefixIndex is the prefix memory of prefix-aware routing (memo, board,
+	// pending notes), fed by the agents through /prefix-state.
+	prefixIndex    *prefixindex.Index
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -372,6 +377,9 @@ func New(cfg *config.Config) (*Router, error) {
 	evaluator := policy.NewEvaluator(store, counters)
 	executor := policy.NewExecutor(agents, evaluator, activePolicy, cfg.MaxTriesPerStep, cfg.QueueDepth)
 	executor.SetQueueMetrics(routerMetrics)
+	prefixIx := prefixindex.New(prefixindex.Config{})
+	executor.SetPrefixIndex(prefixIx)
+	executor.SetPrefixMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so
@@ -494,6 +502,7 @@ func New(cfg *config.Config) (*Router, error) {
 		grpcTLSCert:          tlsCert,
 		agents:               agents,
 		executor:             executor,
+		prefixIndex:          prefixIx,
 		requestQueue:         requestQueue,
 		metrics:              routerMetrics,
 		counters:             counters,
@@ -661,6 +670,7 @@ func (r *Router) Start() error {
 	mux.HandleFunc("/register", r.handleAgentRegister)
 	mux.HandleFunc("/heartbeat", r.handleAgentHeartbeat)
 	mux.HandleFunc("/routing-signals", r.handleRoutingSignals)
+	mux.HandleFunc("/prefix-state", r.handlePrefixState)
 	r.httpHost.SetHTTPHandler(routerProtocolID, mux)
 
 	go r.httpHost.Serve() //nolint:errcheck
@@ -697,7 +707,10 @@ func (r *Router) Start() error {
 	}
 
 	// Create request processor now that httpHost is ready
-	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter)
+	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
+		// Interim key source: the site's agent secret. To move to a sub-key of
+		// the cache-salt secret, with the tenant scope, once that is in place.
+		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -733,6 +746,7 @@ func (r *Router) Start() error {
 	go r.startGRPCServer()
 	go r.healthMonitor()
 	go r.processor.Start(processorCtx)
+	go r.runPrefixIndex(processorCtx)
 	go r.startHTTPServer()
 
 	go func() {
@@ -2034,6 +2048,7 @@ func (r *Router) healthMonitor() {
 				AgentID:      id.String(),
 				Timestamp:    time.Now().UTC(),
 			})
+			r.prefixIndex.RemoveAgent(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)
