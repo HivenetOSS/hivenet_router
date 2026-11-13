@@ -76,6 +76,8 @@ type PrefixMetrics interface {
 type PrefixIndex interface {
 	Lookup(model string, anchors []uint64, candidates []peer.ID) prefixindex.Match
 	Commit(model string, agent peer.ID, anchors []uint64, match prefixindex.Match, blockTTL, pendingTTL time.Duration)
+	// Trust weighs an agent's predicted cache hits (0–1).
+	Trust(agent peer.ID) float64
 }
 
 // PrefixRequest is the prefix information of one request, set by the
@@ -88,6 +90,9 @@ type PrefixRequest struct {
 	match    prefixindex.Match
 	newToks  int
 	selected bool
+	// predicted is the prompt tokens the board says the chosen agent holds,
+	// checked against the engine's report once it answers.
+	predicted int
 	// reserved is the agent whose prefill queue holds reservedToks of this
 	// request; released at the first response byte (Session.ReleasePrefill).
 	reserved     peer.ID
@@ -229,7 +234,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		ok = append(ok, c)
 	}
 	if len(ok) == 0 {
-		pr.match, pr.newToks, pr.selected = prefixindex.Match{}, sum(pr.Sizes), true
+		pr.match, pr.newToks, pr.selected, pr.predicted = prefixindex.Match{}, sum(pr.Sizes), true, 0
 		s.observe(req.Model, PrefixOutcomeBusy)
 		return leastLoadedStrategy{}.Select(candidates, req)
 	}
@@ -246,7 +251,8 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	}
 
 	hit := func(id peer.ID) int {
-		h := m.Depth[id] * prefixhash.BlockTokens
+		// An agent whose past predictions did not come true counts less.
+		h := int(float64(m.Depth[id]*prefixhash.BlockTokens) * s.index.Trust(id))
 		if id == m.Pending {
 			h = max(h, pendingToks)
 		}
@@ -279,6 +285,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 
 	h := hit(chosen.ID)
 	pr.match, pr.newToks, pr.selected = m, max(0, prompt-h), true
+	pr.predicted = m.Depth[chosen.ID] * prefixhash.BlockTokens
 	switch {
 	case m.Depth[chosen.ID] > 0:
 		s.observe(req.Model, PrefixOutcomeHit)

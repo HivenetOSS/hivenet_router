@@ -443,6 +443,8 @@ vllm serve MODEL --enable-prefix-caching \
 --kv-events-endpoint tcp://127.0.0.1:5557
 ```
 
+Add `--enable-prompt-tokens-details` to vLLM so it reports the prompt tokens it served from cache: the router uses them to check its predictions ([agent trust](/routing/prefix-aware-routing#agent-trust)).
+
 ## Use vLLM metrics in routing policies
 
 You can exclude agents whose KV cache is under pressure:

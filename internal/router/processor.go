@@ -106,6 +106,9 @@ type RequestProcessor struct {
 	// returns the scope of a tenant's anchors (nil: one scope for everyone).
 	prefixKeys  prefixhash.Keys
 	prefixScope func(tenantID string) string
+	// prefixCheck receives, after an answer, the cached prompt tokens the
+	// router predicted on the agent and what the engine reported.
+	prefixCheck func(agent peer.ID, model string, predicted, actual int)
 }
 
 // NewRequestProcessor creates a new request processor.
@@ -170,6 +173,21 @@ func WithPrefixKeys(k prefixhash.Keys) ProcessorOption {
 // anchor; when the cache is shared, leave it unset.
 func WithPrefixScope(scope func(tenantID string) string) ProcessorOption {
 	return func(p *RequestProcessor) { p.prefixScope = scope }
+}
+
+// WithPrefixCheck sets the function that checks the router's cache-hit
+// predictions against what the engines report (agent trust).
+func WithPrefixCheck(f func(agent peer.ID, model string, predicted, actual int)) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixCheck = f }
+}
+
+// checkPrefix reports a prediction check when the engine reported its cached
+// tokens and a prediction was made.
+func (p *RequestProcessor) checkPrefix(agent *domain.Agent, pending *domain.PendingRequest, actual int, known bool) {
+	if p.prefixCheck == nil || !known || pending.PredictedCached <= 0 {
+		return
+	}
+	p.prefixCheck(agent.ID, agent.Metadata.Model, pending.PredictedCached, actual)
 }
 
 // countTokensPath is the Anthropic token-counting endpoint: it holds no KV
@@ -415,6 +433,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// actually free: on return for errors and non-streaming responses, at
 		// the end of the stream for streaming ones.
 		pending.PrefillTokens = session.PrefillTokens()
+		pending.PredictedCached = session.PredictedCached()
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
 		// The agent has answered (the first byte, for a stream) or failed:
 		// its prefill no longer waits on this request.
@@ -869,6 +888,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 
 	p.metrics.RequestRouted(region, engine, model, pending.TenantID)
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+	p.checkPrefix(agent, pending, chatResp.Usage.CachedTokens, chatResp.Usage.CachedKnown)
 	decrement()
 	p.counters.RecordSuccess(agent, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens, rttMs)
 	chatResp.ProcessedBy = agent.ID.String()
@@ -986,6 +1006,9 @@ func (p *RequestProcessor) drainStream(
 		}
 	}
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
+	if cached, known := meter.Cached(); known {
+		p.checkPrefix(agent, pending, cached, true)
+	}
 	// Release the in-flight slot before recording the success, mirroring the
 	// non-streaming path (decrement before RecordSuccess) so the
 	// CapacityUtilization published by RecordSuccess reflects post-completion

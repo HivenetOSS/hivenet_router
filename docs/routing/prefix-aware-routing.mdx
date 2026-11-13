@@ -77,6 +77,34 @@ The agent re-chunks the engine's blocks (16 tokens in vLLM, 1 in SGLang) into th
 
 Events only describe new blocks. A prompt that extends a prefix the engine cached before the agent subscribed (for example after an agent restart) is placed once the agent serves that prompt and learns its tokens. When events are lost (a sequence gap, a reconnection), the agent tells the routers to drop its blocks and rebuilds from new events. vLLM publishes events with its next scheduling step, so a cache reset reaches the routers with the next request. Without KV events, the board holds what each agent served, for `predicted_ttl`.
 
+## Measured gains
+
+Measured with 4 replicas of a 7B model on 32 GB GPUs, a KV cache under pressure (40,000 tokens per replica) and a mixed workload (multi-turn chat, a long shared system prompt, RAG with the document in the system prompt, parallel sub-requests on one context), compared with `least-loaded`:
+
+| Workload | Median time to first token |
+| --- | --- |
+| Shared system prompt (6k tokens) | 2.2× lower |
+| RAG, 12k-token documents | 4.7× lower |
+| Parallel sub-requests on an 8k context | 4.3× lower |
+| Multi-turn chat | p99 29–48 % lower |
+| Working set that fits the cache, 64k-token prompts | 21× lower |
+
+Gains grow with prompt length. They shrink when the cache cannot hold the working set and when the reuse is inside one message (see [Limits](#limits)).
+
+## Agent trust
+
+When the engine reports how many prompt tokens it served from its cache, the router checks each prediction: the tokens the board said the agent held against what the engine reused. An agent whose predictions keep failing counts less (its cached blocks weigh less in the estimate), so an agent cannot attract traffic by reporting a cache it does not have.
+
+The check needs the engine to report cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests and on streamed requests that ask for usage (`"stream_options": {"include_usage": true}`), the responses that carry the engine's usage. Engines that do not report cached tokens are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the predictions that did not hold.
+
+## Security
+
+- The router never stores prompt text: anchors and block hashes are keyed hashes, and no endpoint, log or metric label exposes them.
+- Token IDs never leave the agent: they are stripped from responses and never sent to a router. The KV-event address must stay local ([KV events](#kv-events)).
+- Block hashes include the request's `cache_salt`, so tenants whose engine cache is separated never share blocks. Anchors are not scoped per tenant yet: two tenants sending the same text match the same memo entry, which at worst sends one of them to an agent whose cached blocks it cannot use (a cache miss, no faster answer, so no timing signal).
+- Each agent may post at most 50 cache batches a second (bursts of 100), holds at most what its engine's KV cache can (from the KV capacity it reports), and loses weight when its claims do not come true.
+- Everything is advice: a wrong entry only costs the request a cache miss.
+
 ## Busy agents
 
 A candidate is excluded, whatever it holds, when:
@@ -102,7 +130,11 @@ routing_policy:
     pending_ttl: 5s
 ```
 
-See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field.
+See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field. Guidance:
+
+- `prefill_rate`: the prefill speed of your replicas. The default fits a 7B model on a 32 GB GPU (measured 10,000–14,000 tokens per second); use a lower value for larger models. It only converts tokens into seconds, so replicas that are alike do not need it to be exact.
+- `kv_threshold`: lower it (e.g. 0.85) when the KV cache is small for the prompts, so new prefixes go to replicas that can keep them.
+- `pending_ttl`: raise it when new prompts take long to prefill (very long prompts), so copies arriving meanwhile go together.
 
 ## Metrics
 
@@ -110,6 +142,7 @@ See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each
 | --- | --- |
 | `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
 | `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `blocks`, `pending` |
+| `hivenet_prefix_checks_total{model, result}` | Predictions checked against the engine's cached tokens: `held` or `missed` |
 
 Share of requests sent to an agent that holds part of the prompt:
 

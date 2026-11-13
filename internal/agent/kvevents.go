@@ -468,9 +468,9 @@ func (a *Agent) consumeKVEvents(endpoint string) {
 	// (tcp://*:port) and connect to any other. The safe setup is the engine
 	// connecting to a local address the agent listens on (no port opened by
 	// the engine); an engine that binds is dialed instead.
-	if err := sub.Listen(endpoint); err != nil {
+	if lerr := sub.Listen(endpoint); lerr != nil {
 		if err := sub.Dial(endpoint); err != nil {
-			log.Debugf("kv events: %s: %v", endpoint, err)
+			a.warnKVEndpoint(endpoint, lerr, err)
 			return
 		}
 	}
@@ -519,4 +519,20 @@ func warnIfRemote(endpoint string) {
 		return
 	}
 	log.Warnf("kv events: %s is not a local address; the engine's KV events carry prompt token IDs and must stay on the host (127.0.0.1) or inside the pod", endpoint)
+}
+
+// kvWarnEvery throttles the warning for an unusable KV-event endpoint.
+const kvWarnEvery = 5 * time.Minute
+
+// warnKVEndpoint logs, at most every kvWarnEvery, that the agent can neither
+// listen on nor connect to the KV-event endpoint (e.g. the port belongs to
+// another service): no cache events reach the routers.
+func (a *Agent) warnKVEndpoint(endpoint string, listenErr, dialErr error) {
+	a.kvWarnMu.Lock()
+	defer a.kvWarnMu.Unlock()
+	if time.Since(a.kvWarnedAt) < kvWarnEvery {
+		return
+	}
+	a.kvWarnedAt = time.Now()
+	log.Warnf("kv events: cannot listen on %s (%v) nor connect to it (%v): the routers get no cache events from this agent", endpoint, listenErr, dialErr)
 }

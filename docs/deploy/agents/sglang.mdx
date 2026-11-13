@@ -424,6 +424,8 @@ python -m sglang.launch_server --model-path MODEL \
 --kv-events-endpoint tcp://127.0.0.1:5557
 ```
 
+Add `--enable-cache-report` to SGLang so it reports the prompt tokens it served from cache: the router uses them to check its predictions ([agent trust](/routing/prefix-aware-routing#agent-trust)).
+
 ## Use SGLang metrics in routing policies
 
 Exclude agents whose token cache is under pressure:

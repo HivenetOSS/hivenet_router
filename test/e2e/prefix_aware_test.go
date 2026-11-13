@@ -18,6 +18,8 @@ import (
 
 	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
+
+	logging "github.com/ipfs/go-log/v2"
 )
 
 // prefixBackend is a fake vLLM: it renders a chat as tokens (one per byte,
@@ -229,4 +231,52 @@ func grepLines(s, sub string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// Prefix-aware routing never logs prompt content or token IDs, even at debug
+// level: the prompts carry a marker that must not appear in any log line.
+func TestPrefixAwareLeavesNoContentInLogs(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "debug.log")
+	old := logging.GetConfig()
+	logging.SetupLogging(logging.Config{Format: logging.JSONOutput, Level: logging.LevelDebug, File: logFile})
+	logging.SetAllLoggers(logging.LevelDebug)
+	t.Cleanup(func() { logging.SetupLogging(old) })
+
+	policyFile := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(policyFile, []byte("routing_policy:\n  strategy: prefix-aware\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.HTTPPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.GRPCPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.MetricsPort = fmt.Sprintf(":%d", freePort(t))
+	cfg.P2PPort = fmt.Sprintf("%d", freePort(t))
+	cfg.PolicyFile = policyFile
+	r := startSiteRouterOn(t, cfg)
+	b := startPrefixBackend(t)
+	startPrefixAgent(t, r, b.URL)
+	waitFor(t, 20*time.Second, "agent registered", func() bool { return healthyAgents(r.baseURL) == 1 })
+
+	const marker = "ZZPRIVATEMARKERZZ"
+	system := marker + " " + strings.Repeat("system rules ", 30)
+	for turn := range 3 {
+		msgs := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": marker + " question " + strings.Repeat("x", 200)}}
+		for k := range turn {
+			msgs = append(msgs, map[string]string{"role": "assistant", "content": "ok"}, map[string]string{"role": "user", "content": fmt.Sprintf("%s follow-up %d", marker, k)})
+		}
+		streamChat(t, r.baseURL, msgs)
+		time.Sleep(200 * time.Millisecond)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("no debug log captured: the check would prove nothing")
+	}
+	for _, leak := range []string{marker, "prompt_token_ids", "token_ids"} {
+		if strings.Contains(string(logs), leak) {
+			t.Errorf("logs contain %q", leak)
+		}
+	}
 }

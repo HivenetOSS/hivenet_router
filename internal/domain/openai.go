@@ -157,6 +157,12 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedTokens is the prompt tokens the engine served from its prefix
+	// cache, and CachedKnown whether the response reported it (vLLM with
+	// --enable-prompt-tokens-details, SGLang with --enable-cache-report;
+	// Anthropic cache_read_input_tokens). Read only, never re-serialized.
+	CachedTokens int  `json:"-"`
+	CachedKnown  bool `json:"-"`
 }
 
 // UnmarshalJSON also accepts the Anthropic usage shape (input_tokens /
@@ -173,9 +179,18 @@ func (u *Usage) UnmarshalJSON(data []byte) error {
 		TotalTokens      int `json:"total_tokens"`
 		InputTokens      int `json:"input_tokens"`
 		OutputTokens     int `json:"output_tokens"`
+		Details          *struct {
+			CachedTokens *int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CacheRead *int `json:"cache_read_input_tokens"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
+	}
+	if raw.Details != nil && raw.Details.CachedTokens != nil {
+		u.CachedTokens, u.CachedKnown = *raw.Details.CachedTokens, true
+	} else if raw.CacheRead != nil {
+		u.CachedTokens, u.CachedKnown = *raw.CacheRead, true
 	}
 	u.PromptTokens = raw.PromptTokens
 	u.CompletionTokens = raw.CompletionTokens

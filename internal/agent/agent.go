@@ -119,6 +119,9 @@ type Agent struct {
 	// kv mirrors the engine's KV cache from its events; nil without
 	// --kv-events-endpoint.
 	kv *kvMirror
+	// kvWarnMu guards kvWarnedAt, the last unusable-endpoint warning.
+	kvWarnMu   sync.Mutex
+	kvWarnedAt time.Time
 
 	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
 	// requests in flight per router peer, and sessions counts the sessions

@@ -226,3 +226,26 @@ func TestPrefixAware_ReportedPrefill(t *testing.T) {
 		t.Errorf("chose %s: a's reported backlog costs more than its cache saves", got.ID)
 	}
 }
+
+// An agent whose predicted hits do not come true counts less: a reliable
+// agent with less in cache wins.
+func TestPrefixAware_Trust(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	ix.Learn("m", honest.ID, []uint64{100}, []int{15}, blocks(15), time.Minute)
+	ix.Learn("m", liar.ID, []uint64{100}, []int{20}, blocks(20), time.Minute) // the memo now knows 20 blocks
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := func() SelectRequest {
+		return SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{1280, 100}}}
+	}
+	cands := []ScoredCandidate{{Agent: liar}, {Agent: honest}}
+	if got := s.Select(cands, req()); got != liar {
+		t.Fatalf("before any check: chose %s, want the agent holding more", got.ID)
+	}
+	for range 10 {
+		ix.Observe(liar.ID, 1280, 0)
+	}
+	if got := s.Select(cands, req()); got != honest {
+		t.Errorf("chose %s: an agent whose predictions never held must count less", got.ID)
+	}
+}

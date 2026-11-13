@@ -174,3 +174,51 @@ func TestLearnText(t *testing.T) {
 		t.Errorf("text entry: %+v", m)
 	}
 }
+
+// Trust: unjudged until trustMinSamples checks; drops when predictions do not
+// come true; small predictions are not checked.
+func TestTrust(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	if !ix.Observe(a1, 100, 0) || ix.Trust(a1) != 1 {
+		t.Error("a check below trustMinPredicted must be ignored")
+	}
+	for range trustMinSamples - 1 {
+		ix.Observe(a1, 1000, 0)
+	}
+	if ix.Trust(a1) != 1 {
+		t.Error("judged before trustMinSamples checks")
+	}
+	if ix.Observe(a1, 1000, 0) {
+		t.Error("a prediction with nothing cached reported as held")
+	}
+	if tr := ix.Trust(a1); tr > 0.4 {
+		t.Errorf("trust %.2f after %d missed predictions", tr, trustMinSamples)
+	}
+	for range 20 {
+		ix.Observe(a2, 1000, 950)
+	}
+	if tr := ix.Trust(a2); tr < 0.9 {
+		t.Errorf("trust %.2f for an agent whose predictions hold", tr)
+	}
+	ix.RemoveAgent(a1)
+	if ix.Trust(a1) != 1 {
+		t.Error("a removed agent keeps its trust")
+	}
+}
+
+// An agent's KV capacity caps its board entries below the global cap.
+func TestAgentCap(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 1000})
+	ix.SetAgentCap(a1, 50)
+	blocks := make([]uint64, 200)
+	for i := range blocks {
+		blocks[i] = uint64(i + 1)
+	}
+	ix.ApplyEvents("m", a1, blocks, nil, false)
+	ix.mu.RLock()
+	n := ix.models["m"].agentBlocks[a1]
+	ix.mu.RUnlock()
+	if n > 50 {
+		t.Errorf("agent holds %d blocks, its cap is 50", n)
+	}
+}
