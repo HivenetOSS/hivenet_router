@@ -590,7 +590,7 @@ Sends requests that start with the same prompt to the same agent, so the engine 
 | `min_load` | Integer | `4` | 1–1000 | The bound is never below this: an agent with fewer requests in flight is never too busy. Keeps affinity at low traffic, where the bound above is 1. Set `1` for the bound alone, e.g. for engines that serve one request at a time |
 | `virtual_nodes` | Integer | `100` | 10–1000 | Ring positions per agent |
 | `kv_threshold` | Number | `0.80` | (0, 1] | Skip an agent whose `kv_cache_utilization` is at or above it. Agents that do not report it are never skipped for it |
-| `prefix_bytes` | Integer | `4096` | 256–65536 | Bytes of the prompt the routing key covers |
+| `prefix_bytes` | Integer | `4096` | 256–65536 | Bytes the routing key covers from each part of the prompt: the instructions, then the first user message |
 
 A field left out, or `0`, takes its default. The load is the same in-flight count `least-loaded` uses.
 

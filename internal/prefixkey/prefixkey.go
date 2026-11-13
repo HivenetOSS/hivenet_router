@@ -21,15 +21,20 @@ const (
 	recordSep = 0x1e
 )
 
-// Prefix returns the bytes that identify the start of the prompt of req,
-// truncated to maxBytes, or nil when there is nothing to hash.
+// Prefix returns the bytes that identify the start of the prompt of req, or
+// nil when there is nothing to hash. It has two parts, each truncated to
+// maxBytes, so it is at most 2×maxBytes long:
 //
-// The prefix is, in order: the top-level system prompt (Anthropic
-// /v1/messages), the raw tool definitions, then every message up to and
-// including the first user message (system and developer instructions in the
-// OpenAI dialect). All turns of a conversation repeat these, so they share the
-// prefix; two conversations of one application differ at the first user
-// message. Only text counts: images and audio are ignored.
+//  1. the instructions: the top-level system prompt (Anthropic /v1/messages),
+//     the raw tool definitions, then every message before the first user
+//     message (system and developer instructions in the OpenAI dialect);
+//  2. the first user message.
+//
+// All turns of a conversation repeat both parts, so they share the prefix;
+// two conversations of one application differ at the first user message.
+// The first user message has its own budget so that a long system prompt
+// cannot crowd it out: otherwise every conversation of an application would
+// share one key. Only text counts: images and audio are ignored.
 func Prefix(req *domain.ChatRequest, maxBytes int) []byte {
 	if req == nil || maxBytes <= 0 {
 		return nil
@@ -42,14 +47,16 @@ func Prefix(req *domain.ChatRequest, maxBytes int) []byte {
 		b.add("tools", string(req.Tools))
 	}
 	for _, m := range req.Messages {
-		if b.full() {
-			break
-		}
-		if text := domain.GetMessageTextContent(m); text != "" {
-			b.add(m.Role, text)
-		}
+		text := domain.GetMessageTextContent(m)
 		if m.Role == "user" {
+			if text != "" {
+				b.max = len(b.buf) + maxBytes // the first user message's own budget
+				b.add(m.Role, text)
+			}
 			break
+		}
+		if text != "" {
+			b.add(m.Role, text)
 		}
 	}
 	if b.n == 0 {

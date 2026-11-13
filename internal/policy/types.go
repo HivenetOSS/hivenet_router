@@ -149,7 +149,8 @@ type PrefixAwareParams struct {
 	// KVThreshold skips an agent whose KV-cache utilisation (0–1) is at or
 	// above it. Agents that do not report it are never skipped for it.
 	KVThreshold float64 `yaml:"kv_threshold" json:"kv_threshold,omitempty"`
-	// PrefixBytes is how many bytes of the prompt the routing key covers.
+	// PrefixBytes is how many bytes the routing key covers from each part of
+	// the prompt (instructions, first user message).
 	PrefixBytes int `yaml:"prefix_bytes" json:"prefix_bytes,omitempty"`
 }
 
