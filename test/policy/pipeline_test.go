@@ -139,7 +139,7 @@ func TestLeastLoadedStrategy(t *testing.T) {
 		loaded("b", 10, 2),
 		loaded("c", 10, 5),
 	}
-	got := s.Select(cands)
+	got := s.Select(cands, policy.SelectRequest{})
 	if got == nil || got.ID.String() != cands[1].Agent.ID.String() {
 		t.Errorf("expected least-loaded agent b to win, got %v", got)
 	}
@@ -152,7 +152,7 @@ func TestLeastLoadedMixedPoolRanksByCount(t *testing.T) {
 		loaded("a", 10, 9),
 		loaded("b", 0, 1),
 	}
-	got := policy.Get("least-loaded").Select(cands)
+	got := policy.Get("least-loaded").Select(cands, policy.SelectRequest{})
 	if got == nil || got.ID.String() != cands[1].Agent.ID.String() {
 		t.Errorf("expected b (1 in flight) to beat a (9 in flight), got %v", got)
 	}
@@ -170,7 +170,7 @@ func TestLeastLoaded_EmptyPanics(t *testing.T) {
 			t.Error("Select with empty candidates must panic (executor contract violation)")
 		}
 	}()
-	policy.Get("least-loaded").Select(nil)
+	policy.Get("least-loaded").Select(nil, policy.SelectRequest{})
 }
 
 // --- Validation / loading -------------------------------------------------

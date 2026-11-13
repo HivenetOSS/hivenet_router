@@ -19,6 +19,7 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixkey"
 	"hivenet_router/internal/provider"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -99,6 +100,10 @@ type RequestProcessor struct {
 	lastEvict     map[peer.ID]time.Time
 	// forwardFn performs the actual forward; defaults to forwardToAgent.
 	forwardFn ForwardFunc
+
+	// keyScope returns the scope of a tenant's routing keys (nil: one scope
+	// for every tenant). See WithRoutingKeyScope.
+	keyScope func(tenantID string) []byte
 }
 
 // NewRequestProcessor creates a new request processor.
@@ -149,6 +154,34 @@ func NewRequestProcessor(
 // Intended for tests.
 func WithPeerCloser(pc PeerCloser) ProcessorOption {
 	return func(p *RequestProcessor) { p.peers = pc }
+}
+
+// WithRoutingKeyScope sets the scope of a tenant's routing keys. The routing
+// key must follow the engine's prefix cache: when the cache is separated per
+// tenant (cache salt), scope returns the tenant so tenants never share a key;
+// when the cache is shared, leave it unset so the same prefix routes to the
+// same replica whoever sends it.
+func WithRoutingKeyScope(scope func(tenantID string) []byte) ProcessorOption {
+	return func(p *RequestProcessor) { p.keyScope = scope }
+}
+
+// countTokensPath is the Anthropic token-counting endpoint: it holds no KV
+// cache, so it gets no routing key.
+const countTokensPath = "/v1/messages/count_tokens"
+
+// routingKey returns the request's routing key covering maxBytes of its
+// prompt, or nil when it has no prompt text (embeddings, rerank, token
+// counting, empty prompt).
+func (p *RequestProcessor) routingKey(pending *domain.PendingRequest, capability string, maxBytes int) []byte {
+	if capability != domain.CapabilityLLM || pending.Path == countTokensPath {
+		return nil
+	}
+	prefix := prefixkey.Prefix(pending.Request, maxBytes)
+	var scope []byte
+	if p.keyScope != nil && prefix != nil {
+		scope = p.keyScope(pending.TenantID)
+	}
+	return prefixkey.Key(scope, prefix)
 }
 
 // WithForwardFunc overrides the per-attempt forward function. Intended for tests.
@@ -253,6 +286,9 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		capability = domain.CapabilityLLM
 	}
 	session := p.executor.NewSession(pending.Request.Model, capability)
+	if n := session.KeyPrefixBytes(); n > 0 {
+		session.SetKey(p.routingKey(pending, capability, n))
+	}
 
 	// Inherit the trace context from the inbound HTTP request so spans
 	// created here become children of the Gin middleware root span.

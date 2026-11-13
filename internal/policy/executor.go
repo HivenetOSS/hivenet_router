@@ -450,7 +450,26 @@ type Session struct {
 	// lastGates holds the gate funnel from the most recent zero-candidate buildCandidates call.
 	// Consumed by advanceStep("no_candidates") to attach the funnel to the step trace.
 	lastGates []gateDiag
+	// key is the request's routing key, passed to every strategy (SetKey).
+	key []byte
 }
+
+// KeyPrefixBytes is how many bytes of the prompt the routing key must cover
+// for this session's steps: the largest PrefixBytes of a KeyedStrategy among
+// them. Zero means no step routes on the key, so the caller skips computing it.
+func (s *Session) KeyPrefixBytes() int {
+	n := 0
+	for i := range s.steps {
+		if ks, ok := s.steps[i].strategy.(KeyedStrategy); ok {
+			n = max(n, ks.PrefixBytes())
+		}
+	}
+	return n
+}
+
+// SetKey sets the request's routing key (see internal/prefixkey). Every
+// Select of the session, retries included, passes it to the strategy.
+func (s *Session) SetKey(key []byte) { s.key = key }
 
 // Select picks the next eligible agent, advancing through fallback steps as needed.
 // Returns ErrAllStepsExhausted when the entire chain is consumed.
@@ -509,7 +528,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			continue
 		}
 
-		chosen := step.strategy.Select(candidates)
+		chosen := step.strategy.Select(candidates, SelectRequest{Key: s.key})
 
 		// Atomically claim a slot. If lost to a race, retry selection without counting
 		// a forward try — the agent is not "failed", just momentarily at capacity.

@@ -397,6 +397,22 @@ When two agents have the same load, Hivenet Router currently resolves the tie us
 
 Because streaming requests hold their agent slot until the stream fully drains, an agent serving active streams has a higher load than an idle one. `least-loaded` therefore spreads concurrent streaming traffic across agents instead of repeatedly selecting the first agent in peer-ID order.
 
+### Routing key
+
+A strategy that routes on the start of the prompt receives a **routing key**: a SHA-256 hash of the prompt prefix. Requests that start the same way get the same key. The router computes it only when a step of the request's policy uses such a strategy. `least-loaded` does not, so it adds no work.
+
+The prefix is, in order, up to the strategy's byte limit:
+
+1. the top-level `system` prompt of `/v1/messages`
+2. the raw `tools` definitions
+3. every message up to and including the first `user` message (`system` and `developer` messages of `/v1/chat/completions` come first)
+
+Only text counts: images and audio are ignored, and `content` may be a string or an array of parts. All turns of a conversation repeat this prefix, so they share the key. Two conversations of one application differ at their first user message.
+
+Embeddings, rerank, `/v1/messages/count_tokens` and requests with no prompt text get no key.
+
+The prompt and the key are never logged.
+
 The following strategies are not implemented:
 
 - `lowest-srtt`

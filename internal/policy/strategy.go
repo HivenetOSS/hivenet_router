@@ -9,7 +9,22 @@ import "hivenet_router/internal/domain"
 // Implementations must not mutate the candidates slice.
 // To add a new strategy: implement this interface and register it in registry below.
 type Strategy interface {
-	Select(candidates []ScoredCandidate) *domain.Agent
+	Select(candidates []ScoredCandidate, req SelectRequest) *domain.Agent
+}
+
+// SelectRequest carries what a strategy may know about the request it routes.
+type SelectRequest struct {
+	// Key is the request's routing key (see internal/prefixkey): requests with
+	// the same prompt prefix share it. Nil when the request has no text to
+	// hash or no step of its policy asked for it.
+	Key []byte
+}
+
+// KeyedStrategy is implemented by a strategy that routes on the request's
+// routing key. PrefixBytes is how many bytes of the prompt the key covers;
+// zero means the strategy needs no key.
+type KeyedStrategy interface {
+	PrefixBytes() int
 }
 
 // registry maps strategy names to their implementations.
@@ -31,7 +46,7 @@ func Get(name string) Strategy {
 // Ties are broken by iteration order (non-deterministic for equal load).
 type leastLoadedStrategy struct{}
 
-func (leastLoadedStrategy) Select(candidates []ScoredCandidate) *domain.Agent {
+func (leastLoadedStrategy) Select(candidates []ScoredCandidate, _ SelectRequest) *domain.Agent {
 	if len(candidates) == 0 {
 		// Contract violation: executor must never call Select with an empty slice.
 		// Panic with a clear message to surface this as a programming error during testing.
