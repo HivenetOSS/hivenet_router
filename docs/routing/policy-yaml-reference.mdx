@@ -165,6 +165,7 @@ routing_policy:
 | `exclude_if` | Object | No | No metric gates | Live operational thresholds |
 | `strategy` | String | Yes | None | Candidate-ranking strategy |
 | `max_tries` | Integer | No | Router-wide value | Failed forwards allowed in this step |
+| `prefix_aware` | Object | No | Defaults | Tunes `prefix-aware`; rejected with any other strategy |
 
 The router rejects a policy whose primary step has no `strategy`.
 
@@ -550,9 +551,9 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 ## Ranking strategy
 
-Every policy step requires a ranking strategy.
+Every policy step requires a ranking strategy: `least-loaded` or `prefix-aware`.
 
-The only implemented strategy is:
+### least-loaded
 
 ```yaml
 strategy: least-loaded
@@ -567,12 +568,39 @@ max(this router's in-flight requests to the agent,
 
 The agent reports its in-flight requests from all routers about every 500 ms. The lowest load ranks first.
 
+### prefix-aware
+
+```yaml
+strategy: prefix-aware
+prefix_aware:
+  kv_threshold: 0.92
+  max_waiting: 8
+  busy_factor: 2.0
+  tie_epsilon: 0.05
+  prefill_rate: 10000
+  predicted_ttl: 120s
+  pending_ttl: 5s
+```
+
+Sends a chat request to the candidate with the lowest estimated time to first token, counting the part of the prompt the candidate already holds in its KV cache as free. See [Prefix-aware routing](/routing/prefix-aware-routing).
+
+| Field | Type | Default | Range | Purpose |
+| --- | --- | --: | --- | --- |
+| `kv_threshold` | Number | `0.92` | (0, 1] | Exclude a candidate whose engine reports a KV-cache use at or above it |
+| `max_waiting` | Integer | `8` | 0–1000 | Exclude a candidate whose engine reports more waiting requests |
+| `busy_factor` | Number | `2.0` | 1–10 | Exclude a candidate whose requests in flight are above this times the candidates' mean (and above 4) |
+| `tie_epsilon` | Number | `0.05` | 0–1 | Candidates within this share of the best estimate (or 5 ms) are a tie, broken the same way on every router |
+| `prefill_rate` | Number | `10000` | 100–10,000,000 | Assumed prefill speed in tokens per second, used to compare tokens to seconds |
+| `predicted_ttl` | Duration | `120s` | 1s–1h | How long blocks sent to or served by an agent count as held there |
+| `pending_ttl` | Duration | `5s` | 100ms–1m | How long new text keeps going to the agent it was first sent to |
+
+A field left out takes its default. `prefix_aware` is rejected on a step with another strategy.
+
 The following names are not currently supported:
 
 ```text
 lowest-srtt
 round-robin
-prefix-aware
 lowest-kv-cache
 lowest-queue
 best-ttft

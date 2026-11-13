@@ -1056,6 +1056,25 @@ sum by (model, reason) (
 )
 ```
 
+### Prefix-aware routing
+
+```promql
+hivenet_prefix_routing_total
+hivenet_prefix_index_entries
+```
+
+`hivenet_prefix_routing_total` counts the selections of the [`prefix-aware`](/routing/prefix-aware-routing) strategy, per `model` and `outcome`:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `hit` | The chosen agent holds blocks of the prompt |
+| `pending` | The same new text was just sent to the chosen agent |
+| `miss` | No candidate holds anything of the prompt |
+| `busy` | Every candidate was busy: `least-loaded` chose |
+| `no_anchor` | The request had no prompt text: `least-loaded` chose |
+
+`hivenet_prefix_index_entries` is the size of the router's prefix memory, per `kind`: `memo` (message prefixes it can match), `blocks` (cached blocks on its board), `pending` (notes for new text in flight). It has no model, tenant or agent label.
+
 ### Policy reloads
 
 ```promql

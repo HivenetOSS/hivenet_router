@@ -260,6 +260,11 @@ type RouterMetrics struct {
 	// Label: model.
 	queueWaitSeconds *prometheus.HistogramVec
 
+	// prefixRoutingTotal counts prefix-aware selections per model and outcome.
+	prefixRoutingTotal *prometheus.CounterVec
+	// prefixIndexEntries is the size of the prefix memory, per kind.
+	prefixIndexEntries *prometheus.GaugeVec
+
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
 	policyReloadTotal *prometheus.CounterVec
@@ -900,6 +905,20 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		prefixRoutingTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_routing_total",
+				Help: "Prefix-aware routing selections per model and outcome: hit (the chosen agent holds blocks of the prompt), pending (the same new text was just sent there), miss, busy (every candidate busy: least-loaded), no_anchor (no prompt text: least-loaded).",
+			},
+			[]string{"model", "outcome"},
+		),
+		prefixIndexEntries: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_index_entries",
+				Help: "Entries in the router's prefix memory, per kind: memo (text prefixes), blocks (cached blocks on the board), pending (notes for text in flight).",
+			},
+			[]string{"kind"},
+		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
@@ -1038,6 +1057,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueDepth,
 		m.admissionQueueDepth,
 		m.queueWaitSeconds,
+		m.prefixRoutingTotal,
+		m.prefixIndexEntries,
 		// Policy management
 		m.policyReloadTotal,
 		// Semantic alias routing
@@ -1725,6 +1746,19 @@ func (m *RouterMetrics) AdmissionQueueDepthUpdated(model string, depth int) {
 // Implements policy.QueueMetrics.
 func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64) {
 	m.queueWaitSeconds.With(prometheus.Labels{"model": model}).Observe(durationSeconds)
+}
+
+// PrefixRouted counts one prefix-aware selection.
+// Implements policy.PrefixMetrics.
+func (m *RouterMetrics) PrefixRouted(model, outcome string) {
+	m.prefixRoutingTotal.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
+}
+
+// PrefixIndexSize sets the prefix-memory gauges.
+func (m *RouterMetrics) PrefixIndexSize(memo, blocks, pending int) {
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo"}).Set(float64(memo))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "blocks"}).Set(float64(blocks))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
 }
 
 // PolicyReload increments the policy reload counter.

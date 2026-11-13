@@ -1,0 +1,99 @@
+---
+title: "Prefix-aware routing"
+description: "Send each chat request to the replica that already holds the start of its prompt in its KV cache, without tokenizing the request in the router."
+sidebarTitle: "Prefix-aware routing"
+---
+
+Engines such as vLLM keep the attention state of recent prompts in their KV cache. A request whose prompt starts with tokens a replica already holds skips the prefill of that part, and its first token comes much sooner. The cache lives inside one replica, so the gain depends on sending the request to the right one.
+
+The `prefix-aware` strategy does that. It sends a chat request to the candidate with the lowest estimated time to first token, counting the part of the prompt that candidate already holds as free.
+
+```yaml
+routing_policy:
+  strategy: prefix-aware
+```
+
+The strategy is off unless a policy step names it. It applies to chat requests (`/v1/chat/completions` and `/v1/messages`). Embeddings, rerank and `/v1/messages/count_tokens` are routed by `least-loaded`.
+
+## How it works
+
+The router never tokenizes a request and never stores prompt text.
+
+1. **Anchors.** For each request the router computes one *anchor* per message prefix: a keyed hash of the text of messages 1 to *k*, plus the model and the tool definitions. All turns of a conversation repeat their earlier messages, so a later turn shares the earlier turn's anchors.
+2. **What agents served.** The router sends the anchors to the agent with the request. A vLLM agent asks the engine for the prompt's token IDs (`return_token_ids`), removes them from the response before it leaves the agent, and hashes the prompt into keyed blocks of 64 tokens. It then tells every router of the site which blocks each anchor maps to.
+3. **Memo and board.** Each router keeps a *memo* (anchor → blocks) and a *board* (block → the agents that recently served it). A new request is matched through the memo, without tokenizing it, and the board tells how many leading blocks each candidate holds.
+4. **New text.** Text the memo does not know yet gets a short *pending note*: copies of the same new text that arrive before the agent reports go to the same agent.
+5. **Choice.** Busy candidates are excluded first. Among the rest, the strategy estimates for each candidate:
+
+   ```text
+   (prompt tokens queued on it by this router + prompt tokens it does not hold) / prefill_rate
+     + running requests reported by its engine × inter-token latency
+   ```
+
+   The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
+
+Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
+
+<Note>
+Everything the strategy knows is advice. The engine checks its own cache, so a wrong entry only makes a request slower, never wrong.
+</Note>
+
+## Engines
+
+| Engine | What the router learns |
+| --- | --- |
+| vLLM | The blocks of every `/v1/chat/completions` prompt the agent served, from the token IDs the engine returns. Nothing to configure on the engine. `/v1/messages` requests use what was learned (the top-level `system` counts as a first system message) but do not add to it |
+| SGLang, llama.cpp, Ollama, custom | Nothing yet: requests are routed by load and by pending notes only |
+
+For vLLM, the agent finds the token that opens each message in the model's chat template (for example `<|im_start|>`) at start-up, through the engine's `/tokenize`. With it, the router learns each message prefix, so conversations that share a system prompt find it. A template without such a token reports whole prompts only: the turns of one conversation still find each other.
+
+If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
+
+## Busy agents
+
+A candidate is excluded, whatever it holds, when:
+
+- its engine reports a KV-cache use at or above `kv_threshold`;
+- its engine reports more than `max_waiting` requests waiting;
+- its requests in flight are above `busy_factor` times the candidates' mean, and above 4. In flight means what this router has there or what the agent last reported, whichever is larger; requests that already finished never count.
+
+When every candidate is excluded, `least-loaded` chooses.
+
+## Tuning
+
+```yaml
+routing_policy:
+  strategy: prefix-aware
+  prefix_aware:
+    kv_threshold: 0.92
+    max_waiting: 8
+    busy_factor: 2.0
+    tie_epsilon: 0.05
+    prefill_rate: 10000
+    predicted_ttl: 120s
+    pending_ttl: 5s
+```
+
+See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field.
+
+## Metrics
+
+| Metric | Meaning |
+| --- | --- |
+| `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
+| `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `blocks`, `pending` |
+
+Share of requests sent to an agent that holds part of the prompt:
+
+```promql
+sum by (model) (rate(hivenet_prefix_routing_total{outcome="hit"}[5m]))
+/
+sum by (model) (rate(hivenet_prefix_routing_total[5m]))
+```
+
+## Limits
+
+- The board records what agents served recently, not what their engines still hold: a block the engine evicted counts as held until `predicted_ttl` expires. The engine's own cache check keeps the answer correct.
+- Each router counts only the prompt tokens it sent itself in an agent's queue.
+- Text shared *inside* one message (for example a document and a different question in the same user message) is not matched: anchors cover whole messages.
+- The router's memory is per process and rebuilds from new traffic after a restart.

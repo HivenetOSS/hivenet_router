@@ -110,6 +110,10 @@ type Agent struct {
 	// sees the backend's real load, not only the requests it sent itself.
 	inFlight atomic.Int64
 
+	// prefix is the prefix-aware routing state; nil when the engine cannot
+	// return prompt tokens (nothing is reported then).
+	prefix *prefixState
+
 	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
 	// requests in flight per router peer, and sessions counts the sessions
 	// open with each router peer (one router may be listed under several
@@ -214,6 +218,7 @@ func (a *Agent) Run() error {
 	}
 	a.cfg.Model = model
 	log.Infof("Model ready: %s", a.cfg.Model)
+	a.initPrefix()
 
 	var node host.Host
 	var httpHost *p2phttp.Host
@@ -552,8 +557,9 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 	// goroutines; they have exited before the next session reuses rs.
 	pushDone := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); a.runRoutingSignalPusher(rs, pushDone) }()
+	go func() { defer wg.Done(); a.runPrefixStatePusher(rs, pushDone) }()
 	go func() { defer wg.Done(); a.runReAuth(rs, node, pushDone, sessionTTL) }()
 	defer wg.Wait()
 	defer close(pushDone)
@@ -880,6 +886,8 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	defer a.inFlight.Add(-1)
 	r, done := a.track(r)
 	defer done()
+	prefixHeader := r.Header.Get(domain.HeaderPrefixAnchors)
+	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -938,6 +946,8 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatReq.RawBytes = rawBytes
+	var pr *prefixRequest
+	chatReq.RawBytes, pr = a.preparePrefix(prefixHeader, &chatReq)
 
 	// Record request attributes on the span.
 	span.SetAttributes(
@@ -952,10 +962,16 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// Streaming: pipe backend SSE directly to the libp2p response writer
 		// without buffering. forwardStreamingResponse writes headers+body to w,
 		// so we must not write anything to w after it returns on success.
+		opts := []EngineOption{WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
+			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout)}
+		if pr != nil {
+			opts = append(opts, WithStreamFilter(func(dst io.Writer) (io.Writer, func()) {
+				fw := &tokenFieldWriter{a: a, pr: pr, dst: dst}
+				return fw, fw.flush
+			}))
+		}
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
-			chatReq.RawBytes, a.engine.Name(),
-			WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
-			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout))
+			chatReq.RawBytes, a.engine.Name(), opts...)
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
 			span.RecordError(err)
@@ -999,6 +1015,10 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErrorJSON(w, routerErr)
 		return
+	}
+
+	if pr != nil {
+		respBytes = a.handleTokenFields(pr, respBytes)
 	}
 
 	inferenceMs := float64(time.Since(start).Milliseconds())
@@ -1066,6 +1086,7 @@ func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	defer a.inFlight.Add(-1)
 	r, done := a.track(r)
 	defer done()
+	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 

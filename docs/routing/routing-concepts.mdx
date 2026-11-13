@@ -368,9 +368,7 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 ## Ranking strategy
 
-After matching and gates, Hivenet Router ranks the surviving agents.
-
-The only implemented strategy is:
+After matching and gates, Hivenet Router ranks the surviving agents with the step's strategy: `least-loaded` (the default) or [`prefix-aware`](/routing/prefix-aware-routing), which sends a chat request to the agent that already holds the start of its prompt in cache.
 
 ```yaml
 strategy: least-loaded
@@ -401,7 +399,6 @@ The following strategies are not implemented:
 
 - `lowest-srtt`
 - `round-robin`
-- `prefix-aware`
 - `lowest-kv-cache`
 - `lowest-queue`
 - `best-ttft`
@@ -729,7 +726,7 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
     - an incomplete provider fallback
     - invalid YAML indentation
 
-    Only `least-loaded` is currently accepted as a strategy.
+    Only `least-loaded` and `prefix-aware` are accepted as strategies, and `prefix_aware` is accepted only with `prefix-aware`.
   </Accordion>
 
   <Accordion title="An agent does not match">

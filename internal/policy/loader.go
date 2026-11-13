@@ -56,9 +56,9 @@ var knownShedIfFields = map[string]struct{}{
 // Add entries here as new strategies are written (see strategy.go).
 var knownStrategies = map[string]struct{}{
 	"least-loaded": {},
+	"prefix-aware": {},
 	// "lowest-srtt":  {},  // add when implemented
 	// "round-robin":  {},
-	// "prefix-aware": {},
 }
 
 // engineSpecificStrategies require engine: vllm in the match block.
@@ -187,10 +187,10 @@ func validateStep(name string, step PolicyStep) error {
 	}
 	if _, ok := knownStrategies[step.Strategy]; !ok {
 		if _, isEngine := engineSpecificStrategies[step.Strategy]; isEngine {
-			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: least-loaded",
+			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: least-loaded, prefix-aware",
 				name, step.Strategy)
 		}
-		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: least-loaded",
+		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: least-loaded, prefix-aware",
 			name, step.Strategy)
 	}
 	// Engine-specific strategies (future) require engine: vllm in the match block.
@@ -205,7 +205,7 @@ func validateStep(name string, step PolicyStep) error {
 			return err
 		}
 	}
-	return nil
+	return validatePrefixAware(name, step)
 }
 
 // DirSnapshot is the result of loading a policy model directory.

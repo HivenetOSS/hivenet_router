@@ -426,6 +426,12 @@ curl http://192.168.1.100:8080/admin/routing-table \
         }'
 ```
 
+## Prefix-aware routing
+
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent asks vLLM for each prompt's token IDs (`return_token_ids`), removes them from the response, and reports keyed hashes of the prompt's blocks to every router. Nothing needs to be configured on vLLM; tested with vLLM 0.31.
+
+At start-up the agent calls vLLM's `/tokenize` twice to find the token that opens each message in the model's chat template. If it finds none, it reports whole prompts only and logs it once.
+
 ## Use vLLM metrics in routing policies
 
 You can exclude agents whose KV cache is under pressure:
