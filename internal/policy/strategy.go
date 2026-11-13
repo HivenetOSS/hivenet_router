@@ -18,6 +18,11 @@ type SelectRequest struct {
 	// the same prompt prefix share it. Nil when the request has no text to
 	// hash or no step of its policy asked for it.
 	Key []byte
+	// Model is the requested model.
+	Model string
+	// Pool is every agent registered for the model, candidates or not (nil
+	// when the caller has no pool: the candidates stand in for it).
+	Pool []*domain.Agent
 }
 
 // KeyedStrategy is implemented by a strategy that routes on the request's
@@ -33,7 +38,8 @@ var registry = map[string]Strategy{
 	"least-loaded": leastLoadedStrategy{},
 	// "lowest-srtt":  lowestSRTTStrategy{},   // add when implemented
 	// "round-robin":  roundRobinStrategy{},   // add when implemented
-	// "prefix-aware": prefixAwareStrategy{},  // add when implemented
+	// "prefix-aware" is built per policy step from its prefix_aware block
+	// (Executor.resolve), so it is not a registry entry.
 }
 
 // Get returns the Strategy registered for name, or nil if not found.

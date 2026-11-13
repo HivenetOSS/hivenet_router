@@ -1056,6 +1056,36 @@ sum by (model, reason) (
 )
 ```
 
+### Prefix-aware routing
+
+```promql
+hivenet_prefix_routing_total
+```
+
+Counts the selections of the [`prefix-aware`](/routing/routing-concepts#prefix-aware-routing) strategy.
+
+Labels:
+
+```text
+model
+outcome
+```
+
+| `outcome` | Meaning |
+| --- | --- |
+| `home` | The key's first agent on the ring was taken |
+| `spill` | A later agent was taken: the earlier ones were busy, gated, failed, or over `kv_threshold` |
+| `fallback` | No candidate qualified: `least-loaded` chose |
+| `no_key` | The request had no prompt text: `least-loaded` chose |
+
+Share of requests that reached their first agent:
+
+```promql
+sum by (model) (rate(hivenet_prefix_routing_total{outcome="home"}[5m]))
+/
+sum by (model) (rate(hivenet_prefix_routing_total[5m]))
+```
+
 ### Policy reloads
 
 ```promql

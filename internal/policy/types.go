@@ -126,6 +126,31 @@ type PolicyStep struct {
 	Strategy  string                   `yaml:"strategy"   json:"strategy"`
 	// MaxTries caps forward attempts for this step. 0 means use the global default.
 	MaxTries int `yaml:"max_tries" json:"max_tries,omitempty"`
+	// PrefixAware tunes the prefix-aware strategy; only valid with it. Nil or
+	// a zero field means the default.
+	PrefixAware *PrefixAwareParams `yaml:"prefix_aware" json:"prefix_aware,omitempty"`
+}
+
+// PrefixAwareParams tunes the prefix-aware strategy. A zero field means the
+// default (DefaultPrefix* in prefix_aware.go).
+type PrefixAwareParams struct {
+	// LoadFactor bounds an agent's load to LoadFactor times its fair share of
+	// the requests in flight (CHWBL's 1+ε). 1 balances strictly; higher keeps
+	// more requests on the agent that has the prefix cached.
+	LoadFactor float64 `yaml:"load_factor" json:"load_factor,omitempty"`
+	// MinLoad is the least the bound can be: an agent with fewer requests in
+	// flight is never too busy. At low traffic the CHWBL bound is 1, so one
+	// request in flight (or one just finished, still in the agent's last
+	// report) would send the next turn of a conversation elsewhere. 1 keeps
+	// the bound exactly CHWBL's.
+	MinLoad int `yaml:"min_load" json:"min_load,omitempty"`
+	// VirtualNodes is the number of ring positions per agent.
+	VirtualNodes int `yaml:"virtual_nodes" json:"virtual_nodes,omitempty"`
+	// KVThreshold skips an agent whose KV-cache utilisation (0–1) is at or
+	// above it. Agents that do not report it are never skipped for it.
+	KVThreshold float64 `yaml:"kv_threshold" json:"kv_threshold,omitempty"`
+	// PrefixBytes is how many bytes of the prompt the routing key covers.
+	PrefixBytes int `yaml:"prefix_bytes" json:"prefix_bytes,omitempty"`
 }
 
 // FallbackStep is a PolicyStep with an optional name used in logs and metrics.

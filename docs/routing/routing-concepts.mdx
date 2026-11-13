@@ -370,7 +370,7 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 After matching and gates, Hivenet Router ranks the surviving agents.
 
-The only implemented strategy is:
+Two strategies are implemented: `least-loaded` (the default) and `prefix-aware`.
 
 ```yaml
 strategy: least-loaded
@@ -413,11 +413,24 @@ Embeddings, rerank, `/v1/messages/count_tokens` and requests with no prompt text
 
 The prompt and the key are never logged.
 
+### Prefix-aware routing
+
+```yaml
+strategy: prefix-aware
+```
+
+`prefix-aware` sends requests with the same routing key to the same agent, so engines with a prefix cache (vLLM, SGLang, llama.cpp) skip recomputing that prefix. It uses consistent hashing with bounded loads:
+
+1. Every agent of the model takes several positions on a hash ring, derived from its peer ID. Every router that serves the same agents builds the same ring, so they all pick the same agent for a key without sharing any state.
+2. The router walks the ring from the key's position and takes the first candidate (one that passed matching and gates and has not failed in this step) that is within the load bound and whose KV cache, when reported, is below `kv_threshold`.
+3. If no candidate qualifies, or the request has no routing key, it uses `least-loaded`.
+
+The ring changes only when an agent of the model joins or leaves; when one leaves, only its keys move. A busy or excluded agent is skipped, so its requests go to the next agent on the ring, and a retry after a failure does too. See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for the parameters and `hivenet_prefix_routing_total` for how often the first agent was taken.
+
 The following strategies are not implemented:
 
 - `lowest-srtt`
 - `round-robin`
-- `prefix-aware`
 - `lowest-kv-cache`
 - `lowest-queue`
 - `best-ttft`
@@ -638,7 +651,7 @@ For each policy step, Hivenet Router evaluates agents in this order:
 5. **Previous failures**<br />Remove agents that already produced a forward failure in the current step.
 6. **Capacity gate**<br />Remove agents whose load is greater than or equal to their declared capacity. Agents registered over the network declare none and skip this gate.
 7. **Dynamic gates**<br />Apply the configured `exclude_if` thresholds.
-8. **Strategy ranking**<br />Rank the remaining candidates with `least-loaded`.
+8. **Strategy ranking**<br />Rank the remaining candidates with the step's strategy (`least-loaded` or `prefix-aware`).
 9. **Atomic slot acquisition**<br />Attempt to reserve one capacity slot on the selected agent.
 10. **Retry selection after a race**<br />If another request acquired the final slot first, select again without consuming a forward try.
 11. **Wait queue**<br />If all eligible agents are full and queueing is enabled, wait for capacity and evaluate again.
@@ -745,7 +758,7 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
     - an incomplete provider fallback
     - invalid YAML indentation
 
-    Only `least-loaded` is currently accepted as a strategy.
+    Only `least-loaded` and `prefix-aware` are accepted as strategies, and `prefix_aware` is accepted only with `prefix-aware`.
   </Accordion>
 
   <Accordion title="An agent does not match">

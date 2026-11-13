@@ -372,6 +372,7 @@ func New(cfg *config.Config) (*Router, error) {
 	evaluator := policy.NewEvaluator(store, counters)
 	executor := policy.NewExecutor(agents, evaluator, activePolicy, cfg.MaxTriesPerStep, cfg.QueueDepth)
 	executor.SetQueueMetrics(routerMetrics)
+	executor.SetPrefixMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so

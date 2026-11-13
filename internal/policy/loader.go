@@ -56,9 +56,9 @@ var knownShedIfFields = map[string]struct{}{
 // Add entries here as new strategies are written (see strategy.go).
 var knownStrategies = map[string]struct{}{
 	"least-loaded": {},
+	"prefix-aware": {},
 	// "lowest-srtt":  {},  // add when implemented
 	// "round-robin":  {},
-	// "prefix-aware": {},
 }
 
 // engineSpecificStrategies require engine: vllm in the match block.
@@ -187,10 +187,10 @@ func validateStep(name string, step PolicyStep) error {
 	}
 	if _, ok := knownStrategies[step.Strategy]; !ok {
 		if _, isEngine := engineSpecificStrategies[step.Strategy]; isEngine {
-			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: least-loaded",
+			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: least-loaded, prefix-aware",
 				name, step.Strategy)
 		}
-		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: least-loaded",
+		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: least-loaded, prefix-aware",
 			name, step.Strategy)
 	}
 	// Engine-specific strategies (future) require engine: vllm in the match block.
@@ -204,6 +204,31 @@ func validateStep(name string, step PolicyStep) error {
 		if err := validateThreshold(name, field, rule); err != nil {
 			return err
 		}
+	}
+	return validatePrefixAware(name, step)
+}
+
+// validatePrefixAware checks the prefix_aware block: only with the
+// prefix-aware strategy, and every set field within its range.
+func validatePrefixAware(name string, step PolicyStep) error {
+	p := step.PrefixAware
+	if p == nil {
+		return nil
+	}
+	if step.Strategy != "prefix-aware" {
+		return fmt.Errorf("policy: step %q: prefix_aware is only valid with strategy: prefix-aware", name)
+	}
+	switch {
+	case p.LoadFactor != 0 && (p.LoadFactor < 1 || p.LoadFactor > 10):
+		return fmt.Errorf("policy: step %q: prefix_aware.load_factor must be between 1 and 10, got %g", name, p.LoadFactor)
+	case p.MinLoad != 0 && (p.MinLoad < 1 || p.MinLoad > 1000):
+		return fmt.Errorf("policy: step %q: prefix_aware.min_load must be between 1 and 1000, got %d", name, p.MinLoad)
+	case p.VirtualNodes != 0 && (p.VirtualNodes < 10 || p.VirtualNodes > 1000):
+		return fmt.Errorf("policy: step %q: prefix_aware.virtual_nodes must be between 10 and 1000, got %d", name, p.VirtualNodes)
+	case p.KVThreshold != 0 && (p.KVThreshold <= 0 || p.KVThreshold > 1):
+		return fmt.Errorf("policy: step %q: prefix_aware.kv_threshold must be in (0, 1], got %g", name, p.KVThreshold)
+	case p.PrefixBytes != 0 && (p.PrefixBytes < 256 || p.PrefixBytes > 65536):
+		return fmt.Errorf("policy: step %q: prefix_aware.prefix_bytes must be between 256 and 65536, got %d", name, p.PrefixBytes)
 	}
 	return nil
 }

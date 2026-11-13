@@ -165,6 +165,7 @@ routing_policy:
 | `exclude_if` | Object | No | No metric gates | Live operational thresholds |
 | `strategy` | String | Yes | None | Candidate-ranking strategy |
 | `max_tries` | Integer | No | Router-wide value | Failed forwards allowed in this step |
+| `prefix_aware` | Object | No | Defaults below | Tunes `prefix-aware`; rejected with any other strategy |
 
 The router rejects a policy whose primary step has no `strategy`.
 
@@ -552,7 +553,9 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 Every policy step requires a ranking strategy.
 
-The only implemented strategy is:
+Two strategies are implemented: `least-loaded` and `prefix-aware`.
+
+### least-loaded
 
 ```yaml
 strategy: least-loaded
@@ -567,12 +570,35 @@ max(this router's in-flight requests to the agent,
 
 The agent reports its in-flight requests from all routers about every 500 ms. The lowest load ranks first.
 
+### prefix-aware
+
+```yaml
+strategy: prefix-aware
+prefix_aware:
+  load_factor: 1.25
+  min_load: 4
+  virtual_nodes: 100
+  kv_threshold: 0.80
+  prefix_bytes: 4096
+```
+
+Sends requests that start with the same prompt to the same agent, so the engine reuses its prefix cache. The [routing key](/routing/routing-concepts#routing-key) picks a point on a ring of the model's agents; the router walks the ring from that point and takes the first candidate that is within the load bound and, when the engine reports it, whose KV cache is below `kv_threshold`. If none is, it falls back to `least-loaded`. A request with no prompt text uses `least-loaded`.
+
+| Field | Type | Default | Range | Purpose |
+| --- | --- | --: | --- | --- |
+| `load_factor` | Number | `1.25` | 1–10 | An agent takes at most `ceil(load_factor × (requests in flight + 1) / candidates)` requests. Higher keeps more requests on the agent that has the prefix cached |
+| `min_load` | Integer | `4` | 1–1000 | The bound is never below this: an agent with fewer requests in flight is never too busy. Keeps affinity at low traffic, where the bound above is 1. Set `1` for the bound alone, e.g. for engines that serve one request at a time |
+| `virtual_nodes` | Integer | `100` | 10–1000 | Ring positions per agent |
+| `kv_threshold` | Number | `0.80` | (0, 1] | Skip an agent whose `kv_cache_utilization` is at or above it. Agents that do not report it are never skipped for it |
+| `prefix_bytes` | Integer | `4096` | 256–65536 | Bytes of the prompt the routing key covers |
+
+A field left out, or `0`, takes its default. The load is the same in-flight count `least-loaded` uses.
+
 The following names are not currently supported:
 
 ```text
 lowest-srtt
 round-robin
-prefix-aware
 lowest-kv-cache
 lowest-queue
 best-ttft
@@ -651,6 +677,7 @@ Each fallback entry supports:
 | `exclude_if` | Object | No | Dynamic metric gates |
 | `strategy` | String | Yes | Candidate-ranking strategy |
 | `max_tries` | Integer | No | Step-specific forward budget |
+| `prefix_aware` | Object | No | Tunes `prefix-aware` in this step |
 
 When `name` is omitted, Hivenet Router generates a name based on the step’s array position.
 

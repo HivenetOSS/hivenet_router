@@ -154,7 +154,10 @@ type Executor struct {
 	queueMu sync.RWMutex
 	queues  map[string]*WaitQueue // keyed by model name
 
-	queueMetrics QueueMetrics // optional; nil in tests
+	queueMetrics  QueueMetrics  // optional; nil in tests
+	prefixMetrics PrefixMetrics // optional; nil in tests
+
+	rings ringCache // prefix-aware hash rings, per model
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -171,6 +174,12 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 	}
 	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
+}
+
+// SetPrefixMetrics wires an observer of prefix-aware selections.
+// Must be called before any requests are processed (typically once at startup).
+func (e *Executor) SetPrefixMetrics(pm PrefixMetrics) {
+	e.prefixMetrics = pm
 }
 
 // SetQueueMetrics wires an observer that receives queue depth and wait-time events.
@@ -393,10 +402,14 @@ func (e *Executor) resolve(name string, step PolicyStep) resolvedStep {
 	if maxTries <= 0 {
 		maxTries = e.globalMaxTries
 	}
+	strategy := Get(step.Strategy)
+	if step.Strategy == "prefix-aware" {
+		strategy = e.newPrefixAware(step.PrefixAware)
+	}
 	return resolvedStep{
 		name:       name,
 		PolicyStep: step,
-		strategy:   Get(step.Strategy),
+		strategy:   strategy,
 		maxTries:   maxTries,
 	}
 }
@@ -488,7 +501,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 	for s.stepIdx < len(s.steps) {
 		step := &s.steps[s.stepIdx]
 
-		candidates := s.buildCandidates(step)
+		candidates, pool := s.buildCandidates(step)
 		if len(candidates) == 0 {
 			// When all healthy agents are momentarily at capacity, park in the
 			// per-model wait queue instead of immediately escalating to a fallback
@@ -528,7 +541,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			continue
 		}
 
-		chosen := step.strategy.Select(candidates, SelectRequest{Key: s.key})
+		chosen := step.strategy.Select(candidates, SelectRequest{Key: s.key, Model: s.model, Pool: pool})
 
 		// Atomically claim a slot. If lost to a race, retry selection without counting
 		// a forward try — the agent is not "failed", just momentarily at capacity.
@@ -671,17 +684,18 @@ func (s *Session) FallbackProvider() *FallbackProvider {
 }
 
 // buildCandidates applies the three filter layers for the given step and
-// returns the surviving agents paired with their live snapshots.
+// returns the surviving agents paired with their live snapshots, and every
+// agent registered for the model (the pool the candidates come from).
 // When the result is empty, logs a per-attribute breakdown so the exact reason
 // is visible: which filter attribute caused misses, which gate was violated.
-func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
+func (s *Session) buildCandidates(step *resolvedStep) ([]ScoredCandidate, []*domain.Agent) {
 	all := s.executor.agents.ListByModel(s.model)
 	candidates := make([]ScoredCandidate, 0, len(all))
 
 	if len(all) == 0 {
 		s.lastReason = ErrModelNotFound
 		s.lastGates = []gateDiag{{num: 1, name: "model_filter", poolIn: -1, poolOut: 0, reason: "model_not_registered"}}
-		return candidates
+		return candidates, all
 	}
 
 	var nUnhealthy, nAtCapacity, nPrevFailed int
@@ -825,5 +839,5 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 
 		s.lastGates = gates
 	}
-	return candidates
+	return candidates, all
 }

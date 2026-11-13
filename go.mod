@@ -11,6 +11,7 @@ go 1.27.4
 require (
 	github.com/NVIDIA/go-nvml v0.13.4-1
 	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/dgraph-io/badger/v4 v4.9.6
 	// Gin is the HTTP framework used to expose the OpenAI-compatible REST API.
 	github.com/gin-gonic/gin v1.12.0
@@ -60,7 +61,6 @@ require (
 	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect

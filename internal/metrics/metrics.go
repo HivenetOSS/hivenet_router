@@ -260,6 +260,10 @@ type RouterMetrics struct {
 	// Label: model.
 	queueWaitSeconds *prometheus.HistogramVec
 
+	// prefixRoutingTotal counts prefix-aware selections per model and outcome
+	// (home, spill, fallback, no_key).
+	prefixRoutingTotal *prometheus.CounterVec
+
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
 	policyReloadTotal *prometheus.CounterVec
@@ -900,6 +904,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		prefixRoutingTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_routing_total",
+				Help: "Prefix-aware routing selections per model and outcome: home (the prefix's first agent), spill (a later agent on the ring), fallback (every candidate over the load bound: least-loaded), no_key (no prompt text: least-loaded).",
+			},
+			[]string{"model", "outcome"},
+		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
@@ -1038,6 +1049,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueDepth,
 		m.admissionQueueDepth,
 		m.queueWaitSeconds,
+		m.prefixRoutingTotal,
 		// Policy management
 		m.policyReloadTotal,
 		// Semantic alias routing
@@ -1725,6 +1737,12 @@ func (m *RouterMetrics) AdmissionQueueDepthUpdated(model string, depth int) {
 // Implements policy.QueueMetrics.
 func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64) {
 	m.queueWaitSeconds.With(prometheus.Labels{"model": model}).Observe(durationSeconds)
+}
+
+// PrefixRouted counts one prefix-aware selection.
+// Implements policy.PrefixMetrics.
+func (m *RouterMetrics) PrefixRouted(model, outcome string) {
+	m.prefixRoutingTotal.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
 }
 
 // PolicyReload increments the policy reload counter.
