@@ -126,6 +126,9 @@ type PolicyStep struct {
 	Strategy  string                   `yaml:"strategy"   json:"strategy"`
 	// MaxTries caps forward attempts for this step. 0 means use the global default.
 	MaxTries int `yaml:"max_tries" json:"max_tries,omitempty"`
+	// PrefixAware tunes the prefix-aware strategy; only valid with it. Nil or
+	// a zero field means the default.
+	PrefixAware *PrefixAwareParams `yaml:"prefix_aware" json:"prefix_aware,omitempty"`
 }
 
 // FallbackStep is a PolicyStep with an optional name used in logs and metrics.

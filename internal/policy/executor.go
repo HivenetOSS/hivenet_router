@@ -155,6 +155,12 @@ type Executor struct {
 	queues  map[string]*WaitQueue // keyed by model name
 
 	queueMetrics QueueMetrics // optional; nil in tests
+
+	// Prefix-aware routing: the router's prefix memory, its metrics, and the
+	// prompt tokens each agent has been sent but not started answering.
+	prefixIndex   PrefixIndex
+	prefixMetrics PrefixMetrics
+	prefill       prefillQueue
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -172,6 +178,14 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
 }
+
+// SetPrefixIndex wires the router's prefix memory used by the prefix-aware
+// strategy. Must be called before any requests are processed.
+func (e *Executor) SetPrefixIndex(ix PrefixIndex) { e.prefixIndex = ix }
+
+// SetPrefixMetrics wires an observer of prefix-aware selections.
+// Must be called before any requests are processed.
+func (e *Executor) SetPrefixMetrics(pm PrefixMetrics) { e.prefixMetrics = pm }
 
 // SetQueueMetrics wires an observer that receives queue depth and wait-time events.
 // Must be called before any requests are processed (typically once at startup).
@@ -393,10 +407,14 @@ func (e *Executor) resolve(name string, step PolicyStep) resolvedStep {
 	if maxTries <= 0 {
 		maxTries = e.globalMaxTries
 	}
+	strategy := Get(step.Strategy)
+	if step.Strategy == "prefix-aware" {
+		strategy = e.newPrefixAware(step.PrefixAware)
+	}
 	return resolvedStep{
 		name:       name,
 		PolicyStep: step,
-		strategy:   Get(step.Strategy),
+		strategy:   strategy,
 		maxTries:   maxTries,
 	}
 }
@@ -450,7 +468,27 @@ type Session struct {
 	// lastGates holds the gate funnel from the most recent zero-candidate buildCandidates call.
 	// Consumed by advanceStep("no_candidates") to attach the funnel to the step trace.
 	lastGates []gateDiag
+	// prefix holds the request's prefix anchors (SetPrefix), nil if none.
+	prefix *PrefixRequest
 }
+
+// WantsPrefix reports whether a step of this session routes on the request's
+// prefix anchors, so the caller computes them only then.
+func (s *Session) WantsPrefix() bool {
+	for i := range s.steps {
+		if ps, ok := s.steps[i].strategy.(PrefixStrategy); ok && ps.WantsPrefix() {
+			return true
+		}
+	}
+	return false
+}
+
+// SetPrefix sets the request's prefix anchors; every Select uses them.
+func (s *Session) SetPrefix(pr *PrefixRequest) { s.prefix = pr }
+
+// ReleasePrefill tells the session the chosen agent started answering (or
+// gave up): its prompt no longer waits in that agent's prefill queue.
+func (s *Session) ReleasePrefill() { s.prefix.release() }
 
 // Select picks the next eligible agent, advancing through fallback steps as needed.
 // Returns ErrAllStepsExhausted when the entire chain is consumed.
@@ -509,7 +547,8 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			continue
 		}
 
-		chosen := step.strategy.Select(candidates)
+		req := SelectRequest{Model: s.model, Prefix: s.prefix}
+		chosen := step.strategy.Select(candidates, req)
 
 		// Atomically claim a slot. If lost to a race, retry selection without counting
 		// a forward try — the agent is not "failed", just momentarily at capacity.
@@ -521,6 +560,9 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 		}
 
 		gotSlot(ctx)
+		if c, ok := step.strategy.(Committer); ok {
+			c.Commit(req, chosen)
+		}
 		return chosen, nil
 	}
 	// Use the reason captured at routing time rather than re-querying agent state,
