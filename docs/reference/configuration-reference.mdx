@@ -1092,6 +1092,7 @@ The current catalog implementation still includes that model in `/v1/models`. Do
 | `--hardware-sample-interval` | — | `2s` | GPU, CPU, and system-memory collection interval |
 | `--engine-sample-interval` | — | `500ms` | Supported inference-engine metrics scrape interval |
 | `--routing-signal-interval` | — | `500ms` | Frequency for sending cached hardware and engine data to the router |
+| `--kv-events-endpoint` | `HIVENET_AGENT_KV_EVENTS_ENDPOINT` | Empty | ZMQ address the engine publishes its KV-cache events on (vLLM, SGLang), for [prefix-aware routing](/routing/prefix-aware-routing#kv-events). Local addresses only: the events carry prompt token IDs |
 | `--gpu-devices-file` | — | Empty | File containing assigned NVIDIA GPU UUIDs |
 
 ### Sampling and push intervals
@@ -1155,6 +1156,7 @@ The complete current agent flag set is:
 | `--hardware-sample-interval` | — | `2s` |
 | `--engine-sample-interval` | — | `500ms` |
 | `--routing-signal-interval` | — | `500ms` |
+| `--kv-events-endpoint` | `HIVENET_AGENT_KV_EVENTS_ENDPOINT` | Empty |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
 | `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty |
 | `--gpu-devices-file` | — | Empty |

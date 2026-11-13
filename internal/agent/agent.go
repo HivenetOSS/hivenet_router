@@ -109,10 +109,16 @@ type Agent struct {
 	// routers together. It is reported in every routing signal so each router
 	// sees the backend's real load, not only the requests it sent itself.
 	inFlight atomic.Int64
+	// pendingPrefill sums HeaderPrefillTokens over the requests not yet
+	// answering: the engine's prefill backlog, reported to every router.
+	pendingPrefill atomic.Int64
 
 	// prefix is the prefix-aware routing state; nil when the engine cannot
 	// return prompt tokens (nothing is reported then).
 	prefix *prefixState
+	// kv mirrors the engine's KV cache from its events; nil without
+	// --kv-events-endpoint.
+	kv *kvMirror
 
 	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
 	// requests in flight per router peer, and sessions counts the sessions
@@ -603,6 +609,9 @@ type routingSignalPayload struct {
 	// ReportEveryMs is how often this agent sends these signals, so the
 	// router knows how old a report may be before it is stale.
 	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
+	// PendingPrefill is the prompt tokens (as the routers estimated them) of
+	// the requests this agent has not started answering, from all routers.
+	PendingPrefill int64 `json:"pending_prefill_tokens"`
 }
 
 // runRoutingSignalPusher sends fresh engine and hardware snapshots to the router at
@@ -653,6 +662,7 @@ func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 		InFlight:       a.inFlight.Load(),
 		Routers:        a.routerReport(),
 		ReportEveryMs:  a.routingSignalInterval().Milliseconds(),
+		PendingPrefill: a.pendingPrefill.Load(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -888,6 +898,8 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	defer done()
 	prefixHeader := r.Header.Get(domain.HeaderPrefixAnchors)
 	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
+	answering := a.holdPrefill(r)
+	defer answering()
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -963,8 +975,8 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// without buffering. forwardStreamingResponse writes headers+body to w,
 		// so we must not write anything to w after it returns on success.
 		opts := []EngineOption{WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
-			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout)}
-		if pr != nil {
+			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout), WithFirstByte(answering)}
+		if pr != nil && a.prefix.source == sourceResponse {
 			opts = append(opts, WithStreamFilter(func(dst io.Writer) (io.Writer, func()) {
 				fw := &tokenFieldWriter{a: a, pr: pr, dst: dst}
 				return fw, fw.flush
@@ -972,6 +984,9 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
 			chatReq.RawBytes, a.engine.Name(), opts...)
+		if err == nil {
+			a.served(pr, chatReq.RawBytes)
+		}
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
 			span.RecordError(err)
@@ -1019,6 +1034,7 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	if pr != nil {
 		respBytes = a.handleTokenFields(pr, respBytes)
+		a.served(pr, chatReq.RawBytes)
 	}
 
 	inferenceMs := float64(time.Since(start).Milliseconds())
@@ -1087,6 +1103,8 @@ func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	r, done := a.track(r)
 	defer done()
 	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
+	answering := a.holdPrefill(r)
+	defer answering()
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 
@@ -1415,4 +1433,19 @@ func (a *Agent) routerReport() map[string]int64 {
 		out[p.String()] = n
 	}
 	return out
+}
+
+// holdPrefill counts the request's HeaderPrefillTokens in the agent's prefill
+// backlog and returns the function that takes them out (once): when the
+// engine starts answering, or when the request ends.
+func (a *Agent) holdPrefill(r *http.Request) func() {
+	n, err := strconv.ParseInt(r.Header.Get(domain.HeaderPrefillTokens), 10, 64)
+	r.Header.Del(domain.HeaderPrefillTokens) // router to agent only
+	if err != nil || n <= 0 {
+		return func() {}
+	}
+	n = min(n, 1<<24)
+	a.pendingPrefill.Add(n)
+	var once sync.Once
+	return func() { once.Do(func() { a.pendingPrefill.Add(-n) }) }
 }

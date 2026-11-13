@@ -685,6 +685,12 @@ type AgentConfig struct {
 	// (500ms) so engine metrics reach the router without additional delay.
 	RoutingSignalInterval time.Duration
 
+	// KVEventsEndpoint is the ZMQ address the engine publishes its KV-cache
+	// events on (vLLM and SGLang --kv-events-config), for prefix-aware
+	// routing. Empty: not subscribed. Must be a local address: the events
+	// carry prompt token IDs.
+	KVEventsEndpoint string
+
 	// GPUDevicesFile is an optional path to a file containing the GPU UUIDs the
 	// engine was assigned (one UUID per line or comma-separated). When set, the
 	// hardware collector restricts NVML metrics to only those GPUs, ignoring any

@@ -256,7 +256,11 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	best := math.Inf(1)
 	for i, c := range ok {
 		newToks := max(0, prompt-hit(c.Agent.ID))
-		costs[i] = float64(s.queue.get(c.Agent.ID)+newToks)/s.PrefillRate + decodePressure(c)
+		// Prompt tokens waiting on the agent: what this router sent and the
+		// agent has not started, or what the agent reports from every
+		// router, whichever is larger.
+		queued := max(s.queue.get(c.Agent.ID), c.Agent.ReportedPrefill())
+		costs[i] = float64(queued+newToks)/s.PrefillRate + decodePressure(c)
 		best = min(best, costs[i])
 	}
 	eps := max(s.TieEpsilon*best, 0.005)

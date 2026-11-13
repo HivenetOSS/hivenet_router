@@ -57,8 +57,11 @@ type Agent struct {
 	// valid once hasReport); sentSinceReport counts what this router forwarded
 	// since that report, which the report could not include yet.
 	reportedInFlight int
-	sentSinceReport  int
-	hasReport        bool
+	// reportedPrefill is the prompt tokens the agent last reported waiting
+	// for prefill, from all routers.
+	reportedPrefill int
+	sentSinceReport int
+	hasReport       bool
 
 	// routers is the agent's last list of the routers it is connected to
 	// (libp2p peer ID → requests in flight for it), reported at routersAt.
@@ -224,6 +227,25 @@ func (a *Agent) InFlight() int {
 		return a.ActiveRequests
 	}
 	return max(a.ActiveRequests, a.reportedInFlight)
+}
+
+// SetReportedPrefill records the prompt tokens waiting for prefill on the
+// agent, from all routers, as its last report says.
+func (a *Agent) SetReportedPrefill(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reportedPrefill = max(n, 0)
+}
+
+// ReportedPrefill is the agent's last reported prefill backlog in tokens, 0
+// when its report is too old.
+func (a *Agent) ReportedPrefill() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
+		return 0
+	}
+	return a.reportedPrefill
 }
 
 // UpdateLastSeen updates the last seen timestamp

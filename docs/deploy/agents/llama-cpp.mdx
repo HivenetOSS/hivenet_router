@@ -422,6 +422,10 @@ curl http://192.168.1.100:8080/admin/routing-table \
 
 The routing table exposes scalar cache and queue values. llama.cpp prompt and generation throughput are available through Prometheus, not the current routing-table response.
 
+## Prefix-aware routing
+
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent renders and tokenizes each served chat request with llama.cpp's `/apply-template` and `/tokenize` after forwarding it, and reports keyed hashes of the prompt's blocks to every router. llama.cpp publishes no cache events, so the routers know what each agent served recently, not what it evicted.
+
 ## Use llama.cpp metrics in routing policies
 
 Exclude agents whose KV cache is under pressure:
