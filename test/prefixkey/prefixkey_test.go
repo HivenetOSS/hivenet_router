@@ -101,18 +101,30 @@ func TestPrefix_NothingToHash(t *testing.T) {
 	}
 }
 
-// The prefix stops at maxBytes: prompts that differ only after it share the
-// key, and a long prompt is never copied whole.
+// Each part stops at maxBytes: a long prompt is never copied whole, and
+// prompts that differ only after it share the prefix.
 func TestPrefix_TruncatedToMaxBytes(t *testing.T) {
 	long := strings.Repeat("x", 10_000)
-	a := parse(t, `{"messages":[{"role":"system","content":"`+long+`"},{"role":"user","content":"A"}]}`)
-	b := parse(t, `{"messages":[{"role":"system","content":"`+long+`"},{"role":"user","content":"B"}]}`)
-	pa := prefixkey.Prefix(a, 256)
-	if len(pa) != 256 {
-		t.Errorf("prefix length %d, want 256", len(pa))
+	body := func(system, user string) *domain.ChatRequest {
+		return parse(t, `{"messages":[{"role":"system","content":"`+system+`"},{"role":"user","content":"`+user+`"}]}`)
 	}
-	if !bytes.Equal(pa, prefixkey.Prefix(b, 256)) {
-		t.Error("prompts equal for the first 256 bytes got different prefixes")
+	p := prefixkey.Prefix(body(long+"A", long+"A"), 256)
+	if len(p) != 512 {
+		t.Errorf("prefix length %d, want 512 (two parts of 256)", len(p))
+	}
+	if !bytes.Equal(p, prefixkey.Prefix(body(long+"B", long+"B"), 256)) {
+		t.Error("prompts equal within both budgets got different prefixes")
+	}
+}
+
+// A system prompt longer than maxBytes does not crowd out the first user
+// message: conversations of one application still get different keys.
+func TestPrefix_LongSystemPromptKeepsConversationsApart(t *testing.T) {
+	long := strings.Repeat("You are a careful assistant. ", 400) // ~12 KB
+	a := `{"messages":[{"role":"system","content":"` + long + `"},{"role":"user","content":"question A"}]}`
+	b := `{"messages":[{"role":"system","content":"` + long + `"},{"role":"user","content":"question B"}]}`
+	if bytes.Equal(key(t, a), key(t, b)) {
+		t.Error("a long system prompt made two conversations share a key")
 	}
 }
 
@@ -149,8 +161,8 @@ func FuzzPrefix(f *testing.F) {
 		}
 		maxBytes %= 1 << 16
 		p := prefixkey.Prefix(&req, maxBytes)
-		if len(p) > max(maxBytes, 0) {
-			t.Fatalf("prefix of %d bytes exceeds maxBytes %d", len(p), maxBytes)
+		if len(p) > 2*max(maxBytes, 0) {
+			t.Fatalf("prefix of %d bytes exceeds 2×maxBytes %d", len(p), maxBytes)
 		}
 	})
 }
