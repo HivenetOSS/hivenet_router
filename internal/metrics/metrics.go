@@ -264,6 +264,9 @@ type RouterMetrics struct {
 	prefixRoutingTotal *prometheus.CounterVec
 	// prefixIndexEntries is the size of the prefix memory, per kind.
 	prefixIndexEntries *prometheus.GaugeVec
+	// prefixChecksTotal counts cache-hit predictions checked against the
+	// engines' reports, per model and result.
+	prefixChecksTotal *prometheus.CounterVec
 
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
@@ -919,6 +922,13 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"kind"},
 		),
+		prefixChecksTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_checks_total",
+				Help: "Prefix-aware cache-hit predictions checked against the cached tokens the engine reported, per model: held (half or more came true) or missed.",
+			},
+			[]string{"model", "result"},
+		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
@@ -1059,6 +1069,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueWaitSeconds,
 		m.prefixRoutingTotal,
 		m.prefixIndexEntries,
+		m.prefixChecksTotal,
 		// Policy management
 		m.policyReloadTotal,
 		// Semantic alias routing
@@ -1759,6 +1770,15 @@ func (m *RouterMetrics) PrefixIndexSize(memo, blocks, pending int) {
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo"}).Set(float64(memo))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "blocks"}).Set(float64(blocks))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
+}
+
+// PrefixChecked counts one prediction check.
+func (m *RouterMetrics) PrefixChecked(model string, held bool) {
+	result := "missed"
+	if held {
+		result = "held"
+	}
+	m.prefixChecksTotal.With(prometheus.Labels{"model": model, "result": result}).Inc()
 }
 
 // PolicyReload increments the policy reload counter.

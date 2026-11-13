@@ -5,6 +5,7 @@ package router
 
 import (
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -32,5 +33,26 @@ func TestKVCursors(t *testing.T) {
 	c.forget(a)
 	if c.accept(a, &prefixKVPayload{Epoch: 1, From: 7, To: 7}) {
 		t.Error("a forgotten agent was accepted without a snapshot")
+	}
+}
+
+func TestPrefixRateLimits(t *testing.T) {
+	var l prefixRateLimits
+	a := peer.ID("agent")
+	now := time.Unix(0, 0)
+	ok := 0
+	for range int(prefixBurst) + 20 {
+		if l.allow(a, now) {
+			ok++
+		}
+	}
+	if ok != int(prefixBurst) {
+		t.Errorf("burst allowed %d, want %d", ok, int(prefixBurst))
+	}
+	if !l.allow(a, now.Add(100*time.Millisecond)) {
+		t.Error("no refill after 100 ms")
+	}
+	if !l.allow(peer.ID("other"), now) {
+		t.Error("buckets are not per agent")
 	}
 }

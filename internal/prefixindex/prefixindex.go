@@ -40,7 +40,26 @@ type Index struct {
 	// eventAgents report their engine's cache events: predictions on them
 	// only need to bridge the moment until the event confirms them.
 	eventAgents map[peer.ID]bool
+	// trust is, per agent, how far the cache hits the board predicts on it
+	// come true (see Observe).
+	trust map[peer.ID]*trustState
+	// agentCap bounds an agent's board entries (from its KV capacity), below
+	// the global BlocksPerAgent.
+	agentCap map[peer.ID]int
 }
+
+type trustState struct {
+	score   float64
+	samples int
+}
+
+// Trust bounds: an agent is judged after trustMinSamples checks of at least
+// trustMinPredicted predicted tokens each.
+const (
+	trustMinSamples   = 5
+	trustMinPredicted = 256
+	trustWeight       = 0.2 // weight of the newest check in the moving average
+)
 
 // Config bounds the index. Zero fields take the defaults.
 type Config struct {
@@ -96,7 +115,7 @@ func New(cfg Config) *Index {
 	if cfg.SpeculativeTTL <= 0 {
 		cfg.SpeculativeTTL = DefaultSpeculativeTTL
 	}
-	return &Index{models: map[string]*model{}, cfg: cfg, now: time.Now, eventAgents: map[peer.ID]bool{}}
+	return &Index{models: map[string]*model{}, cfg: cfg, now: time.Now, eventAgents: map[peer.ID]bool{}, trust: map[peer.ID]*trustState{}, agentCap: map[peer.ID]int{}}
 }
 
 func (ix *Index) model(name string, create bool) *model {
@@ -169,6 +188,61 @@ func (ix *Index) LearnText(modelName string, agent peer.ID, anchors []uint64, tt
 	}
 }
 
+// Observe records one check of what the board predicted on agent against
+// what its engine reported: predicted prompt tokens in cache vs. the cached
+// tokens in the response. It returns whether the prediction held (half or
+// more came true); checks below trustMinPredicted tokens are ignored and
+// count as held.
+func (ix *Index) Observe(agent peer.ID, predicted, actual int) bool {
+	if predicted < trustMinPredicted {
+		return true
+	}
+	ratio := min(1, float64(max(actual, 0))/float64(predicted))
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	t := ix.trust[agent]
+	if t == nil {
+		t = &trustState{score: 1}
+		ix.trust[agent] = t
+	}
+	t.score = (1-trustWeight)*t.score + trustWeight*ratio
+	t.samples++
+	return ratio >= 0.5
+}
+
+// Trust is the weight of agent's predicted cache hits, 0–1: 1 until it has
+// trustMinSamples checks, then the moving share of its predictions that came
+// true. An agent whose engine reports cache it does not have loses weight.
+func (ix *Index) Trust(agent peer.ID) float64 {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	t := ix.trust[agent]
+	if t == nil || t.samples < trustMinSamples {
+		return 1
+	}
+	return t.score
+}
+
+// SetAgentCap bounds agent's board entries per model to n blocks (its KV
+// cache cannot hold more), when n is below the global cap.
+func (ix *Index) SetAgentCap(agent peer.ID, n int) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if n > 0 && n < ix.cfg.BlocksPerAgent {
+		ix.agentCap[agent] = n
+	}
+}
+
+// capOf is agent's board cap. Caller must not hold ix.mu.
+func (ix *Index) capOf(agent peer.ID) int {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if n := ix.agentCap[agent]; n > 0 {
+		return n
+	}
+	return ix.cfg.BlocksPerAgent
+}
+
 // SetEventSource marks agent as reporting its engine's cache events.
 func (ix *Index) SetEventSource(agent peer.ID) {
 	ix.mu.Lock()
@@ -238,7 +312,7 @@ func (ix *Index) confirm(m *model, agent peer.ID, blocks []uint64, now time.Time
 			m.agentBlocks[agent]++
 		}
 	}
-	if m.agentBlocks[agent] > ix.cfg.BlocksPerAgent {
+	if m.agentBlocks[agent] > ix.capOf(agent) {
 		ix.trimAgent(m, agent, now)
 	}
 }
@@ -312,7 +386,7 @@ func (ix *Index) predict(m *model, agent peer.ID, blocks []uint64, exp int64, no
 		m.board[b] = append(hs, holder{agent: agent, exp: exp})
 		m.agentBlocks[agent]++
 	}
-	if m.agentBlocks[agent] > ix.cfg.BlocksPerAgent {
+	if m.agentBlocks[agent] > ix.capOf(agent) {
 		ix.trimAgent(m, agent, now)
 	}
 }
@@ -422,6 +496,8 @@ func (ix *Index) Commit(modelName string, agent peer.ID, anchors []uint64, match
 func (ix *Index) RemoveAgent(agent peer.ID) {
 	ix.mu.Lock()
 	delete(ix.eventAgents, agent)
+	delete(ix.trust, agent)
+	delete(ix.agentCap, agent)
 	ms := make([]*model, 0, len(ix.models))
 	for _, m := range ix.models {
 		ms = append(ms, m)
@@ -508,9 +584,15 @@ type Stats struct{ Memo, Blocks, Pending int }
 // Stats returns the current sizes.
 func (ix *Index) Stats() Stats {
 	var s Stats
+	// Never hold ix.mu while taking a model's lock: Learn and Commit take
+	// ix.mu (predictionTTL, capOf) while holding one.
 	ix.mu.RLock()
-	defer ix.mu.RUnlock()
+	ms := make([]*model, 0, len(ix.models))
 	for _, m := range ix.models {
+		ms = append(ms, m)
+	}
+	ix.mu.RUnlock()
+	for _, m := range ms {
 		m.mu.Lock()
 		s.Memo += len(m.memo)
 		s.Blocks += len(m.board)
@@ -540,28 +622,27 @@ func (ix *Index) capMemo(m *model, now time.Time) {
 	}
 }
 
-// trimAgent drops expired predictions of agent, then arbitrary ones, down to
-// 90 % of the per-agent cap. Caller holds m.mu.
+// trimAgent brings agent's board entries down to 90 % of its cap: expired
+// predictions first, then live predictions, then confirmed holdings (an
+// agent never holds more than its cap, whatever it reports). Caller holds m.mu.
 func (ix *Index) trimAgent(m *model, agent peer.ID, now time.Time) {
 	nanos := now.UnixNano()
-	target := ix.cfg.BlocksPerAgent * 9 / 10
-	for _, expiredOnly := range []bool{true, false} {
+	target := ix.capOf(agent) * 9 / 10
+	drop := []func(h holder) bool{
+		func(h holder) bool { return h.exp != 0 && h.exp <= nanos },
+		func(h holder) bool { return h.exp != 0 },
+		func(h holder) bool { return true },
+	}
+	for _, match := range drop {
 		for b, hs := range m.board {
 			if m.agentBlocks[agent] <= target {
 				return
 			}
-			for i, h := range hs {
-				if h.agent != agent || h.exp == 0 || (expiredOnly && h.exp > nanos) {
-					continue
+			for _, h := range hs {
+				if h.agent == agent && match(h) {
+					m.unhold(b, agent)
+					break
 				}
-				hs = append(hs[:i], hs[i+1:]...)
-				m.agentBlocks[agent]--
-				break
-			}
-			if len(hs) == 0 {
-				delete(m.board, b)
-			} else {
-				m.board[b] = hs
 			}
 		}
 	}

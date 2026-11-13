@@ -136,7 +136,9 @@ type Router struct {
 	// pending notes), fed by the agents through /prefix-state.
 	prefixIndex *prefixindex.Index
 	// kvCursors tracks where each agent's cache changes stand.
-	kvCursors      kvCursors
+	kvCursors kvCursors
+	// prefixLimits bounds how often each agent may post /prefix-state.
+	prefixLimits   prefixRateLimits
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -716,7 +718,10 @@ func (r *Router) Start() error {
 	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
 		// Interim key source: the site's agent secret. To move to a sub-key of
 		// the cache-salt secret, with the tenant scope, once that is in place.
-		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))))
+		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))),
+		WithPrefixCheck(func(agent peer.ID, model string, predicted, actual int) {
+			r.metrics.PrefixChecked(model, r.prefixIndex.Observe(agent, predicted, actual))
+		}))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -2059,6 +2064,7 @@ func (r *Router) healthMonitor() {
 			})
 			r.prefixIndex.RemoveAgent(id)
 			r.kvCursors.forget(id)
+			r.prefixLimits.forget(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)
