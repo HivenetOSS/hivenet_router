@@ -490,6 +490,15 @@ func (s *Session) SetPrefix(pr *PrefixRequest) { s.prefix = pr }
 // gave up): its prompt no longer waits in that agent's prefill queue.
 func (s *Session) ReleasePrefill() { s.prefix.release() }
 
+// PredictedCached is the prompt tokens the last Select predicted the chosen
+// agent holds in cache (0 when the strategy does not predict it).
+func (s *Session) PredictedCached() int {
+	if s.prefix == nil {
+		return 0
+	}
+	return s.prefix.predicted
+}
+
 // PrefillTokens is the prompt tokens the last Select expects the chosen agent
 // to prefill (0 when the strategy does not estimate it).
 func (s *Session) PrefillTokens() int {

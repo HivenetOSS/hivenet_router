@@ -105,6 +105,10 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
+	if !r.prefixLimits.allow(a.ID, time.Now()) {
+		http.Error(w, "too many prefix-state batches", http.StatusTooManyRequests)
+		return
+	}
 	if len(payload.Served) > maxPrefixStateServed {
 		http.Error(w, "too many entries", http.StatusRequestEntityTooLarge)
 		return
@@ -135,6 +139,11 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.prefixIndex.SetEventSource(a.ID)
+		// No agent holds more blocks than its engine's KV cache can (plus a
+		// margin for blocks shared between prompts and timing).
+		if ep, err := r.storage.GetEnginePunctual(a.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil && *ep.KVCapacityTokens > 0 {
+			r.prefixIndex.SetAgentCap(a.ID, int(*ep.KVCapacityTokens*1.25)/prefixhash.BlockTokens+1)
+		}
 		if kv.Snapshot {
 			r.prefixIndex.ReplaceConfirmed(model, a.ID, kv.Stored)
 		} else {
@@ -159,4 +168,48 @@ func (r *Router) runPrefixIndex(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// prefixRateLimits is a token bucket per agent for /prefix-state: an agent
+// posts about 10 batches a second per router; a burst above prefixBurst is
+// refused with 429 (the agent sends the batch again on its next tick).
+type prefixRateLimits struct {
+	mu sync.Mutex
+	m  map[peer.ID]*bucket
+}
+
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+const (
+	prefixRate  = 50.0 // batches per second
+	prefixBurst = 100.0
+)
+
+func (l *prefixRateLimits) allow(agent peer.ID, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = map[peer.ID]*bucket{}
+	}
+	b := l.m[agent]
+	if b == nil {
+		b = &bucket{tokens: prefixBurst, last: now}
+		l.m[agent] = b
+	}
+	b.tokens = min(prefixBurst, b.tokens+now.Sub(b.last).Seconds()*prefixRate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func (l *prefixRateLimits) forget(agent peer.ID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.m, agent)
 }

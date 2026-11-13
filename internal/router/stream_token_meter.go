@@ -36,6 +36,8 @@ type SSETokenMeter struct {
 	haveUsage       bool
 	usagePrompt     int
 	usageCompletion int
+	usageCached     int
+	cachedKnown     bool
 
 	// sawEvents reports whether any recognised stream event was seen: an
 	// OpenAI chunk with a choices array or the [DONE] marker, or an Anthropic
@@ -136,6 +138,9 @@ type sseChunk struct {
 		CompletionTokens int `json:"completion_tokens"`
 		InputTokens      int `json:"input_tokens"`  // Anthropic message_delta (rare here)
 		OutputTokens     int `json:"output_tokens"` // Anthropic message_delta (cumulative)
+		Details          *struct {
+			CachedTokens *int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 	Message *struct { // Anthropic message_start
 		Usage struct {
@@ -183,6 +188,9 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 		m.haveUsage = true
 		m.usagePrompt = c.Usage.PromptTokens
 		m.usageCompletion = c.Usage.CompletionTokens
+		if c.Usage.Details != nil && c.Usage.Details.CachedTokens != nil {
+			m.usageCached, m.cachedKnown = *c.Usage.Details.CachedTokens, true
+		}
 	}
 	// Anthropic message_start: the exact prompt count arrives before any output.
 	// Usage is exact from this point; output_tokens is refined by message_delta.
@@ -222,6 +230,10 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 // message_delta). When false, Tokens returns an estimate, which the caller must
 // not feed back into the learned estimator.
 func (m *SSETokenMeter) HaveUsage() bool { return m.haveUsage }
+
+// Cached returns the prompt tokens the engine reported serving from its
+// prefix cache, and whether it reported them.
+func (m *SSETokenMeter) Cached() (int, bool) { return m.usageCached, m.cachedKnown }
 
 // SawEvents reports whether the stream carried any recognised event (OpenAI
 // choices chunk or [DONE], or an Anthropic typed event).

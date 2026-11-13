@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -204,7 +205,10 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 	t := time.NewTicker(prefixPushEvery)
 	defer t.Stop()
 	var cursor, kvCursor uint64
-	needSnapshot := true // a new session: the router does not know this agent's cache yet
+	// A new session: the router does not know this agent's cache yet. Every
+	// snapshot waits a random delay, so the agents of a site do not all send
+	// theirs at once when a router restarts.
+	needSnapshot, snapshotAt := true, time.Now().Add(snapshotJitter())
 	for {
 		select {
 		case <-t.C:
@@ -212,7 +216,13 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 			var kv *kvPayload
 			if a.kv != nil {
 				p, ok := a.kv.since(kvCursor)
-				if needSnapshot || !ok {
+				if !ok && !needSnapshot {
+					needSnapshot, snapshotAt = true, time.Now().Add(snapshotJitter())
+				}
+				switch {
+				case needSnapshot && time.Now().Before(snapshotAt):
+					p = kvPayload{} // not yet: changes wait for the snapshot
+				case needSnapshot:
 					p = a.kv.snapshot()
 				}
 				if p.Snapshot || p.Cleared || len(p.Stored) > 0 || len(p.Removed) > 0 {
@@ -224,7 +234,7 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 			}
 			err := a.pushPrefixState(rs, batch, kv)
 			if errors.Is(err, errKVGap) {
-				needSnapshot = true
+				needSnapshot, snapshotAt = true, time.Now().Add(snapshotJitter())
 				cursor = last // the served entries were taken
 				continue
 			}
@@ -595,4 +605,9 @@ func (w *tokenFieldWriter) filter(line []byte) []byte {
 		return nil
 	}
 	return out
+}
+
+// snapshotJitter is the random delay before a cache snapshot, up to 2 s.
+func snapshotJitter() time.Duration {
+	return time.Duration(mrand.Int64N(int64(2 * time.Second)))
 }
