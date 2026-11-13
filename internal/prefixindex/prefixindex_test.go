@@ -117,3 +117,60 @@ func TestRemoveAgentAndCaps(t *testing.T) {
 		t.Errorf("memo %d entries, cap 10", s.Memo)
 	}
 }
+
+// Engine events confirm, remove and clear holdings; a block nobody holds any
+// more takes the memo entries ending at it along (the memo forgets what no
+// cache holds).
+func TestEvents(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	ix.SetEventSource(a1)
+	ix.Learn("m", a1, []uint64{100, 101}, []int{2, 3}, []uint64{1, 2, 3}, time.Minute)
+	// Predictions on an event source last SpeculativeTTL only.
+	c.t = c.t.Add(DefaultSpeculativeTTL + time.Second)
+	if m := ix.Lookup("m", []uint64{100}, []peer.ID{a1}); m.Depth[a1] != 0 {
+		t.Fatalf("prediction outlived the speculative TTL: %+v", m)
+	}
+	ix.ApplyEvents("m", a1, []uint64{1, 2, 3}, nil, false)
+	if m := ix.Lookup("m", []uint64{100, 101}, []peer.ID{a1}); m.Known != 2 || m.Depth[a1] != 3 {
+		t.Fatalf("after stored events: %+v", m)
+	}
+	c.t = c.t.Add(time.Hour - time.Minute) // confirmed holdings do not expire
+	ix.Sweep()
+	if m := ix.Lookup("m", []uint64{100}, []peer.ID{a1}); m.Depth[a1] != 2 {
+		t.Errorf("confirmed blocks expired: %+v", m)
+	}
+	c.t = time.Unix(1_800_000_000, 0)
+	ix.Learn("m", a1, []uint64{100, 101}, []int{2, 3}, []uint64{1, 2, 3}, time.Minute)
+	ix.ApplyEvents("m", a1, nil, []uint64{3}, false)
+	if m := ix.Lookup("m", []uint64{100, 101}, []peer.ID{a1}); m.Known != 1 {
+		t.Errorf("anchor 101 ends at the evicted block 3 and must be forgotten: %+v", m)
+	}
+	ix.ApplyEvents("m", a1, nil, nil, true)
+	if s := ix.Stats(); s.Blocks != 0 || s.Memo != 0 {
+		t.Errorf("after cleared: %+v", s)
+	}
+}
+
+// A snapshot replaces the confirmed holdings.
+func TestReplaceConfirmed(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	ix.ApplyEvents("m", a1, []uint64{1, 2, 3}, nil, false)
+	ix.ReplaceConfirmed("m", a1, []uint64{2, 4})
+	ix.mu.RLock()
+	m := ix.models["m"]
+	ix.mu.RUnlock()
+	for b, want := range map[uint64]bool{1: false, 2: true, 3: false, 4: true} {
+		if got := holds(m.board[b], a1, 0); got != want {
+			t.Errorf("block %d held: %v, want %v", b, got, want)
+		}
+	}
+}
+
+// Text entries (engines without tokens) point their anchors at the agent.
+func TestLearnText(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	ix.LearnText("m", a2, []uint64{100, 101}, time.Minute)
+	if m := ix.Lookup("m", []uint64{100, 101, 102}, []peer.ID{a1, a2}); m.Pending != a2 || m.PendingTo != 2 {
+		t.Errorf("text entry: %+v", m)
+	}
+}

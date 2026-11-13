@@ -37,6 +37,8 @@ type PendingRequest struct {
 	// PrefixAnchors is HeaderPrefixAnchors for this request, empty when its
 	// policy does not route on prefixes.
 	PrefixAnchors string
+	// PrefillTokens is HeaderPrefillTokens for the current forward attempt.
+	PrefillTokens int
 
 	// Path is the agent-facing HTTP path the processor forwards this request to
 	// (e.g. "/v1/messages" for the Anthropic passthrough). Empty means the
@@ -122,6 +124,12 @@ const HeaderTimeout = "X-Hivenet-Timeout-Ms"
 // never text. The agent reports which blocks each anchor maps to once the
 // engine has the prompt's tokens, and never forwards the header.
 const HeaderPrefixAnchors = "X-Hivenet-Prefix-Anchors"
+
+// HeaderPrefillTokens carries, from router to agent, the prompt tokens the
+// router expects the engine to prefill for this request (those not already
+// in its cache). The agent sums them over the requests it has not started
+// answering and reports the sum to every router.
+const HeaderPrefillTokens = "X-Hivenet-Prefill-Tokens"
 
 // TimeoutHeader is the value of HeaderTimeout for a request due at deadline.
 func TimeoutHeader(deadline time.Time) string {

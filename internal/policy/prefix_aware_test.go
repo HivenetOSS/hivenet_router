@@ -211,3 +211,18 @@ func TestPrefixAware_FinishedRequestsAreNotBusy(t *testing.T) {
 		t.Errorf("chose %s: an idle agent that holds the prompt was treated as busy", got.ID)
 	}
 }
+
+// The prefill backlog an agent reports (from every router) counts like the
+// one this router sent itself.
+func TestPrefixAware_ReportedPrefill(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	a, b := llm("a"), llm("b")
+	ix.Learn("m", a.ID, []uint64{100}, []int{2}, blocks(2), time.Minute)
+	a.SetReportedLoad(0)
+	a.SetReportedPrefill(60_000) // other routers queued 6 s of prefill on a
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{128, 100}}}
+	if got := s.Select([]ScoredCandidate{{Agent: a}, {Agent: b}}, req); got != b {
+		t.Errorf("chose %s: a's reported backlog costs more than its cache saves", got.ID)
+	}
+}

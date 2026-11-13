@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,18 +26,31 @@ import (
 // (/prefix-state). Token IDs never leave the agent: they are reversible to
 // text with the model's public tokenizer, block hashes are not.
 
-// promptTokenEngine is implemented by engines that can return a prompt's
-// token IDs in the response.
-type promptTokenEngine interface {
-	// MessageStartToken returns the token that opens every message in the
-	// model's chat template, or an error when the template has none.
-	MessageStartToken(ctx context.Context, baseURL string, httpClient *http.Client, model string) (int, error)
+// responseTokenEngine is implemented by engines that return a prompt's token
+// IDs in the response when asked (vLLM: return_token_ids).
+type responseTokenEngine interface {
+	promptTokensInResponse()
 }
+
+// tokenSource is how the agent learns a served prompt's tokens.
+type tokenSource int
+
+const (
+	// sourceResponse: the engine returns them in the response (vLLM).
+	sourceResponse tokenSource = iota
+	// sourceBackground: the agent tokenizes the request after forwarding it,
+	// off the request path (SGLang, llama.cpp).
+	sourceBackground
+	// sourceText: no tokens; the agent reports the text anchors it served.
+	sourceText
+)
 
 // prefixState is the agent's prefix-aware routing state.
 type prefixState struct {
 	keys       prefixhash.Keys
-	startToken int // -1: unknown, only the whole prompt is reported
+	source     tokenSource
+	startToken int           // -1: unknown, only the whole prompt is reported
+	bgSlots    chan struct{} // bounds background tokenizations
 
 	mu      sync.Mutex
 	nextSeq uint64
@@ -48,11 +62,13 @@ type outboxEntry struct {
 	entry prefixServedEntry
 }
 
-// prefixServedEntry mirrors the router's /prefix-state entry.
+// prefixServedEntry mirrors the router's /prefix-state entry. Text entries
+// carry anchors only (the engine gave no tokens).
 type prefixServedEntry struct {
 	Anchors []uint64 `json:"anchors"`
-	Ends    []int    `json:"ends"`
-	Blocks  []uint64 `json:"blocks"`
+	Ends    []int    `json:"ends,omitempty"`
+	Blocks  []uint64 `json:"blocks,omitempty"`
+	Text    bool     `json:"text,omitempty"`
 }
 
 const (
@@ -60,24 +76,41 @@ const (
 	prefixBatchMax    = 1024
 	prefixPushEvery   = 100 * time.Millisecond
 	prefixProbeTimout = 10 * time.Second
+	prefixBgTokenize  = 2 // background tokenizations at once; more are skipped
+	prefixBgTimeout   = 30 * time.Second
 )
 
-// initPrefix enables prefix reporting when the engine can return prompt
-// tokens, and learns the model's message-start token.
+// initPrefix sets up prefix reporting for a chat agent: how it learns the
+// prompts' tokens, and the model's message-start token. It also starts the
+// KV-event subscriber when an endpoint is configured.
 func (a *Agent) initPrefix() {
-	pe, ok := a.engine.(promptTokenEngine)
-	if !ok || len(a.cfg.JWTSecret) == 0 {
+	if len(a.cfg.JWTSecret) == 0 || !a.servesChat() {
 		return
 	}
-	st := &prefixState{keys: prefixhash.DeriveKeys([]byte(a.cfg.JWTSecret)), startToken: -1}
-	ctx, cancel := context.WithTimeout(context.Background(), prefixProbeTimout)
-	defer cancel()
-	if t, err := pe.MessageStartToken(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model); err == nil {
-		st.startToken = t
-	} else {
-		log.Infof("prefix-aware routing: no message-start token found (%v); only whole prompts are reported", err)
+	st := &prefixState{keys: prefixhash.DeriveKeys([]byte(a.cfg.JWTSecret)), startToken: -1, source: sourceText, bgSlots: make(chan struct{}, prefixBgTokenize)}
+	_, inResponse := a.engine.(responseTokenEngine)
+	_, tokenizer := a.engine.(chatTokenizer)
+	switch {
+	case inResponse:
+		st.source = sourceResponse
+	case tokenizer:
+		st.source = sourceBackground
+	}
+	if pr, ok := a.engine.(messageStartProber); ok && st.source != sourceText {
+		ctx, cancel := context.WithTimeout(context.Background(), prefixProbeTimout)
+		if t, err := pr.MessageStartToken(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model); err == nil {
+			st.startToken = t
+		} else {
+			log.Infof("prefix-aware routing: no message-start token found (%v); only whole prompts are reported", err)
+		}
+		cancel()
 	}
 	a.prefix = st
+	if ep := a.cfg.KVEventsEndpoint; ep != "" && st.source != sourceText {
+		warnIfRemote(ep)
+		a.kv = newKVMirror(st.keys, a.cfg.Model)
+		go a.runKVEvents(ep)
+	}
 }
 
 // add queues one served prompt for every router.
@@ -120,19 +153,39 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 	}
 	t := time.NewTicker(prefixPushEvery)
 	defer t.Stop()
-	var cursor uint64
+	var cursor, kvCursor uint64
+	needSnapshot := true // a new session: the router does not know this agent's cache yet
 	for {
 		select {
 		case <-t.C:
 			batch, last := a.prefix.since(cursor)
-			if len(batch) == 0 {
+			var kv *kvPayload
+			if a.kv != nil {
+				p, ok := a.kv.since(kvCursor)
+				if needSnapshot || !ok {
+					p = a.kv.snapshot()
+				}
+				if p.Snapshot || p.Cleared || len(p.Stored) > 0 || len(p.Removed) > 0 {
+					kv = &p
+				}
+			}
+			if len(batch) == 0 && kv == nil {
 				continue
 			}
-			if err := a.pushPrefixState(rs, batch); err != nil {
+			err := a.pushPrefixState(rs, batch, kv)
+			if errors.Is(err, errKVGap) {
+				needSnapshot = true
+				cursor = last // the served entries were taken
+				continue
+			}
+			if err != nil {
 				log.Debugf("prefix-state push: %v", err)
 				continue
 			}
 			cursor = last
+			if kv != nil {
+				kvCursor, needSnapshot = kv.To, false
+			}
 		case <-done:
 			return
 		case <-a.stopCh:
@@ -141,11 +194,16 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 	}
 }
 
-func (a *Agent) pushPrefixState(rs *routerSession, batch []prefixServedEntry) error {
+// errKVGap is the router's answer to cache changes it cannot apply in order:
+// the next batch must be a snapshot.
+var errKVGap = errors.New("router needs a cache snapshot")
+
+func (a *Agent) pushPrefixState(rs *routerSession, batch []prefixServedEntry, kv *kvPayload) error {
 	body, err := json.Marshal(struct {
 		SessionToken string              `json:"session_token"`
-		Served       []prefixServedEntry `json:"served"`
-	}{rs.sessionToken(), batch})
+		Served       []prefixServedEntry `json:"served,omitempty"`
+		KV           *kvPayload          `json:"kv,omitempty"`
+	}{rs.sessionToken(), batch, kv})
 	if err != nil {
 		return err
 	}
@@ -154,6 +212,9 @@ func (a *Agent) pushPrefixState(rs *routerSession, batch []prefixServedEntry) er
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return errKVGap
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -205,6 +266,9 @@ func (a *Agent) preparePrefix(header string, req *domain.ChatRequest) ([]byte, *
 		genPrompt: (f.AddGenerationPrompt == nil || *f.AddGenerationPrompt) && (f.ContinueFinalMessage == nil || !*f.ContinueFinalMessage),
 		scope:     f.CacheSalt,
 	}
+	if a.prefix.source != sourceResponse {
+		return req.RawBytes, pr
+	}
 	if f.ReturnTokenIDs != nil {
 		if !*f.ReturnTokenIDs {
 			return req.RawBytes, nil // the client asked not to get them: respect it
@@ -225,6 +289,32 @@ func (a *Agent) preparePrefix(header string, req *domain.ChatRequest) ([]byte, *
 	return out, pr
 }
 
+// served is called once a request was served: engines that do not return
+// tokens are handled here, off the request path.
+func (a *Agent) served(pr *prefixRequest, body []byte) {
+	if pr == nil {
+		return
+	}
+	switch a.prefix.source {
+	case sourceText:
+		a.prefix.add(prefixServedEntry{Anchors: pr.anchors, Text: true})
+	case sourceBackground:
+		select {
+		case a.prefix.bgSlots <- struct{}{}:
+		default:
+			return // busy: skip this one, it is a hint
+		}
+		go func() {
+			defer func() { <-a.prefix.bgSlots }()
+			ctx, cancel := context.WithTimeout(context.Background(), prefixBgTimeout)
+			defer cancel()
+			if toks, err := a.engine.(chatTokenizer).TokenizeChat(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model, body); err == nil {
+				a.learn(pr, toks)
+			}
+		}()
+	}
+}
+
 // learn hashes a prompt's tokens and queues what it maps to. Once per request.
 func (a *Agent) learn(pr *prefixRequest, tokens []int) {
 	pr.once.Do(func() {
@@ -243,6 +333,9 @@ func (a *Agent) learn(pr *prefixRequest, tokens []int) {
 			ends[pr.messages-1] = len(blocks)
 		}
 		a.prefix.add(prefixServedEntry{Anchors: pr.anchors, Ends: ends, Blocks: blocks})
+		if a.kv != nil {
+			a.kv.resolve(tokens, pr.scope)
+		}
 	})
 }
 

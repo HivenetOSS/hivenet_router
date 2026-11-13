@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -413,6 +414,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// forwardToAgent releases the slot and wakes one waiter when the slot is
 		// actually free: on return for errors and non-streaming responses, at
 		// the end of the stream for streaming ones.
+		pending.PrefillTokens = session.PrefillTokens()
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
 		// The agent has answered (the first byte, for a stream) or failed:
 		// its prefill no longer waits on this request.
@@ -724,6 +726,11 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		req.Header.Set(domain.HeaderPrefixAnchors, pending.PrefixAnchors)
 	} else {
 		req.Header.Del(domain.HeaderPrefixAnchors) // never trust a client's copy
+	}
+	if pending.PrefillTokens > 0 {
+		req.Header.Set(domain.HeaderPrefillTokens, strconv.Itoa(pending.PrefillTokens))
+	} else {
+		req.Header.Del(domain.HeaderPrefillTokens)
 	}
 
 	// Inject W3C trace context headers so the agent can create child spans.

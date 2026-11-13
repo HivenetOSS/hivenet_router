@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
@@ -203,12 +204,79 @@ func TestPrefix_ClientChoiceAndNoHeader(t *testing.T) {
 	}
 }
 
-// Engines without prompt tokens report nothing.
-func TestPrefix_OnlyEnginesWithTokens(t *testing.T) {
-	a := &Agent{cfg: &config.AgentConfig{JWTSecret: testSecret}, engine: &OllamaEngine{}}
+// Engines without prompt tokens report the text anchors they served.
+func TestPrefix_TextSource(t *testing.T) {
+	a := &Agent{cfg: &config.AgentConfig{JWTSecret: testSecret, Model: "m"}, engine: &OllamaEngine{}}
 	a.initPrefix()
-	if a.prefix != nil {
-		t.Error("ollama cannot return prompt tokens: no prefix state expected")
+	if a.prefix == nil || a.prefix.source != sourceText {
+		t.Fatalf("ollama: want the text source, got %+v", a.prefix)
+	}
+	var cr domain.ChatRequest
+	_ = json.Unmarshal([]byte(chatBody(false, "")), &cr)
+	anchors, _ := prefixhash.DeriveKeys([]byte("k")).Anchors("m", "", &cr)
+	body, pr := a.preparePrefix(prefixhash.EncodeAnchors(anchors), &cr)
+	if string(body) != string(cr.RawBytes) || pr == nil {
+		t.Fatal("text source must not change the body")
+	}
+	a.served(pr, body)
+	if e, _ := a.prefix.since(0); len(e) != 1 || !e[0].Text || !slices.Equal(e[0].Anchors, anchors) {
+		t.Errorf("entries %+v", e)
+	}
+}
+
+// Engines that tokenize but do not return tokens are tokenized after the
+// request, off its path, and nothing is injected into the body.
+func TestPrefix_BackgroundSource(t *testing.T) {
+	fake := &fakeVLLM{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/tokenize" { // SGLang's path, same rendering as the fake
+			r.URL.Path = "/tokenize"
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	a := &Agent{cfg: &config.AgentConfig{BackendURL: srv.URL, Model: "m", JWTSecret: testSecret}, engine: &SGLangEngine{}, httpClient: srv.Client(), stopCh: make(chan struct{})}
+	a.initPrefix()
+	if a.prefix.source != sourceBackground || a.prefix.startToken != fakeStart {
+		t.Fatalf("sglang: source %v, start %d", a.prefix.source, a.prefix.startToken)
+	}
+	rec, _ := callChat(t, a, chatBody(true, ""), true)
+	if strings.Contains(rec.Body.String(), "token_ids") {
+		t.Error("token IDs in the response")
+	}
+	fake.mu.Lock()
+	for _, b := range fake.bodies {
+		if b["return_token_ids"] == true {
+			t.Error("return_token_ids sent to an engine that does not support it while streaming")
+		}
+	}
+	fake.mu.Unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, _ := a.prefix.since(0); len(e) == 1 {
+			if len(e[0].Blocks) == 0 || len(e[0].Ends) != 2 {
+				t.Errorf("entry %+v", e[0])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("no entry learned in the background")
+}
+
+// The prefill backlog counts a request's estimate until its first bytes.
+func TestHoldPrefill(t *testing.T) {
+	a := &Agent{}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.Header.Set(domain.HeaderPrefillTokens, "1500")
+	release := a.holdPrefill(r)
+	if a.pendingPrefill.Load() != 1500 || r.Header.Get(domain.HeaderPrefillTokens) != "" {
+		t.Fatalf("backlog %d; header must not reach the engine", a.pendingPrefill.Load())
+	}
+	release()
+	release()
+	if a.pendingPrefill.Load() != 0 {
+		t.Errorf("backlog %d after release, want 0 (released once)", a.pendingPrefill.Load())
 	}
 }
 
@@ -227,11 +295,20 @@ func TestRemoveField(t *testing.T) {
 	}
 }
 
+// The message-start token occurs twice more with three messages than with
+// one, with or without a generation prompt; the end token too, but later.
 func TestMessageStartFromProbes(t *testing.T) {
-	if _, err := messageStartFromProbes([]int{1, 2, 3}, []int{1, 2, 3, 4, 5}); err == nil {
-		t.Error("a second message with no common opening token must fail")
-	}
-	if tok, err := messageStartFromProbes([]int{7, 1, 8}, []int{7, 1, 8, 7, 2, 8}); err != nil || tok != 7 {
+	// [S user ping E] vs [S user ping E][S asst pong E][S user again E]
+	one := []int{7, 1, 50, 8}
+	three := []int{7, 1, 50, 8, 7, 2, 51, 8, 7, 1, 52, 8}
+	if tok, err := messageStartFromProbes(one, three); err != nil || tok != 7 {
 		t.Errorf("got %d, %v; want 7", tok, err)
+	}
+	// With a generation prompt [S asst] appended to both.
+	if tok, err := messageStartFromProbes(append(one, 7, 2), append(three, 7, 2)); err != nil || tok != 7 {
+		t.Errorf("with generation prompt: got %d, %v; want 7", tok, err)
+	}
+	if _, err := messageStartFromProbes([]int{1, 50}, []int{1, 50, 51, 52}); err == nil {
+		t.Error("a template without a message token must fail")
 	}
 }

@@ -409,6 +409,21 @@ curl http://192.168.1.100:8080/admin/routing-table \
         }'
 ```
 
+## Prefix-aware routing
+
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent tokenizes each served chat request with SGLang's `/v1/tokenize` after forwarding it (SGLang returns no token IDs while streaming), and reports keyed hashes of the prompt's blocks to every router. Tested with SGLang 0.5.23.
+
+To report what SGLang stores and evicts, publish its KV-cache events on a **local** address and give the agent that address ([KV events](/routing/prefix-aware-routing#kv-events)):
+
+```bash
+python -m sglang.launch_server --model-path MODEL \
+  --kv-events-config '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557"}'
+```
+
+```bash
+--kv-events-endpoint tcp://127.0.0.1:5557
+```
+
 ## Use SGLang metrics in routing policies
 
 Exclude agents whose token cache is under pressure:

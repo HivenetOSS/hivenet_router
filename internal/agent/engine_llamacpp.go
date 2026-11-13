@@ -4,9 +4,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"hivenet_router/internal/domain"
@@ -121,4 +123,54 @@ func (e *LlamaCPPEngine) ScrapeMetrics(ctx context.Context, baseURL string, http
 
 func (e *LlamaCPPEngine) ForwardChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, req domain.ChatRequest, options ...EngineOption) ([]byte, http.Header, error) {
 	return forwardOpenAIChatCompletion(ctx, baseURL, httpClient, model, req.RawBytes, e.Name(), options...)
+}
+
+// llamaRender renders messages through llama.cpp's /apply-template, then
+// tokenizes the prompt with special tokens parsed, as the server does.
+func llamaRender(ctx context.Context, httpClient *http.Client, baseURL string, req map[string]any) ([]int, error) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/apply-template", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(hreq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("apply-template: HTTP %d", resp.StatusCode)
+	}
+	var tpl struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&tpl); err != nil {
+		return nil, err
+	}
+	return postTokens(ctx, httpClient, baseURL+"/tokenize", map[string]any{"content": tpl.Prompt, "add_special": true, "parse_special": true})
+}
+
+// MessageStartToken implements messageStartProber with llama.cpp's
+// /apply-template and /tokenize.
+func (e *LlamaCPPEngine) MessageStartToken(ctx context.Context, baseURL string, httpClient *http.Client, _ string) (int, error) {
+	return probeMessageStart(func(msgs []map[string]string) ([]int, error) {
+		return llamaRender(ctx, httpClient, baseURL, map[string]any{"messages": msgs})
+	})
+}
+
+// TokenizeChat implements chatTokenizer with llama.cpp's /apply-template and /tokenize.
+func (e *LlamaCPPEngine) TokenizeChat(ctx context.Context, baseURL string, httpClient *http.Client, _ string, body []byte) ([]int, error) {
+	var p chatParts
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, err
+	}
+	req := map[string]any{"messages": p.Messages}
+	if len(p.Tools) > 0 && string(p.Tools) != "null" {
+		req["tools"] = p.Tools
+	}
+	return llamaRender(ctx, httpClient, baseURL, req)
 }

@@ -20,17 +20,18 @@ The strategy is off unless a policy step names it. It applies to chat requests (
 The router never tokenizes a request and never stores prompt text.
 
 1. **Anchors.** For each request the router computes one *anchor* per message prefix: a keyed hash of the text of messages 1 to *k*, plus the model and the tool definitions. All turns of a conversation repeat their earlier messages, so a later turn shares the earlier turn's anchors.
-2. **What agents served.** The router sends the anchors to the agent with the request. A vLLM agent asks the engine for the prompt's token IDs (`return_token_ids`), removes them from the response before it leaves the agent, and hashes the prompt into keyed blocks of 64 tokens. It then tells every router of the site which blocks each anchor maps to.
-3. **Memo and board.** Each router keeps a *memo* (anchor → blocks) and a *board* (block → the agents that recently served it). A new request is matched through the memo, without tokenizing it, and the board tells how many leading blocks each candidate holds.
-4. **New text.** Text the memo does not know yet gets a short *pending note*: copies of the same new text that arrive before the agent reports go to the same agent.
-5. **Choice.** Busy candidates are excluded first. Among the rest, the strategy estimates for each candidate:
+2. **What agents served.** The router sends the anchors to the agent with the request. Once the agent knows the prompt's token IDs (from the engine; see [Engines](#engines)), it hashes them into keyed blocks of 64 tokens and tells every router of the site which blocks each anchor maps to.
+3. **Memo and board.** Each router keeps a *memo* (anchor → blocks) and a *board* (block → the agents that hold it). A new request is matched through the memo, without tokenizing it, and the board tells how many leading blocks each candidate holds.
+4. **What engines hold.** With [KV events](#kv-events), each engine reports what its cache stores and evicts; the agent relays it to every router, so the board follows the engines' caches, not only what was served. A memo entry is forgotten as soon as no agent holds its last block.
+5. **New text.** Text the memo does not know yet gets a short *pending note*: copies of the same new text that arrive before the agent reports go to the same agent.
+6. **Choice.** Busy candidates are excluded first. Among the rest, the strategy estimates for each candidate:
 
    ```text
-   (prompt tokens queued on it by this router + prompt tokens it does not hold) / prefill_rate
+   (prompt tokens waiting for prefill on it + prompt tokens it does not hold) / prefill_rate
      + running requests reported by its engine × inter-token latency
    ```
 
-   The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
+   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
 
 Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
 
@@ -40,14 +41,41 @@ Everything the strategy knows is advice. The engine checks its own cache, so a w
 
 ## Engines
 
-| Engine | What the router learns |
-| --- | --- |
-| vLLM | The blocks of every `/v1/chat/completions` prompt the agent served, from the token IDs the engine returns. Nothing to configure on the engine. `/v1/messages` requests use what was learned (the top-level `system` counts as a first system message) but do not add to it |
-| SGLang, llama.cpp, Ollama, custom | Nothing yet: requests are routed by load and by pending notes only |
+| Engine | Prompt tokens | Board | Precision |
+| --- | --- | --- | --- |
+| vLLM | Returned in the response (`return_token_ids`); the agent strips them | KV events, or what was served | Full |
+| SGLang | `/v1/tokenize` after the request, off its path (SGLang returns no token IDs while streaming) | KV events, or what was served | Full; at saturation the memo can lag |
+| llama.cpp | `/apply-template` and `/tokenize` after the request | What was served | Good |
+| Ollama, custom | None: the anchors served point to the agent | What was served | Approximate |
+| Embeddings, rerank | — | — | `least-loaded` |
 
-For vLLM, the agent finds the token that opens each message in the model's chat template (for example `<|im_start|>`) at start-up, through the engine's `/tokenize`. With it, the router learns each message prefix, so conversations that share a system prompt find it. A template without such a token reports whole prompts only: the turns of one conversation still find each other.
+Tokenization after the request runs at most two at a time per agent; more are skipped (they are hints). For vLLM, SGLang and llama.cpp the agent finds the token that opens each message in the model's chat template at start-up, so the router learns each message prefix; a template without such a token reports whole prompts only.
 
-If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
+/v1/messages requests use what was learned (the top-level `system` counts as a first system message) but do not add to it. If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
+
+## KV events
+
+vLLM and SGLang can publish their cache events over ZMQ. Give the engine and the agent the same **local** address: the engine connects to it and the agent listens on it, so the engine opens no port.
+
+```bash
+vllm serve MODEL --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":"kv-events"}'
+
+python -m sglang.launch_server --model-path MODEL \
+  --kv-events-config '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557"}'
+
+hivenet-router-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
+```
+
+Both engines connect to any endpoint that is not a wildcard; with a wildcard (`tcp://*:5557`) they listen instead, and the agent connects to them. The agent tries to listen first and connects when the address is taken, so both setups work. With the engine in a container, run the agent in the same network namespace (the same pod), or publish the engine's port on `127.0.0.1` only.
+
+<Warning>
+The events carry the prompts' token IDs, which can be turned back into text. Keep the address on `127.0.0.1` or inside the pod, never on an interface other hosts reach. The agent logs a warning when the endpoint is not a local address.
+</Warning>
+
+The agent re-chunks the engine's blocks (16 tokens in vLLM, 1 in SGLang) into the router's 64-token blocks and sends every router the changes every 100 ms. Blocks of LoRA adapters, multimodal prompts and non-full-attention layers are not reported. A router that falls behind or restarts asks the agent for a snapshot; a new router session also receives the prompts the agent recently reported.
+
+Events only describe new blocks. A prompt that extends a prefix the engine cached before the agent subscribed (for example after an agent restart) is placed once the agent serves that prompt and learns its tokens. When events are lost (a sequence gap, a reconnection), the agent tells the routers to drop its blocks and rebuilds from new events. vLLM publishes events with its next scheduling step, so a cache reset reaches the routers with the next request. Without KV events, the board holds what each agent served, for `predicted_ttl`.
 
 ## Busy agents
 
@@ -93,7 +121,6 @@ sum by (model) (rate(hivenet_prefix_routing_total[5m]))
 
 ## Limits
 
-- The board records what agents served recently, not what their engines still hold: a block the engine evicted counts as held until `predicted_ttl` expires. The engine's own cache check keeps the answer correct.
-- Each router counts only the prompt tokens it sent itself in an agent's queue.
+- Without KV events the board records what agents served, not what their engines still hold: a block the engine evicted counts as held until `predicted_ttl` expires. The engine's own cache check keeps the answer correct.
 - Text shared *inside* one message (for example a document and a different question in the same user message) is not matched: anchors cover whole messages.
-- The router's memory is per process and rebuilds from new traffic after a restart.
+- The router's memory is per process; after a restart the agents send snapshots of their caches, and the memo rebuilds from new traffic.

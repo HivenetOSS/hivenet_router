@@ -109,30 +109,54 @@ func writeField(h hash.Hash, s string) {
 	h.Write([]byte(s))
 }
 
+// Chain is the running state of a block-hash chain: the HMAC of every block
+// so far. The zero value is not valid; start with Keys.Seed.
+type Chain [sha256.Size]byte
+
+// Seed starts a block-hash chain for model and scope: the same tokens under
+// another model or cache salt give other hashes.
+func (k Keys) Seed(model, scope string) Chain {
+	m := hmac.New(sha256.New, k.block)
+	m.Write([]byte("block/v1\x00"))
+	writeField(m, model)
+	writeField(m, scope)
+	var c Chain
+	m.Sum(c[:0])
+	return c
+}
+
+// Next hashes one block of exactly BlockTokens tokens after prev and returns
+// the new chain state and the block's hash.
+func (k Keys) Next(prev Chain, tokens []int32) (Chain, uint64) {
+	var buf [4 * BlockTokens]byte
+	for i, t := range tokens[:BlockTokens] {
+		binary.LittleEndian.PutUint32(buf[4*i:], uint32(t))
+	}
+	m := hmac.New(sha256.New, k.block)
+	m.Write(prev[:])
+	m.Write(buf[:])
+	var c Chain
+	m.Sum(c[:0])
+	return c, binary.LittleEndian.Uint64(c[:])
+}
+
 // Blocks returns the chained hashes of the full BlockTokens-token blocks of
-// tokens (a trailing partial block is not hashed). model and scope seed the
-// chain: the same tokens under another model or cache salt give other hashes.
+// tokens (a trailing partial block is not hashed), as Seed and Next would.
 func (k Keys) Blocks(model, scope string, tokens []int) []uint64 {
 	if len(k.block) == 0 {
 		return nil
 	}
 	n := min(len(tokens)/BlockTokens, MaxBlocks)
 	out := make([]uint64, 0, n)
-	m := hmac.New(sha256.New, k.block)
-	m.Write([]byte("block/v1\x00"))
-	writeField(m, model)
-	writeField(m, scope)
-	prev := m.Sum(nil)
-	buf := make([]byte, 4*BlockTokens)
+	c := k.Seed(model, scope)
+	blk := make([]int32, BlockTokens)
 	for b := range n {
 		for i, t := range tokens[b*BlockTokens : (b+1)*BlockTokens] {
-			binary.LittleEndian.PutUint32(buf[4*i:], uint32(t))
+			blk[i] = int32(t)
 		}
-		m.Reset()
-		m.Write(prev)
-		m.Write(buf)
-		prev = m.Sum(prev[:0])
-		out = append(out, binary.LittleEndian.Uint64(prev))
+		var h uint64
+		c, h = k.Next(c, blk)
+		out = append(out, h)
 	}
 	return out
 }

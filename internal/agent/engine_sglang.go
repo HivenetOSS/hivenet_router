@@ -225,3 +225,16 @@ func (e *SGLangEngine) ForwardChat(ctx context.Context, baseURL string, httpClie
 func (e *SGLangEngine) Warm(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
 	return warmChat(ctx, baseURL, httpClient, model)
 }
+
+// MessageStartToken implements messageStartProber with SGLang's /v1/tokenize
+// (which applies the chat template to messages).
+func (e *SGLangEngine) MessageStartToken(ctx context.Context, baseURL string, httpClient *http.Client, model string) (int, error) {
+	return probeMessageStart(func(msgs []map[string]string) ([]int, error) {
+		return postTokens(ctx, httpClient, baseURL+"/v1/tokenize", map[string]any{"model": model, "messages": msgs})
+	})
+}
+
+// TokenizeChat implements chatTokenizer through SGLang's /v1/tokenize.
+func (e *SGLangEngine) TokenizeChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, body []byte) ([]int, error) {
+	return tokenizeChatBody(ctx, httpClient, baseURL+"/v1/tokenize", model, body)
+}

@@ -428,9 +428,20 @@ curl http://192.168.1.100:8080/admin/routing-table \
 
 ## Prefix-aware routing
 
-With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent asks vLLM for each prompt's token IDs (`return_token_ids`), removes them from the response, and reports keyed hashes of the prompt's blocks to every router. Nothing needs to be configured on vLLM; tested with vLLM 0.31.
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent asks vLLM for each prompt's token IDs (`return_token_ids`), removes them from the response, and reports keyed hashes of the prompt's blocks to every router. Tested with vLLM 0.31.
 
-At start-up the agent calls vLLM's `/tokenize` twice to find the token that opens each message in the model's chat template. If it finds none, it reports whole prompts only and logs it once.
+At start-up the agent calls vLLM's `/tokenize` to find the token that opens each message in the model's chat template. If it finds none, it reports whole prompts only and logs it once.
+
+So that the routers also see what vLLM evicts, publish its KV-cache events on a **local** address and give the agent that address ([KV events](/routing/prefix-aware-routing#kv-events)):
+
+```bash
+vllm serve MODEL --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":"kv-events"}'
+```
+
+```bash
+--kv-events-endpoint tcp://127.0.0.1:5557
+```
 
 ## Use vLLM metrics in routing policies
 
