@@ -139,22 +139,22 @@ They still report Hivenet Router request history, latency, capacity, and availab
 | Running requests | Yes | Yes | Yes |
 | Waiting requests | Yes | Yes | Yes |
 | Preemptions | Yes | No | No |
-| Average TTFT | Yes | Yes | Yes |
-| P90 TTFT | Yes | Yes | Yes |
-| Raw TTFT histogram | Yes | No | No |
-| Average ITL | Yes | No | Yes |
-| P90 ITL | Yes | No | Yes |
-| Raw ITL histogram | Yes | No | No |
-| Prompt-length histogram | Yes | No | No |
-| Generation-length histogram | Yes | No | No |
+| Average TTFT | Yes | Yes | No |
+| P90 TTFT | Yes | Yes | No |
+| Raw TTFT histogram | Yes | Yes | No |
+| Average ITL | Yes | Yes | No |
+| P90 ITL | Yes | Yes | No |
+| Raw ITL histogram | Yes | Yes | No |
+| Prompt-length histogram | Yes | Yes | No |
+| Generation-length histogram | Yes | Yes | No |
 | Finish reasons | Yes | No | No |
 | Generation throughput | No | No | Yes |
 | Prompt throughput | No | No | Yes |
 
 <Note>
-  SGLang and llama.cpp expose histogram data that Hivenet Router uses to calculate their local average and P90 scalar values.
+  Hivenet Router re-exports the raw histograms of vLLM and SGLang through Prometheus and calculates the average and P90 scalar values from them.
 
-  In the current implementation, raw histogram snapshots are re-exported through Prometheus only for vLLM.
+  llama.cpp exposes no TTFT, ITL or length histogram, so llama.cpp agents report no TTFT or ITL values.
 </Note>
 
 ## Enable backend metrics
@@ -530,7 +530,7 @@ Hivenet Router keeps it as a scalar because routing policies need to read a curr
 
 ### Raw TTFT histogram
 
-For vLLM agents, Hivenet Router also exports:
+For vLLM and SGLang agents, Hivenet Router also exports:
 
 ```text
 hivenet_agent_engine_ttft_seconds
@@ -544,7 +544,7 @@ hivenet_agent_engine_ttft_seconds_sum
 hivenet_agent_engine_ttft_seconds_count
 ```
 
-Fleet-wide P90 for vLLM:
+Fleet-wide P90:
 
 ```promql
 histogram_quantile(
@@ -602,9 +602,9 @@ hivenet_agent_engine_p90_itl_seconds
 for:
 
 - vLLM
-- llama.cpp
+- SGLang
 
-SGLang does not currently supply ITL through this integration.
+llama.cpp does not supply ITL through this integration.
 
 Average ITL:
 
@@ -618,13 +618,13 @@ P90 ITL:
 hivenet_agent_engine_p90_itl_seconds
 ```
 
-For vLLM, Hivenet Router also exports the raw histogram:
+For vLLM and SGLang, Hivenet Router also exports the raw histogram:
 
 ```text
 hivenet_agent_engine_itl_seconds
 ```
 
-Fleet-wide vLLM P90:
+Fleet-wide P90:
 
 ```promql
 histogram_quantile(
@@ -650,7 +650,7 @@ Possible causes include:
 
 ## Prompt-length histogram
 
-vLLM supplies a histogram of prompt sizes:
+vLLM and SGLang supply a histogram of prompt sizes:
 
 ```text
 hivenet_agent_engine_request_prompt_tokens
@@ -700,7 +700,7 @@ Long prompts can increase:
 
 ## Generation-length histogram
 
-vLLM also supplies a distribution of generated output lengths:
+vLLM and SGLang also supply a distribution of generated output lengths:
 
 ```text
 hivenet_agent_engine_request_generation_tokens
@@ -892,7 +892,7 @@ exclude_if:
     gt: 0.05
 ```
 
-does not exclude an SGLang agent because SGLang does not report ITL through this integration.
+does not exclude a llama.cpp agent because llama.cpp does not report ITL through this integration.
 
 <Warning>
   Combine engine-specific gates with a static engine or metadata match when the metric must be present.
@@ -1169,19 +1169,19 @@ groups:
     - whether requests have completed
     - whether the expected histogram exists on the backend
 
-    SGLang does not provide ITL through the current integration.
+    llama.cpp does not provide TTFT or ITL through the current integration.
   </Accordion>
 
   <Accordion title="Raw histogram queries are empty">
-    The current Hivenet Router implementation re-exports raw engine histograms from vLLM.
+    The current Hivenet Router implementation re-exports raw engine histograms from vLLM and SGLang.
 
-    SGLang and llama.cpp currently supply scalar average and P90 values but not raw histogram series through the router.
+    llama.cpp exposes no TTFT, ITL or length histogram, so these families carry no series for llama.cpp agents.
 
-    Filter for vLLM:
+    Filter for vLLM and SGLang:
 
     ```promql
     hivenet_agent_engine_ttft_seconds_count{
-      engine="vllm"
+      engine=~"vllm|sglang"
     }
     ```
   </Accordion>
