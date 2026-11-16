@@ -81,7 +81,10 @@ func (c *kvCursors) forget(agent peer.ID) {
 
 // Bounds on one /prefix-state batch.
 const (
-	maxPrefixStateBody   = 16 << 20
+	maxPrefixStateBody = 16 << 20
+	// prefixCheckDelay is how long a trust check waits for the cache events
+	// that may excuse it (agents send them every 100 ms).
+	prefixCheckDelay     = 500 * time.Millisecond
 	maxPrefixStateServed = 1024
 	maxKVBlocks          = 1 << 20 // 64M tokens of cache per agent
 )

@@ -300,3 +300,56 @@ func TestTrimDropsGuessesFirst(t *testing.T) {
 		t.Errorf("a1 kept %d of its 60 reported blocks", m.Reported[a1])
 	}
 }
+
+// A check judges only the blocks the engine kept since the decision: blocks
+// it evicted (or evicted and stored again) are not held against the agent;
+// blocks it still holds and did not serve from cache are.
+func TestCheckClaim(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	ix.ApplyEvents("m", a1, blocks12, nil, false)
+	at := ix.Lookup("m", []uint64{1}, []peer.ID{a1}).At
+	c.t = c.t.Add(time.Second)
+	// Too small to judge.
+	if r := ix.CheckClaim("m", a1, blocks12[:3], at, 0); r != "" {
+		t.Errorf("3 blocks: %q, want no check", r)
+	}
+	// The engine evicted all but 2 blocks before the request reached it.
+	ix.ApplyEvents("m", a1, nil, blocks12[2:], false)
+	for range 10 {
+		if r := ix.CheckClaim("m", a1, blocks12, at, 128); r != CheckEvicted {
+			t.Fatalf("after evictions: %q, want %q", r, CheckEvicted)
+		}
+	}
+	// It stored them again (the request recomputed them): still not held all along.
+	ix.ApplyEvents("m", a1, blocks12[2:], nil, false)
+	if r := ix.CheckClaim("m", a1, blocks12, at, 128); r != CheckEvicted {
+		t.Errorf("evicted then stored again: %q, want %q", r, CheckEvicted)
+	}
+	if tr := ix.Trust(a1); tr != 1 {
+		t.Errorf("trust %.2f after evictions only, want 1", tr)
+	}
+	// An agent whose engine still holds the blocks but served none of them.
+	ix.ApplyEvents("m", a2, blocks12, nil, false)
+	at = ix.Lookup("m", []uint64{1}, []peer.ID{a2}).At
+	c.t = c.t.Add(time.Second)
+	for range trustMinSamples {
+		if r := ix.CheckClaim("m", a2, blocks12, at, 0); r != CheckMissed {
+			t.Fatalf("held but not served: %q, want %q", r, CheckMissed)
+		}
+	}
+	if tr := ix.Trust(a2); tr > 0.4 {
+		t.Errorf("trust %.2f for an agent whose kept blocks were never cached", tr)
+	}
+	// A repeated store event for blocks it holds changes nothing.
+	ix.ApplyEvents("m", a2, blocks12, nil, false)
+	if r := ix.CheckClaim("m", a2, blocks12, at, 0); r != CheckMissed {
+		t.Errorf("after a repeated store event: %q, want %q", r, CheckMissed)
+	}
+	// Partly evicted, the rest served: judged on what it kept, and held.
+	ix.ApplyEvents("m", a2, nil, blocks12[8:], false)
+	if r := ix.CheckClaim("m", a2, blocks12, at, 8*64); r != CheckHeld {
+		t.Errorf("8 kept and served: %q, want %q", r, CheckHeld)
+	}
+}
+
+var blocks12 = []uint64{201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212}

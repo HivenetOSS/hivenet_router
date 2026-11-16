@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"hivenet_router/internal/prefixhash"
+
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -95,6 +97,10 @@ type holder struct {
 	// (Commit), as opposed to what the agent reported (Learn, events). Every
 	// router receives the same reports, but each makes its own guesses.
 	guess bool
+	// since is when the engine last confirmed the block (unix nanos): a block
+	// evicted and stored again has a later since, so a check can tell it was
+	// not held all along.
+	since int64
 }
 
 type note struct {
@@ -217,6 +223,46 @@ func (ix *Index) Observe(agent peer.ID, predicted, actual int) bool {
 	return ratio >= 0.5
 }
 
+// Results of CheckClaim.
+const (
+	CheckHeld    = "held"
+	CheckMissed  = "missed"
+	CheckEvicted = "evicted"
+)
+
+// CheckClaim checks what agent's engine confirmed holding at a routing
+// decision (the leading blocks, confirmed at time at) against the cached
+// tokens it reported for that request. Blocks its engine evicted since (by a
+// cache event; a block stored again later counts as evicted) are not held
+// against it: under KV-cache pressure an engine evicts confirmed blocks
+// before the request reaches it. It returns CheckHeld or CheckMissed when the
+// agent was judged, CheckEvicted when evictions left too little to judge,
+// and "" when the claim was too small to judge.
+func (ix *Index) CheckClaim(modelName string, agent peer.ID, blocks []uint64, at int64, actual int) string {
+	if len(blocks)*prefixhash.BlockTokens < trustMinPredicted {
+		return ""
+	}
+	kept := 0
+	if m := ix.model(modelName, false); m != nil {
+		m.mu.Lock()
+		for _, b := range blocks {
+			if !holdsIf(m.board[b], agent, func(h holder) bool { return h.exp == 0 && h.since <= at }) {
+				break
+			}
+			kept++
+		}
+		m.mu.Unlock()
+	}
+	expected := kept * prefixhash.BlockTokens
+	if expected < trustMinPredicted {
+		return CheckEvicted
+	}
+	if ix.Observe(agent, expected, actual) {
+		return CheckHeld
+	}
+	return CheckMissed
+}
+
 // Trust is the weight of agent's predicted cache hits, 0–1: 1 until it has
 // trustMinSamples checks, then the moving share of its predictions that came
 // true. An agent whose engine reports cache it does not have loses weight.
@@ -318,13 +364,16 @@ func (ix *Index) confirm(m *model, agent peer.ID, blocks []uint64, now time.Time
 		found := false
 		for i := range hs {
 			if hs[i].agent == agent {
+				if hs[i].exp != 0 {
+					hs[i].since = now.UnixNano()
+				}
 				hs[i].exp, hs[i].guess = 0, false
 				found = true
 				break
 			}
 		}
 		if !found {
-			m.board[b] = append(hs, holder{agent: agent})
+			m.board[b] = append(hs, holder{agent: agent, since: now.UnixNano()})
 			m.agentBlocks[agent]++
 		}
 	}
@@ -425,6 +474,8 @@ type Match struct {
 	// cache events confirmed.
 	Reported  map[peer.ID]int
 	Confirmed map[peer.ID]int
+	// At is when the lookup ran (unix nanos), for CheckClaim.
+	At int64
 	// Pending is the agent a request whose text went past the memo was just
 	// sent to, if any, and PendingTo the number of anchors that note covers.
 	// PendingReported is set when the note is the agent's own text entry
@@ -443,6 +494,7 @@ func (ix *Index) Lookup(modelName string, anchors []uint64, candidates []peer.ID
 		return res
 	}
 	now := ix.now().UnixNano()
+	res.At = now
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k := len(anchors) - 1; k >= 0; k-- {

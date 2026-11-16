@@ -97,7 +97,9 @@ When the engine reports how many prompt tokens it served from its cache, the rou
 
 Only confirmed blocks are checked. What the router predicted itself (a copy of a prompt sent before the first prefill ended) or what an agent served but its engine has not confirmed yet is not a claim the agent made, so it is not held against it.
 
-The check needs KV events and an engine that reports cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests, on streamed chat requests that ask for usage (`"stream_options": {"include_usage": true}`), and on `/v1/messages` responses that carry `cache_read_input_tokens`. Agents without KV events are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the checks that did not hold.
+Nor are blocks the engine evicted after the routing decision. Under KV-cache pressure an engine evicts confirmed blocks before the request reaches it; its cache events report the eviction, and the router waits half a second after the answer for them before it checks. Only the blocks the engine kept all along are judged (a block evicted and stored again does not count), and when too few are left the check is skipped. An agent relaying another engine's events cannot use this: that engine does not evict the blocks the agent did not serve from cache.
+
+The check needs KV events and an engine that reports cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests, on streamed chat requests that ask for usage (`"stream_options": {"include_usage": true}`), and on `/v1/messages` responses that carry `cache_read_input_tokens`. Agents without KV events are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the checks that did not hold, `result="evicted"` the checks skipped because the engine evicted the blocks first.
 
 <Note>
 The engine's usage reaches the router through the agent, so trust catches broken and misconfigured agents, not a compromised one: such an agent could report matching cached tokens too. What bounds a compromised agent is the per-agent caps below and that everything is advice; an agent joins a site only with the site's agent secret.
@@ -148,7 +150,7 @@ See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each
 | --- | --- |
 | `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
 | `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `blocks`, `pending` |
-| `hivenet_prefix_checks_total{model, result}` | Predictions checked against the engine's cached tokens: `held` or `missed` |
+| `hivenet_prefix_checks_total{model, result}` | Confirmed blocks checked against the engine's cached tokens: `held`, `missed`, or `evicted` (evicted before the request reached the engine: not judged) |
 
 Share of requests sent to an agent that holds part of the prompt:
 

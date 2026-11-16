@@ -106,9 +106,10 @@ type RequestProcessor struct {
 	// returns the scope of a tenant's anchors (nil: one scope for everyone).
 	prefixKeys  prefixhash.Keys
 	prefixScope func(tenantID string) string
-	// prefixCheck receives, after an answer, the cached prompt tokens the
-	// router predicted on the agent and what the engine reported.
-	prefixCheck func(agent peer.ID, model string, predicted, actual int)
+	// prefixCheck receives, after an answer, the blocks the agent's engine
+	// confirmed holding at the routing decision and the cached prompt tokens
+	// the engine reported.
+	prefixCheck func(agent peer.ID, model string, blocks []uint64, at int64, actual int)
 }
 
 // NewRequestProcessor creates a new request processor.
@@ -175,19 +176,20 @@ func WithPrefixScope(scope func(tenantID string) string) ProcessorOption {
 	return func(p *RequestProcessor) { p.prefixScope = scope }
 }
 
-// WithPrefixCheck sets the function that checks the router's cache-hit
-// predictions against what the engines report (agent trust).
-func WithPrefixCheck(f func(agent peer.ID, model string, predicted, actual int)) ProcessorOption {
+// WithPrefixCheck sets the function that checks what an agent's engine
+// confirmed holding (blocks, as of at) against the cached tokens it reported
+// (agent trust).
+func WithPrefixCheck(f func(agent peer.ID, model string, blocks []uint64, at int64, actual int)) ProcessorOption {
 	return func(p *RequestProcessor) { p.prefixCheck = f }
 }
 
 // checkPrefix reports a prediction check when the engine reported its cached
 // tokens and a prediction was made.
 func (p *RequestProcessor) checkPrefix(agent *domain.Agent, pending *domain.PendingRequest, actual int, known bool) {
-	if p.prefixCheck == nil || !known || pending.PredictedCached <= 0 {
+	if p.prefixCheck == nil || !known || len(pending.PredictedBlocks) == 0 {
 		return
 	}
-	p.prefixCheck(agent.ID, agent.Metadata.Model, pending.PredictedCached, actual)
+	p.prefixCheck(agent.ID, agent.Metadata.Model, pending.PredictedBlocks, pending.PredictedAt, actual)
 }
 
 // countTokensPath is the Anthropic token-counting endpoint: it holds no KV
@@ -433,7 +435,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// actually free: on return for errors and non-streaming responses, at
 		// the end of the stream for streaming ones.
 		pending.PrefillTokens = session.PrefillTokens()
-		pending.PredictedCached = session.PredictedCached()
+		pending.PredictedBlocks, pending.PredictedAt = session.PredictedClaim()
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
 		// The agent has answered (the first byte, for a stream) or failed:
 		// its prefill no longer waits on this request.
