@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +22,7 @@ import (
 // blocks before each message, and the prompt's block hashes. Hashes only:
 // no text, no token IDs.
 type prefixStatePayload struct {
-	SessionToken string              `json:"session_token"`
-	Served       []prefixServedEntry `json:"served"`
+	Served []prefixServedEntry `json:"served"`
 	// KV carries the changes of the agent's engine cache (from its KV
 	// events), in router block hashes; absent when the agent has none.
 	KV *prefixKVPayload `json:"kv,omitempty"`
@@ -88,14 +88,16 @@ const (
 
 // handlePrefixState records what an agent served in the prefix memory: the
 // memo learns which blocks each anchor maps to, and the board predicts those
-// blocks on the agent. Authenticated like /routing-signals.
+// blocks on the agent. The agent's session token comes in the Authorization
+// header, so the batch is authenticated and rate-limited before its body
+// (up to maxPrefixStateBody) is read.
 func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
-	var payload prefixStatePayload
-	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, maxPrefixStateBody)).Decode(&payload); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	token, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+	if !ok || token == "" {
+		http.Error(w, "missing session token", http.StatusUnauthorized)
 		return
 	}
-	session, valid := r.sessionManager.ValidateSession(payload.SessionToken)
+	session, valid := r.sessionManager.ValidateSession(token)
 	if !valid {
 		http.Error(w, "invalid or expired session token", http.StatusUnauthorized)
 		return
@@ -107,6 +109,11 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 	}
 	if !r.prefixLimits.allow(a.ID, time.Now()) {
 		http.Error(w, "too many prefix-state batches", http.StatusTooManyRequests)
+		return
+	}
+	var payload prefixStatePayload
+	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, maxPrefixStateBody)).Decode(&payload); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if len(payload.Served) > maxPrefixStateServed {
@@ -141,8 +148,12 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 		r.prefixIndex.SetEventSource(a.ID)
 		// No agent holds more blocks than its engine's KV cache can (plus a
 		// margin for blocks shared between prompts and timing).
-		if ep, err := r.storage.GetEnginePunctual(a.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil && *ep.KVCapacityTokens > 0 {
-			r.prefixIndex.SetAgentCap(a.ID, int(*ep.KVCapacityTokens*1.25)/prefixhash.BlockTokens+1)
+		// Read on snapshots (each new session, each gap) and until known, not
+		// on every batch.
+		if kv.Snapshot || !r.prefixIndex.HasAgentCap(a.ID) {
+			if ep, err := r.storage.GetEnginePunctual(a.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil && *ep.KVCapacityTokens > 0 {
+				r.prefixIndex.SetAgentCap(a.ID, int(*ep.KVCapacityTokens*1.25)/prefixhash.BlockTokens+1)
+			}
 		}
 		if kv.Snapshot {
 			r.prefixIndex.ReplaceConfirmed(model, a.ID, kv.Stored)

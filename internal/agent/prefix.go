@@ -260,14 +260,21 @@ var errKVGap = errors.New("router needs a cache snapshot")
 
 func (a *Agent) pushPrefixState(rs *routerSession, batch []prefixServedEntry, kv *kvPayload) error {
 	body, err := json.Marshal(struct {
-		SessionToken string              `json:"session_token"`
-		Served       []prefixServedEntry `json:"served,omitempty"`
-		KV           *kvPayload          `json:"kv,omitempty"`
-	}{rs.sessionToken(), batch, kv})
+		Served []prefixServedEntry `json:"served,omitempty"`
+		KV     *kvPayload          `json:"kv,omitempty"`
+	}{batch, kv})
 	if err != nil {
 		return err
 	}
-	resp, err := rs.client.Post("http://router/prefix-state", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://router/prefix-state", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	// The session goes in a header: the router authenticates and rate-limits
+	// the batch before it reads the body.
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+rs.sessionToken())
+	resp, err := rs.client.Do(req)
 	if err != nil {
 		return err
 	}
