@@ -134,18 +134,20 @@ type sseChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		InputTokens      int `json:"input_tokens"`  // Anthropic message_delta (rare here)
-		OutputTokens     int `json:"output_tokens"` // Anthropic message_delta (cumulative)
+		PromptTokens     int  `json:"prompt_tokens"`
+		CompletionTokens int  `json:"completion_tokens"`
+		InputTokens      int  `json:"input_tokens"`            // Anthropic message_delta (rare here)
+		OutputTokens     int  `json:"output_tokens"`           // Anthropic message_delta (cumulative)
+		CacheRead        *int `json:"cache_read_input_tokens"` // Anthropic message_delta
 		Details          *struct {
 			CachedTokens *int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 	Message *struct { // Anthropic message_start
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens  int  `json:"input_tokens"`
+			OutputTokens int  `json:"output_tokens"`
+			CacheRead    *int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	Delta *struct { // Anthropic content_block_delta
@@ -200,6 +202,14 @@ func (m *SSETokenMeter) parseLine(line []byte) {
 		if c.Message.Usage.OutputTokens > m.usageCompletion {
 			m.usageCompletion = c.Message.Usage.OutputTokens
 		}
+	}
+	// Anthropic cached prompt tokens: in message_start, and in message_delta
+	// for engines that only know them at the end.
+	if c.Message != nil && c.Message.Usage.CacheRead != nil {
+		m.usageCached, m.cachedKnown = *c.Message.Usage.CacheRead, true
+	}
+	if c.Usage != nil && c.Usage.CacheRead != nil {
+		m.usageCached, m.cachedKnown = *c.Usage.CacheRead, true
 	}
 	// Anthropic message_delta: cumulative output count; the last one wins.
 	if c.Usage != nil && c.Usage.OutputTokens > m.usageCompletion {
