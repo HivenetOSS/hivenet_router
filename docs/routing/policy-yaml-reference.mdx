@@ -123,9 +123,17 @@ effective request backstop = max_inflight × healthy_replicas
 
 When `admit_budget_tokens` is `0`, the token budget is `floor(HIVENET_ROUTER_ADMIT_FRACTION × summed KV capacity of the healthy replicas)`. vLLM and SGLang agents report KV capacity; set `HIVENET_ROUTER_ADMIT_FROM_ENGINE_KV=false` to ignore it. Other engines do not report it. A model with no token budget and no `max_inflight` gets `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica; `0` disables that default.
 
-With several routers sharing `--sync-store=valkey`, each router admits the effective token budget and request backstop divided by the number of live routers. See [Run several routers](/deploy/multiple-routers).
+With several routers sharing `--sync-store=valkey`, each router admits against occupancy credits held from a site-wide pool. Credits are redistributed as demand changes; normal admission does not divide the budget statically by the number of live routers. If the store is unreachable, each router uses only the credits it already holds, capped at its share, and obtains no more until the store responds. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits) and [store-outage behavior](/deploy/multiple-routers#when-the-store-is-unreachable).
 
-Over-budget requests wait in the per-model wait queue, up to `--queue-depth` requests for up to half the request timeout; requests beyond it park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT`. If no room frees, the router returns `429 concurrency_limit_exceeded`. A request larger than the whole token budget is admitted when nothing else of that model is in flight on this router. Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
+Requests that do not fit wait in the per-model occupancy queue, sized by `--admission-queue-depth`. Its default follows `--queue-depth` (normally `30`). Queued requests wait up to half of `--request-timeout`, within the overall request deadline. With the default `60s` timeout, a request can wait up to `30s`; one that waits `20s` has `40s` left.
+
+Requests outside that queue park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`). If no room frees before the wait ends, the router returns `429 concurrency_limit_exceeded` with `Retry-After: 1`. Admission runs before routing and provider fallback, so this rejection does not advance the fallback chain.
+
+Setting `--admission-queue-depth=0` disables the occupancy queue but leaves the short park wait. Set `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT=0` as well to reject requests that do not fit without waiting. Requests released after [hold at zero](/routing/hold-at-zero#after-the-wake) have a separate wait budget and recovery response.
+
+A request larger than the whole token budget can be admitted when no other request for that model is in flight on the admitting router; it still needs the applicable occupancy credits. During a store outage, each router can admit one request larger than its share, so actual engine occupancy can reach the number of routers multiplied by the budget. See [B2: pool occupancy](/routing/admission-control#b2-pool-occupancy) for oversized-request behavior.
+
+Existing reservations are not canceled when the healthy pool shrinks; the smaller limit affects new admissions until work completes.
 
 Benchmark-derived values are not loaded automatically from `router_limits.yaml`. Operators or provisioning tooling must copy the certified per-model values into the policy.
 

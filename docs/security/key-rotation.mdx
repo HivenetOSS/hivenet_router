@@ -109,9 +109,9 @@ Static client keys are stored as SHA-256 hashes in `auth.yaml`. The safest rotat
     Hivenet Router validates the replacement provider before swapping it in. A failed reload leaves the previous provider active.
 
     <Warning>
-      A successful static-auth reload rebuilds the in-memory quota limiter.
+      Without a shared sync store, a successful static-auth reload rebuilds the in-memory quota limiter. Request-per-minute buckets reset. With the `memory` quota backend, current daily token usage is also lost. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
 
-      Request-per-minute buckets reset. With the `memory` quota backend, current daily token usage is also lost. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
+      With `--sync-store=valkey`, today's shared usage is retained; see [Run several routers](/deploy/multiple-routers).
     </Warning>
   </Step>
   <Step title="Test the new key">
@@ -203,7 +203,11 @@ This is useful for emergency revocation, but it does not provide an overlap peri
 
 ### Restart behavior
 
-Dynamic registry state is memory-only. After a router restart, repopulate the complete current registry before expecting client authentication to work.
+With the default `--key-store=memory`, a restart empties the dynamic registry. Repopulate the complete current registry before expecting client authentication to work.
+
+With `--key-store=badger`, eligible keys can be restored from a local warm-start cache. Restoration depends on the snapshot's integrity, schema, age, and prior full-replace confirmation; the default maximum age is `15m`. An unusable cache starts empty. A restored registry remains unconfirmed until the upstream key-sync service sends a full replacement.
+
+The upstream service remains authoritative. Push the current key set, including rotations and revocations, to every router; neither the key store nor the shared quota store replicates keys. See [Persistent key store](/security/api-keys#persistent-key-store-warm-start).
 
 Use:
 
@@ -252,7 +256,7 @@ curl \
   Editing a systemd `EnvironmentFile`, Docker `.env` file, Kubernetes Secret, or shell configuration does not change that process environment. In normal deployments, restart or recreate the router after changing `HIVENET_ROUTER_ADMIN_API_KEYS`.
 </Note>
 
-Admin-key rotation restarts the current single router process. Queued and in-flight requests are not durably recovered after a router restart.
+Admin-key rotation requires restarting each affected router process. Queued and in-flight requests on a restarted router are not durably recovered. In a multi-router site, update and verify the administrator credentials on every router.
 
 ## Rotate the agent JWT secret
 
@@ -299,7 +303,7 @@ The router restart removes its in-memory agent sessions. Agents that have not re
 
 When the deployment cannot tolerate this control-plane interruption, build a separate replacement deployment with its own router, secret, and agent fleet, validate it, then move client traffic to it.
 
-The current single-router architecture does not provide an in-place zero-downtime dual-secret rotation.
+Running several routers does not add dual-secret support. Every router and agent in a site must use the same shared JWT secret, so coordinate the change across the site.
 
 ### Rollback
 
