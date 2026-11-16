@@ -39,10 +39,12 @@ type PendingRequest struct {
 	PrefixAnchors string
 	// PrefillTokens is HeaderPrefillTokens for the current forward attempt.
 	PrefillTokens int
-	// PredictedCached is the prompt tokens the current attempt's agent holds
-	// in cache by its engine's confirmed cache events (prefix-aware), to check
-	// against the engine's report.
-	PredictedCached int
+	// PredictedBlocks is the leading prompt blocks the current attempt's
+	// agent holds in cache by its engine's confirmed cache events
+	// (prefix-aware), as of PredictedAt (unix nanos), to check against the
+	// engine's report.
+	PredictedBlocks []uint64
+	PredictedAt     int64
 
 	// Path is the agent-facing HTTP path the processor forwards this request to
 	// (e.g. "/v1/messages" for the Anthropic passthrough). Empty means the

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/prefixhash"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -497,7 +498,17 @@ func (s *Session) PredictedCached() int {
 	if s.prefix == nil {
 		return 0
 	}
-	return s.prefix.predicted
+	return len(s.prefix.predicted) * prefixhash.BlockTokens
+}
+
+// PredictedClaim is the leading blocks the chosen agent's engine confirmed
+// holding at the last Select, and when (see prefixindex.CheckClaim); nil
+// when there is nothing to check.
+func (s *Session) PredictedClaim() ([]uint64, int64) {
+	if s.prefix == nil {
+		return nil, 0
+	}
+	return s.prefix.predicted, s.prefix.predictedAt
 }
 
 // PrefillTokens is the prompt tokens the last Select expects the chosen agent

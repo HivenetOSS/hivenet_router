@@ -947,7 +947,7 @@ func NewRouterMetrics() *RouterMetrics {
 		prefixChecksTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_prefix_checks_total",
-				Help: "Prefix-aware cache-hit predictions checked against the cached tokens the engine reported, per model: held (half or more came true) or missed.",
+				Help: "Prefix-aware checks of the blocks an agent's engine confirmed holding against the cached tokens it reported, per model: held (half or more came true), missed, or evicted (evicted before the request reached the engine: not judged).",
 			},
 			[]string{"model", "result"},
 		),
@@ -1811,12 +1811,9 @@ func (m *RouterMetrics) PrefixIndexSize(memo, memoEnds, blocks, pending int) {
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
 }
 
-// PrefixChecked counts one prediction check.
-func (m *RouterMetrics) PrefixChecked(model string, held bool) {
-	result := "missed"
-	if held {
-		result = "held"
-	}
+// PrefixChecked counts one check of an agent's confirmed cache: result is
+// held, missed or evicted.
+func (m *RouterMetrics) PrefixChecked(model, result string) {
 	m.prefixChecksTotal.With(prometheus.Labels{"model": model, "result": result}).Inc()
 }
 

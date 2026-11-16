@@ -94,9 +94,11 @@ type PrefixRequest struct {
 	// lost slot race selects again; a retry is the same request).
 	outcome string
 	counted bool
-	// predicted is the prompt tokens the board says the chosen agent holds,
-	// checked against the engine's report once it answers.
-	predicted int
+	// predicted is the leading blocks the chosen agent's engine confirmed
+	// holding, at predictedAt (index clock): checked against the engine's
+	// report once it answers.
+	predicted   []uint64
+	predictedAt int64
 	// reserved is the agent whose prefill queue holds reservedToks of this
 	// request; released at the first response byte (Session.ReleasePrefill).
 	reserved     peer.ID
@@ -237,7 +239,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		ok = append(ok, c)
 	}
 	if len(ok) == 0 {
-		pr.match, pr.newToks, pr.selected, pr.predicted, pr.outcome = prefixindex.Match{}, sum(pr.Sizes), true, 0, PrefixOutcomeBusy
+		pr.match, pr.newToks, pr.selected, pr.predicted, pr.outcome = prefixindex.Match{}, sum(pr.Sizes), true, nil, PrefixOutcomeBusy
 		return leastLoadedStrategy{}.Select(candidates, req)
 	}
 
@@ -311,7 +313,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	// cached tokens it reports: a block this router predicted (a copy sent
 	// before the first prefill ended, a report not yet confirmed) failing to
 	// be cached says nothing about the agent.
-	pr.predicted = m.Confirmed[chosen.ID] * prefixhash.BlockTokens
+	pr.predicted, pr.predictedAt = m.Blocks[:m.Confirmed[chosen.ID]], m.At
 	switch {
 	case m.Depth[chosen.ID] > 0:
 		pr.outcome = PrefixOutcomeHit

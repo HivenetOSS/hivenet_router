@@ -771,8 +771,15 @@ func (r *Router) Start() error {
 		// Interim key source: the site's agent secret. To move to a sub-key of
 		// the cache-salt secret, with the tenant scope, once that is in place.
 		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))),
-		WithPrefixCheck(func(agent peer.ID, model string, predicted, actual int) {
-			r.metrics.PrefixChecked(model, r.prefixIndex.Observe(agent, predicted, actual))
+		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
+			// Wait for the engine's cache events that may have evicted the
+			// blocks before the request reached it (sent in batches every
+			// 100 ms, after the engine's next step).
+			time.AfterFunc(prefixCheckDelay, func() {
+				if res := r.prefixIndex.CheckClaim(model, agent, blocks, at, actual); res != "" {
+					r.metrics.PrefixChecked(model, res)
+				}
+			})
 		}))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
