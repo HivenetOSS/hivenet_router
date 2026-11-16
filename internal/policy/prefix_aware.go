@@ -253,9 +253,21 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	}
 
 	hit := func(id peer.ID) int {
-		// An agent whose past predictions did not come true counts less.
+		// An agent whose past predictions did not come true counts less. The
+		// pending note is this router's own note, not the agent's claim, so
+		// trust does not weigh it.
 		h := int(float64(m.Depth[id]*prefixhash.BlockTokens) * s.index.Trust(id))
 		if id == m.Pending {
+			h = max(h, pendingToks)
+		}
+		return h
+	}
+	// reported is what the agent itself reported holding (engine events,
+	// served prompts, text entries): every router receives the same reports,
+	// so near-ties are broken the same way everywhere.
+	reported := func(id peer.ID) int {
+		h := m.Reported[id] * prefixhash.BlockTokens
+		if id == m.Pending && m.PendingReported {
 			h = max(h, pendingToks)
 		}
 		return h
@@ -279,13 +291,13 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		if costs[i] > best+eps {
 			continue
 		}
-		// Among near-ties the agent that holds the most of the prompt wins
-		// (usually the one that served the conversation's earlier turns), so a
-		// conversation stays put when the load differences are small. Equal
-		// holdings go to rendezvous hashing on the first anchor: every router
-		// breaks the tie the same way, so new text arriving on two routers
-		// lands together.
-		h, score := hit(c.Agent.ID), hrw(pr.Anchors[0], c.Agent.ID)
+		// Among near-ties the agent that reported holding the most of the
+		// prompt wins (usually the one that served the conversation's earlier
+		// turns), so a conversation stays put when the load differences are
+		// small. Equal holdings go to rendezvous hashing on the first anchor:
+		// every router breaks the tie the same way, so new text arriving on
+		// two routers lands together.
+		h, score := reported(c.Agent.ID), hrw(pr.Anchors[0], c.Agent.ID)
 		if chosen == nil || h > bestHit || (h == bestHit && score > bestScore) {
 			chosen, bestHit, bestScore = c.Agent, h, score
 		}
@@ -293,7 +305,11 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 
 	h := hit(chosen.ID)
 	pr.match, pr.newToks, pr.selected = m, max(0, prompt-h), true
-	pr.predicted = m.Depth[chosen.ID] * prefixhash.BlockTokens
+	// Only what the engine's cache events confirmed is checked against the
+	// cached tokens it reports: a block this router predicted (a copy sent
+	// before the first prefill ended, a report not yet confirmed) failing to
+	// be cached says nothing about the agent.
+	pr.predicted = m.Confirmed[chosen.ID] * prefixhash.BlockTokens
 	switch {
 	case m.Depth[chosen.ID] > 0:
 		pr.outcome = PrefixOutcomeHit

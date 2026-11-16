@@ -39,9 +39,9 @@ type PendingRequest struct {
 	PrefixAnchors string
 	// PrefillTokens is HeaderPrefillTokens for the current forward attempt.
 	PrefillTokens int
-	// PredictedCached is the prompt tokens the router predicted the current
-	// attempt's agent holds in cache (prefix-aware), to check against the
-	// engine's report.
+	// PredictedCached is the prompt tokens the current attempt's agent holds
+	// in cache by its engine's confirmed cache events (prefix-aware), to check
+	// against the engine's report.
 	PredictedCached int
 
 	// Path is the agent-facing HTTP path the processor forwards this request to
