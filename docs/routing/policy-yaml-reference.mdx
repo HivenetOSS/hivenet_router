@@ -589,7 +589,7 @@ Sends a chat request to the candidate with the lowest estimated time to first to
 | `kv_threshold` | Number | `0.92` | (0, 1] | Exclude a candidate whose engine reports a KV-cache use at or above it |
 | `max_waiting` | Integer | `8` | 0–1000 | Exclude a candidate whose engine reports more waiting requests |
 | `busy_factor` | Number | `2.0` | 1–10 | Exclude a candidate whose requests in flight are above this times the candidates' mean (and above 4) |
-| `tie_epsilon` | Number | `0.05` | 0–1 | Candidates within this share of the best estimate (or 5 ms) are a tie, broken the same way on every router |
+| `tie_epsilon` | Number | `0.05` | 0–1 | Candidates within this share of the best estimate (or 5 ms) are a tie: the one holding the most of the prompt wins, then a hash breaks the tie the same way on every router |
 | `prefill_rate` | Number | `10000` | 100–10,000,000 | Assumed prefill speed in tokens per second, used to compare tokens to seconds |
 | `predicted_ttl` | Duration | `120s` | 1s–1h | How long blocks sent to or served by an agent count as held there |
 | `pending_ttl` | Duration | `5s` | 100ms–1m | How long new text keeps going to the agent it was first sent to |

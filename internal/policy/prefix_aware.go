@@ -271,15 +271,21 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	}
 	eps := max(s.TieEpsilon*best, 0.005)
 	var chosen *domain.Agent
+	var bestHit int
 	var bestScore uint64
 	for i, c := range ok {
 		if costs[i] > best+eps {
 			continue
 		}
-		// Rendezvous hashing on the first anchor: every router breaks the tie
-		// the same way, so new text arriving on two routers lands together.
-		if score := hrw(pr.Anchors[0], c.Agent.ID); chosen == nil || score > bestScore {
-			chosen, bestScore = c.Agent, score
+		// Among near-ties the agent that holds the most of the prompt wins
+		// (usually the one that served the conversation's earlier turns), so a
+		// conversation stays put when the load differences are small. Equal
+		// holdings go to rendezvous hashing on the first anchor: every router
+		// breaks the tie the same way, so new text arriving on two routers
+		// lands together.
+		h, score := hit(c.Agent.ID), hrw(pr.Anchors[0], c.Agent.ID)
+		if chosen == nil || h > bestHit || (h == bestHit && score > bestScore) {
+			chosen, bestHit, bestScore = c.Agent, h, score
 		}
 	}
 
