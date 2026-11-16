@@ -1455,7 +1455,7 @@ The LLM admission gates publish one rejection counter and four live pool gauges:
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
 | `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
-| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective B2 budget after admit fraction and healthy-replica scaling (or from the engines' KV capacity), and after the per-router share |
+| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective full-pool B2 token budget after the admit fraction and healthy-replica scaling (or from the engines' KV capacity); not the router's current credit balance |
 | `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
 | `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
 
@@ -1472,6 +1472,8 @@ The `reason` label identifies the gate:
 | `b4_rpm` | Request-per-minute limit |
 
 The budget and backstop gauges can change as healthy replicas join or leave. Existing reservations remain visible in the occupancy gauges while the new denominators affect subsequent admissions.
+
+With a shared occupancy pool, the occupancy and in-flight gauges record this router's reservations. The budget and backstop gauges report the full-pool limits most recently observed by the controller, not a static per-router division or the credits currently available to that router. Do not sum these limit gauges across routers.
 
 `POST /v1/messages/count_tokens`, embedding, and reranking requests do not enter B1 through B4, so they do not change these occupancy gauges. See [Admission control metrics](/observability/admission-control-metrics) for panel queries and alert interpretation.
 
