@@ -4,8 +4,16 @@
 package router
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"hivenet_router/internal/auth"
+	"hivenet_router/internal/domain"
+	"hivenet_router/internal/prefixindex"
+	pb "hivenet_router/proto"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -54,5 +62,42 @@ func TestPrefixRateLimits(t *testing.T) {
 	}
 	if !l.allow(peer.ID("other"), now) {
 		t.Error("buckets are not per agent")
+	}
+}
+
+// The session comes in the Authorization header and is checked, with the
+// rate limit, before the body is read: a batch over the limit is refused
+// without decoding it.
+func TestPrefixStateAuthenticatesBeforeTheBody(t *testing.T) {
+	r := &Router{sessionManager: auth.NewSessionManager(time.Hour), agents: NewAgentRegistry(), prefixIndex: prefixindex.New(prefixindex.Config{})}
+	id := peer.ID("agent-x")
+	token := r.sessionManager.CreateSession("agent-x", &pb.AgentMetadata{Model: "m", Capacity: 1})
+	if !r.sessionManager.LinkPeerID(token, id) {
+		t.Fatal("LinkPeerID failed")
+	}
+	r.agents.Register(domain.NewAgent(id, domain.AgentMetadata{Model: "m", Capacity: 1}, token))
+	post := func(auth, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/prefix-state", strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		r.handlePrefixState(rec, req)
+		return rec.Code
+	}
+	if c := post("", `{}`); c != http.StatusUnauthorized {
+		t.Errorf("no header: %d, want 401", c)
+	}
+	if c := post("Bearer nope", `{}`); c != http.StatusUnauthorized {
+		t.Errorf("bad token: %d, want 401", c)
+	}
+	if c := post("Bearer "+token, `{"served":[]}`); c != http.StatusOK {
+		t.Errorf("valid batch: %d, want 200", c)
+	}
+	for range int(prefixBurst) {
+		post("Bearer "+token, `{}`)
+	}
+	if c := post("Bearer "+token, `not json`); c != http.StatusTooManyRequests {
+		t.Errorf("over the limit: %d, want 429 before the body is read", c)
 	}
 }
