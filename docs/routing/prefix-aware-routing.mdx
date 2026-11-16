@@ -31,7 +31,7 @@ The router never tokenizes a request and never stores prompt text.
      + running requests reported by its engine × inter-token latency
    ```
 
-   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Among near-ties, the candidate that reported holding the most of the prompt (by its engine's cache events, the prompts it served, or its text entries) wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little. Every router receives the same reports, so they break the tie the same way; equal holdings go to a hash of the request's first anchor and the agent.
+   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Among near-ties, the candidate that reported holding the most of the prompt (by its engine's cache events, the prompts it served, or its text entries), weighted by its [trust](#agent-trust), wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little. Every router receives the same reports, so they break the tie the same way; equal holdings go to a hash of the request's first anchor and the agent.
 
 Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
 
