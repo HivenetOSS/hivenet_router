@@ -4,7 +4,7 @@ description: "Trace how Hivenet Router’s router, agents, authentication, polic
 sidebarTitle: "Detailed architecture"
 ---
 
-Hivenet Router uses a hub-and-spoke architecture with one router process coordinating one or more inference agents.
+Hivenet Router uses a hub-and-spoke architecture with one router process or several routers behind a load balancer. In a multi-router site, each agent connects to every router so any router can forward requests to it. The diagram below shows the connections for one router.
 
 The router exposes the client and administration APIs. Agents connect inference engines to the router, advertise their capabilities, report their health and operational state, and proxy selected requests to their local backends.
 
@@ -339,6 +339,8 @@ With `--routers`, the agent runs this sequence independently for each router of 
 
 ## Agent startup and registration
 
+For each router, the agent authenticates, registers, sends heartbeats and routing signals, and renews its session independently. Sessions share one libp2p identity, one engine-metrics poller, and one backend health check. A failed router session does not interrupt the others.
+
 The normal agent lifecycle is:
 
 1. Load or create a persistent Ed25519 libp2p identity.
@@ -633,6 +635,14 @@ When the policy sets no `admit_budget_tokens`, the token budget is the admit fra
 
 The B4 occupancy share uses `share × admit_budget_tokens × healthy replicas`, or the share of the engine-reported KV capacity, without the admit fraction. B4 is a per-key fairness control; B2 remains the pool-safety limit.
 
+#### Occupancy waiting
+
+When a request does not fit B2, it can wait in the per-model queue sized by `--admission-queue-depth` (default: `--queue-depth`, normally `30`). It waits up to half of `--request-timeout`, and the wait counts toward the overall request deadline. Requests outside the queue park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`).
+
+If no room frees before the wait ends, the router returns `429 concurrency_limit_exceeded` with `Retry-After: 1`. This happens before policy selection, so admission rejection does not trigger local or provider fallback. Setting the queue depth to `0` leaves the short park wait; setting the park timeout to `0` as well removes occupancy waiting. Requests released after [hold at zero](/routing/hold-at-zero#after-the-wake) follow a separate wait budget.
+
+Oversized requests and shared-store outages have additional rules. See [B2: pool occupancy](/routing/admission-control#b2-pool-occupancy) and [store-outage behavior](/deploy/multiple-routers#when-the-store-is-unreachable).
+
 #### Reservation lifetime
 
 An occupancy reservation stays attached to the request until it finishes:
@@ -701,11 +711,19 @@ The current strategy is:
 least-loaded
 ```
 
-It compares each agent's load in requests: the larger of this router's in-flight requests to the agent and the agent's own reported count from all routers, plus what this router sent since that report.
+It compares each agent's load in requests:
+
+```text
+max(this router's in-flight requests to the agent,
+    agent's reported in-flight requests from all routers
+      + requests this router sent since the report)
+```
+
+Reports older than three seconds are ignored. Network-registered agents use declared capacity `0`; a positive declared capacity still caps embedded or test agents that explicitly set it.
 
 ### 8. Capacity wait queue
 
-This queue applies only to agents with a declared capacity, such as agents in embedded or test setups. Routers ignore the `--capacity` of network agents; for them, `--queue-depth` sizes the wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) instead.
+This routing-stage queue applies only to agents with a positive declared capacity, such as embedded or test agents, and is sized by `--queue-depth`. Routers ignore the deprecated `--capacity` of network agents. Their occupancy wait happens earlier, at admission, in the queue sized by `--admission-queue-depth` (which follows `--queue-depth` by default). See [B2: pool occupancy](/routing/admission-control#b2-pool-occupancy).
 
 When eligible agents exist but all are at capacity, the request can enter a bounded per-model FIFO queue.
 
@@ -841,7 +859,8 @@ Hivenet Router has several independent limits.
 | HTTP enqueue wait | `5s` | Prevents handlers from blocking indefinitely on a full queue |
 | Global request queue | `100` | Bounds pending processor work |
 | Concurrent forwards | `50` | Bounds router forwarding goroutines |
-| Per-model wait queue | `30` | Bounds requests waiting for room in the occupancy budget |
+| Occupancy wait queue (`--admission-queue-depth`) | Follows `--queue-depth`, normally `30` per model | Bounds requests waiting at admission for room in the occupancy budget |
+| Declared-capacity wait queue (`--queue-depth`) | `30` per model | Bounds routing-stage waiters for embedded or test agents with positive declared capacity |
 | Occupancy budget (B2) | Engine KV capacity × `0.90` for vLLM and SGLang; `8` requests in flight per replica otherwise | Bounds work per model |
 | Policy step attempts | `3` | Bounds backend retries within one step |
 | Request deadline | `60s` | Bounds the complete router-side operation |
@@ -854,7 +873,7 @@ The effective request deadline is still controlled by the router. A longer clien
 
 ## Storage architecture
 
-Hivenet Router uses two BadgerDB instances.
+Hivenet Router uses an in-memory BadgerDB and a persistent history database. Dynamic authentication can also use a separate BadgerDB warm-start cache with `--key-store=badger`; its path and secret are separate from the history database. See [Persistent key store](/security/api-keys#persistent-key-store-warm-start).
 
 ```mermaid
 flowchart LR
@@ -943,12 +962,13 @@ The new process then continues from those values.
 | Request queues | Router memory only |
 | Active policy state | Router memory, reconstructed from configured files |
 | API-written policy changes | Router memory only |
-| Dynamic API-key registry | Router memory only |
+| Dynamic API-key registry | Memory by default; optional local Badger warm-start cache with validated restore; upstream key-sync remains authoritative |
 | Current engine and hardware snapshots | In-memory BadgerDB |
 | Universal agent history | Persistent BadgerDB |
-| Flat or per-model RPM state | Memory only |
-| Daily token state with memory backend | Memory only |
-| Daily token state with Badger backend | Persistent BadgerDB |
+| Flat or per-model RPM state, no shared sync store | Memory only |
+| Daily token state with memory backend, no shared sync store | Memory only |
+| Daily token state with Badger backend, no shared sync store | Persistent BadgerDB |
+| Rate and daily-token usage with `--sync-store=valkey` | Shared through Valkey; recent rate usage is replayed and today's totals restored after restart |
 | Audit JSONL | Configured filesystem or volume |
 | Prometheus, Loki, and Tempo history | Their own configured storage |
 
@@ -1115,7 +1135,9 @@ When dynamic client authentication is active:
 
 - the dynamic registry is preserved during SIGHUP
 - only the administrator provider is reloaded
-- the registry is lost on process restart
+- with `--key-store=memory`, a restart empties the registry
+- with `--key-store=badger`, eligible keys can be restored from a local snapshot that passes integrity, schema, age, and confirmation checks; an unusable cache starts empty
+- the upstream key-sync service remains authoritative and must update every router
 
 ### Configuration that still requires restart
 
@@ -1158,7 +1180,6 @@ For example:
 The current design does not provide:
 
 - replication of agent state, dynamic API keys, or queues between routers
-- occupancy budgets shared exactly across routers
 - automatic inference-backend deployment
 - automatic model loading through the public API
 - translation between OpenAI and Anthropic request schemas
@@ -1168,7 +1189,7 @@ The current design does not provide:
 - durable recovery of in-flight requests
 - automatic pricing, energy, or carbon-aware routing
 
-These are deployment and system boundaries rather than hidden capabilities.
+Occupancy budgets can be shared through site-wide credits with `--sync-store=valkey`. Credit accounting does not guarantee that actual engine occupancy stays below the configured budget in every case: oversized requests, growing output reservations, and store outages have specific exceptions. See [Occupancy credits](/deploy/multiple-routers#occupancy-credits) and [B2: pool occupancy](/routing/admission-control#b2-pool-occupancy).
 
 ## Source layout
 

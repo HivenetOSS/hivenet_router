@@ -12,18 +12,20 @@ Every request is first limited to agents that serve the requested model and capa
 
 ## Routing at a glance
 
-A request moves through these stages:
+For generation requests, [admission control](/routing/admission-control) runs before the stages below and may wait for occupancy. An admission rejection ends the request without entering fallback. Other workload types follow their documented admission exemptions.
+
+After admission succeeds, routing moves through these stages:
 
 1. Match the requested model.
 2. Remove unhealthy agents.
 3. Match the required capability.
 4. Apply the policy’s static `match` filters.
 5. Remove agents that already failed during this policy step.
-6. Remove agents at their declared capacity, for agents that declare one.
+6. Remove agents at their declared capacity, where applicable to embedded or test agents.
 7. Apply live `exclude_if` gates.
 8. Rank the remaining agents.
-9. Acquire a capacity slot and forward the request.
-10. Wait in the per-model queue when all matching agents are full.
+9. Acquire an agent slot and forward the request.
+10. For embedded or test agents with declared capacity, wait in the legacy routing queue when all matching agents are full.
 11. Move to the next fallback step when the current step is exhausted.
 12. Use an optional external provider fallback after all local steps fail.
 
@@ -37,7 +39,7 @@ The three configurable policy layers are:
 | Dynamic gates | `exclude_if` | Remove agents using live operational signals |
 | Ranking | `strategy` | Choose among the remaining candidates |
 
-Model, health, capability, previous failures, and declared capacity (for agents that declare one) are hard constraints. They apply even when the policy does not mention them.
+Model, health, capability, and previous failures are hard constraints. Declared capacity also applies to embedded or test agents that declare one; routers ignore `--capacity` for network-connected agents. These constraints apply even when the policy does not mention them.
 
 ## Default routing behavior
 
@@ -334,8 +336,8 @@ Not every backend provides every field.
 For example:
 
 - vLLM reports cache, running, waiting, TTFT, and ITL metrics.
-- SGLang reports cache, running, waiting, and TTFT metrics.
-- metrics-enabled llama.cpp reports cache, running, waiting, TTFT, and ITL metrics.
+- SGLang reports cache, running, waiting, TTFT, and ITL metrics.
+- metrics-enabled llama.cpp reports cache, running, waiting, and throughput metrics, but no TTFT or ITL. Gates for its missing latency metrics are skipped.
 - Ollama and custom engines do not currently provide these engine-specific signals.
 
 ## Hardware gates
@@ -467,42 +469,41 @@ A sustained increase may indicate repeated network interruption or agent reconne
 
 ## Capacity wait queue
 
-When a request does not fit the model's [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), Hivenet Router places it in a per-model wait queue before routing starts. Requests beyond the queue depth wait only `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) and then get `429 concurrency_limit_exceeded`.
+Generation requests pass [admission control](/routing/admission-control) before backend selection. When a request does not fit the model's token-weighted occupancy budget or request-count backstop (B2), it can wait in a per-model admission queue. An admission rejection returns `429 concurrency_limit_exceeded` with `Retry-After: 1`; it does not advance through local or provider fallback.
 
-Defaults:
+Normal admission waiting uses these defaults:
 
 | Setting | Default |
 | --- | --- |
-| Queue depth | 30 waiting requests per model |
-| Wait deadline | Router request timeout |
-| Request timeout | 60 seconds |
+| `--admission-queue-depth` | Follows `--queue-depth`, normally 30 waiting requests per model |
+| Queue wait limit | Half of `--request-timeout`, within the overall request deadline |
+| `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` | `250ms` for requests without an admission-queue slot |
+| `--request-timeout` | `60s` for the whole request |
 
-Configure the queue depth:
-
-```bash
---queue-depth 50
-```
-
-Disable it:
+Configure the admission queue depth:
 
 ```bash
---queue-depth 0
+--admission-queue-depth 50
 ```
 
-Change the request timeout:
+Disable queue slots:
 
 ```bash
---request-timeout 2m
+--admission-queue-depth 0
 ```
 
-While waiting, the request resumes when an in-flight request of the model finishes and frees room in the budget. It does not reserve a particular agent while it waits.
+This leaves the short park enabled. To remove ordinary occupancy waiting, also set `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT=0`. Setting only `--queue-depth 0` affects admission queue slots when `--admission-queue-depth` has not been set separately.
 
-Agents with a declared capacity, such as agents in embedded or test setups, can also wait for a free capacity slot between fallback steps. Routers ignore the `--capacity` of network agents.
+Waiting consumes the overall request deadline. With the default `60s` request timeout, normal admission waits at most `30s`, leaving the remaining time for admitted work. While waiting, the request does not reserve a particular agent. It can proceed when the occupancy budget and request-count limit allow it.
 
-If the queue is full or the request deadline expires, Hivenet Router moves to the next fallback step. Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) may wait beyond the queue depth.
+Requests released by a [model waking from zero](/routing/hold-at-zero#after-the-wake) use a separate hold budget. They may wait beyond the queue depth and even when the short-park timeout is zero. If that hold budget ends without room, they receive `503 model_waking` with `Retry-After: 30`.
+
+### Declared-capacity queue
+
+Embedded or test agents can declare a capacity and wait for an agent slot during routing. This legacy queue uses `--queue-depth`; exhausting it can advance a local fallback step while the overall deadline still permits work. Routers ignore `--capacity` for network-connected agents, so this is separate from their generation admission queue. Expiry of the overall request deadline ends the request.
 
 <Note>
-  The queue is keyed by model. Traffic for one model does not consume another model’s queue depth.
+  Both queues are keyed by model. Traffic for one model does not consume another model's queue depth.
 </Note>
 
 ## Fallback chains
@@ -552,7 +553,7 @@ Hivenet Router advances to the next step when:
 - no agent matches the required capability
 - no agent passes the static filters
 - every remaining agent violates a dynamic gate
-- matching agents stay at capacity until the queue is full or times out
+- embedded or test agents with declared capacity remain full until their legacy routing queue is exhausted, while the overall request deadline still permits another step
 - application-level forward failures exhaust `max_tries`
 
 Model and capability remain hard constraints throughout the chain. A fallback step cannot send a request to an agent serving another model or workload type.
@@ -764,13 +765,9 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
   </Accordion>
 
   <Accordion title="Requests wait instead of falling back">
-    The model's occupancy budget may be full.
+    The model's occupancy budget or request-count backstop may be full. Admission waits before routing starts, and an admission rejection does not trigger fallback.
 
-    Hivenet Router waits in the per-model queue before routing starts. Reduce or disable the queue when a fast `429` is more appropriate:
-
-    ```bash
-    --queue-depth 0
-    ```
+    Set `--admission-queue-depth 0` to disable admission queue slots. Requests can still park for `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`); set that timeout to `0` as well for immediate rejection when ordinary generation work does not fit. [Wake-from-zero requests](/routing/hold-at-zero#after-the-wake) have separate waiting behavior.
   </Accordion>
 
   <Accordion title="An external provider is never called">

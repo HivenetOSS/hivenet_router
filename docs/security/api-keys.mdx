@@ -13,7 +13,7 @@ Two key-management modes are available:
 | Mode | Source of truth | Persistence | Best suited to |
 | --- | --- | --- | --- |
 | Static | `auth.yaml` | File on disk | Small and stable deployments |
-| Dynamic | Administration API | Memory only | External control services and frequent changes |
+| Dynamic | Administration API | Memory by default; optional local Badger warm-start cache | External control services and frequent changes |
 
 <Note>
   Administration keys are separate from client API keys. Client keys do not grant access to `/admin/*`.
@@ -508,9 +508,11 @@ The human-readable message varies according to the stage. Use `error.code` and t
 
 ## Choose quota persistence
 
-Request-rate state is always kept in memory.
+Without a shared sync store (`--sync-store=none`, the default), request-rate state is kept in memory, and daily token usage can use either backend below.
 
-Daily token usage can use either:
+With `--sync-store=valkey`, routers reconcile recent rate usage and today's token totals through the shared store. A restarting router replays the last minute of usage and restores today's totals. This shares quota usage, not the API-key registry; the upstream key-sync service must still update every router. See [Run several routers](/deploy/multiple-routers).
+
+For local daily-token storage:
 
 | Backend | Restart behavior |
 | --- | --- |
@@ -559,9 +561,9 @@ Hivenet Router:
 In-flight requests continue using the provider they already reached.
 
 <Warning>
-  Request-per-minute buckets reset after a successful authentication reload.
+  Without a shared sync store, request-per-minute buckets reset after a successful authentication reload.
 
-  With the `memory` quota backend, current daily token usage also resets. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests.
+  In that mode, the `memory` quota backend also loses current daily token usage. With the `badger` backend, Hivenet Router flushes daily token state before rebuilding the limiter and restores it on later requests. With `--sync-store=valkey`, today's shared usage is retained; see [Run several routers](/deploy/multiple-routers).
 </Warning>
 
 <Warning>
@@ -784,7 +786,7 @@ The raw bearer key cannot be recovered from the registry.
 
 By default (`--key-store=memory`) dynamic key state is memory-only.
 
-After every router restart:
+In memory mode, after every router restart:
 
 1. the registry is empty
 2. every previous client key fails authentication
@@ -795,7 +797,7 @@ SIGHUP does not clear or replace the dynamic registry. It can reload the adminis
 
 ## Persistent key store (warm start)
 
-With `--key-store=badger` (`HIVENET_ROUTER_KEY_STORE=badger`) the router keeps a copy of the dynamic registry in its own BadgerDB at `--key-store-path`. A restarted router serves keys immediately instead of returning `401` until the upstream key-sync service pushes again.
+With `--key-store=badger` (`HIVENET_ROUTER_KEY_STORE=badger`), the router keeps a copy of the dynamic registry in its own BadgerDB at `--key-store-path`. A restarted router can serve eligible cached keys immediately when the snapshot passes the restore checks below. An unavailable store or rejected snapshot leaves the registry empty until the upstream key-sync service pushes again.
 
 The persisted registry is a **warm-start cache**, never a second source of truth. The upstream key-sync service stays authoritative, and each router keeps its own local copy.
 
@@ -899,7 +901,7 @@ The router refuses to start with unauthenticated administrator endpoints unless 
     - a static hash matches the exact raw key
     - the static key has not expired
     - the dynamic key is enabled
-    - the dynamic registry has been repopulated after restart
+    - the dynamic key was restored from a usable cache or repopulated by the upstream key-sync service after restart
 
     Hivenet Router does not reveal which authentication condition failed.
   </Accordion>
