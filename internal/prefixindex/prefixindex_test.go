@@ -222,3 +222,81 @@ func TestAgentCap(t *testing.T) {
 		t.Errorf("agent holds %d blocks, its cap is 50", n)
 	}
 }
+
+// Lookup tells apart this router's guesses (Commit), what the agent reported
+// (Learn) and what its engine confirmed (events), each as a leading depth.
+func TestDepthByOrigin(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	anchors := []uint64{100, 101}
+	ix.Learn("m", a1, anchors, []int{2, 4}, blocks4, time.Minute) // a1 reported 4 blocks
+	m := ix.Lookup("m", anchors, []peer.ID{a1, a2})
+	ix.Commit("m", a2, anchors, m, time.Minute, 5*time.Second) // a2: a guess on the same 4
+	ix.ApplyEvents("m", a1, blocks4[:3], nil, false)           // a1's engine confirms 3
+	m = ix.Lookup("m", anchors, []peer.ID{a1, a2})
+	if m.Depth[a1] != 4 || m.Reported[a1] != 4 || m.Confirmed[a1] != 3 {
+		t.Errorf("a1: depth %d reported %d confirmed %d, want 4 4 3", m.Depth[a1], m.Reported[a1], m.Confirmed[a1])
+	}
+	if m.Depth[a2] != 4 || m.Reported[a2] != 0 || m.Confirmed[a2] != 0 {
+		t.Errorf("a2: depth %d reported %d confirmed %d, want 4 0 0 (a guess only)", m.Depth[a2], m.Reported[a2], m.Confirmed[a2])
+	}
+	// A report turns the guess into a reported holding; a gap stops the depth.
+	ix.Learn("m", a2, anchors, []int{2, 4}, blocks4, time.Minute)
+	ix.ApplyEvents("m", a2, []uint64{blocks4[0], blocks4[2]}, nil, false)
+	m = ix.Lookup("m", anchors, []peer.ID{a2})
+	if m.Reported[a2] != 4 || m.Confirmed[a2] != 1 {
+		t.Errorf("a2 after its report: reported %d confirmed %d, want 4 1", m.Reported[a2], m.Confirmed[a2])
+	}
+}
+
+var blocks4 = []uint64{11, 12, 13, 14}
+
+// An agent's text entry is its report; a routing note is this router's.
+// A decision to the same agent keeps the agent's (longer) text entry.
+func TestTextEntryIsReported(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	ix.LearnText("m", a2, []uint64{100}, time.Minute)
+	m := ix.Lookup("m", []uint64{100, 101}, []peer.ID{a1, a2})
+	if m.Pending != a2 || !m.PendingReported {
+		t.Fatalf("text entry: %+v", m)
+	}
+	ix.Commit("m", a2, []uint64{100, 101}, m, time.Minute, 5*time.Second)
+	c.t = c.t.Add(10 * time.Second) // the routing notes expired, the text entry not
+	if m := ix.Lookup("m", []uint64{100}, []peer.ID{a2}); m.Pending != a2 || !m.PendingReported {
+		t.Errorf("the decision replaced the agent's text entry: %+v", m)
+	}
+	ix.Commit("m", a1, []uint64{200}, Match{}, time.Minute, 5*time.Second)
+	if m := ix.Lookup("m", []uint64{200}, []peer.ID{a1}); m.Pending != a1 || m.PendingReported {
+		t.Errorf("routing note: %+v", m)
+	}
+}
+
+// A cap set from a small KV capacity goes back to the global one when the
+// capacity grows past it.
+func TestAgentCapResets(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 1000})
+	ix.SetAgentCap(a1, 50)
+	if !ix.HasAgentCap(a1) || ix.capOf(a1) != 50 {
+		t.Fatalf("cap %d", ix.capOf(a1))
+	}
+	ix.SetAgentCap(a1, 5000)
+	if ix.HasAgentCap(a1) || ix.capOf(a1) != 1000 {
+		t.Errorf("cap %d after the capacity grew, want the global 1000", ix.capOf(a1))
+	}
+}
+
+// Over its cap, an agent loses this router's guesses before what it reported.
+func TestTrimDropsGuessesFirst(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 100})
+	reported := make([]uint64, 60)
+	guessed := make([]uint64, 60)
+	for i := range 60 {
+		reported[i], guessed[i] = uint64(i+1), uint64(1000+i)
+	}
+	ix.Learn("m", a1, []uint64{1}, []int{60}, reported, time.Minute)
+	ix.Learn("m", a2, []uint64{2}, []int{60}, guessed, time.Minute) // memo for anchor 2
+	m := ix.Lookup("m", []uint64{2}, []peer.ID{a1})
+	ix.Commit("m", a1, []uint64{2}, m, time.Minute, time.Second) // 120 > 100: trim
+	if m := ix.Lookup("m", []uint64{1}, []peer.ID{a1}); m.Reported[a1] != 60 {
+		t.Errorf("a1 kept %d of its 60 reported blocks", m.Reported[a1])
+	}
+}

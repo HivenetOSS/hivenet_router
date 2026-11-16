@@ -91,11 +91,18 @@ type memoEntry struct {
 type holder struct {
 	agent peer.ID
 	exp   int64 // unix nanos; 0 = confirmed by the engine (never expires on its own)
+	// guess marks a prediction this router made from its own routing decision
+	// (Commit), as opposed to what the agent reported (Learn, events). Every
+	// router receives the same reports, but each makes its own guesses.
+	guess bool
 }
 
 type note struct {
 	agent peer.ID
 	exp   int64
+	// reported marks a text entry the agent reported (LearnText), as opposed
+	// to this router's own pending note (Commit).
+	reported bool
 }
 
 // New returns an empty index.
@@ -158,7 +165,7 @@ func (ix *Index) Learn(modelName string, agent peer.ID, anchors []uint64, ends [
 		m.memoByEnd[blocks[e-1]] = append(m.memoByEnd[blocks[e-1]], a)
 	}
 	ix.capMemo(m, now)
-	ix.predict(m, agent, blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), now)
+	ix.predict(m, agent, blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), false, now)
 }
 
 // predictionTTL caps ttl for agents whose engine confirms blocks by events.
@@ -184,7 +191,7 @@ func (ix *Index) LearnText(modelName string, agent peer.ID, anchors []uint64, tt
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, a := range anchors {
-		m.pending[a] = note{agent: agent, exp: exp}
+		m.pending[a] = note{agent: agent, exp: exp, reported: true}
 	}
 }
 
@@ -230,7 +237,16 @@ func (ix *Index) SetAgentCap(agent peer.ID, n int) {
 	defer ix.mu.Unlock()
 	if n > 0 && n < ix.cfg.BlocksPerAgent {
 		ix.agentCap[agent] = n
+		return
 	}
+	delete(ix.agentCap, agent) // back to the global cap
+}
+
+// HasAgentCap reports whether agent has a cap of its own (below the global one).
+func (ix *Index) HasAgentCap(agent peer.ID) bool {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.agentCap[agent] > 0
 }
 
 // capOf is agent's board cap. Caller must not hold ix.mu.
@@ -302,7 +318,7 @@ func (ix *Index) confirm(m *model, agent peer.ID, blocks []uint64, now time.Time
 		found := false
 		for i := range hs {
 			if hs[i].agent == agent {
-				hs[i].exp = 0
+				hs[i].exp, hs[i].guess = 0, false
 				found = true
 				break
 			}
@@ -363,8 +379,9 @@ func (m *model) dropAgent(agent peer.ID) {
 }
 
 // predict marks blocks as held by agent until exp, unless an engine already
-// confirmed them. Caller holds m.mu.
-func (ix *Index) predict(m *model, agent peer.ID, blocks []uint64, exp int64, now time.Time) {
+// confirmed them. guess marks this router's own prediction (Commit); a report
+// (Learn) turns a guess into a reported holding. Caller holds m.mu.
+func (ix *Index) predict(m *model, agent peer.ID, blocks []uint64, exp int64, guess bool, now time.Time) {
 	for _, b := range blocks {
 		hs := m.board[b]
 		found := false
@@ -372,6 +389,9 @@ func (ix *Index) predict(m *model, agent peer.ID, blocks []uint64, exp int64, no
 			if hs[i].agent == agent {
 				if hs[i].exp != 0 && hs[i].exp < exp {
 					hs[i].exp = exp
+				}
+				if !guess {
+					hs[i].guess = false
 				}
 				found = true
 				break
@@ -383,7 +403,7 @@ func (ix *Index) predict(m *model, agent peer.ID, blocks []uint64, exp int64, no
 		if len(hs) >= maxHoldersPerBlockSoft {
 			hs = m.pruneHolders(hs, now.UnixNano())
 		}
-		m.board[b] = append(hs, holder{agent: agent, exp: exp})
+		m.board[b] = append(hs, holder{agent: agent, exp: exp, guess: guess})
 		m.agentBlocks[agent]++
 	}
 	if m.agentBlocks[agent] > ix.capOf(agent) {
@@ -397,12 +417,21 @@ type Match struct {
 	// are the block hashes of messages[0..Known-1].
 	Known  int
 	Blocks []uint64
-	// Depth is, per candidate, how many leading Blocks it holds.
+	// Depth is, per candidate, how many leading Blocks it holds, counting
+	// this router's own predictions.
 	Depth map[peer.ID]int
+	// Reported counts only what the agents reported (engine events and served
+	// prompts), the same on every router; Confirmed only what the engine's
+	// cache events confirmed.
+	Reported  map[peer.ID]int
+	Confirmed map[peer.ID]int
 	// Pending is the agent a request whose text went past the memo was just
 	// sent to, if any, and PendingTo the number of anchors that note covers.
-	Pending   peer.ID
-	PendingTo int
+	// PendingReported is set when the note is the agent's own text entry
+	// (LearnText) rather than this router's routing note.
+	Pending         peer.ID
+	PendingTo       int
+	PendingReported bool
 }
 
 // Lookup matches a request's anchors against the memo, the board (for the
@@ -423,43 +452,56 @@ func (ix *Index) Lookup(modelName string, anchors []uint64, candidates []peer.ID
 		}
 	}
 	if len(res.Blocks) > 0 {
-		res.Depth = make(map[peer.ID]int, len(candidates))
-		alive := make(map[peer.ID]bool, len(candidates))
-		for _, c := range candidates {
-			alive[c] = true
-		}
-		for d, b := range res.Blocks {
-			hs := m.board[b]
-			for c := range alive {
-				if !holds(hs, c, now) {
-					res.Depth[c] = d
-					delete(alive, c)
-				}
-			}
-			if len(alive) == 0 {
-				break
-			}
-		}
-		for c := range alive {
-			res.Depth[c] = len(res.Blocks)
-		}
+		res.Depth = leadingDepth(m.board, res.Blocks, candidates, func(h holder) bool { return h.exp == 0 || h.exp > now })
+		res.Reported = leadingDepth(m.board, res.Blocks, candidates, func(h holder) bool { return !h.guess && (h.exp == 0 || h.exp > now) })
+		res.Confirmed = leadingDepth(m.board, res.Blocks, candidates, func(h holder) bool { return h.exp == 0 })
 	}
 	for j := len(anchors) - 1; j >= res.Known; j-- {
 		if n, ok := m.pending[anchors[j]]; ok && n.exp > now {
-			res.Pending, res.PendingTo = n.agent, j+1
+			res.Pending, res.PendingTo, res.PendingReported = n.agent, j+1, n.reported
 			break
 		}
 	}
 	return res
 }
 
-func holds(hs []holder, agent peer.ID, now int64) bool {
+// leadingDepth returns, per candidate, how many leading blocks it holds by
+// a holding that counts. Caller holds m.mu.
+func leadingDepth(board map[uint64][]holder, blocks []uint64, candidates []peer.ID, counts func(holder) bool) map[peer.ID]int {
+	depth := make(map[peer.ID]int, len(candidates))
+	alive := make(map[peer.ID]bool, len(candidates))
+	for _, c := range candidates {
+		alive[c] = true
+	}
+	for d, b := range blocks {
+		hs := board[b]
+		for c := range alive {
+			if !holdsIf(hs, c, counts) {
+				depth[c] = d
+				delete(alive, c)
+			}
+		}
+		if len(alive) == 0 {
+			break
+		}
+	}
+	for c := range alive {
+		depth[c] = len(blocks)
+	}
+	return depth
+}
+
+func holdsIf(hs []holder, agent peer.ID, counts func(holder) bool) bool {
 	for _, h := range hs {
-		if h.agent == agent && (h.exp == 0 || h.exp > now) {
+		if h.agent == agent && counts(h) {
 			return true
 		}
 	}
 	return false
+}
+
+func holds(hs []holder, agent peer.ID, now int64) bool {
+	return holdsIf(hs, agent, func(h holder) bool { return h.exp == 0 || h.exp > now })
 }
 
 // Commit records a routing decision: the matched blocks are predicted on agent
@@ -474,10 +516,14 @@ func (ix *Index) Commit(modelName string, agent peer.ID, anchors []uint64, match
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(match.Blocks) > 0 {
-		ix.predict(m, agent, match.Blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), now)
+		ix.predict(m, agent, match.Blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), true, now)
 	}
 	exp := now.Add(pendingTTL).UnixNano()
 	for _, a := range anchors[match.Known:] {
+		// The agent's own text entry outlives a routing note: keep it.
+		if n, ok := m.pending[a]; ok && n.reported && n.agent == agent && n.exp > exp {
+			continue
+		}
 		m.pending[a] = note{agent: agent, exp: exp}
 	}
 	if len(m.pending) > ix.cfg.PendingCap {
@@ -623,13 +669,15 @@ func (ix *Index) capMemo(m *model, now time.Time) {
 }
 
 // trimAgent brings agent's board entries down to 90 % of its cap: expired
-// predictions first, then live predictions, then confirmed holdings (an
-// agent never holds more than its cap, whatever it reports). Caller holds m.mu.
+// predictions first, then this router's guesses, then live predictions, then
+// confirmed holdings, in no particular order within each (an agent never
+// holds more than its cap, whatever it reports). Caller holds m.mu.
 func (ix *Index) trimAgent(m *model, agent peer.ID, now time.Time) {
 	nanos := now.UnixNano()
 	target := ix.capOf(agent) * 9 / 10
 	drop := []func(h holder) bool{
 		func(h holder) bool { return h.exp != 0 && h.exp <= nanos },
+		func(h holder) bool { return h.guess },
 		func(h holder) bool { return h.exp != 0 },
 		func(h holder) bool { return true },
 	}

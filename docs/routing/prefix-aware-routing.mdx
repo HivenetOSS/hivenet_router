@@ -31,7 +31,7 @@ The router never tokenizes a request and never stores prompt text.
      + running requests reported by its engine × inter-token latency
    ```
 
-   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Among near-ties, the candidate that holds the most of the prompt wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little; equal holdings are broken by a hash of the request's first anchor and the agent, the same way on every router.
+   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Among near-ties, the candidate that reported holding the most of the prompt (by its engine's cache events, the prompts it served, or its text entries) wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little. Every router receives the same reports, so they break the tie the same way; equal holdings go to a hash of the request's first anchor and the agent.
 
 Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
 
@@ -93,16 +93,22 @@ Gains grow with prompt length. They shrink when the cache cannot hold the workin
 
 ## Agent trust
 
-When the engine reports how many prompt tokens it served from its cache, the router checks each prediction: the tokens the board said the agent held against what the engine reused. An agent whose predictions keep failing counts less (its cached blocks weigh less in the estimate), so an agent cannot attract traffic by reporting a cache it does not have.
+When the engine reports how many prompt tokens it served from its cache, the router checks the agent's claim: the leading blocks its engine confirmed by [KV events](#kv-events) against what the engine reused. An agent whose confirmed blocks keep failing counts less (its cached blocks weigh less in the estimate), so a misconfigured agent, or one relaying another engine's events, stops attracting traffic.
 
-The check needs the engine to report cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests and on streamed requests that ask for usage (`"stream_options": {"include_usage": true}`), the responses that carry the engine's usage. Engines that do not report cached tokens are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the predictions that did not hold.
+Only confirmed blocks are checked. What the router predicted itself (a copy of a prompt sent before the first prefill ended) or what an agent served but its engine has not confirmed yet is not a claim the agent made, so it is not held against it.
+
+The check needs KV events and an engine that reports cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests, on streamed chat requests that ask for usage (`"stream_options": {"include_usage": true}`), and on `/v1/messages` responses that carry `cache_read_input_tokens`. Agents without KV events are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the checks that did not hold.
+
+<Note>
+The engine's usage reaches the router through the agent, so trust catches broken and misconfigured agents, not a compromised one: such an agent could report matching cached tokens too. What bounds a compromised agent is the per-agent caps below and that everything is advice; an agent joins a site only with the site's agent secret.
+</Note>
 
 ## Security
 
 - The router never stores prompt text: anchors and block hashes are keyed hashes, and no endpoint, log or metric label exposes them.
 - Token IDs never leave the agent: they are stripped from responses and never sent to a router. The KV-event address must stay local ([KV events](#kv-events)).
 - Block hashes include the request's `cache_salt`, so tenants whose engine cache is separated never share blocks. Anchors are not scoped per tenant yet: two tenants sending the same text match the same memo entry, which at worst sends one of them to an agent whose cached blocks it cannot use (a cache miss, no faster answer, so no timing signal).
-- Each agent may post at most 50 cache batches a second (bursts of 100), holds at most what its engine's KV cache can (from the KV capacity it reports), and loses weight when its claims do not come true.
+- Each agent may post at most 50 cache batches a second (bursts of 100), checked with its session before the batch is read; holds at most what its engine's KV cache can (1.25 × the KV capacity it reports; over it, entries go in this order: expired predictions, the router's own guesses, reported blocks, confirmed blocks, in no particular order within each kind); and loses weight when its confirmed blocks are not cached ([Agent trust](#agent-trust)).
 - Everything is advice: a wrong entry only costs the request a cache miss.
 
 ## Busy agents
