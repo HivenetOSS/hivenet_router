@@ -342,3 +342,27 @@ func TestPrefixAware_TieIgnoresThisRoutersGuesses(t *testing.T) {
 		}
 	}
 }
+
+// An agent whose confirmed claims fail does not win near-ties on them: its
+// reported holdings are weighted by its trust there too.
+func TestPrefixAware_LiarLosesTies(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	if hrw(100, liar.ID) > hrw(100, honest.ID) {
+		liar, honest = honest, liar // the hash prefers the honest agent: only the claim can make the liar win
+	}
+	e := prefixExecutor(ix, nil, liar, honest)
+	ix.SetEventSource(liar.ID)
+	ix.Learn("m", honest.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+	ix.ApplyEvents("m", liar.ID, blocks(12), nil, false)
+	ix.Learn("m", peer.ID("c"), []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute) // memo for the 12 blocks
+	for range 10 {
+		ix.Observe(liar.ID, 768, 0) // trust 0.8^10 ≈ 0.11
+	}
+	// The liar's weighted hit (~82 tokens) vs the honest 640: a queue of 540
+	// on the honest agent makes the costs a near-tie (~2 ms apart).
+	e.prefill.add(honest.ID, 540)
+	if got := route(t, e, []uint64{100, 101, 200}); got != honest {
+		t.Errorf("chose %s: a near-tie must not go to an agent whose claims fail", got.ID)
+	}
+}

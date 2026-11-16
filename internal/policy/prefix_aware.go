@@ -263,14 +263,16 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		return h
 	}
 	// reported is what the agent itself reported holding (engine events,
-	// served prompts, text entries): every router receives the same reports,
-	// so near-ties are broken the same way everywhere.
+	// served prompts, text entries), weighted by its trust: every router
+	// receives the same reports and honest agents keep a trust of 1, so
+	// near-ties between them are broken the same way everywhere, while an
+	// agent whose claims fail does not win ties on them.
 	reported := func(id peer.ID) int {
 		h := m.Reported[id] * prefixhash.BlockTokens
 		if id == m.Pending && m.PendingReported {
 			h = max(h, pendingToks)
 		}
-		return h
+		return int(float64(h) * s.index.Trust(id))
 	}
 	costs := make([]float64, len(ok))
 	best := math.Inf(1)
