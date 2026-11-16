@@ -100,6 +100,34 @@ func TestPrefixAware_TieIsTheSameOnEveryRouter(t *testing.T) {
 	}
 }
 
+// A near-tie goes to the agent that holds more of the prompt, even when the
+// rendezvous hash prefers the other: a conversation stays on the agent that
+// served its earlier turns when both hold the shared system prompt and the
+// load differs a little.
+func TestPrefixAware_TieGoesToTheDeeperHolder(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	a, b := llm("a"), llm("b")
+	if hrw(100, a.ID) < hrw(100, b.ID) {
+		a, b = b, a // a is the agent the hash prefers
+	}
+	e := prefixExecutor(ix, rec, a, b)
+	shared := blocks(10)
+	ix.Learn("m", a.ID, []uint64{100}, []int{10}, shared, time.Minute)
+	ix.Learn("m", b.ID, []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute)
+	// b's 128 extra cached tokens save ~13 ms; 200 queued tokens cost it 20 ms,
+	// so b is ~7 ms slower: within the 5% tie window.
+	e.prefill.add(b.ID, 200)
+	if got := route(t, e, []uint64{100, 101, 102}); got != b {
+		t.Errorf("chose %s, want %s (holds the conversation)", got.ID, b.ID)
+	}
+	// Outside the window the cost wins (a new last message: the first one
+	// left a pending note on b).
+	e.prefill.add(b.ID, 2000)
+	if got := route(t, e, []uint64{100, 101, 103}); got != a {
+		t.Errorf("chose %s, want %s (b's queue is long)", got.ID, a.ID)
+	}
+}
+
 // New text sent to an agent leaves a pending note: a copy that arrives before
 // the agent reports goes to the same agent.
 func TestPrefixAware_PendingKeepsCopiesTogether(t *testing.T) {
