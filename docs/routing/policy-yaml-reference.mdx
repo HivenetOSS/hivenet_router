@@ -490,8 +490,8 @@ Backend support differs:
 | Backend | Available engine signals |
 | --- | --- |
 | vLLM | Cache, running, waiting, TTFT, ITL, and preemption data |
-| SGLang | Cache, running, waiting, and TTFT |
-| llama.cpp with `--metrics` | Cache, running, waiting, TTFT, ITL, and throughput |
+| SGLang | Cache, running, waiting, TTFT, and ITL |
+| llama.cpp with `--metrics` | Cache, running, waiting, and throughput; no TTFT or ITL |
 | Ollama | No engine-specific policy metrics |
 | Infinity | No engine-specific policy metrics |
 | Custom | No engine-specific policy metrics |
