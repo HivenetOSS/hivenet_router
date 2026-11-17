@@ -42,13 +42,33 @@ type kvMirror struct {
 	// (cached before the agent subscribed): kept a few seconds until a served
 	// prompt shows which tokens come before them (resolve).
 	orphans []orphanEvent
-	now     func() time.Time
+	// recent are the openings of the last prompts served, per scope: an
+	// orphan whose scope the event does not say is placed under a served
+	// prompt's scope only when no other scope served the same opening.
+	recent []servedOpening
+	now    func() time.Time
+
+	// resets counts the times events were lost and the mirror cleared;
+	// logged at most every kvResetLogEvery.
+	resets    uint64
+	resetLogs time.Time
 }
 
 type orphanEvent struct {
 	ev    kvEvent
 	scope string
-	at    time.Time
+	// scopeKnown: the event names its cache salt (SGLang). vLLM puts the salt
+	// in the first block's extra keys only, so an event with a parent block
+	// does not say which tenant it belongs to.
+	scopeKnown bool
+	at         time.Time
+}
+
+// servedOpening is the first orphanMatch tokens of a served prompt.
+type servedOpening struct {
+	scope  string
+	tokens []int32
+	at     time.Time
 }
 
 type mirrorEntry struct {
@@ -66,10 +86,13 @@ type kvDelta struct {
 }
 
 const (
-	kvDeltaCap  = 1024
-	orphanCap   = 256
-	orphanTTL   = 10 * time.Second
-	orphanMatch = 4096 // tokens of a served prompt searched for an orphan's tokens
+	kvDeltaCap = 1024
+	orphanCap  = 256
+	recentCap  = 64
+	// kvResetLogEvery throttles the warning for lost events.
+	kvResetLogEvery = time.Minute
+	orphanTTL       = 10 * time.Second
+	orphanMatch     = 4096 // tokens of a served prompt searched for an orphan's tokens
 )
 
 func newKVMirror(keys prefixhash.Keys, model string) *kvMirror {
@@ -156,7 +179,7 @@ func (m *kvMirror) store(ev kvEvent) []uint64 {
 	} else {
 		// Parent unknown: cached before we subscribed (or evicted). Wait for
 		// a served prompt that shows the tokens before it.
-		m.orphans = append(m.orphans, orphanEvent{ev: ev, scope: scope, at: m.now()})
+		m.orphans = append(m.orphans, orphanEvent{ev: ev, scope: scope, scopeKnown: ev.CacheSalt != "", at: m.now()})
 		if len(m.orphans) > orphanCap {
 			m.orphans = m.orphans[len(m.orphans)-orphanCap:]
 		}
@@ -196,13 +219,19 @@ func (m *kvMirror) store(ev kvEvent) []uint64 {
 // is the chain state after prompt[:p]. Those prefix blocks are recorded as
 // held under the parent's engine hash, so evicting the parent releases them,
 // and the orphan is applied.
+//
+// An orphan whose event does not name its scope takes the served prompt's,
+// unless a prompt served under another scope in the last orphanTTL opens with
+// the same tokens: the engine block could then be either tenant's, and the
+// orphan is dropped rather than credited to the wrong one.
 func (m *kvMirror) resolve(tokens []int, scope string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := m.now()
+	m.remember(tokens, scope, now)
 	if len(m.orphans) == 0 {
 		return
 	}
-	now := m.now()
 	net := map[uint64]bool{}
 	kept := m.orphans[:0]
 	for _, o := range m.orphans {
@@ -212,9 +241,12 @@ func (m *kvMirror) resolve(tokens []int, scope string) {
 		parentKey := engineKey(o.ev.ParentBlockHash)
 		if _, known := m.entries[parentKey]; !known {
 			p := findAt(tokens, o.ev.TokenIDs, o.ev.BlockSize)
-			if p <= 0 || o.scope != scope {
+			if p <= 0 || (o.scopeKnown && o.scope != scope) {
 				kept = append(kept, o)
 				continue
+			}
+			if !o.scopeKnown && m.servedElsewhere(tokens[:p], scope, now) {
+				continue // either tenant's: drop it
 			}
 			chain := m.keys.Seed(m.model, scope)
 			var done []uint64
@@ -250,6 +282,40 @@ func (m *kvMirror) resolve(tokens []int, scope string) {
 		d.stored = append(d.stored, h)
 	}
 	m.push(d)
+}
+
+// remember records the opening of a served prompt. Caller holds m.mu.
+func (m *kvMirror) remember(tokens []int, scope string, now time.Time) {
+	n := min(len(tokens), orphanMatch)
+	open := make([]int32, n)
+	for i, t := range tokens[:n] {
+		open[i] = int32(t)
+	}
+	if len(m.recent) >= recentCap {
+		m.recent = append(m.recent[:0], m.recent[1:]...)
+	}
+	m.recent = append(m.recent, servedOpening{scope: scope, tokens: open, at: now})
+}
+
+// servedElsewhere reports whether a prompt served under another scope in the
+// last orphanTTL opened with prefix. Caller holds m.mu.
+func (m *kvMirror) servedElsewhere(prefix []int, scope string, now time.Time) bool {
+	for _, r := range m.recent {
+		if r.scope == scope || now.Sub(r.at) > orphanTTL || len(r.tokens) < len(prefix) {
+			continue
+		}
+		same := true
+		for i, t := range prefix {
+			if r.tokens[i] != int32(t) {
+				same = false
+				break
+			}
+		}
+		if same {
+			return true
+		}
+	}
+	return false
 }
 
 // findAt returns the first block-aligned position p > 0 (within the first
@@ -299,6 +365,20 @@ func (m *kvMirror) release(done []uint64) []uint64 {
 	return gone
 }
 
+// noteReset counts a clear caused by lost events and warns, at most every
+// kvResetLogEvery: every router then drops this agent's confirmed blocks and
+// relearns them, so frequent resets mean the engine publishes faster than the
+// agent reads (ZMQ drops) or the connection is unstable.
+func (m *kvMirror) noteReset(why string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resets++
+	if now := m.now(); now.Sub(m.resetLogs) >= kvResetLogEvery {
+		m.resetLogs = now
+		log.Warnf("kv events: cleared the cache mirror after %s; %d resets since start", why, m.resets)
+	}
+}
+
 // clear forgets everything (engine cache cleared, or events lost) and
 // records it, so every router drops what it had from this agent.
 func (m *kvMirror) clear() {
@@ -312,6 +392,7 @@ func (m *kvMirror) clearLocked() {
 	m.entries = map[string]mirrorEntry{}
 	m.held = map[uint64]int{}
 	m.orphans = nil
+	m.recent = nil
 }
 
 // push appends a delta. Caller holds m.mu.
@@ -446,6 +527,7 @@ func (a *Agent) runKVEvents(endpoint string) {
 	for !a.stopped() {
 		a.consumeKVEvents(endpoint)
 		a.kv.clear()
+		a.kv.noteReset("a reconnection")
 		if a.sleepOrStop(2 * time.Second) {
 			return
 		}
@@ -492,6 +574,7 @@ func (a *Agent) consumeKVEvents(endpoint string) {
 			seq := binary.BigEndian.Uint64(msg.Frames[len(msg.Frames)-2])
 			if have && seq != last+1 {
 				a.kv.clear()
+				a.kv.noteReset("a sequence gap (events lost)")
 			}
 			last, have = seq, true
 		}
@@ -504,19 +587,16 @@ func (a *Agent) consumeKVEvents(endpoint string) {
 	}
 }
 
-// warnIfRemote logs once when the KV-event endpoint is not a local address:
-// the events carry token IDs, which can be turned back into prompt text.
-func warnIfRemote(endpoint string) {
+// isLocalEndpoint reports whether a ZMQ endpoint is on a loopback address.
+func isLocalEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return
+		return false
 	}
 	host := u.Hostname()
 	if host == "localhost" {
-		return
+		return true
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return
-	}
-	log.Warnf("kv events: %s is not a local address; the engine's KV events carry prompt token IDs and must stay on the host (127.0.0.1) or inside the pod", endpoint)
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

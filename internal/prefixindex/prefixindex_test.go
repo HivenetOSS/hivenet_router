@@ -213,3 +213,26 @@ func TestLearnText(t *testing.T) {
 		t.Errorf("text entry: %+v", m)
 	}
 }
+
+// Learning the same prompt again does not grow the index: a hot system
+// prompt is one memo entry and one end-of-entry record, however often served.
+func TestLearnSameAnchorDoesNotGrow(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	for range 1000 {
+		ix.Learn("m", a1, []uint64{100, 101}, []int{2, 3}, []uint64{1, 2, 3}, time.Minute)
+	}
+	if s := ix.Stats(); s.Memo != 2 || s.MemoEnds != 2 {
+		t.Fatalf("after 1000 learns: %+v, want 2 memo entries indexed once each", s)
+	}
+	// A new end for the same anchor moves its record.
+	ix.Learn("m", a1, []uint64{100}, []int{1}, []uint64{1, 2, 3}, time.Minute)
+	if s := ix.Stats(); s.Memo != 2 || s.MemoEnds != 2 {
+		t.Errorf("after a new end: %+v", s)
+	}
+	// Expiry and sweep drop both.
+	c.t = c.t.Add(time.Hour)
+	ix.Sweep()
+	if s := ix.Stats(); s.Memo != 0 || s.MemoEnds != 0 {
+		t.Errorf("after expiry: %+v", s)
+	}
+}

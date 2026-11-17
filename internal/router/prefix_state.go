@@ -154,7 +154,7 @@ func (r *Router) runPrefixIndex(ctx context.Context) {
 		case <-t.C:
 			r.prefixIndex.Sweep()
 			st := r.prefixIndex.Stats()
-			r.metrics.PrefixIndexSize(st.Memo, st.Blocks, st.Pending)
+			r.metrics.PrefixIndexSize(st.Memo, st.MemoEnds, st.Blocks, st.Pending)
 		case <-ctx.Done():
 			return
 		}

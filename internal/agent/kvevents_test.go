@@ -295,3 +295,50 @@ func TestKVMirror_ResolvesOrphansFromServedPrompts(t *testing.T) {
 		t.Errorf("%d orphans kept past their TTL", len(m.orphans))
 	}
 }
+
+// vLLM names the cache salt in the first block only, so an orphan (an event
+// with a parent) does not say its tenant. It is placed under the served
+// prompt's salt, and dropped when another salt served the same opening.
+func TestKVMirror_SaltedOrphans(t *testing.T) {
+	prompt := promptTokens(5 * prefixhash.BlockTokens)
+	p := 2*prefixhash.BlockTokens + 16
+	orphan := func() kvEvent {
+		ev := kvEvent{Type: "BlockStored", BlockSize: 16, ParentBlockHash: int64(-99), Kind: "full_attention", TokenIDs: prompt[p : p+32]}
+		ev.BlockHashes = []any{int64(1000), int64(1001)}
+		return ev
+	}
+	m := newKVMirror(testKeys, "m")
+	m.apply([]kvEvent{orphan()})
+	m.resolve(prompt, "salt-a")
+	want := testKeys.Blocks("m", "salt-a", prompt[:p+32])
+	if got := m.snapshot().Stored; !slices.Equal(sorted(got), sorted(want)) {
+		t.Fatalf("salted orphan: %d blocks, want tenant a's %d", len(got), len(want))
+	}
+
+	m = newKVMirror(testKeys, "m")
+	m.resolve(prompt, "salt-b") // tenant b served the same opening just before
+	m.apply([]kvEvent{orphan()})
+	m.resolve(prompt, "salt-a")
+	if got := m.snapshot().Stored; len(got) != 0 {
+		t.Errorf("an orphan two tenants could own was credited: %d blocks", len(got))
+	}
+	if len(m.orphans) != 0 {
+		t.Error("the ambiguous orphan must be dropped")
+	}
+}
+
+func TestIsLocalEndpoint(t *testing.T) {
+	for ep, want := range map[string]bool{
+		"tcp://127.0.0.1:5557": true,
+		"tcp://localhost:5557": true,
+		"tcp://[::1]:5557":     true,
+		"tcp://10.0.0.5:5557":  false,
+		"tcp://*:5557":         false,
+		"tcp://0.0.0.0:5557":   false,
+		"not a url\x00":        false,
+	} {
+		if got := isLocalEndpoint(ep); got != want {
+			t.Errorf("isLocalEndpoint(%q) = %v, want %v", ep, got, want)
+		}
+	}
+}

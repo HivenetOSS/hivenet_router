@@ -31,7 +31,7 @@ The router never tokenizes a request and never stores prompt text.
      + running requests reported by its engine × inter-token latency
    ```
 
-   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
+   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. A request counts until its first response byte; a non-streamed response has none before the whole answer, so its prompt counts until the generation ends and an agent serving long non-streamed answers looks more queued than it is. The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
 
 Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
 
@@ -53,6 +53,10 @@ Tokenization after the request runs at most two at a time per agent; more are sk
 
 /v1/messages requests use what was learned (the top-level `system` counts as a first system message) but do not add to it. If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
 
+At start-up a vLLM agent sends the engine one short request with `return_token_ids`. If the engine rejects it or answers without the prompt's token IDs (an older vLLM), the agent logs a warning, stops adding the field to requests and tokenizes prompts in the background instead, as for SGLang. Tested with vLLM 0.30 and 0.31, SGLang 0.5.23.
+
+If the agent cannot remove the token IDs from a response (a malformed or cut-off value), it does not forward that response: a streamed chunk is dropped and a whole response becomes an error. Token IDs never reach the client unless it asked for them.
+
 ## KV events
 
 vLLM and SGLang can publish their cache events over ZMQ. Give the engine and the agent the same **local** address: the engine connects to it and the agent listens on it, so the engine opens no port.
@@ -70,16 +74,12 @@ hivenet-router-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
 Both engines connect to any endpoint that is not a wildcard; with a wildcard (`tcp://*:5557`) they listen instead, and the agent connects to them. The agent tries to listen first and connects when the address is taken, so both setups work. With the engine in a container, run the agent in the same network namespace (the same pod), or publish the engine's port on `127.0.0.1` only.
 
 <Warning>
-The events carry the prompts' token IDs, which can be turned back into text. Keep the address on `127.0.0.1` or inside the pod, never on an interface other hosts reach. The agent logs a warning when the endpoint is not a local address.
+The events carry the prompts' token IDs, which can be turned back into text. Keep the address on `127.0.0.1` or inside the pod, never on an interface other hosts reach. The agent refuses an endpoint that is not a loopback address and subscribes to nothing. Where the engine can only reach the agent on another address that no other host reaches (for example a pod IP shared by the containers of one pod), set `--kv-events-allow-remote`.
 </Warning>
 
 The agent re-chunks the engine's blocks (16 tokens in vLLM, 1 in SGLang) into the router's 64-token blocks and sends every router the changes every 100 ms. Blocks of LoRA adapters, multimodal prompts and non-full-attention layers are not reported. A router that falls behind or restarts asks the agent for a snapshot; a new router session also receives the prompts the agent recently reported.
 
-Events only describe new blocks. A prompt that extends a prefix the engine cached before the agent subscribed (for example after an agent restart) is placed once the agent serves that prompt and learns its tokens. When events are lost (a sequence gap, a reconnection), the agent tells the routers to drop its blocks and rebuilds from new events. vLLM publishes events with its next scheduling step, so a cache reset reaches the routers with the next request. Without KV events, the board holds what each agent served, for `predicted_ttl`.
-
-At start-up the agent sends the engine one short request with `return_token_ids`. If the engine rejects it or answers without the prompt's token IDs (an older vLLM), the agent logs a warning and leaves every request untouched: that agent reports no prefixes, and the router places its requests on load alone. Tested with vLLM 0.30 and 0.31.
-
-If the agent cannot remove the token IDs from a response (a malformed or cut-off value), it does not forward that response: a streamed chunk is dropped and a whole response becomes an error. Token IDs never reach the client unless it asked for them.
+Events only describe new blocks. A prompt that extends a prefix the engine cached before the agent subscribed (for example after an agent restart) is placed once the agent serves that prompt and learns its tokens. When events are lost (a sequence gap, a reconnection), the agent tells the routers to drop its blocks and rebuilds from new events; it logs a warning with the number of such resets, at most once a minute. Frequent resets mean the engine publishes faster than the agent reads. vLLM publishes events with its next scheduling step, so a cache reset reaches the routers with the next request. Without KV events, the board holds what each agent served, for `predicted_ttl`.
 
 ## Busy agents
 
@@ -113,7 +113,7 @@ See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each
 | Metric | Meaning |
 | --- | --- |
 | `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
-| `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `blocks`, `pending` |
+| `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `memo_ends` (memo entries indexed by their last block; follows `memo`), `blocks`, `pending` |
 
 Share of requests sent to an agent that holds part of the prompt:
 

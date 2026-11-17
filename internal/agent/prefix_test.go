@@ -354,15 +354,37 @@ func TestHandleTokenFields_FailsClosed(t *testing.T) {
 	}
 }
 
-// An engine that rejects return_token_ids gets no prefix work: client
-// requests are forwarded untouched.
+// An engine that rejects return_token_ids is not sent it: the agent
+// tokenizes prompts in the background instead, and client requests are
+// forwarded untouched.
 func TestPrefix_ProbeOffOnOldEngine(t *testing.T) {
 	fake := &fakeVLLM{old: true}
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
-	a := &Agent{cfg: &config.AgentConfig{BackendURL: srv.URL, Model: "m", JWTSecret: testSecret}, engine: &VLLMEngine{}, httpClient: srv.Client()}
+	a := &Agent{cfg: &config.AgentConfig{BackendURL: srv.URL, Model: "m", JWTSecret: testSecret}, engine: &VLLMEngine{}, httpClient: srv.Client(), stopCh: make(chan struct{})}
 	a.initPrefix()
-	if a.prefix != nil {
-		t.Fatal("an engine that rejects return_token_ids must disable prefix reporting")
+	if a.prefix == nil || a.prefix.source != sourceBackground {
+		t.Fatalf("prefix state %+v, want background tokenization", a.prefix)
+	}
+	if rec, _ := callChat(t, a, chatBody(false, ""), true); rec.Code != http.StatusOK {
+		t.Errorf("request failed with %d: return_token_ids must not be added", rec.Code)
+	}
+}
+
+// A non-loopback KV endpoint is refused unless explicitly allowed.
+func TestPrefix_RemoteKVEndpointRefused(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		fake := &fakeVLLM{}
+		srv := httptest.NewServer(fake)
+		a := &Agent{cfg: &config.AgentConfig{BackendURL: srv.URL, Model: "m", JWTSecret: testSecret, KVEventsEndpoint: "tcp://192.0.2.1:5557", KVEventsAllowRemote: allow}, engine: &VLLMEngine{}, httpClient: srv.Client(), stopCh: make(chan struct{})}
+		a.initPrefix()
+		if a.prefix == nil {
+			t.Fatal("prefix reporting must work without KV events")
+		}
+		if got := a.kv != nil; got != allow {
+			t.Errorf("allow %v: subscribed %v", allow, got)
+		}
+		close(a.stopCh)
+		srv.Close()
 	}
 }

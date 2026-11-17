@@ -119,7 +119,13 @@ func (a *Agent) initPrefix() {
 	}
 	a.prefix = st
 	if ep := a.cfg.KVEventsEndpoint; ep != "" && st.source != sourceText {
-		warnIfRemote(ep)
+		if !isLocalEndpoint(ep) {
+			if !a.cfg.KVEventsAllowRemote {
+				log.Errorf("kv events: %s is not a loopback address; refusing it (the events carry prompt token IDs and the socket has no authentication). Use 127.0.0.1, or --kv-events-allow-remote for an address only this pod reaches", ep)
+				return
+			}
+			log.Warnf("kv events: %s is not a loopback address (allowed by --kv-events-allow-remote); it must not be reachable from other hosts", ep)
+		}
 		a.kv = newKVMirror(st.keys, a.cfg.Model)
 		go a.runKVEvents(ep)
 	}

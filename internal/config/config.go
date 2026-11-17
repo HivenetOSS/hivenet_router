@@ -764,6 +764,10 @@ type AgentConfig struct {
 	// carry prompt token IDs.
 	KVEventsEndpoint string
 
+	// KVEventsAllowRemote accepts a KVEventsEndpoint that is not a loopback
+	// address. Off: such an endpoint is refused (no subscription).
+	KVEventsAllowRemote bool
+
 	// GPUDevicesFile is an optional path to a file containing the GPU UUIDs the
 	// engine was assigned (one UUID per line or comma-separated). When set, the
 	// hardware collector restricts NVML metrics to only those GPUs, ignoring any
