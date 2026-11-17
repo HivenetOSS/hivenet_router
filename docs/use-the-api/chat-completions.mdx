@@ -332,7 +332,7 @@ curl -X POST \
   }'
 ```
 
-The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router.
+The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router, in the router's error envelope with `source: "backend"` (see [error codes](/reference/error-codes#error-source)).
 
 Model names must match both:
 

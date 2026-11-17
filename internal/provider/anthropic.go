@@ -114,7 +114,7 @@ func (p *anthropicProvider) Complete(ctx context.Context, req *domain.ChatReques
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, string(errBody))
+		return nil, &HTTPError{Provider: "anthropic", Status: resp.StatusCode, Body: string(errBody)}
 	}
 
 	var anthropicResp anthropicResponse

@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"hivenet_router/internal/domain"
@@ -42,4 +43,21 @@ type Config struct {
 
 	// Metrics records outbound HTTP client durations. May be nil.
 	Metrics *metrics.RouterMetrics
+}
+
+// HTTPError is a provider's non-2xx answer. Error leaves the body out: a
+// provider may echo the prompt in it, and errors end up in logs and traces.
+// ClientMessage carries it, for the client that sent the request.
+type HTTPError struct {
+	Provider string
+	Status   int
+	Body     string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Provider, e.Status) }
+
+// ClientMessage is the error with the provider's own explanation, for the
+// client only.
+func (e *HTTPError) ClientMessage() string {
+	return fmt.Sprintf("%s: HTTP %d: %s", e.Provider, e.Status, e.Body)
 }

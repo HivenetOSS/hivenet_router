@@ -1145,7 +1145,7 @@ func (h *Handlers) refuseBudget(c *gin.Context, b auth.DailyBudget, need int, de
 		c.Header("Retry-After", strconv.Itoa(s))
 	}
 	c.Set(auditKeyErrorCode, string(re.Code))
-	setRootSpanError(c, re.Message)
+	setRootSpanError(c, re)
 	c.JSON(http.StatusTooManyRequests, domain.RouterErrorResponse{Error: re})
 }
 
@@ -1332,7 +1332,6 @@ func writeErrorResponse(c *gin.Context, pending *domain.PendingRequest, err erro
 	var re *domain.RouterError
 	if !errors.As(err, &re) {
 		c.Set(auditKeyErrorCode, string(domain.ErrCodeBackendError))
-		setRootSpanError(c, err.Error())
 		writeRouterError(c, http.StatusInternalServerError, domain.ErrCodeBackendError, err.Error(), domain.SourceBackend)
 		return
 	}
@@ -1347,7 +1346,7 @@ func writeErrorResponse(c *gin.Context, pending *domain.PendingRequest, err erro
 		c.Header(headerRateLimitRemainingTokens, "0")
 	}
 	c.Set(auditKeyErrorCode, string(re.Code))
-	setRootSpanError(c, re.Message)
+	setRootSpanError(c, re)
 	c.JSON(domain.HTTPStatusFor(re.Code), domain.RouterErrorResponse{Error: re})
 }
 
@@ -1631,11 +1630,9 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 		var re *domain.RouterError
 		if errors.As(err, &re) {
 			c.Set(auditKeyErrorCode, string(re.Code))
-			setRootSpanError(c, re.Message)
+			setRootSpanError(c, re)
 			c.JSON(domain.HTTPStatusFor(re.Code), domain.RouterErrorResponse{Error: re})
 		} else {
-			c.Set(auditKeyErrorCode, string(domain.ErrCodeBackendError))
-			setRootSpanError(c, err.Error())
 			writeRouterError(c, http.StatusInternalServerError, domain.ErrCodeBackendError, err.Error(), domain.SourceBackend)
 		}
 
@@ -1681,11 +1678,13 @@ func callerIDs(c *gin.Context) (tenantID, keyID, deploymentID string) {
 	return
 }
 
-// setRootSpanError sets the error status and message on the root HTTP span
-// so Tempo's statusMessage is visible in Grafana dashboards.
-func setRootSpanError(c *gin.Context, msg string) {
+// setRootSpanError sets the error status on the root HTTP span so Tempo's
+// statusMessage is visible in Grafana dashboards. The status is re.Error():
+// the router's own message, or only the code for an error from the backend,
+// whose message can echo the prompt and goes to the client alone.
+func setRootSpanError(c *gin.Context, re *domain.RouterError) {
 	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
-		span.SetStatus(codes.Error, msg)
+		span.SetStatus(codes.Error, re.Error())
 	}
 }
 
@@ -1696,11 +1695,10 @@ func setRootSpanError(c *gin.Context, msg string) {
 // a 400/401/404 without this call shows up as "OK" in Grafana because the
 // span's OTEL status defaults to OK.
 func writeRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, message string, source domain.ErrorSource) {
+	re := domain.NewRouterError(code, message, source)
 	c.Set(auditKeyErrorCode, string(code))
-	setRootSpanError(c, message)
-	c.JSON(httpStatus, domain.RouterErrorResponse{
-		Error: domain.NewRouterError(code, message, source),
-	})
+	setRootSpanError(c, re)
+	c.JSON(httpStatus, domain.RouterErrorResponse{Error: re})
 }
 
 // abortWithRouterError is the middleware-side counterpart to writeRouterError
@@ -1708,11 +1706,10 @@ func writeRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, mes
 // run. Matches the span / audit side effects so early-reject middleware
 // failures (auth, rate limit) surface correctly in Grafana.
 func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, message string, source domain.ErrorSource) {
+	re := domain.NewRouterError(code, message, source)
 	c.Set(auditKeyErrorCode, string(code))
-	setRootSpanError(c, message)
-	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{
-		Error: domain.NewRouterError(code, message, source),
-	})
+	setRootSpanError(c, re)
+	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{Error: re})
 }
 
 // copyBackendHeaders copies the backend's response headers to the client and

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/jsonbody"
 	"hivenet_router/internal/semantic"
@@ -211,6 +212,7 @@ func (h *Handlers) logDecision(c *gin.Context, path string, d semantic.Decision,
 		TS:            time.Now().UTC(),
 		RequestID:     c.GetString("request_id"),
 		Path:          path,
+		TenantID:      c.GetString("tenant_id"),
 		KeyID:         callerIdentity(c),
 		Alias:         d.Alias,
 		ResolvedModel: d.Model,
@@ -246,12 +248,12 @@ func cachedBody(c *gin.Context) ([]byte, bool) {
 
 // callerIdentity scopes task pins and fingerprints to one API key: its key
 // ID, which every dynamic, static and admin key carries. Only auth mode none
-// has no key ID; it falls back to the tenant plus the key's masked preview.
+// has no key ID: it is "anonymous", as in the audit log and the metrics.
 func callerIdentity(c *gin.Context) string {
 	if id := c.GetString("key_id"); id != "" {
 		return id
 	}
-	return c.GetString("tenant_id") + "/" + c.GetString("key_preview")
+	return auth.AnonymousID
 }
 
 // describeFiltered explains, for the client, why each candidate the caller's

@@ -340,6 +340,12 @@ func pathsOverlap(a, b string) bool {
 
 // New creates a new Router instance with initialized components.
 func New(cfg *config.Config) (*Router, error) {
+	// Open the audit log now, so a wrong path or a missing volume shows at
+	// startup rather than on the first audited request.
+	api.SetAuditRouterID(cfg.RouterID)
+	if err := api.OpenAuditLog(); err != nil {
+		log.Errorf("%v: audit lines, which name every tenant and key, go to stdout with the application output", err)
+	}
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT secret is not configured — set --jwt-secret or HIVENET_ROUTER_JWT_SECRET")
 	}

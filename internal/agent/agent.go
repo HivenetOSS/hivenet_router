@@ -1114,6 +1114,16 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 	}
 	defer resp.Body.Close()
 
+	// A backend error goes back in the router's envelope, classified like
+	// the native chat path's: its body (which can echo the input) becomes
+	// the message the client gets, from the backend, never something the
+	// router could log or trace as its own (see domain.DecodeAgentError).
+	if resp.StatusCode >= http.StatusBadRequest {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		writeErrorJSON(w, domain.ClassifyBackendError(resp.StatusCode, errBody))
+		return
+	}
+
 	domain.CopyHttpHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 	_ "time/tzdata" // embed IANA timezone database so time.LoadLocation works in Docker
 
@@ -15,6 +17,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"hivenet_router/internal/auth"
+	"hivenet_router/internal/logger"
 )
 
 // cetLocation is loaded once at startup. Falls back to UTC if the zone is somehow absent.
@@ -44,7 +48,44 @@ const (
 // Keeping audit output separate from stdout ensures docker compose logs router
 // stays human-readable; Promtail scrapes the file via a shared volume.
 // Falls back to stdout if the file cannot be opened (e.g. local dev without a volume).
-var auditLog = func() *zap.Logger {
+// Opened by OpenAuditLog at startup, or on first use, not at package init, so
+// the path is read when the router starts.
+var (
+	auditLogOnce sync.Once
+	auditLog     *zap.Logger
+	// auditOpenErr is why the audit file could not be opened (the lines then
+	// go to stdout); nil once it is open.
+	auditOpenErr error
+	// auditOpened reports whether the audit logger exists yet.
+	auditOpened atomic.Bool
+	// auditRouterID names this router on every audit line (SetAuditRouterID).
+	auditRouterID string
+)
+
+// auditLogger returns the audit logger, opening the file on first use.
+func auditLogger() *zap.Logger {
+	auditLogOnce.Do(func() {
+		auditLog = newAuditLogger()
+		auditOpened.Store(true)
+	})
+	return auditLog
+}
+
+// OpenAuditLog opens the audit log now rather than on the first audited
+// request, so a wrong path or a missing volume shows at startup. It returns
+// why the file could not be opened: the audit lines, which name every tenant
+// and key, then go to stdout, mixed into the application output.
+func OpenAuditLog() error {
+	auditLogger()
+	return auditOpenErr
+}
+
+// SetAuditRouterID names this router (--router-id) on every audit line, so
+// the lines of several routers writing to one log can be told apart. Call
+// before serving.
+func SetAuditRouterID(id string) { auditRouterID = id }
+
+func newAuditLogger() *zap.Logger {
 	cfg := zap.NewProductionEncoderConfig()
 	cfg.TimeKey = ""    // ts is written explicitly as the request start time
 	cfg.LevelKey = ""   // level is written as a computed field per request, not a fixed "info"
@@ -56,28 +97,34 @@ var auditLog = func() *zap.Logger {
 		zapcore.InfoLevel,
 	)
 	return zap.New(core).With(zap.String("log_type", "audit"))
-}()
+}
 
 // auditLogFile is the underlying *os.File for auditLog (nil when falling back to stdout).
 // Retained so SyncAuditLog can flush pending kernel buffers and release the file descriptor.
 var auditLogFile *os.File
 
-// openAuditFile opens (or creates) the audit log file for append.
-// Path is read from HIVENET_ROUTER_AUDIT_LOG_PATH; defaults to /var/log/hivenet-router/audit.jsonl.
-// Falls back to stdout on any error so the server always starts.
+// openAuditFile opens (or creates) the audit log file for append, owner-only
+// (logger.OpenOwnerOnly). Path is read from HIVENET_ROUTER_AUDIT_LOG_PATH;
+// defaults to /var/log/hivenet-router/audit.jsonl. Falls back to stdout on any
+// error, recorded in auditOpenErr (OpenAuditLog reports it at startup).
 func openAuditFile() zapcore.WriteSyncer {
 	path := os.Getenv("HIVENET_ROUTER_AUDIT_LOG_PATH")
 	if path == "" {
 		path = "/var/log/hivenet-router/audit.jsonl"
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "audit: cannot create log dir: %v — falling back to stdout\n", err)
+		auditOpenErr = fmt.Errorf("audit: cannot create the directory of %s: %w", path, err)
+		fmt.Fprintf(os.Stderr, "%v — falling back to stdout\n", auditOpenErr)
 		return zapcore.AddSync(os.Stdout)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit: cannot open %s: %v — falling back to stdout\n", path, err)
+	f, err := logger.OpenOwnerOnly(path)
+	if f == nil {
+		auditOpenErr = fmt.Errorf("audit: cannot open %s: %w", path, err)
+		fmt.Fprintf(os.Stderr, "%v — falling back to stdout\n", auditOpenErr)
 		return zapcore.AddSync(os.Stdout)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit: %v\n", err)
 	}
 	auditLogFile = f
 	// zapcore.Lock wraps the file with a mutex so concurrent goroutines don't interleave lines.
@@ -88,9 +135,13 @@ func openAuditFile() zapcore.WriteSyncer {
 // Call this during graceful shutdown — after the HTTP server stops accepting requests
 // and before os.Exit — to ensure the last audit lines are written to disk and the
 // file descriptor is released cleanly.
-// Safe to call multiple times; a nil file is a no-op.
+// Safe to call multiple times; a router that never opened the audit log does
+// not open (or create) it just to sync it.
 func SyncAuditLog() {
-	_ = auditLog.Sync()
+	if !auditOpened.Load() {
+		return
+	}
+	_ = auditLogger().Sync()
 	if auditLogFile != nil {
 		_ = auditLogFile.Close()
 	}
@@ -121,6 +172,11 @@ func AuditMiddleware() gin.HandlerFunc {
 			clientReqID, _ := c.Get(ctxKeyClientRequestID)
 			tenantID, _ := c.Get("tenant_id")
 			keyID, _ := c.Get("key_id")
+			// An authenticated request always names its key: no-auth requests
+			// (tenant "default", no key) log "anonymous", like the metrics.
+			if tenantID != nil && strDefault(keyID, "") == "" {
+				keyID = auth.AnonymousID
+			}
 			model, _ := c.Get(auditKeyModel)
 			inTok, _ := c.Get(auditKeyInputTokens)
 			outTok, _ := c.Get(auditKeyOutputTokens)
@@ -168,13 +224,16 @@ func AuditMiddleware() gin.HandlerFunc {
 				zap.String("source_ip", c.ClientIP()),
 				zap.Time("ts", start.In(cetLocation)),
 			}
+			if auditRouterID != "" {
+				fields = append(fields, zap.String("router_id", auditRouterID))
+			}
 			// Semantic alias requests: model above is the resolved model; record
 			// the alias the client asked for and the route that chose it.
 			if alias, ok := c.Get(auditKeyAlias); ok {
 				route, _ := c.Get(auditKeySemanticRoute)
 				fields = append(fields, zap.String("alias", strDefault(alias, "")), zap.String("semantic_route", strDefault(route, "")))
 			}
-			auditLog.Info("", fields...)
+			auditLogger().Info("", fields...)
 		}()
 
 		c.Next()

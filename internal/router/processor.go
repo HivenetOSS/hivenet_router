@@ -331,7 +331,12 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 					p.metrics.RequestFailed("cloud", fp.Engine, fp.Model, pending.TenantID)
 					p.metrics.PolicyExhausted(pending.Request.Model)
 					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-					pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, provErr.Error(), domain.SourceBackend)
+					msg := provErr.Error()
+					var he *provider.HTTPError
+					if errors.As(provErr, &he) {
+						msg = fmt.Sprintf("provider %s: %s", fp.Engine, he.ClientMessage())
+					}
+					pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
 					return
 				}
 			}
@@ -671,17 +676,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}
 		if resp.StatusCode != http.StatusOK {
 			p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-			var errResp domain.RouterErrorResponse
-			if jsonErr := json.Unmarshal(rawBytes, &errResp); jsonErr == nil && errResp.Error != nil {
-				return nil, rttMs, errResp.Error
-			}
-			// Fall back to the raw body (e.g. FastAPI {"detail":"..."}) so the
-			// caller sees the actual backend error rather than a generic status code.
-			msg := string(rawBytes)
-			if msg == "" {
-				msg = fmt.Sprintf("agent returned HTTP %d", resp.StatusCode)
-			}
-			return nil, rttMs, domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
+			return nil, rttMs, domain.DecodeAgentError(resp.StatusCode, rawBytes)
 		}
 
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
@@ -744,23 +739,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RequestFailed(region, engine, model, pending.TenantID)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		// Parse only the first 4 KB for JSON: structured error bodies are always short.
-		// Using the full (potentially truncated) slice would break JSON parsing silently
-		// and degrade a structured context_length_exceeded into a retryable backend_error.
-		jsonSlice := body
-		if len(jsonSlice) > 4*1024 {
-			jsonSlice = jsonSlice[:4*1024]
-		}
-		var errResp domain.RouterErrorResponse
-		if jsonErr := json.Unmarshal(jsonSlice, &errResp); jsonErr == nil && errResp.Error != nil {
-			return nil, rttMs, errResp.Error
-		}
-		// Fallback: agent returned a non-structured error body.
-		msg := string(body)
-		if msg == "" {
-			msg = fmt.Sprintf("agent returned HTTP %d", resp.StatusCode)
-		}
-		return nil, rttMs, domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
+		// The agent's envelope when it is one the router can trust, else the
+		// body classified as the backend's (DecodeAgentError).
+		return nil, rttMs, domain.DecodeAgentError(resp.StatusCode, body)
 	}
 
 	var chatResp domain.ChatResponse
