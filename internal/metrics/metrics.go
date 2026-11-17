@@ -276,6 +276,11 @@ type RouterMetrics struct {
 	apiKeyPushRejected *prometheus.CounterVec
 	// prefixRoutingTotal counts prefix-aware selections per model and outcome.
 	prefixRoutingTotal *prometheus.CounterVec
+
+	// prefixPrefillRate and prefixDecodeStep are the prefill speed and decode
+	// step the prefix-aware cost learned per model, engine and GPU.
+	prefixPrefillRate *prometheus.GaugeVec
+	prefixDecodeStep  *prometheus.GaugeVec
 	// prefixIndexEntries is the size of the prefix memory, per kind.
 	prefixIndexEntries *prometheus.GaugeVec
 	// prefixChecksTotal counts cache-hit predictions checked against the
@@ -930,6 +935,20 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		prefixPrefillRate: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_prefill_rate_tokens_per_second",
+				Help: "Prefill speed the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
+		prefixDecodeStep: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_decode_step_seconds",
+				Help: "Decode step the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
 		prefixRoutingTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_prefix_routing_total",
@@ -1099,6 +1118,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.admissionQueueDepth,
 		m.queueWaitSeconds,
 		m.prefixRoutingTotal,
+		m.prefixPrefillRate,
+		m.prefixDecodeStep,
 		m.prefixIndexEntries,
 		m.prefixChecksTotal,
 		// Policy management
@@ -1801,6 +1822,14 @@ func (m *RouterMetrics) APIKeyPushRejected(endpoint string) {
 // Implements policy.PrefixMetrics.
 func (m *RouterMetrics) PrefixRouted(model, outcome string) {
 	m.prefixRoutingTotal.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
+}
+
+// LatencyModel publishes the learned prefill speed and decode step of a
+// group of replicas. Implements policy.LatencyMetrics.
+func (m *RouterMetrics) LatencyModel(model, engine, gpu string, prefillRate, decodeStep float64) {
+	l := prometheus.Labels{"model": model, "engine": engine, "gpu": gpu}
+	m.prefixPrefillRate.With(l).Set(prefillRate)
+	m.prefixDecodeStep.With(l).Set(decodeStep)
 }
 
 // PrefixIndexSize sets the prefix-memory gauges.

@@ -27,9 +27,11 @@ The router never tokenizes a request and never stores prompt text.
 6. **Choice.** Busy candidates are excluded first. Among the rest, the strategy estimates for each candidate:
 
    ```text
-   (prompt tokens waiting for prefill on it + prompt tokens it does not hold) / prefill_rate
-     + running requests reported by its engine × inter-token latency
+   (prompt tokens waiting for prefill on it + prompt tokens it does not hold) / prefill speed
+     + running requests reported by its engine × decode step
    ```
+
+   The prefill speed and the decode step are [learned from the engines](#learned-speeds), never configured.
 
    Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. A request counts until its first response byte; a non-streamed response has none before the whole answer, so its prompt counts until the generation ends and an agent serving long non-streamed answers looks more queued than it is. The lowest estimate wins. Among near-ties, the candidate that reported holding the most of the prompt (by its engine's cache events, the prompts it served, or its text entries), weighted by its [trust](#agent-trust), wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little. Every router receives the same reports, so they break the tie the same way; equal holdings go to a hash of the request's first anchor and the agent.
 
@@ -38,6 +40,24 @@ Anchors and block hashes are keyed with a secret derived from the site's agent s
 <Note>
 Everything the strategy knows is advice. The engine checks its own cache, so a wrong entry only makes a request slower, never wrong.
 </Note>
+
+## Learned speeds
+
+The cost converts tokens into seconds with two numbers that depend on the model, the GPU, the quantization and the engine: the **prefill speed** (prompt tokens per second) and the **decode step** (seconds per generated token). Nothing has to be set: they are measured.
+
+1. **Each agent** reads its engine's counters every scrape and computes, over its **last 60 seconds**, the prefill speed (prompt tokens the engine computed, cache hits excluded, divided by the time requests spent in prefill) and the decode step (decode seconds divided by decode tokens, for every request; the average inter-token latency for an engine without these counters). It sends both, with how many requests and tokens they cover, in its heartbeat.
+2. **Each router** pools the reports of the replicas of a **group** — same model, engine and GPU (`--gpu-model`), weighting each by how much it covers: prefill seconds for the prefill speed (total tokens over total seconds, so short prompts, where a fixed per-request cost dominates, do not outweigh long ones), decode tokens for the decode step. Replicas of one model behind one router are normally one group; replicas on different GPUs or engines form separate groups.
+3. **The cost** of every replica of the group uses the pooled figures. A group whose replicas reported nothing in the last minute keeps its last figures (they describe the hardware, not a moment); a group never measured uses the defaults: 10,000 tokens per second and 20 ms.
+
+Pooling is deliberate: a replica's cost never depends on its own past figures, which change only when it is used, so a replica avoided once is not kept away.
+
+| Engine | Prefill speed from | Decode step from |
+| --- | --- | --- |
+| vLLM | `vllm:request_prefill_kv_computed_tokens` and `vllm:request_prefill_time_seconds` (older versions: `prompt_tokens_total` − `prompt_tokens_cached_total`) | `vllm:request_decode_time_seconds` over the generation tokens |
+| SGLang | `sglang:uncached_prompt_tokens_histogram` and `sglang:per_stage_req_latency_seconds{stage="prefill_forward"}` (rank 0) | e2e latency − TTFT over the generation tokens (its inter-token latency histogram covers streamed requests only) |
+| llama.cpp, Ollama, custom | Not measured: defaults | Not measured: defaults |
+
+Tested with vLLM 0.31 and SGLang 0.5.23. At start-up the agent logs whether its engine exposes the prefill counters. A `prefill_rate` set in the policy replaces the learned prefill speed.
 
 ## Engines
 
@@ -137,14 +157,13 @@ routing_policy:
     max_waiting: 8
     busy_factor: 2.0
     tie_epsilon: 0.05
-    prefill_rate: 10000
     predicted_ttl: 120s
     pending_ttl: 5s
 ```
 
 See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field. Guidance:
 
-- `prefill_rate`: the prefill speed of your replicas. The default fits a 7B model on a 32 GB GPU (measured 10,000–14,000 tokens per second); use a lower value for larger models. It only converts tokens into seconds, so replicas that are alike do not need it to be exact.
+- `prefill_rate`: leave it unset. The prefill speed is [learned](#learned-speeds) per model, engine and GPU; set it only to pin a value, which then applies to every replica.
 - `kv_threshold`: lower it (e.g. 0.85) when the KV cache is small for the prompts, so new prefixes go to replicas that can keep them.
 - `pending_ttl`: raise it when new prompts take long to prefill (very long prompts), so copies arriving meanwhile go together.
 
@@ -154,6 +173,8 @@ See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each
 | --- | --- |
 | `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
 | `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `memo_ends` (memo entries indexed by their last block; follows `memo`), `blocks`, `pending` |
+| `hivenet_prefix_prefill_rate_tokens_per_second{model, engine, gpu}` | Learned prefill speed of a group of replicas |
+| `hivenet_prefix_decode_step_seconds{model, engine, gpu}` | Learned decode step of a group of replicas |
 | `hivenet_prefix_checks_total{model, result}` | Confirmed blocks checked against the engine's cached tokens: `held`, `missed`, or `evicted` (evicted before the request reached the engine: not judged) |
 
 Share of requests sent to an agent that holds part of the prompt:

@@ -175,6 +175,13 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 			m.DecodeTokensTotal = &decodeTokens
 		}
 	}
+	// Prefill counters for the agent's windowed prefill speed: prompt tokens
+	// computed (cache hits excluded, one series per request, not per rank)
+	// and seconds requests spent in the prefill forward pass (rank 0).
+	m.PrefillComputedTokensTotal = metricSum(sums, "sglang:uncached_prompt_tokens_histogram_sum")
+	m.PrefillSecondsTotal = metricSum(sums, `sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"}`)
+	m.PrefillRequestsTotal = metricSum(sums, `sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"}`)
+
 	if e2e := metricSum(sums, "sglang:e2e_request_latency_seconds_sum"); e2e != nil {
 		if ttft := metricSum(sums, "sglang:time_to_first_token_seconds_sum"); ttft != nil {
 			m.DecodeSecondsTotal = e.monotonicDecodeSeconds(*e2e-*ttft, metricSum(sums, "sglang:num_requests_total"))

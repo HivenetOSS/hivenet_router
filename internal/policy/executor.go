@@ -162,6 +162,9 @@ type Executor struct {
 	prefixIndex   PrefixIndex
 	prefixMetrics PrefixMetrics
 	prefill       prefillQueue
+	// latency is the learned prefill speed and decode step per group of
+	// replicas, shared by every prefix-aware step (latency_model.go).
+	latency *latencyModel
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -175,6 +178,7 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 		globalMaxTries:    globalMaxTries,
 		defaultQueueDepth: defaultQueueDepth,
 		queues:            make(map[string]*WaitQueue),
+		latency:           &latencyModel{},
 	}
 	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
@@ -183,6 +187,10 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 // SetPrefixIndex wires the router's prefix memory used by the prefix-aware
 // strategy. Must be called before any requests are processed.
 func (e *Executor) SetPrefixIndex(ix PrefixIndex) { e.prefixIndex = ix }
+
+// SetLatencyMetrics wires an observer of the learned latency figures.
+// Must be called before any requests are processed.
+func (e *Executor) SetLatencyMetrics(lm LatencyMetrics) { e.latency.metrics = lm }
 
 // SetPrefixMetrics wires an observer of prefix-aware selections.
 // Must be called before any requests are processed.

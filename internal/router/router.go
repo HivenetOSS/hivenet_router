@@ -443,6 +443,7 @@ func New(cfg *config.Config) (*Router, error) {
 	prefixIx := prefixindex.New(prefixindex.Config{})
 	executor.SetPrefixIndex(prefixIx)
 	executor.SetPrefixMetrics(routerMetrics)
+	executor.SetLatencyMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so

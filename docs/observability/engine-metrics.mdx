@@ -520,7 +520,7 @@ Both are measured in seconds.
 hivenet_agent_engine_avg_ttft_seconds
 ```
 
-This is calculated from the backend histogram’s cumulative sum and count.
+This is calculated from the change in the backend histogram’s sum and count over the agent's last 60 seconds, not since the engine started, so it follows the replica's current speed. With no request in the last minute the gauge keeps its last value until one arrives. For a longer view use the histogram, `hivenet_agent_engine_ttft_seconds`, with `rate()`.
 
 ### P90 TTFT
 
@@ -528,7 +528,7 @@ This is calculated from the backend histogram’s cumulative sum and count.
 hivenet_agent_engine_p90_ttft_seconds
 ```
 
-The agent estimates this value from the backend histogram buckets.
+The agent estimates this value from the backend histogram buckets, over the same last 60 seconds.
 
 Hivenet Router keeps it as a scalar because routing policies need to read a current value directly during agent selection.
 

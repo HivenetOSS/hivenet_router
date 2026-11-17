@@ -33,8 +33,9 @@ type PrefixAwareParams struct {
 	// TieEpsilon makes candidates whose estimated cost is within this share of
 	// the best (or 5 ms) a tie, broken the same way on every router.
 	TieEpsilon float64 `yaml:"tie_epsilon" json:"tie_epsilon,omitempty"`
-	// PrefillRate is the prefill speed assumed for every agent, in tokens per
-	// second; it converts tokens to seconds in the cost.
+	// PrefillRate, when set, is the prefill speed in tokens per second used
+	// for every agent; it converts tokens to seconds in the cost. Unset (the
+	// default), the speed is learned from the engines (latency_model.go).
 	PrefillRate float64 `yaml:"prefill_rate" json:"prefill_rate,omitempty"`
 	// PredictedTTL is how long blocks sent to or served by an agent count as
 	// held by it without confirmation from its engine.
@@ -207,10 +208,31 @@ type prefixAwareStrategy struct {
 	index             PrefixIndex
 	queue             *prefillQueue
 	metrics           PrefixMetrics
+	// latency learns each group's prefill speed and decode step; the
+	// policy's prefill_rate, when set (prefillRateSet), wins over the
+	// learned speed.
+	latency        *latencyModel
+	prefillRateSet bool
 }
 
 func (e *Executor) newPrefixAware(p *PrefixAwareParams) prefixAwareStrategy {
-	return prefixAwareStrategy{PrefixAwareParams: p.resolved(), index: e.prefixIndex, queue: &e.prefill, metrics: e.prefixMetrics}
+	return prefixAwareStrategy{PrefixAwareParams: p.resolved(), index: e.prefixIndex, queue: &e.prefill, metrics: e.prefixMetrics,
+		latency: e.latency, prefillRateSet: p != nil && p.PrefillRate != 0}
+}
+
+// speeds returns the prefill speed (tokens per second) and decode step
+// (seconds) to cost an agent of group g with: the policy's prefill_rate when
+// set, else the learned figure, else the default.
+func (s prefixAwareStrategy) speeds(figs map[latencyGroup]latencyFigures, a *domain.Agent) (rate, step float64) {
+	f := figs[groupOf(a)]
+	rate, step = f.prefillRate, f.decodeStep
+	if s.prefillRateSet || rate == 0 {
+		rate = s.PrefillRate
+	}
+	if step == 0 {
+		step = defaultITLSeconds
+	}
+	return rate, step
 }
 
 // WantsPrefix implements PrefixStrategy.
@@ -276,6 +298,10 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		}
 		return int(float64(h) * s.index.Trust(id))
 	}
+	var figs map[latencyGroup]latencyFigures
+	if s.latency != nil {
+		figs = s.latency.learn(candidates)
+	}
 	costs := make([]float64, len(ok))
 	best := math.Inf(1)
 	for i, c := range ok {
@@ -284,7 +310,8 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		// agent has not started, or what the agent reports from every
 		// router, whichever is larger.
 		queued := max(s.queue.get(c.Agent.ID), c.Agent.ReportedPrefill())
-		costs[i] = float64(queued+newToks)/s.PrefillRate + decodePressure(c)
+		rate, step := s.speeds(figs, c.Agent)
+		costs[i] = float64(queued+newToks)/rate + decodePressure(c, step)
 		best = min(best, costs[i])
 	}
 	eps := max(s.TieEpsilon*best, 0.005)
@@ -361,21 +388,18 @@ func (s prefixAwareStrategy) busy(c ScoredCandidate, mean float64) bool {
 }
 
 // decodePressure estimates the seconds an agent's running requests add to a
-// new request's first token, from what its engine reports. An engine that
-// reports nothing adds nothing: the router's own load count still holds
-// requests that just finished (until the agent's next report), and using it
-// would push a conversation away from the agent that holds it; the busy
-// filter guards against hot spots instead.
-func decodePressure(c ScoredCandidate) float64 {
+// new request's first token: one decode step each, the step learned for the
+// agent's group (not the agent's own average: an agent avoided once would
+// keep its old figure). An engine that reports no running count adds
+// nothing: the router's own load count still holds requests that just
+// finished (until the agent's next report), and using it would push a
+// conversation away from the agent that holds it; the busy filter guards
+// against hot spots instead.
+func decodePressure(c ScoredCandidate, step float64) float64 {
 	if c.Snapshot.RunningRequests == nil {
 		return 0
 	}
-	running := *c.Snapshot.RunningRequests
-	itl := defaultITLSeconds
-	if c.Snapshot.AvgITLSeconds != nil && *c.Snapshot.AvgITLSeconds > 0 {
-		itl = *c.Snapshot.AvgITLSeconds
-	}
-	return running * itl
+	return *c.Snapshot.RunningRequests * step
 }
 
 func hrw(anchor uint64, id peer.ID) uint64 {

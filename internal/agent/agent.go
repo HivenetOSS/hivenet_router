@@ -104,6 +104,11 @@ type Agent struct {
 	// Stored in an atomic pointer so sendHeartbeat reads with zero lock contention.
 	// Nil until the first successful scrape or when the engine does not implement MetricsProvider.
 	engineMetrics atomic.Pointer[domain.BackendMetrics]
+	// engineWindow turns the engine's cumulative counters into figures over
+	// the last EngineWindow (see engine_window.go).
+	engineWindow *engineWindow
+	// prefillCheck logs once whether the engine's prefill speed can be measured.
+	prefillCheck sync.Once
 
 	// backendHealthy is the result of the most recent periodic backend health check.
 	// Initialised to true at the start of each session (backend was healthy at registration).
@@ -148,10 +153,11 @@ type Agent struct {
 // The hardware collector is auto-detected: NVML when available, NullCollector otherwise.
 func NewAgent(cfg *config.AgentConfig, engine Engine) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		engine:    engine,
-		collector: hardware.NewCollector(cfg.GPUDevicesFile),
-		gater:     p2p.NewRouterGater(),
+		cfg:          cfg,
+		engine:       engine,
+		engineWindow: newEngineWindow(),
+		collector:    hardware.NewCollector(cfg.GPUDevicesFile),
+		gater:        p2p.NewRouterGater(),
 		// All backend traffic goes through this client, so the backend API key
 		// (if configured) applies to health checks and model discovery as well
 		// as inference. The key only goes to the backend and health URL hosts.
@@ -846,6 +852,14 @@ func (a *Agent) scrapeEngineMetrics(provider MetricsProvider) bool {
 		log.Debugf("engine metrics scrape failed: %v", err)
 		return false
 	}
+	a.engineWindow.apply(bm) // latency figures over the last EngineWindow, not since the engine started
+	a.prefillCheck.Do(func() {
+		if bm.PrefillComputedTokensTotal == nil || bm.PrefillSecondsTotal == nil {
+			log.Infof("Engine %s exposes no prefill counters: routers cost this agent with their default prefill speed", a.engine.Name())
+		} else {
+			log.Infof("Engine %s exposes prefill counters: routers learn this replica group's prefill speed", a.engine.Name())
+		}
+	})
 	a.engineMetrics.Store(bm)
 	return true
 }
