@@ -139,22 +139,22 @@ They still report Hivenet Router request history, latency, capacity, and availab
 | Running requests | Yes | Yes | Yes |
 | Waiting requests | Yes | Yes | Yes |
 | Preemptions | Yes | No | No |
-| Average TTFT | Yes | Yes | No |
-| P90 TTFT | Yes | Yes | No |
+| Average and P90 TTFT | Yes | Yes | No |
 | Raw TTFT histogram | Yes | Yes | No |
-| Average ITL | Yes | Yes | No |
-| P90 ITL | Yes | Yes | No |
+| Average and P90 ITL | Yes | Yes | No |
 | Raw ITL histogram | Yes | Yes | No |
 | Prompt-length histogram | Yes | Yes | No |
 | Generation-length histogram | Yes | Yes | No |
+| Decode-time histogram | Yes | No | No |
+| Decode-phase token and time counters | Yes | Yes | Yes |
 | Finish reasons | Yes | No | No |
-| Generation throughput | No | No | Yes |
-| Prompt throughput | No | No | Yes |
+| Current generation-throughput gauge | No | No | Yes |
+| Current prompt-throughput gauge | No | No | Yes |
 
 <Note>
-  Hivenet Router re-exports the raw histograms of vLLM and SGLang through Prometheus and calculates the average and P90 scalar values from them.
+  Availability depends on the backend build and the metrics it exposes. A missing histogram produces no series.
 
-  llama.cpp exposes no TTFT, ITL or length histogram, so llama.cpp agents report no TTFT or ITL values.
+  vLLM and SGLang supply the histograms used for TTFT and ITL averages and P90 values. llama.cpp supplies neither those histograms nor their derived scalar values. Use decode-phase counters to measure output speed across all three supported engines.
 </Note>
 
 ## Enable backend metrics
@@ -235,7 +235,11 @@ organization
 machine
 ```
 
-as their common labels.
+as their common labels. Engine histograms and decode-phase counters also carry `deployment_id`, taken from the agent's `HIVENET_ROUTER_DEPLOYMENT_ID`, or `unset` when absent. Scalar engine gauges keep the label set above.
+
+Scope deployment queries with both `organization` and `deployment_id`, because the agent declares those values. These series describe the agent's backend workload; they isolate a deployment's traffic only when its agents serve no other deployment's requests.
+
+The aggregation examples below assume one scraped router per site. In a multi-router site, every router exports the same reported engine series. Scrape one router or deduplicate repeated series before summing, retaining the agent identity and the labels needed by the query. For histograms, retain `le` as well. See [Multiple routers per site](/observability/prometheus-metrics#multiple-routers-per-site).
 
 For example:
 
@@ -501,7 +505,7 @@ A rising value together with high KV-cache utilization is evidence of cache pres
 
 Time to first token, or TTFT, is the time between a request entering the inference engine and the first output token becoming available.
 
-Hivenet Router exposes two per-agent gauges:
+For vLLM and SGLang, Hivenet Router exposes two per-agent gauges:
 
 ```text
 hivenet_agent_engine_avg_ttft_seconds
@@ -544,7 +548,7 @@ hivenet_agent_engine_ttft_seconds_sum
 hivenet_agent_engine_ttft_seconds_count
 ```
 
-Fleet-wide P90:
+Fleet-wide P90 TTFT:
 
 ```promql
 histogram_quantile(
@@ -599,12 +603,7 @@ hivenet_agent_engine_avg_itl_seconds
 hivenet_agent_engine_p90_itl_seconds
 ```
 
-for:
-
-- vLLM
-- SGLang
-
-llama.cpp does not supply ITL through this integration.
+for vLLM and SGLang. SGLang uses `sglang:inter_token_latency_seconds`, which records one observation per generated token, as on vLLM. llama.cpp does not supply TTFT or ITL histograms or their derived scalar values.
 
 Average ITL:
 
@@ -624,7 +623,7 @@ For vLLM and SGLang, Hivenet Router also exports the raw histogram:
 hivenet_agent_engine_itl_seconds
 ```
 
-Fleet-wide P90:
+Fleet-wide P90 ITL:
 
 ```promql
 histogram_quantile(
@@ -792,6 +791,29 @@ The first snapshot establishes a baseline. Hivenet Router counts changes observe
 
 If the backend count decreases after a restart, Hivenet Router treats the new value as post-restart activity.
 
+## Decode-phase output speed
+
+vLLM, SGLang, and llama.cpp expose cumulative decode-phase counters:
+
+```text
+hivenet_agent_engine_decode_tokens_total
+hivenet_agent_engine_decode_seconds_total
+```
+
+Divide their rates to measure output tokens per second of decode time. For one deployment, using one scraped router per site:
+
+```promql
+sum(rate(hivenet_agent_engine_decode_tokens_total{organization="<org>", deployment_id="<id>"}[5m]))
+/
+sum(rate(hivenet_agent_engine_decode_seconds_total{organization="<org>", deployment_id="<id>"}[5m]))
+```
+
+Replace `<org>` and `<id>` with the agent registration values. If you scrape several routers per site, deduplicate the repeated agent series before aggregation.
+
+The counters follow the engine's cumulative values and reset when the engine restarts; use `rate()` to account for resets. SGLang derives decode time from end-to-end time minus TTFT and keeps it from decreasing between restarts. Aborted requests can make decode time read slightly low and output speed slightly high.
+
+vLLM also exposes the per-request decode-time histogram `hivenet_agent_engine_request_decode_time_seconds`. SGLang and llama.cpp do not. See [Engine histograms](/observability/prometheus-metrics#engine-histograms) for the counter sources and histogram-based formula.
+
 ## llama.cpp token throughput
 
 llama.cpp exposes two current throughput gauges:
@@ -892,7 +914,7 @@ exclude_if:
     gt: 0.05
 ```
 
-does not exclude a llama.cpp agent because llama.cpp does not report ITL through this integration.
+does not exclude a llama.cpp agent because this integration supplies no ITL value for llama.cpp. It also passes for a vLLM or SGLang agent whose backend has not reported that metric.
 
 <Warning>
   Combine engine-specific gates with a static engine or metadata match when the metric must be present.
@@ -1169,21 +1191,21 @@ groups:
     - whether requests have completed
     - whether the expected histogram exists on the backend
 
-    llama.cpp does not provide TTFT or ITL through the current integration.
+    vLLM and SGLang can supply TTFT and ITL. llama.cpp supplies neither; use its decode-phase counters or throughput gauges for output speed.
   </Accordion>
 
   <Accordion title="Raw histogram queries are empty">
-    The current Hivenet Router implementation re-exports raw engine histograms from vLLM and SGLang.
+    vLLM and SGLang can supply TTFT, ITL, prompt-length, and generation-length histograms. The decode-time histogram is vLLM-only. llama.cpp supplies no engine histogram series.
 
-    llama.cpp exposes no TTFT, ITL or length histogram, so these families carry no series for llama.cpp agents.
-
-    Filter for vLLM and SGLang:
+    Check a supported engine:
 
     ```promql
     hivenet_agent_engine_ttft_seconds_count{
       engine=~"vllm|sglang"
     }
     ```
+
+    If the series is absent, check that the backend exposes the corresponding histogram and that the agent has completed a successful scrape.
   </Accordion>
 
   <Accordion title="Preemption calculations become negative">

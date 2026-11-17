@@ -78,7 +78,7 @@ export HIVENET_ROUTER_JWT_SECRET="<shared-secret>"
 
 ## Agent authentication flow
 
-An agent joins the network in two stages.
+An agent joins each router in two stages. In a [multi-router site](/deploy/multiple-routers), it authenticates and maintains an independent session with every router. All routers and agents in the site use the same shared JWT secret.
 
 <Steps>
   <Step title="Authenticate over gRPC">
@@ -116,7 +116,7 @@ An agent joins the network in two stages.
 
     Router-agent traffic then uses libp2p with Noise encryption.
 
-    The agent accepts libp2p connections only from the router it authenticated against. Its libp2p node listens on `127.0.0.1` only, and any other peer is disconnected right after the Noise handshake. Inference requests therefore always go through the router, with its API keys, quotas and routing policy.
+    The agent accepts libp2p connections only from routers with which it has authenticated sessions. Its libp2p node listens on `127.0.0.1` only, and any other peer is disconnected right after the Noise handshake. Inference requests therefore go through an authenticated router, with that router's API keys, quotas, and routing policy.
   </Step>
 </Steps>
 
@@ -127,11 +127,12 @@ The router rejects authentication when required metadata is missing or invalid.
 Required fields include:
 
 - model
-- positive capacity
 - agent version
 - engine
 - region
 - organization
+
+Network-registered agents use declared capacity `0`. The router accepts `0` during authentication and ignores the deprecated agent `--capacity` value. Positive declared capacity still limits embedded or test agents that explicitly set it. For network agents, use [admission control](/routing/admission-control) to bound work.
 
 Other metadata can include:
 
@@ -186,7 +187,7 @@ Hivenet Router supports three client-authentication modes.
 | --- | --- | --- | --- |
 | `none` | No keys | Not applicable | Local development |
 | `api-key` | `auth.yaml` | File on disk | Static deployments |
-| `dynamic` | Administration API | Memory only | External control services |
+| `dynamic` | Administration API | Memory by default; optional local Badger warm-start cache | External control services |
 
 ### No authentication
 
@@ -293,7 +294,7 @@ sudo kill -HUP "$(pgrep hivenet-router)"
 Hivenet Router validates the updated file before replacing the active static-key provider.
 
 <Note>
-  A successful authentication reload rebuilds in-memory quota state. Request-rate buckets reset. Daily token usage also resets with the `memory` quota backend, while the `badger` backend preserves and restores daily token state.
+  Without a shared sync store, a successful authentication reload rebuilds in-memory quota state. Request-rate buckets reset. Daily token usage also resets with the `memory` quota backend, while the `badger` backend preserves and restores daily token state. With `--sync-store=valkey`, today's shared usage is retained; see [Run several routers](/deploy/multiple-routers).
 </Note>
 
 ### Dynamic API keys
@@ -307,7 +308,7 @@ export HIVENET_ROUTER_AUTH_MODE=dynamic
 export HIVENET_ROUTER_ADMIN_API_KEYS="<admin-key>"
 ```
 
-The registry starts empty. An external control service must add or replace client keys through:
+With the default `--key-store=memory`, the registry starts empty. An external control service manages client keys through:
 
 ```text
 PUT    /admin/api-keys/{id}
@@ -317,7 +318,9 @@ POST   /admin/api-keys/replace
 
 Dynamic entries contain SHA-256 key hashes rather than plaintext client keys.
 
-The registry is not persisted. It must be repopulated after every router restart.
+With `--key-store=memory`, repopulate the registry after each restart. With `--key-store=badger`, a router can restore eligible keys from its local warm-start cache when the snapshot passes integrity, schema, age, and confirmation checks. An unusable cache leaves the registry empty until the upstream key-sync service pushes the current keys.
+
+The upstream key-sync service remains authoritative and must push changes to every router. The cache does not replicate keys between routers. See [Persistent key store](/security/api-keys#persistent-key-store-warm-start) for the required persistent storage, dedicated router-only secret, and restore rules.
 
 <Warning>
   Administration authentication is mandatory in dynamic mode.
@@ -525,7 +528,7 @@ Hivenet Router protects different network paths differently.
 | Path | Transport protection |
 | --- | --- |
 | Agent → Router gRPC authentication | TLS 1.3 with a pinned key derived from the JWT secret |
-| Router ↔ Agent libp2p traffic | Noise encryption; the agent accepts only its authenticated router |
+| Router ↔ Agent libp2p traffic | Noise encryption; the agent accepts only routers with authenticated sessions |
 | Client → Router HTTP API | No built-in TLS termination |
 
 For production client traffic, place Hivenet Router behind a reverse proxy, ingress, or load balancer that provides HTTPS.
@@ -600,7 +603,6 @@ Compromise has different consequences:
     Required values include:
 
     - model
-    - positive capacity
     - version
     - engine
     - region
@@ -663,9 +665,9 @@ Compromise has different consequences:
   </Accordion>
 
   <Accordion title="Dynamic keys disappear">
-    The dynamic registry is stored in memory.
+    With the default `--key-store=memory`, repopulate the registry through the administration API after every restart.
 
-    Repopulate it through the administration API after every router restart.
+    With `--key-store=badger`, check the [key-store runbook](/security/api-keys#runbook) for an unavailable store, rejected snapshot, or skipped key records. Confirm that the upstream key-sync service pushes the current registry to every router.
   </Accordion>
 </AccordionGroup>
 

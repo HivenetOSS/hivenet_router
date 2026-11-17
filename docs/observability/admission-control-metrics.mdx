@@ -11,12 +11,16 @@ The admission-control metrics show why requests are rejected and how close each 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by an admission gate |
-| `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current weighted in-flight token sum |
+| `hivenet_admission_occupancy_tokens` | Gauge | `model` | This router's current weighted in-flight token sum |
 | `hivenet_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas`, or × the engines' summed KV capacity when `admit_budget_tokens` is unset. With `--sync-store=valkey` this is the site-wide budget, shared through credits |
-| `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
-| `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas`; `0` means no count backstop |
+| `hivenet_admission_inflight_requests` | Gauge | `model` | This router's current in-flight request count |
+| `hivenet_admission_max_inflight` | Gauge | `model` | Full-pool request backstop after healthy-replica scaling, including the default backstop when applicable; `0` means no count backstop |
 
 The global occupancy controller updates all four gauges when a request is admitted, released, adjusted to exact input usage, or grown by streamed output. The healthy-replica count is recomputed for each admission and floored at `1`, so the budget and backstop gauges follow the live serving pool.
+
+With a [shared occupancy pool](/deploy/multiple-routers), the occupancy and in-flight gauges record this router's reservations. The budget and backstop gauges report the full-pool limits most recently observed by its controller, not the credits currently available to that router. Do not sum these limit gauges across routers.
+
+For a site-wide utilization view, sum the local reservations from every router in the same site for the same model and compare them with one current, consistent full-pool limit. Keep sites and models separate, and check that the routers agree on their limits. A single router's occupancy-to-budget ratio measures its reservations relative to the full pool; it is not site utilization or a measure of its remaining credits. This differs from engine metrics repeated by several routers, which must be [deduplicated](/observability/prometheus-metrics#engine-histograms).
 
 Per-tenant RPM rejects also increment `hivenet_tenant_rate_limited_total` in addition to the unified `b4_rpm` reason below.
 
@@ -25,7 +29,7 @@ Per-tenant RPM rejects also increment `hivenet_tenant_rate_limited_total` in add
 | `reason` | Gate and response |
 | --- | --- |
 | `b1` | Per-request input-token or image cap; HTTP `400 input_too_long` |
-| `b2` | Global occupancy budget or `max_inflight`; HTTP `429 concurrency_limit_exceeded` |
+| `b2` | Occupancy budget, request-count backstop, or unavailable shared-pool credits; HTTP `429 concurrency_limit_exceeded` |
 | `b3` | Front-door `shed_if` pressure gate; HTTP `429 concurrency_limit_exceeded` |
 | `b4_occupancy` | Serverless per-key occupancy share; HTTP `429 rate_limit_exceeded` |
 | `b4_itpm` | Serverless per-key input tokens per minute; HTTP `429 rate_limit_exceeded` |
@@ -33,6 +37,8 @@ Per-tenant RPM rejects also increment `hivenet_tenant_rate_limited_total` in add
 | `b4_rpm` | Requests per minute; HTTP `429 rate_limit_exceeded` |
 
 ## PromQL examples
+
+Scope selectors to the intended site using your Prometheus scrape labels. The utilization expressions below operate on each router's matching series. The rejection examples aggregate the selected routers by model and reason; keep separate sites in separate queries or retain their scrape labels in the grouping.
 
 ### Occupancy utilization
 
@@ -48,7 +54,7 @@ Exclude a zero or unset budget when using this expression in an alert:
   hivenet_admission_occupancy_tokens
     / hivenet_admission_budget_tokens
 )
-and on (model)
+and
 hivenet_admission_budget_tokens > 0
 ```
 
@@ -59,7 +65,7 @@ hivenet_admission_budget_tokens > 0
   hivenet_admission_inflight_requests
     / hivenet_admission_max_inflight
 )
-and on (model)
+and
 hivenet_admission_max_inflight > 0
 ```
 
@@ -91,8 +97,8 @@ The rejection counter has no `tenant_id` or `key_id` label, so it can show that 
 
 ## Interpret the signals
 
-- Occupancy near budget with rising `b2` means the model is at its global KV-occupancy limit.
-- `b3` rising while occupancy remains below budget means live engine pressure is worse than the token estimate suggests, or the configured shed threshold is deliberately more conservative.
+- High occupancy utilization with rising `b2` can indicate token-budget pressure, but also check the request-count backstop. In a multi-router deployment, use the site-wide view described above and inspect credit availability and sync-store health; a router can reject work while its local occupancy ratio is low.
+- Rising `b3` means the configured live-engine pressure threshold was crossed. Compare the reported signals with the threshold and site-wide occupancy; a low local occupancy ratio alone does not establish spare capacity.
 - Sustained `b4_itpm`, `b4_otpm`, or `b4_occupancy` can indicate abusive traffic or undersized serverless key limits.
 - A nonzero `max_inflight` with high concurrency utilization can bind before the token budget does when requests are small.
 
