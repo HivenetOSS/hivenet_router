@@ -337,12 +337,19 @@ func TestTextEntryIsReported(t *testing.T) {
 func TestAgentCapResets(t *testing.T) {
 	ix, _ := newTestIndex(Config{BlocksPerAgent: 1000})
 	ix.SetAgentCap(a1, 50)
-	if !ix.HasAgentCap(a1) || ix.capOf(a1) != 50 {
+	if ix.AgentCapKnown(a2) {
+		t.Error("an agent never capped has no known capacity")
+	}
+	if !ix.AgentCapKnown(a1) || ix.capOf(a1) != 50 {
 		t.Fatalf("cap %d", ix.capOf(a1))
 	}
 	ix.SetAgentCap(a1, 5000)
-	if ix.HasAgentCap(a1) || ix.capOf(a1) != 1000 {
-		t.Errorf("cap %d after the capacity grew, want the global 1000", ix.capOf(a1))
+	if !ix.AgentCapKnown(a1) || ix.capOf(a1) != 1000 {
+		t.Errorf("cap %d after the capacity grew, want the global 1000, still known (not read again every batch)", ix.capOf(a1))
+	}
+	ix.RemoveAgent(a1)
+	if ix.AgentCapKnown(a1) {
+		t.Error("a removed agent keeps its capacity")
 	}
 }
 
@@ -415,3 +422,8 @@ func TestCheckClaim(t *testing.T) {
 }
 
 var blocks12 = []uint64{201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212}
+
+// holds reports whether agent holds a live entry in hs.
+func holds(hs []holder, agent peer.ID, now int64) bool {
+	return holdsIf(hs, agent, func(h holder) bool { return h.exp == 0 || h.exp > now })
+}

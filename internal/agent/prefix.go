@@ -181,11 +181,17 @@ func (s *prefixState) since(seq uint64) ([]prefixServedEntry, uint64) {
 	defer s.mu.Unlock()
 	var out []prefixServedEntry
 	last := seq
+	size := 0
 	for _, o := range s.outbox {
 		if o.seq <= seq {
 			continue
 		}
+		n := len(o.entry.Anchors) + len(o.entry.Ends) + len(o.entry.Blocks)
+		if len(out) > 0 && size+n > prefixhash.MaxBatchHashes {
+			break // the rest goes in the next batch
+		}
 		out = append(out, o.entry)
+		size += n
 		last = o.seq
 		if len(out) == prefixBatchMax {
 			break
@@ -209,6 +215,7 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 	// snapshot waits a random delay, so the agents of a site do not all send
 	// theirs at once when a router restarts.
 	needSnapshot, snapshotAt := true, time.Now().Add(snapshotJitter())
+	var lastWarn time.Time
 	for {
 		select {
 		case <-t.C:
@@ -216,6 +223,9 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 			var kv *kvPayload
 			if a.kv != nil {
 				p, ok := a.kv.since(kvCursor)
+				if len(p.Stored) > prefixhash.MaxKVBlocks || len(p.Removed) > prefixhash.MaxKVBlocks {
+					ok = false // too many changes for one batch: send the state instead
+				}
 				if !ok && !needSnapshot {
 					needSnapshot, snapshotAt = true, time.Now().Add(snapshotJitter())
 				}
@@ -239,7 +249,12 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 				continue
 			}
 			if err != nil {
-				log.Debugf("prefix-state push: %v", err)
+				// Sent again next tick. A router that keeps refusing (a
+				// batch it cannot take) would otherwise fail silently.
+				if now := time.Now(); now.Sub(lastWarn) >= time.Minute {
+					lastWarn = now
+					log.Warnf("prefix-state push to router %s: %v (sent again every %s)", rs.addr, err, prefixPushEvery)
+				}
 				continue
 			}
 			cursor = last

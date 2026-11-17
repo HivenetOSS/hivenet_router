@@ -48,7 +48,8 @@ type Index struct {
 	// come true (see Observe).
 	trust map[peer.ID]*trustState
 	// agentCap bounds an agent's board entries (from its KV capacity), below
-	// the global BlocksPerAgent.
+	// the global BlocksPerAgent; 0: its capacity is known and the global cap
+	// applies. An agent without an entry has no known capacity yet.
 	agentCap map[peer.ID]int
 }
 
@@ -287,14 +288,16 @@ func (ix *Index) SetAgentCap(agent peer.ID, n int) {
 		ix.agentCap[agent] = n
 		return
 	}
-	delete(ix.agentCap, agent) // back to the global cap
+	ix.agentCap[agent] = 0 // known: the global cap applies
 }
 
-// HasAgentCap reports whether agent has a cap of its own (below the global one).
-func (ix *Index) HasAgentCap(agent peer.ID) bool {
+// AgentCapKnown reports whether SetAgentCap was called for agent since it
+// was added, whether its cap is its own or the global one.
+func (ix *Index) AgentCapKnown(agent peer.ID) bool {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	return ix.agentCap[agent] > 0
+	_, ok := ix.agentCap[agent]
+	return ok
 }
 
 // capOf is agent's board cap. Caller must not hold ix.mu.
@@ -584,10 +587,6 @@ func holdsIf(hs []holder, agent peer.ID, counts func(holder) bool) bool {
 		}
 	}
 	return false
-}
-
-func holds(hs []holder, agent peer.ID, now int64) bool {
-	return holdsIf(hs, agent, func(h holder) bool { return h.exp == 0 || h.exp > now })
 }
 
 // Commit records a routing decision: the matched blocks are predicted on agent

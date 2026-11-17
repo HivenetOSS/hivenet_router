@@ -190,3 +190,4 @@ sum by (model) (rate(hivenet_prefix_routing_total[5m]))
 - Without KV events the board records what agents served, not what their engines still hold: a block the engine evicted counts as held until `predicted_ttl` expires. The engine's own cache check keeps the answer correct.
 - Text shared *inside* one message (for example a document and a different question in the same user message) is not matched: anchors cover whole messages.
 - The router's memory is per process; after a restart the agents send snapshots of their caches, and the memo rebuilds from new traffic.
+- One batch from an agent carries at most 524,288 cached blocks (32M tokens of engine cache). An engine that holds more sends part of its cache in snapshots, and the agent logs a warning. An agent whose batches a router keeps refusing logs a warning once a minute.

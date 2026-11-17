@@ -388,3 +388,29 @@ func TestPrefix_RemoteKVEndpointRefused(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// A batch carries at most prefixhash.MaxBatchHashes hashes of served entries
+// (at least one entry); the rest goes in the next batches.
+func TestPrefixState_BatchBudget(t *testing.T) {
+	s := &prefixState{}
+	long := make([]uint64, prefixhash.MaxBlocks)
+	n := 2 * prefixhash.MaxBatchHashes / prefixhash.MaxBlocks
+	for range n {
+		s.add(prefixServedEntry{Anchors: []uint64{1}, Ends: []int{1}, Blocks: long})
+	}
+	got, cursor := 0, uint64(0)
+	for batches := 0; got < n; batches++ {
+		b, last := s.since(cursor)
+		size := 0
+		for _, e := range b {
+			size += len(e.Anchors) + len(e.Ends) + len(e.Blocks)
+		}
+		if len(b) == 0 || size > prefixhash.MaxBatchHashes {
+			t.Fatalf("batch of %d entries, %d hashes", len(b), size)
+		}
+		got, cursor = got+len(b), last
+		if batches > n {
+			t.Fatal("batches do not advance")
+		}
+	}
+}

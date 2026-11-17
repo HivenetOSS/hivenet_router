@@ -86,7 +86,11 @@ const (
 	// that may excuse it (agents send them every 100 ms).
 	prefixCheckDelay     = 500 * time.Millisecond
 	maxPrefixStateServed = 1024
-	maxKVBlocks          = 1 << 20 // 64M tokens of cache per agent
+	// maxKVBlocks bounds the block hashes of one batch's cache changes
+	// (32M tokens of cache per agent). It keeps the largest snapshot (about
+	// 11 MB of JSON) plus a full batch of served entries under
+	// maxPrefixStateBody; the agent never sends more (prefixhash.MaxKVBlocks).
+	maxKVBlocks = prefixhash.MaxKVBlocks
 )
 
 // handlePrefixState records what an agent served in the prefix memory: the
@@ -123,6 +127,12 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "too many entries", http.StatusRequestEntityTooLarge)
 		return
 	}
+	// Check the whole batch before applying any of it: a refused batch is
+	// sent again, and its served entries must not be learned twice.
+	if kv := payload.KV; kv != nil && (len(kv.Stored) > maxKVBlocks || len(kv.Removed) > maxKVBlocks) {
+		http.Error(w, "too many blocks", http.StatusRequestEntityTooLarge)
+		return
+	}
 	model := a.Metadata.Model
 	for _, s := range payload.Served {
 		if len(s.Anchors) == 0 || len(s.Anchors) > prefixhash.MaxAnchors {
@@ -138,10 +148,6 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 		r.prefixIndex.Learn(model, a.ID, s.Anchors, s.Ends, s.Blocks, policy.DefaultPrefixPredictedTTL)
 	}
 	if kv := payload.KV; kv != nil {
-		if len(kv.Stored) > maxKVBlocks || len(kv.Removed) > maxKVBlocks {
-			http.Error(w, "too many blocks", http.StatusRequestEntityTooLarge)
-			return
-		}
 		if !r.kvCursors.accept(a.ID, kv) {
 			// Out of order, or this router does not know the agent's run:
 			// the agent sends a snapshot next.
@@ -153,7 +159,7 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 		// margin for blocks shared between prompts and timing).
 		// Read on snapshots (each new session, each gap) and until known, not
 		// on every batch.
-		if kv.Snapshot || !r.prefixIndex.HasAgentCap(a.ID) {
+		if kv.Snapshot || !r.prefixIndex.AgentCapKnown(a.ID) {
 			if ep, err := r.storage.GetEnginePunctual(a.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil && *ep.KVCapacityTokens > 0 {
 				r.prefixIndex.SetAgentCap(a.ID, int(*ep.KVCapacityTokens*1.25)/prefixhash.BlockTokens+1)
 			}

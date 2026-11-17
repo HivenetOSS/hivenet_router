@@ -466,8 +466,14 @@ func (m *kvMirror) since(seq uint64) (p kvPayload, ok bool) {
 func (m *kvMirror) snapshot() kvPayload {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	p := kvPayload{Epoch: m.epoch, To: m.seq, Snapshot: true, Stored: make([]uint64, 0, len(m.held))}
+	p := kvPayload{Epoch: m.epoch, To: m.seq, Snapshot: true, Stored: make([]uint64, 0, min(len(m.held), prefixhash.MaxKVBlocks))}
 	for h := range m.held {
+		if len(p.Stored) == prefixhash.MaxKVBlocks {
+			// More cache than one batch carries: the routers get part of it
+			// (they are hints) rather than a batch they refuse.
+			log.Warnf("kv events: the engine holds %d blocks, a snapshot carries %d", len(m.held), prefixhash.MaxKVBlocks)
+			break
+		}
 		p.Stored = append(p.Stored, h)
 	}
 	return p
