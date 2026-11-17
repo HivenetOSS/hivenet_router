@@ -46,6 +46,9 @@ type DynamicKeyEntry struct {
 	HomeCountry string
 	// Reservation names the dedicated replicas the key uses; see AuthResult.
 	Reservation string
+	// ExternalFallback is the client's own provider account (BYOK); nil =
+	// no external fallback. See AuthResult.
+	ExternalFallback *ExternalFallback
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -233,6 +236,7 @@ func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, 
 		ScopeMax:          entry.ScopeMax,
 		HomeCountry:       entry.HomeCountry,
 		Reservation:       entry.Reservation,
+		ExternalFallback:  entry.ExternalFallback,
 		QuotaLimits:       quota,
 	}, nil
 }
@@ -282,6 +286,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 		return err
 	}
 	if err := validateReservation(fmt.Sprintf("key entry %q", e.ID), e.Reservation); err != nil {
+		return err
+	}
+	if err := validateExternalFallback(fmt.Sprintf("key entry %q", e.ID), e.ExternalFallback, e.ScopeMax); err != nil {
 		return err
 	}
 	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
@@ -339,6 +346,7 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		ScopeMax:          e.ScopeMax,
 		HomeCountry:       e.HomeCountry,
 		Reservation:       e.Reservation,
+		ExternalFallback:  e.ExternalFallback,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -456,6 +464,7 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			ScopeMax:          entries[i].ScopeMax,
 			HomeCountry:       entries[i].HomeCountry,
 			Reservation:       entries[i].Reservation,
+			ExternalFallback:  entries[i].ExternalFallback,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry

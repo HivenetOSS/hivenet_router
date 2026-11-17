@@ -90,6 +90,10 @@ type RequestProcessor struct {
 	// providers maps provider engine name ("openai", "anthropic") to its implementation.
 	// Populated at startup from config; only configured providers are present (missing key means not configured).
 	providers map[string]provider.Provider
+
+	// providerBaseURLs overrides provider endpoints by name (see
+	// WithProviderBaseURLs); nil = the providers' public APIs.
+	providerBaseURLs map[string]string
 	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
@@ -370,9 +374,38 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 
 		agent, err := session.Select(ctx)
 		if err != nil {
-			// All local policy steps exhausted — try the provider fallback if configured.
-			// Provider fallback calls ForwardChat and only makes sense for LLM requests.
-			if fp := session.FallbackProvider(); fp != nil && pending.Capability == domain.CapabilityLLM {
+			// All local policy steps exhausted — try the external fallback: the
+			// key's own provider account (BYOK) first, else the policy's
+			// fallback_provider (deprecated). Only for LLM requests, and never
+			// for a request bound to a scope: the provider runs outside the
+			// operator's sites.
+			if fb := pending.ExternalFallback; fb != nil && pending.Capability == domain.CapabilityLLM && externalAllowed(pending) {
+				if pending.IsExpired() {
+					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+					pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out before the external fallback could be attempted", domain.SourceRouter)
+					return
+				}
+				if pending.Reservation != nil {
+					pending.Reservation.Release() // served off-box: no local KV held
+				}
+				resp, provErr := p.tryBYOK(pending, fb)
+				if provErr == nil {
+					p.metrics.RequestRouted("byok", fb.Provider, fb.Model, pending.TenantID)
+					p.metrics.PolicyProviderFallbackRouted(pending.Request.Model)
+					p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+					pending.Response <- resp
+					return
+				}
+				// The provider's error text may echo request details; it never
+				// holds the credential (sent only as a header).
+				log.Warnf("External fallback (BYOK %s/%s) failed for request %s: %v", fb.Provider, fb.Model, pending.ID, provErr)
+				p.metrics.RequestFailed("byok", fb.Provider, fb.Model, pending.TenantID)
+				p.metrics.PolicyExhausted(pending.Request.Model)
+				p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+				pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, provErr.Error(), domain.SourceBackend)
+				return
+			}
+			if fp := session.FallbackProvider(); fp != nil && pending.Capability == domain.CapabilityLLM && externalAllowed(pending) {
 				if pending.IsExpired() {
 					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
 					pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out before provider fallback could be attempted", domain.SourceRouter)
@@ -1182,6 +1215,61 @@ func (rc *errCaptureReader) Read(p []byte) (int, error) {
 // specified model. It is called only after all local policy steps are exhausted.
 // Returns the ChatResponse on success, or an error if the provider is not configured
 // or the HTTPS call fails.
+// externalAllowed reports whether a request may be sent to an external
+// provider: not when it is bound to a scope narrower than "all".
+func externalAllowed(pending *domain.PendingRequest) bool {
+	return pending.Scope == "" || pending.Scope == domain.ScopeAll
+}
+
+// WithProviderBaseURLs overrides the providers' API endpoints by provider
+// name ("openai", "anthropic"), for the operator's providers and the clients'
+// own (BYOK) alike: an OpenAI-compatible gateway, a regional endpoint.
+func WithProviderBaseURLs(urls map[string]string) ProcessorOption {
+	return func(p *RequestProcessor) { p.providerBaseURLs = urls }
+}
+
+// tryBYOK sends the request to the key's own provider account. The client's
+// credential is revealed only into the provider's auth header.
+func (p *RequestProcessor) tryBYOK(pending *domain.PendingRequest, fb *domain.ExternalFallback) (*domain.ChatResponse, error) {
+	prov, err := provider.New(provider.Config{
+		Name: fb.Provider, APIKey: fb.APIKey.Reveal(), BaseURL: p.providerBaseURLs[fb.Provider], Metrics: p.metrics,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("external fallback: %w", err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), pending.Deadline)
+	defer cancel()
+	log.Infof("Forwarding request %s to the key's own provider account %s (model: %s)", pending.ID, fb.Provider, fb.Model)
+	resp, err := prov.Complete(ctx, pending.Request, fb.Model)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: %w", fb.Provider, err)
+	}
+	// Billing and the audit log tell it apart from the operator's provider:
+	// the client pays the provider directly.
+	resp.ProcessedBy = domain.BYOKProcessedByPrefix + fb.Provider
+	if err := withRawBody(resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// withRawBody gives a provider's decoded answer the OpenAI JSON body the
+// handlers write (they write RawBytes; a provider decodes the answer into
+// fields). Who served it stays out of the body: it is in the audit log.
+func withRawBody(resp *domain.ChatResponse) error {
+	if resp.Body != nil || len(resp.RawBytes) > 0 {
+		return nil
+	}
+	out := *resp
+	out.ProcessedBy = ""
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return fmt.Errorf("provider response: encode: %w", err)
+	}
+	resp.RawBytes = raw
+	return nil
+}
+
 func (p *RequestProcessor) tryProviderFallback(pending *domain.PendingRequest, engine, model string) (*domain.ChatResponse, error) {
 	prov, ok := p.providers[engine]
 	if !ok {
@@ -1198,6 +1286,9 @@ func (p *RequestProcessor) tryProviderFallback(pending *domain.PendingRequest, e
 		return nil, fmt.Errorf("provider %s: %w", engine, err)
 	}
 	log.Infof("Provider fallback %s succeeded for request %s (%.0fms)", engine, pending.ID, float64(time.Since(start).Milliseconds()))
+	if err := withRawBody(resp); err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 

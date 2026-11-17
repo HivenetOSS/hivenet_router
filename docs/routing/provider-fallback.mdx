@@ -6,6 +6,43 @@ sidebarTitle: "Provider fallback"
 
 Provider fallback sends an eligible language-model request to OpenAI or Anthropic after every local Hivenet Router routing step has been exhausted.
 
+<Warning>
+  **Bring your own key.** The way to give a client an external fallback is now its API key's `external_fallback`: the client's own provider account and credential, used only for that client's requests. The policy's `fallback_provider` and the router-wide `HIVENET_ROUTER_OPENAI_API_KEY` / `HIVENET_ROUTER_ANTHROPIC_API_KEY` send every client's requests to the operator's account; they are **deprecated** (a warning is logged at load) and will be removed in a later release. See [Bring your own key](#bring-your-own-key).
+</Warning>
+
+## Bring your own key
+
+An API key can carry the client's own provider account:
+
+```json
+{
+  "external_fallback": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "api_key": "sk-…"
+  }
+}
+```
+
+Set it with the [admin API](/use-the-api/admin-endpoints) (`PUT /admin/api-keys/{id}`), or in [`auth.yaml`](/security/auth-yaml-reference#external_fallback) with `api_key_env`, the name of an environment variable holding the credential (never the credential itself).
+
+When every local step of the model's policy is exhausted, a request on that key is sent to the client's provider, with the client's credential:
+
+1. The key's `external_fallback`, if it has one.
+2. Else the policy's `fallback_provider` (deprecated), as before.
+3. Else the request fails with the local error.
+
+Rules:
+
+- **Off by default.** A key without `external_fallback` gets no BYOK fallback.
+- **Sovereignty.** The provider runs outside the operator's sites. A key whose `scope_max` is narrower than `all` cannot have an `external_fallback` (`400` on push, the router does not start on `auth.yaml`), and a request with a [scope](/routing/cross-site-redirect#scope) narrower than `all` is never sent to any external provider, BYOK or not.
+- **Redirect first.** A [cross-site redirect](/routing/cross-site-redirect) to a site serving the model wins over any external fallback.
+- **The credential is write-only.** Reads through the admin API show only a preview (`sk-...KJ4`); the router never writes it in a log, an error or a trace. In the persistent key store it is encrypted with AES-256-GCM, with a key derived from the key-store secret (`HIVENET_ROUTER_KEY_STORE_SECRET`), bound to its key ID. A new push replaces it.
+- **Billing.** The client pays its provider directly: the response's audit `agent_id` is `byok:<provider>` (the operator's provider shows `provider:<provider>`), and like any provider response it charges no local output rate.
+- **Endpoints.** `HIVENET_ROUTER_OPENAI_BASE_URL` and `HIVENET_ROUTER_ANTHROPIC_BASE_URL` override a provider's API endpoint (an OpenAI-compatible gateway, a regional endpoint) for the operator's and the clients' accounts alike.
+
+The rest of this page describes the provider calls themselves, which BYOK shares with the deprecated policy fallback.
+
 It is the last step in a policy:
 
 ```text

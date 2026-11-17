@@ -402,6 +402,9 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set(ctxKeyScopeMax, result.ScopeMax)
 		c.Set(ctxKeyHomeCountry, result.HomeCountry)
 		c.Set(ctxKeyReservation, result.Reservation)
+		if result.ExternalFallback != nil {
+			c.Set(ctxKeyExternalFallback, result.ExternalFallback)
+		}
 		c.Set("quota_limits", result.QuotaLimits)
 		if result.Redirect != nil {
 			// Accepted once RedirectTarget has checked the body.

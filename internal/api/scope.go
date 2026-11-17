@@ -19,6 +19,8 @@ const (
 	ctxKeyHomeCountry = "home_country"
 	ctxKeyScope       = "scope"
 	ctxKeyReservation = "reservation"
+	// ctxKeyExternalFallback holds the key's *domain.ExternalFallback (BYOK).
+	ctxKeyExternalFallback = "external_fallback"
 )
 
 // Scope resolves where an inference request may be served, from its API key

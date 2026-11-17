@@ -850,6 +850,7 @@ Response:
 | `routing_strategies` | No | Ranking strategies the key may use, the first its default; empty leaves routing to the models' policies ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 | `scope_max` | No | Widest scope the key's requests may be served in: `all` (default), `EU` or `country:XX` ([details](/routing/cross-site-redirect#scope)) |
 | `home_country` | No | ISO 3166-1 alpha-2 country used as the scope of a request without `X-Hivenet-Scope`; must lie inside `scope_max` |
+| `external_fallback` | No | The client's own provider account: `provider` (`openai`, `anthropic`), `model`, `api_key` (write-only: reads show a preview) ([details](/routing/provider-fallback#bring-your-own-key)) |
 | `reservation` | No | Sends the key's requests only to the agents reserved for it ([dedicated replicas](/routing/dedicated-replicas)); empty: the shared agents only |
 
 A stale version returns HTTP `409`:
@@ -868,6 +869,7 @@ A key hash cannot belong to two different IDs. Delete the existing entry before 
 `PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants as static configuration:
 
 - `max_occupancy_share` must be `0` or in `(0, 1]`.
+- `external_fallback` needs a supported `provider`, a `model` and an `api_key`, and is refused on a key whose `scope_max` is narrower than `all`.
 - `reservation` must be 1 to 64 letters, digits, `.`, `_` or `-`.
 - `scope_max` must be `all`, `EU` or `country:XX`; `home_country` an ISO 3166-1 alpha-2 code inside `scope_max`.
 - Every `routing_strategies` entry must be an implemented strategy (`least-loaded`, `prefix-aware`), listed once.

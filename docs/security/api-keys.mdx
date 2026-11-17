@@ -678,6 +678,7 @@ See [Admin endpoints](/use-the-api/admin-endpoints) for individual add, update, 
 | `routing_strategies` | No | Ranking strategies the key may use, the first its default ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 | `scope_max` / `home_country` | No | Where the key's requests may be served, and the default ([details](/routing/cross-site-redirect#scope)) |
 | `reservation` | No | The [dedicated replicas](/routing/dedicated-replicas) the key uses |
+| `external_fallback` | No | The client's own provider account for the [external fallback](/routing/provider-fallback#bring-your-own-key) |
 
 `id` and `owner` follow the same character rules as a static owner: valid UTF-8, no space at either end, and no control, invisible or line-separator characters or whitespace other than a plain space. The owners `admin`, `default` and `anonymous`, the ID `anonymous`, and IDs starting with `static-` or `admin-` are reserved, in any letter case (compared as Unicode case folding does, so a long `ſ` counts as `s`): the router uses them for its own callers and for the IDs it derives.
 

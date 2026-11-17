@@ -109,3 +109,45 @@ func TestAdminKeys_Scope(t *testing.T) {
 		}
 	}
 }
+
+// external_fallback: pushed with the client's provider key, read back with
+// its preview only; refused on a key bound to a scope.
+func TestAdminKeys_ExternalFallback(t *testing.T) {
+	const cred = "sk-client-0123456789abcdef"
+	put := func(h interface {
+		UpsertAPIKey(*gin.Context)
+	}, extra map[string]any) *httptest.ResponseRecorder {
+		b := map[string]any{"version": "v1", "key_hash": strings.Repeat("ab", 32), "owner": "o", "name": "k", "enabled": true,
+			"external_fallback": map[string]any{"provider": "openai", "model": "gpt-4o-mini", "api_key": cred}}
+		for k, v := range extra {
+			b[k] = v
+		}
+		body, _ := json.Marshal(b)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/admin/api-keys/k1", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "id", Value: "k1"}}
+		h.UpsertAPIKey(c)
+		return w
+	}
+	h, reg := newAdminKeyHandlers(policy.Default())
+	if w := put(h, nil); w.Code != http.StatusOK {
+		t.Fatalf("push: %d %s", w.Code, w.Body)
+	}
+	if e, _ := reg.GetKey("k1"); e.ExternalFallback == nil || e.ExternalFallback.APIKey.Reveal() != cred {
+		t.Fatalf("stored %+v", e.ExternalFallback)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/api-keys/k1", nil)
+	c.Params = gin.Params{{Key: "id", Value: "k1"}}
+	h.GetAPIKey(c)
+	if strings.Contains(w.Body.String(), "0123456789") || !strings.Contains(w.Body.String(), "sk-...def") {
+		t.Errorf("GET shows %s, want the preview only", w.Body)
+	}
+	h2, _ := newAdminKeyHandlers(policy.Default())
+	if w := put(h2, map[string]any{"scope_max": "EU"}); w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "0123456789") {
+		t.Errorf("scoped key with external fallback: %d %s, want 400 without the credential", w.Code, w.Body)
+	}
+}

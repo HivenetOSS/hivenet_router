@@ -201,6 +201,12 @@ type APIKeyEntry struct {
 	// shared replicas only.
 	Reservation string `yaml:"reservation,omitempty"`
 
+	// ExternalFallback is the client's own provider account (bring your own
+	// key), used when every local policy step is exhausted. The credential is
+	// read from the environment variable named by api_key_env, never written
+	// in this file.
+	ExternalFallback *StaticExternalFallback `yaml:"external_fallback,omitempty"`
+
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
 
@@ -431,4 +437,12 @@ func splitTrimmed(s, sep string) []string {
 		}
 	}
 	return out
+}
+
+// StaticExternalFallback is ExternalFallback as auth.yaml declares it: the
+// credential comes from an environment variable.
+type StaticExternalFallback struct {
+	Provider  string `yaml:"provider"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }

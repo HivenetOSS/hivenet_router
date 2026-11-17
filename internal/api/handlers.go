@@ -527,6 +527,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	setRoutingStrategy(c, pending)
 	pending.Scope = requestScope(c)
 	pending.Pool = requestPool(c)
+	pending.ExternalFallback = requestExternalFallback(c)
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
@@ -1655,6 +1656,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	setRoutingStrategy(c, pending)
 	pending.Scope = requestScope(c)
 	pending.Pool = requestPool(c)
+	pending.ExternalFallback = requestExternalFallback(c)
 
 	select {
 	case h.requestQueue <- pending:
@@ -1862,3 +1864,10 @@ func (h *Handlers) SetPoolSignals(p PoolSignals) { h.pools = p }
 // requestPool is the request's pool: its key's reservation, or
 // domain.SharedPool.
 func requestPool(c *gin.Context) string { return c.GetString(ctxKeyReservation) }
+
+// requestExternalFallback is the key's own provider account (BYOK), or nil.
+func requestExternalFallback(c *gin.Context) *domain.ExternalFallback {
+	v, _ := c.Get(ctxKeyExternalFallback)
+	fb, _ := v.(*domain.ExternalFallback)
+	return fb
+}
