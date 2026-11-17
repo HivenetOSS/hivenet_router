@@ -114,7 +114,7 @@ func TestStaticKeyProvider_ServerlessKeyFullQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStaticKeyProvider: %v", err)
 	}
-	got := p.Tenants()["serverless-tenant"]
+	got := authenticate(t, p, "serverless").QuotaLimits
 	if got.RequestsPerMinute != 96 || got.TokensPerDay != 5_000_000 ||
 		got.InputTokensPerMinute != 519_540 || got.OutputTokensPerMinute != 47_424 ||
 		got.MaxOccupancyShare != 0.64 {
@@ -135,7 +135,7 @@ func TestStaticKeyProvider_ReservedKeyNoQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStaticKeyProvider: %v", err)
 	}
-	got := p.Tenants()["reserved-tenant"]
+	got := authenticate(t, p, "reserved").QuotaLimits
 	if got.RequestsPerMinute != 0 || got.TokensPerDay != 0 ||
 		got.InputTokensPerMinute != 0 || got.OutputTokensPerMinute != 0 ||
 		got.MaxOccupancyShare != 0 || got.PerModel != nil {

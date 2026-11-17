@@ -15,12 +15,14 @@ With `--sync-store=valkey` the routers of one site share their usage through a [
 | Requests per minute | Yes | Within one sync interval of usage |
 | Input and output tokens per minute | Yes | Within one sync interval of usage |
 | Tokens per day | Yes | Within one sync interval of usage; today's total survives restarts |
+| Tenant daily budget (`tenant_tokens_per_day`) | Yes | Within one sync interval of usage, like a key's daily budget, over all the tenant's keys |
+| Tenant usage today (`hivenet_tenant_tokens_used_today`) | Yes | Every router reports the site total for every tenant, refreshed each sync interval; aggregate it with `max by (tenant_id)` |
 | Occupancy budgets (B2, B4) | Yes | Exact: the routers together never hold more than the budget (see [Occupancy credits](#occupancy-credits)) |
 | Agents | Yes | Every agent connects to every router (see [Connect agents to every router](#connect-agents-to-every-router)) |
 | Redirect tokens | Yes | A cross-site redirect token is accepted once by the whole site, not once per router |
 | Dynamic API keys | No | Push key changes to every router |
 
-Every router keeps deciding in memory, exactly as a single router does. The only time a request waits on the store is the first request of the day for a key with a daily limit, which reads that key's total once: at most 200 ms, and requests for the same key share the read.
+Every router keeps deciding in memory, exactly as a single router does. The only time a request waits on the store is the first request of the day for a key with a daily limit, or for a tenant with a daily budget, which reads that total once: at most 200 ms, and requests for the same key or tenant share the read. A key and tenant without a daily limit never wait.
 
 ## How it works
 
@@ -81,6 +83,8 @@ A router that was given up by the others drops the credits it believed it held a
 
 Output tokens are counted after the response, so they are never refused because of a router's share. They are refused only when the shared daily budget is spent, as with one router.
 
+Near the end of a daily budget (a key's `tokens_per_day` or a tenant's `tenant_tokens_per_day`), a router admits at most its share of what is left until the next sync, so a request can fit the site's budget but not that router's share for the moment. It gets `429 token_limit_exceeded` with `Retry-After: 1`, and a retry a second later is admitted while the budget has room. A budget that is spent gets the same code without `Retry-After`. See [error codes](/reference/error-codes#token_limit_exceeded).
+
 ## Deploy Valkey
 
 Use one Valkey per site, reachable only from the routers. For high availability run one primary, two replicas and three Sentinels on separate hosts. Sentinel promotes a replica when the primary fails; routers ask the Sentinels for the current primary.
@@ -122,6 +126,10 @@ hivenet-router \
 <Warning>
   The load balancer must spread requests over the routers without changing the client's API key. Every router must load the same `auth.yaml`, policies and key registry, so each one applies the same limits.
 </Warning>
+
+<Note>
+  Limits are counted per key (the tokens-per-minute buckets per tenant and key), and the shared counters are named with a version marker. Routers older than per-key counting kept one bucket per tenant, or per key ID for tokens per minute; during a rolling upgrade the old and new routers do not add to each other's counters, so until the last router is upgraded each group enforces the limits on its own. Each key's daily count, and each tenant's usage today, starts from zero once on upgrade.
+</Note>
 
 ## Connect agents to every router
 

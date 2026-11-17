@@ -264,13 +264,7 @@ It labels and groups:
 - audit records
 - tenant dashboards
 
-Keys with the same owner share quota state.
-
-<Warning>
-  Give keys the same owner only when they belong to the same tenant and should share quota buckets.
-
-  When several keys share an owner, keep their quota configuration consistent. Different limits attached to the same shared bucket can produce confusing behavior.
-</Warning>
+Quota state is per key, even when keys share an owner. Each key is counted against its own limits, so a tenant with several keys can use up to the sum of their limits. Give keys the same owner when they belong to the same tenant, so their metrics and audit records are attributed together.
 
 ### Creation date
 
@@ -380,7 +374,7 @@ This gives per-model quota configuration one source of truth for both access and
 
 ## Flat quotas
 
-The flat quota shape applies one shared budget to every model the owner may call.
+The flat quota shape applies one budget to every model the key may call.
 
 ```yaml
 quota:
@@ -393,22 +387,21 @@ quota:
 | Field | Required | Description |
 | --- | --- | --- |
 | `requests_per_minute` | No | Shared request-rate limit |
-| `tokens_per_day` | No | Shared daily language-model token budget |
+| `tokens_per_day` | No | Daily language-model token budget for this key |
 | `input_tokens_per_minute` | No | Serverless per-key input-token rate, charged before forwarding |
 | `output_tokens_per_minute` | No | Serverless per-key output-token rate, metered after local responses |
+| `tenant_tokens_per_day` | No | Daily token budget of the key's whole owner (see [Tenant daily budget](#tenant-daily-budget)); also valid with `per_model` |
 | `0` | Not applicable | Unlimited |
 
 The two per-minute token fields are available only in the flat quota shape. They cannot be combined with `quota.per_model`, and negative values are rejected.
 
-Flat quota buckets are associated with the owner rather than the individual key.
-
-For example, two credentials with:
+Flat quota buckets belong to the individual key. Two credentials with:
 
 ```yaml
 owner: "acme-corp"
 ```
 
-share the same request and token counters.
+each get their own request and token counters, each held to its own limits. To cap what all of an owner's keys spend together, give them a tenant budget (see [Tenant daily budget](#tenant-daily-budget)).
 
 ### Request-rate behavior
 
@@ -441,11 +434,28 @@ The daily budget:
 - applies to language-model chat traffic
 - combines input and output tokens
 - resets at midnight UTC
-- is shared by models and keys using the same flat owner bucket
+- belongs to the key: other keys, including keys of the same owner, have their own budgets
+- is shared by all models the key calls with the flat quota shape
 
 A value of `0` disables the token budget.
 
 Embedding and reranking requests currently participate in request-rate limits but do not charge input against `tokens_per_day`.
+
+### Tenant daily budget
+
+```yaml
+quota:
+  tenant_tokens_per_day: 20000000
+```
+
+`tenant_tokens_per_day` is a daily token budget for the key's whole owner (tenant): every key of the owner spends it together, on top of each key's own `tokens_per_day`, and with [shared counters](/deploy/multiple-routers) every router of the site spends it together too. It fits both the flat and the per-model quota shape. `0` or an omitted field means no tenant budget.
+
+- A request must fit both its key's budget and its tenant's. A request refused by either is charged to neither.
+- When the owner's keys declare different values, the lowest applies to all of them. Lowering the value on one key applies at once; raising it applies once every key of the owner carries the new value. Deleting the key that carries the lowest value, or pushing it without the field, raises or removes the budget at once. Disabled and expired keys count until they are deleted.
+- It counts the same tokens as `tokens_per_day`: chat and `/v1/messages`, input (as the backend counts it, once the response arrives) and output, resetting at midnight UTC. The tenant's usage today is `hivenet_tenant_tokens_used_today`.
+- A request refused by the tenant budget gets `429 token_limit_exceeded` with the message `your organization's daily token budget is exhausted`, so the client can tell it from its own key's budget; so does a completion refused after the response for the same reason. With several routers, a refusal because one router's share of the budget is used up for the moment, while the budget still has room, carries `Retry-After: 1` instead (see [Run several routers](/deploy/multiple-routers)).
+- One key's request that is larger than what is left does not block the owner's other keys: a smaller request from any key still fits.
+- With shared counters, a router that cannot read the tenant's site total for the day refuses the tenant's requests until it can, like a key with a daily budget.
 
 ### Serverless per-key caps
 

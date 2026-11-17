@@ -8,6 +8,8 @@ package e2e
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -180,4 +182,320 @@ func TestIsolation_ConcurrentResponsesNotCrossWired(t *testing.T) {
 	for e := range errs {
 		t.Error(e)
 	}
+}
+
+// postAs sends one raw chat-completions body with the given key and returns
+// the status and response body.
+func postAs(t *testing.T, base, key, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
+
+// TestIsolation_TwoTenantsQuotaE2E: one router, one agent, two tenants with
+// two keys each. A key exhausting its request rate or its daily token budget
+// is refused with 429; the other key of the same tenant and the other
+// tenant's keys keep being served.
+func TestIsolation_TwoTenantsQuotaE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const (
+		rpmA1, rpmA2, rpmB1 = "sk-q-a1", "sk-q-a2", "sk-q-b1"
+		tpdA, tpdB          = "sk-q-a-tpd", "sk-q-b-tpd"
+	)
+	auth := writeAuthYAML(
+		testKey{Token: rpmA1, Owner: "tenant-a", Name: "a1", RPM: 2},
+		testKey{Token: rpmA2, Owner: "tenant-a", Name: "a2", RPM: 2},
+		testKey{Token: rpmB1, Owner: "tenant-b", Name: "b1", RPM: 2},
+		// 170 tokens/day: one request reserving 150 output tokens on a ~14
+		// token prompt fits; after it is charged (prompt + 1 output token)
+		// the next identical request no longer does.
+		testKey{Token: tpdA, Owner: "tenant-a", Name: "a-tpd", TPD: 170},
+		testKey{Token: tpdB, Owner: "tenant-b", Name: "b-tpd", TPD: 170},
+	)
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, rpmB1, stubModel)
+	})
+	small := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":5}`, stubModel)
+
+	t.Run("requests per minute", func(t *testing.T) {
+		for i := range 2 {
+			if code, body := postAs(t, base, rpmA1, small); code != http.StatusOK {
+				t.Fatalf("a1 request %d: %d %s", i, code, body)
+			}
+		}
+		if code, _ := postAs(t, base, rpmA1, small); code != http.StatusTooManyRequests {
+			t.Fatalf("a1 third request: %d, want 429", code)
+		}
+		if code, body := postAs(t, base, rpmA2, small); code != http.StatusOK {
+			t.Errorf("a2 (same tenant, own bucket) after a1 hit its limit: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, rpmB1, small); code != http.StatusOK {
+			t.Errorf("b1 (other tenant) after a1 hit its limit: %d %s", code, body)
+		}
+	})
+
+	t.Run("tokens per day", func(t *testing.T) {
+		big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":150}`,
+			stubModel, strings.Repeat("x", 40))
+		if code, body := postAs(t, base, tpdA, big); code != http.StatusOK {
+			t.Fatalf("a-tpd first request: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, tpdA, big); code != http.StatusTooManyRequests || !strings.Contains(body, "token") {
+			t.Fatalf("a-tpd second request: %d %s, want 429 (daily budget spent)", code, body)
+		}
+		if code, body := postAs(t, base, tpdB, big); code != http.StatusOK {
+			t.Errorf("b-tpd (other tenant) after a-tpd spent its budget: %d %s", code, body)
+		}
+		if code, body := postAs(t, base, rpmA2, small); code != http.StatusOK {
+			t.Errorf("a2 (same tenant, no daily limit) after a-tpd spent its budget: %d %s", code, body)
+		}
+	})
+}
+
+// TestIsolation_TenantCapE2E: a tenant's daily budget caps all its keys
+// together, end to end. Its two keys declare different tenant budgets and the
+// lowest applies to both; once one key has spent it, the other key is refused
+// with a message naming the organization's budget, while another tenant's
+// keys are untouched.
+func TestIsolation_TenantCapE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	const keyA1, keyA2, keyB1 = "sk-cap-a1", "sk-cap-a2", "sk-cap-b1"
+	auth := writeAuthYAML(
+		// The lowest value applies: 170 tokens a day for all of tenant-a.
+		// One request reserving 150 output tokens on a ~14 token prompt
+		// fits; once it is charged, the next one does not, on either key.
+		testKey{Token: keyA1, Owner: "tenant-a", Name: "a1", TenantTPD: 1000},
+		testKey{Token: keyA2, Owner: "tenant-a", Name: "a2", TenantTPD: 170},
+		testKey{Token: keyB1, Owner: "tenant-b", Name: "b1", TenantTPD: 170},
+	)
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, keyB1, stubModel)
+	})
+	big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":150}`,
+		stubModel, strings.Repeat("x", 40))
+
+	if code, body := postAs(t, base, keyA1, big); code != http.StatusOK {
+		t.Fatalf("a1 first request: %d %s", code, body)
+	}
+	for _, key := range []string{keyA2, keyA1} {
+		code, body := postAs(t, base, key, big)
+		if code != http.StatusTooManyRequests || !strings.Contains(body, "organization") {
+			t.Errorf("%s after a1 spent tenant-a's budget: %d %s, want 429 naming the organization's budget", key, code, body)
+		}
+	}
+	if code, body := postAs(t, base, keyB1, big); code != http.StatusOK {
+		t.Errorf("b1 (other tenant) after tenant-a spent its budget: %d %s", code, body)
+	}
+}
+
+// startUsageBackend serves the stub model and reports, for every chat
+// completion, the given prompt and completion token counts, streaming or not.
+func startUsageBackend(t *testing.T, promptTokens, completionTokens int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model"}]}`, stubModel)
+	})
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		usage := fmt.Sprintf(`{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`, promptTokens, completionTokens, promptTokens+completionTokens)
+		if strings.Contains(string(body), `"stream":true`) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n", stubModel)
+			fmt.Fprintf(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":%s}\n\n", stubModel, usage)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"c","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":%s}`, stubModel, usage)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// startBudgetStack starts a router with the given keys and one agent on a
+// backend reporting the given usage, and returns its base URL and its
+// /metrics URL.
+func startBudgetStack(t *testing.T, promptTokens, completionTokens int, keys ...testKey) (string, string) {
+	t.Helper()
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: writeAuthYAML(keys...), AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startUsageBackend(t, promptTokens, completionTokens).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool { return modelHealthyAs(base, keys[0].Token, stubModel) })
+	return base, "http://127.0.0.1" + rcfg.MetricsPort + "/metrics"
+}
+
+// TestIsolation_TenantCapOutputRefusalNamesOrganization: when a budget
+// refuses the output charge after the response (the prompt fit, the
+// completion does not), the 429 names the budget that ran out: the
+// organization's when the tenant's budget overflowed, the key's own when only
+// the key's did while the tenant still has room. The backend reports a
+// completion larger than the budget.
+func TestIsolation_TenantCapOutputRefusalNamesOrganization(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	hi := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, stubModel)
+	base, _ := startBudgetStack(t, 10, 5000,
+		testKey{Token: "sk-cap-out", Owner: "tenant-o", Name: "o", TenantTPD: 1000},
+		// The completion fits the tenant (6000) but not the key (1000): once
+		// charged, the tenant is at 5010 of 6000, with room for its other keys.
+		testKey{Token: "sk-cap-key", Owner: "tenant-k", Name: "k", TPD: 1000, TenantTPD: 6000})
+	if code, got := postAs(t, base, "sk-cap-out", hi); code != http.StatusTooManyRequests || !strings.Contains(got, "organization") {
+		t.Errorf("a 5000-token completion over a 1000-token tenant budget: %d %s, want 429 naming the organization's budget", code, got)
+	}
+	if code, got := postAs(t, base, "sk-cap-key", hi); code != http.StatusTooManyRequests || strings.Contains(got, "organization") || !strings.Contains(got, "daily token budget") {
+		t.Errorf("a 5000-token completion over a 1000-token key budget, tenant with room: %d %s, want 429 naming the key's budget", code, got)
+	}
+}
+
+// TestIsolation_InputChargedFromBackendCount: the daily budget counts the
+// prompt the backend reports, not only the router's estimate of it. A short
+// prompt the backend counts as 5000 tokens on a key with 2000 a day: the
+// non-streaming answer is refused (like a completion over the budget) and
+// the budget is spent; a streaming one, already delivered, is still charged,
+// so the next request is refused.
+func TestIsolation_InputChargedFromBackendCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, metricsURL := startBudgetStack(t, 5000, 1,
+		testKey{Token: "sk-in-a", Owner: "tenant-i", Name: "a", TPD: 2000},
+		testKey{Token: "sk-in-b", Owner: "tenant-j", Name: "b", TPD: 2000})
+	hi := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, stubModel)
+	if code, got := postAs(t, base, "sk-in-a", hi); code != http.StatusTooManyRequests {
+		t.Errorf("non-streaming, backend counts 5000 prompt tokens on a 2000 budget: %d %s, want 429", code, got)
+	}
+	if code, got := postAs(t, base, "sk-in-a", hi); code != http.StatusTooManyRequests {
+		t.Errorf("after that: %d %s, want 429 (the budget is spent)", code, got)
+	}
+	stream := fmt.Sprintf(`{"model":%q,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, stubModel)
+	if code, got := postAs(t, base, "sk-in-b", stream); code != http.StatusOK {
+		t.Fatalf("streaming: %d %s, want 200 (delivered before the count is known)", code, got)
+	}
+	// The charge itself, not the estimator (which also learns from the
+	// count): the tenant's usage today is the whole budget, not the estimate.
+	waitFor(t, 5*time.Second, "tenant-j's usage to count the backend's prompt tokens", func() bool {
+		sum, _ := tenantSeries(t, metricsURL, "hivenet_tenant_tokens_used_today")
+		return sum["tenant-j"] >= 2000
+	})
+}
+
+// tenantSeries sums a Prometheus counter's samples per tenant_id and lists
+// the key_id values seen per tenant.
+func tenantSeries(t *testing.T, metricsURL, name string) (sum map[string]float64, keys map[string]map[string]bool) {
+	t.Helper()
+	resp, err := http.Get(metricsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sum, keys = map[string]float64{}, map[string]map[string]bool{}
+	label := func(line, l string) string {
+		m := regexp.MustCompile(l + `="([^"]*)"`).FindStringSubmatch(line)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, name+"{") {
+			continue
+		}
+		var v float64
+		if _, err := fmt.Sscan(line[strings.LastIndex(line, " ")+1:], &v); err != nil {
+			continue
+		}
+		tenant, key := label(line, "tenant_id"), label(line, "key_id")
+		sum[tenant] += v
+		if keys[tenant] == nil {
+			keys[tenant] = map[string]bool{}
+		}
+		keys[tenant][key] = true
+	}
+	return sum, keys
+}
+
+// TestIsolation_TenantMetricsAttribution: a tenant's requests move only that
+// tenant's hivenet_tenant_* series, labelled with its own key ID (a static
+// key's derived ID, not "anonymous").
+func TestIsolation_TenantMetricsAttribution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey})
+	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
+		return modelHealthyAs(base, isoKeyA, stubModel)
+	})
+	metricsURL := "http://127.0.0.1" + rcfg.MetricsPort + "/metrics"
+	const success = "hivenet_tenant_requests_success_total"
+	small := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":5}`, stubModel)
+
+	for range 3 {
+		if code, body := postAs(t, base, isoKeyA, small); code != http.StatusOK {
+			t.Fatalf("tenant-a request: %d %s", code, body)
+		}
+	}
+	waitFor(t, 5*time.Second, "tenant-a success counter at 3", func() bool {
+		sum, _ := tenantSeries(t, metricsURL, success)
+		return sum["tenant-a"] == 3
+	})
+	if sum, _ := tenantSeries(t, metricsURL, success); sum["tenant-b"] != 0 {
+		t.Errorf("tenant-b success %v after only tenant-a sent requests, want 0", sum["tenant-b"])
+	}
+
+	if code, body := postAs(t, base, isoKeyB, small); code != http.StatusOK {
+		t.Fatalf("tenant-b request: %d %s", code, body)
+	}
+	waitFor(t, 5*time.Second, "tenant-b success counter at 1", func() bool {
+		sum, _ := tenantSeries(t, metricsURL, success)
+		return sum["tenant-b"] == 1
+	})
+	sum, keys := tenantSeries(t, metricsURL, success)
+	if sum["tenant-a"] != 3 {
+		t.Errorf("tenant-a success %v after tenant-b's request, want still 3", sum["tenant-a"])
+	}
+	for tenant, token := range map[string]string{"tenant-a": isoKeyA, "tenant-b": isoKeyB} {
+		want := derivedStaticKeyID(token)
+		if !keys[tenant][want] || keys[tenant]["anonymous"] {
+			t.Errorf("%s key_id labels %v, want only its own %q", tenant, keys[tenant], want)
+		}
+	}
+	// Usage today counts keys without a daily budget too (these keys have
+	// none, like every key key-sync pushes): each tenant's gauge moves, and
+	// by its own requests only (tenant-a sent 3, tenant-b 1).
+	waitFor(t, 5*time.Second, "tokens used today for both tenants", func() bool {
+		used, _ := tenantSeries(t, metricsURL, "hivenet_tenant_tokens_used_today")
+		return used["tenant-a"] > 0 && used["tenant-b"] > 0 && used["tenant-a"] > used["tenant-b"]
+	})
+}
+
+// derivedStaticKeyID is the key ID the router derives for a static key.
+func derivedStaticKeyID(token string) string {
+	h := sha256.Sum256([]byte(token))
+	id := sha256.Sum256([]byte("hivenet-router/key-id/v1\x00static-\x00" + hex.EncodeToString(h[:])))
+	return "static-" + hex.EncodeToString(id[:8])
 }

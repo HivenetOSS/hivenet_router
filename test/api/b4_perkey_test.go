@@ -111,6 +111,38 @@ func TestB4_ITPMDeniesOverRate(t *testing.T) {
 	}
 }
 
+// TestB4_ITPMChargesBackendPromptTokens: the input-tokens-per-minute bucket
+// counts the prompt the backend reports, not only the admission estimate. A
+// 40-character prompt is estimated at 14 tokens and admitted under an ITPM of
+// 100; the backend reports 95, so after the response the 81 tokens beyond
+// the estimate are charged, and the same request is refused next.
+func TestB4_ITPMChargesBackendPromptTokens(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	h := newB4Handlers(q, serverless(0))
+	limits := auth.QuotaLimits{InputTokensPerMinute: 100}
+	c, w := newCtx("/v1/chat/completions", textBody(40, 0))
+	withKey(c, limits)
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	select {
+	case pending := <-q:
+		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{}`),
+			Usage: domain.Usage{PromptTokens: 95, CompletionTokens: 1, TotalTokens: 96}}
+	case <-time.After(time.Second):
+		t.Fatal("request was not enqueued")
+	}
+	<-done
+	if w.Code != http.StatusOK {
+		t.Fatalf("first request: %d, want 200", w.Code)
+	}
+	c2, w2 := newCtx("/v1/chat/completions", textBody(40, 0))
+	withKey(c2, limits)
+	h.Passthrough(c2)
+	if w2.Code != http.StatusTooManyRequests {
+		t.Errorf("after the backend counted 95 prompt tokens against an ITPM of 100: %d, want 429", w2.Code)
+	}
+}
+
 // TestB4_ReservedModeBypassesAllCaps verifies a reserved-mode replica ignores all
 // four B4 caps: a request that would breach the per-key share AND the ITPM cap is
 // admitted anyway (only the global circuit breaker applies on reserved replicas).

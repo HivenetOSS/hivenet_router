@@ -183,7 +183,7 @@ type Handlers struct {
 	// May be nil when metrics are not configured.
 	policyReloadObserver func(trigger, result string)
 
-	// limiter enforces per-tenant token budgets. The input check (AllowInputTokens)
+	// limiter enforces per-key token budgets. The input check (AllowInputTokens)
 	// runs here after the request body is parsed; the output check runs in the processor.
 	// May be nil when auth is disabled.
 	limiter auth.RateLimiter
@@ -475,6 +475,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	m.requestID = requestIDFrom(c)
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
 	m.tpd, m.quotaModel = quotaBudgetFromContext(c)
+	m.tenantTPD = quotaLimitsFromContext(c).TenantTokensPerDay
 
 	// Record last-seen timestamp for the tenant (every authenticated request).
 	if h.onRequestReceived != nil {
@@ -490,8 +491,13 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// count_tokens is also exempt from the daily token budget: it generates
 	// nothing, and a count-then-send client would otherwise pay for every
 	// prompt twice (once counted, once sent).
-	if !countOnly && !h.reserveInputBudget(c, &req, m) {
-		return
+	chargedInput := 0
+	if !countOnly {
+		ok, charged := h.reserveInputBudget(c, &req, m)
+		if !ok {
+			return
+		}
+		chargedInput = charged
 	}
 	if !captureRawBody(c, &req, m.requestID) {
 		return
@@ -504,10 +510,12 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.KeyID = m.keyID
 	pending.DeploymentID = m.deploymentID
 	pending.TokensPerDay = m.tpd
+	pending.TenantTokensPerDay = m.tenantTPD
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
+	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -521,18 +529,25 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 // reqMeta bundles the request-scoped identifiers and budget shared across the
 // Passthrough pipeline so the helpers below avoid long parameter lists.
 //
-// quotaModel selects the limiter bucket: empty for legacy-flat keys (one
-// bucket per tenant), non-empty for per-model keys (one bucket per
-// (tenant, model)). Stashed by QuotaMiddleware so the handler does not redo
-// the resolution.
+// quotaModel selects the limiter bucket: empty for flat keys (one bucket per
+// key), non-empty for per-model keys (one bucket per (key, model)). Stashed by
+// QuotaMiddleware so the handler does not redo the resolution. tenantTPD is
+// the daily budget of the key's tenant.
 type reqMeta struct {
 	requestID    string
 	tenantID     string
 	keyID        string
 	deploymentID string
 	tpd          int
+	tenantTPD    int
 	quotaModel   string
 	start        time.Time
+}
+
+// budget names the daily token budgets this request is charged to.
+func (m reqMeta) budget() auth.DailyBudget {
+	return auth.DailyBudget{TenantID: m.tenantID, KeyID: m.keyID, Model: m.quotaModel,
+		KeyTokensPerDay: m.tpd, TenantTokensPerDay: m.tenantTPD}
 }
 
 // parsePassthroughRequest binds the JSON body, validates the model field, and
@@ -800,12 +815,12 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 	limits := quotaLimitsFromContext(c)
 	// Check the non-deducting OTPM gate before charging the ITPM bucket, so an
 	// output-rate rejection never spends input-rate tokens.
-	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
+	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.tenantID, m.keyID, req.Model, limits.OutputTokensPerMinute) {
 		h.fireAdmissionReject("b4_otpm", req.Model)
 		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	if limits.InputTokensPerMinute > 0 {
-		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, inputEstimate) {
+		if !h.minuteLimiter.AllowInputTokens(m.tenantID, m.keyID, req.Model, limits.InputTokensPerMinute, inputEstimate) {
 			h.fireAdmissionReject("b4_itpm", req.Model)
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}
@@ -826,7 +841,26 @@ func (h *Handlers) chargeOutputRate(c *gin.Context, req *domain.ChatRequest, m r
 		return
 	}
 	if otpm := quotaLimitsFromContext(c).OutputTokensPerMinute; otpm > 0 {
-		h.minuteLimiter.ChargeOutputTokens(m.keyID, req.Model, otpm, completionTokens)
+		h.minuteLimiter.ChargeOutputTokens(m.tenantID, m.keyID, req.Model, otpm, completionTokens)
+	}
+}
+
+// chargeInputShortfall charges the key's ITPM bucket, after a serverless
+// response, for the prompt tokens the backend reported beyond the estimate
+// admission charged it (pending.EstimatedInputTokens), so the per-minute
+// input rate counts the prompt the backend processed. Post-hoc like
+// chargeOutputRate; an overestimate is not refunded. Needs the backend's
+// exact count (exact).
+func (h *Handlers) chargeInputShortfall(c *gin.Context, req *domain.ChatRequest, m reqMeta, pending *domain.PendingRequest, promptTokens int, exact bool) {
+	if h.minuteLimiter == nil || h.executor == nil || !exact || pending.EstimatedInputTokens <= 0 || promptTokens <= pending.EstimatedInputTokens {
+		return
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil || !pol.IsServerless() {
+		return
+	}
+	if itpm := quotaLimitsFromContext(c).InputTokensPerMinute; itpm > 0 {
+		h.minuteLimiter.ChargeInputTokens(m.tenantID, m.keyID, req.Model, itpm, promptTokens-pending.EstimatedInputTokens)
 	}
 }
 
@@ -936,7 +970,7 @@ func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unres
 //
 //   - Per-model keys: QuotaMiddleware sets effectiveTPDContextKey and
 //     quotaModelContextKey to the resolved entry — used here verbatim so the
-//     handler charges the same (tenant, model) bucket admission used.
+//     handler charges the same (key, model) bucket admission used.
 //   - Legacy flat keys: neither context key is set; fall back to
 //     QuotaLimits.TokensPerDay and an empty model (legacy tenant-only bucket).
 //
@@ -953,7 +987,7 @@ func quotaBudgetFromContext(c *gin.Context) (tpd int, model string) {
 		}
 	}
 	if model == "" {
-		// Legacy flat shape — read the per-tenant TPD from the umbrella limits.
+		// Flat shape — read the key's TPD from the umbrella limits.
 		if raw, ok := c.Get("quota_limits"); ok {
 			if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel == nil {
 				tpd = limits.TokensPerDay
@@ -969,66 +1003,87 @@ func quotaBudgetFromContext(c *gin.Context) (tpd int, model string) {
 // the token-budget admission gate rather than bypassing it with a 0 estimate.
 const perMessageTokenOverhead = 4
 
-// reserveInputBudget enforces the daily token budget BEFORE queueing. It is a
-// pure admission check: it peeks the remaining budget WITHOUT charging and rejects
-// the request up front (clean 429) if its worst case — estimated prompt tokens
-// plus the requested max output — cannot fit, so a rejected request consumes no
-// budget. Only when the request is admitted is the prompt estimate charged; the
-// processor deducts the actual completion tokens after the response (max_tokens is
-// never deducted, only used to size the admission check). Returns false (after
-// writing 429) when the request cannot be admitted.
-func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta) bool {
-	if h.limiter == nil || m.tpd <= 0 {
-		return true
+// reserveInputBudget enforces the daily token budgets (the key's and its
+// tenant's) BEFORE queueing. It is a pure admission check: it peeks the
+// remaining budget WITHOUT charging and rejects the request up front (clean
+// 429) if its worst case — estimated prompt tokens plus the requested max
+// output — cannot fit, so a rejected request consumes no budget. Only when the
+// request is admitted is the prompt estimate charged; the processor deducts
+// the actual completion tokens after the response (max_tokens is never
+// deducted, only used to size the admission check). A request with no daily
+// budget is still charged, so it counts in its tenant's usage today. Returns
+// false (after writing 429) when the request cannot be admitted.
+func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta) (ok bool, charged int) {
+	if h.limiter == nil {
+		return true, 0
 	}
 	// EstimateTokens only sees text content; estimatePromptTokens floors a
 	// multimodal or tool-only message at a per-message overhead so it is charged
 	// (and passes through this gate) rather than bypassing it with a 0 estimate.
 	promptTokens := h.estimatePromptTokens(req)
 	if promptTokens == 0 {
-		return true // genuinely empty body — nothing to budget
+		return true, 0 // genuinely empty body — nothing to budget
 	}
-	// Worst-case output. max_completion_tokens is the 2026 field; fall back to
-	// max_tokens (also the Anthropic field name).
-	reservedOutput := req.MaxCompletionTokens
-	if reservedOutput == 0 {
-		reservedOutput = req.MaxTokens
-	}
-
-	// Admission check — peek, do not charge. If we cannot read the budget, fail open.
-	remaining, err := h.limiter.RemainingTokens(m.tenantID, m.quotaModel, m.tpd)
-	if err != nil {
-		log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
-		return true
-	}
-	if remaining >= 0 && promptTokens+reservedOutput > remaining {
-		h.fireTokenLimited(m, req.Model)
-		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
-		msg := "daily token budget exceeded"
-		if reservedOutput > 0 {
-			msg = "insufficient daily token budget for requested max_tokens"
+	budget := m.budget()
+	if budget.KeyTokensPerDay > 0 || budget.TenantTokensPerDay > 0 {
+		// Worst-case output. max_completion_tokens is the 2026 field; fall back to
+		// max_tokens (also the Anthropic field name).
+		reservedOutput := req.MaxCompletionTokens
+		if reservedOutput == 0 {
+			reservedOutput = req.MaxTokens
 		}
-		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeTokenLimitExceeded, msg, domain.SourceRouter)
-		return false
+		// Admission check — peek, do not charge. If we cannot read the budget, fail open.
+		remaining, err := h.limiter.RemainingTokens(budget)
+		if err != nil {
+			log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
+			return true, 0
+		}
+		if need := promptTokens + reservedOutput; remaining >= 0 && need > remaining {
+			h.fireTokenLimited(m, req.Model)
+			c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
+			msg := "daily token budget exceeded"
+			if reservedOutput > 0 {
+				msg = "insufficient daily token budget for requested max_tokens"
+			}
+			h.refuseBudget(c, budget, need, msg)
+			return false, 0
+		}
 	}
 
 	// Admitted — charge the prompt estimate now (the processor charges the actual
 	// completion after the response). A concurrent request may have consumed the
 	// budget between the peek and here, so honour a late deduction failure.
-	allowed, remainingAfter, err := h.limiter.AllowInputTokens(m.tenantID, m.quotaModel, m.tpd, promptTokens)
+	allowed, remainingAfter, err := h.limiter.AllowInputTokens(budget, promptTokens)
 	if err != nil {
 		log.Warnf("Input token check error for request %s: %v (fail-open)", m.requestID, err)
 	}
 	if !allowed {
 		h.fireTokenLimited(m, req.Model)
 		c.Header(headerRateLimitRemainingTokens, "0")
-		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeTokenLimitExceeded, "daily token budget exceeded", domain.SourceRouter)
-		return false
+		h.refuseBudget(c, budget, promptTokens, "daily token budget exceeded")
+		return false, 0
 	}
 	if remainingAfter >= 0 {
 		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remainingAfter))
 	}
-	return true
+	return true, promptTokens
+}
+
+// refuseBudget answers 429 token_limit_exceeded for a request whose need
+// tokens the daily budgets refused, saying why (auth.Refusal): the key's
+// budget (def), the tenant's, or a refusal a retry shortly overcomes (this
+// router's share is spent for the moment, or today's usage cannot be read
+// yet), which also gets Retry-After.
+func (h *Handlers) refuseBudget(c *gin.Context, b auth.DailyBudget, need int, def string) {
+	r := auth.ExplainRefusal(h.limiter, b, need)
+	re := domain.NewRouterError(domain.ErrCodeTokenLimitExceeded, r.Message(def), domain.SourceRouter)
+	if s := r.RetryAfter(); s > 0 {
+		re.RetryAfter = s
+		c.Header("Retry-After", strconv.Itoa(s))
+	}
+	c.Set(auditKeyErrorCode, string(re.Code))
+	setRootSpanError(c, re.Message)
+	c.JSON(http.StatusTooManyRequests, domain.RouterErrorResponse{Error: re})
 }
 
 // fireTokenLimited reports an input-phase token-limit rejection, if a callback is set.
@@ -1151,6 +1206,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		// already released when the processor handed the request to the provider.
 		if !resp.ServedByProvider() {
 			h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
+			h.chargeInputShortfall(c, req, m, pending, resp.Usage.PromptTokens, usageExact)
 			h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
 		}
 		return
@@ -1175,6 +1231,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		c.Set(auditKeyOutputTokens, ct)
 	}
 	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
+	h.chargeInputShortfall(c, req, m, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 }
 

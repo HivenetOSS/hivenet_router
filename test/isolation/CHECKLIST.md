@@ -42,19 +42,20 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 2.1 | RPM and daily-token counters are per key (persisted per key with the Badger backend), checked against that key's own limits. Another key cannot overwrite a key's ceiling. | planned (PR-2) | `TestInMemoryLimiter_PerKeyBucketsWithinTenant`, `TestInMemoryLimiter_KeyCeilingNotOverwrittenByOtherKey`, `TestBadgerLimiter_PerKeyPersistence` |
-| 2.2 | Input/output tokens-per-minute and occupancy share are per key, static keys included. | planned (PR-1, PR-2) | `TestIsolation_StaticKeysHaveDistinctB4State` |
-| 2.3 | A key ID reassigned to another tenant starts with fresh counters: requests per minute, tokens per minute and tokens per day. | planned (PR-2) | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated`, `TestMinute_KeyReassignedToOtherTenantStartsFresh` |
-| 2.4 | `X-RateLimit-*` headers describe the calling key only. | planned (PR-2) | `TestIsolation_RateLimitHeadersArePerKey` |
-| 2.5 | A key exhausting its request rate or daily tokens never causes a 429 for another key, of its own tenant or another (end to end, output tokens included). | planned (PR-2) | `TestIsolation_TwoTenantsQuotaE2E` |
+| 2.1 | RPM and daily-token counters are per key (persisted per key with the Badger backend), checked against that key's own limits. Another key cannot overwrite a key's ceiling. | done | `TestInMemoryLimiter_PerKeyBucketsWithinTenant`, `TestInMemoryLimiter_KeyCeilingNotOverwrittenByOtherKey`, `TestBadgerLimiter_PerKeyPersistence` |
+| 2.2 | Input/output tokens-per-minute and occupancy share are per key, static keys included. | done | `TestIsolation_StaticKeysHaveDistinctB4State` |
+| 2.3 | A key ID reassigned to another tenant starts with fresh counters: requests per minute, tokens per minute and tokens per day. | done | `TestInMemoryLimiter_SameKeyIDDifferentTenantIsolated`, `TestMinute_KeyReassignedToOtherTenantStartsFresh` |
+| 2.4 | `X-RateLimit-*` headers describe the calling key only. | done | `TestIsolation_RateLimitHeadersArePerKey` |
+| 2.5 | A key exhausting its request rate or daily tokens never causes a 429 for another key, of its own tenant or another (end to end, output tokens included). | done | `TestIsolation_TwoTenantsQuotaE2E` |
 | 2.6 | With the model allowlist required, a key without one is refused on inference, discovery, aliases and redirects. The setting cannot be combined with auth mode `none`. | planned (PR-3) | `TestIsolation_RequireModelAllowlist`, `TestValidateIsolationConfig`, `TestLoadFromEnv_IsolationSwitches` |
 | 2.7 | Embeddings and rerank honour the same allowlist as chat (`per_model` keys included). | planned (PR-3) | `TestEmbeddings_HonoursEffectiveAllowlist` |
 | 2.8 | A redirect token's scope cannot be widened by the client. | done | `TestIsolation_RedirectTokenCannotWidenScope`, `TestRedirect_Scope` |
 | 2.9 | A key's `scope_max` caps the scope a request may ask for. | Epic F | `TestIsolation_ScopeMaxCapsKeyScope` (skipped until Epic F) |
-| 2.10 | A tenant-wide daily token budget: the lowest `tenant_tokens_per_day` among a tenant's keys caps all of them together, site-wide. A request refused by the key's or the tenant's budget charges neither. | planned (PR-2) | `TestInMemoryLimiter_TenantCap`, `TestTenantCapSharedAcrossRouters`, `TestIsolation_TenantCapE2E` |
+| 2.10 | A tenant-wide daily token budget: the lowest `tenant_tokens_per_day` among a tenant's keys caps all of them together, site-wide. A request refused by the key's or the tenant's budget charges neither, and its 429 names the budget that refused it, at admission and after the response; a refusal the budget does not explain (one router's share used up for the moment) carries `Retry-After`. | done | `TestInMemoryLimiter_TenantCap`, `TestTenantCapSharedAcrossRouters`, `TestIsolation_TenantCapE2E`, `TestIsolation_TenantCapOutputRefusalNamesOrganization` |
 | 2.11 | Capacity is shared per model (B2/B3 budgets, queue, wait queue), so one customer's burst can slow another (noisy neighbour, vLLM ④). | out of scope | none: accepted residual; `max_occupancy_share` caps one key's share, and a dedicated replica (Tier 1, Epic N) removes it |
 | 2.12 | A model outside the key's allowlist is refused with 403 before any quota is charged, any model is woken or any redirect is issued, on every inference endpoint. | planned (PR-3) | `TestIsolation_ForbiddenModelCostsNothing` |
 | 2.13 | A key with both `allowed_models` and `quota.per_model` may use only the models in both. | planned (PR-3) | `TestAllowlist_IntersectsAllowedModelsAndPerModel` |
+| 2.14 | Daily budgets (the key's and the tenant's) and the per-minute input rate count the prompt the backend reports, not only the router's estimate of it: the difference is charged after the response, and a non-streaming answer it does not fit is refused. | done | `TestIsolation_InputChargedFromBackendCount`, `TestB4_ITPMChargesBackendPromptTokens`, `TestInputShortfall`, `TestMinute_ChargeInputTokens` |
 
 ## 3. Per-customer prefix-cache salt (vLLM ①, CVE-2025-46570)
 
@@ -78,7 +79,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.1 | Every authenticated `/v1` audit and decision-log line carries the caller's `tenant_id` and a non-empty `key_id`. | planned (PR-5) | `TestIsolation_LogsAttributable`, `TestIsolation_DecisionLogAttributable` |
 | 4.2 | No log contains a prompt, response, backend error body, credential, salt secret or salt (doc-18 G7, as a regression test), on successful requests and on backend errors (4xx, 5xx, retried or not). | planned (PR-5) | `TestIsolation_LogsContentFree`, `TestIsolation_BackendErrorsContentFree` |
 | 4.3 | The audit log file and the decision log are readable by their owner only (0600). | planned (PR-5) | `TestIsolation_AuditFileMode`, `TestDecisionLog_FileMode` |
-| 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage counts every key; the limit gauges sum the tenant's keys. | planned (PR-2) | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
+| 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage counts every key; the limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
 | 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | planned (PR-7) | `TestMetricsHandler_BearerToken`, `TestIsPrivateBindAddr` |
 | 4.6 | Multi-tenant mode refuses to start with `/metrics` open to anything but a loopback or private address without a token. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics`, `TestValidateIsolationConfig` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |
@@ -129,7 +130,7 @@ the shared state is where one tenant could reach another's.
 | # | Line | Status | Tests |
 |---|---|---|---|
 | 8.1 | Request, tokens-per-minute and daily counters are shared by every router of the site: a limit holds once per site, not once per router. | done | `TestRPMSharedAcrossRouters`, `TestRPMWithoutSharingMultiplies`, `TestTokensPerMinuteShared`, `TestDailySharedAcrossRouters` |
-| 8.2 | The per-key buckets, tenant usage and tenant budgets of Epic G are the shared ones, so they too hold site-wide. | planned (PR-2) | `TestPerKeyBudgetsSharedAcrossRouters`, `TestTenantUsageSiteWide`, `TestTenantCapSharedAcrossRouters` |
+| 8.2 | The per-key buckets, tenant usage and tenant budgets of Epic G are the shared ones, so they too hold site-wide. | done | `TestPerKeyBudgetsSharedAcrossRouters`, `TestTenantUsageSiteWide`, `TestTenantCapSharedAcrossRouters`, `TestDailyShareRefusalIsRetryable` |
 | 8.3 | While Valkey is unreachable each router enforces its share of every limit, and a key with a daily limit is refused until the site total is known. | done | `TestStoreDownEachRouterEnforcesItsShare`, `TestDailyFailsClosedWithoutTotals` |
 | 8.4 | Occupancy budgets (B2, B4) are shared exactly: the routers together never hold more than the budget. | done | `TestOccupancySharedAcrossRouters`, `TestCreditsNeverOversubscribe` |
 | 8.5 | A cross-site redirect token is accepted once by the whole site: a replay, or a token used by someone else, is refused. | done | `TestRedirect_SingleUseCannotBeStolen`, `TestReplayGuard`, `TestTokenAuth_SingleUseIsLast` |

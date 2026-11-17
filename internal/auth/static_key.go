@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,7 +25,8 @@ type keyEntry struct {
 // token and looking it up in a pre-built map keyed by SHA-256 hex strings loaded
 // from auth.yaml. Plaintext keys are never retained after startup.
 type StaticKeyProvider struct {
-	keys map[string]keyEntry // SHA-256 hex → entry
+	keys    map[string]keyEntry // SHA-256 hex → entry
+	tenants []string            // every owner, once
 }
 
 // NewStaticKeyProvider creates a StaticKeyProvider from a list of APIKeyEntry.
@@ -92,7 +94,29 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 			expiresAt: expiresAt,
 		}
 	}
-	return &StaticKeyProvider{keys: keys}, nil
+	// Each key's result carries its tenant's daily budget: the lowest value
+	// among the tenant's keys.
+	byTenant := make(map[string][]QuotaLimits)
+	for _, e := range keys {
+		byTenant[e.result.TenantID] = append(byTenant[e.result.TenantID], e.result.QuotaLimits)
+	}
+	budgets := tenantBudgets(byTenant)
+	for hash, e := range keys {
+		e.result.QuotaLimits.TenantTokensPerDay = budgets[e.result.TenantID]
+		keys[hash] = e
+	}
+	tenants := make([]string, 0, len(budgets))
+	for t := range budgets {
+		tenants = append(tenants, t)
+	}
+	sort.Strings(tenants)
+	return &StaticKeyProvider{keys: keys, tenants: tenants}, nil
+}
+
+// TenantIDs returns every tenant with a key. Cheaper than Tenants: no
+// ceilings are computed.
+func (s *StaticKeyProvider) TenantIDs() []string {
+	return append([]string(nil), s.tenants...)
 }
 
 // keyIDDomain separates derived key IDs from the key hash: the ID is a hash
@@ -122,15 +146,19 @@ func staticKeyID(keyHash string) string {
 	return derivedKeyID(staticKeyIDPrefix, keyHash)
 }
 
-// Tenants returns a map from tenant ID to QuotaLimits for every key entry,
-// deduplicated by tenant ID. When multiple keys share an owner the last
-// entry's limits win (same owner → same tier in practice).
-// Used at startup and after SIGHUP to pre-populate Prometheus quota gauges
-// so the Grafana $tenant_id variable populates within the first scrape.
+// Tenants returns every tenant's total ceiling: the limits of its keys
+// summed (see tenantCeilings). Used at startup and after SIGHUP to
+// pre-populate the per-tenant Prometheus quota gauges so the Grafana
+// $tenant_id variable populates within the first scrape. Enforcement is per
+// key and never reads this.
 func (s *StaticKeyProvider) Tenants() map[string]QuotaLimits {
-	out := make(map[string]QuotaLimits, len(s.keys))
+	byTenant := make(map[string][]QuotaLimits)
 	for _, e := range s.keys {
-		out[e.result.TenantID] = e.result.QuotaLimits
+		byTenant[e.result.TenantID] = append(byTenant[e.result.TenantID], e.result.QuotaLimits)
+	}
+	out := make(map[string]QuotaLimits, len(byTenant))
+	for tenant, keys := range byTenant {
+		out[tenant] = tenantCeilings(keys)
 	}
 	return out
 }

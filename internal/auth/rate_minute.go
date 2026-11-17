@@ -14,9 +14,11 @@ import (
 
 // MinuteRateLimiter enforces the serverless per-key tokens-per-minute caps
 // (ITPM/OTPM). It is separate from RateLimiter so the RPM/daily interface (and
-// its fakes) stay stable. Each (tenant, model, direction) pair gets its own
+// its fakes) stay stable. Each (tenant, key, model, direction) gets its own
 // x/time/rate token bucket measured in tokens: rate = limit/60 tokens per
-// second, burst = limit (one minute's capacity). Safe for concurrent use.
+// second, burst = limit (one minute's capacity). The tenant is part of the
+// bucket, like RateLimiter's, so a key ID reassigned to another tenant starts
+// fresh. Safe for concurrent use.
 type MinuteRateLimiter struct {
 	buckets sync.Map // direction+bucketKey → *rate.Limiter
 
@@ -47,8 +49,17 @@ func (l *MinuteRateLimiter) ApplyPeerUsage(kind byte, key string, limit, n int, 
 // NewMinuteRateLimiter creates an empty MinuteRateLimiter.
 func NewMinuteRateLimiter() *MinuteRateLimiter { return &MinuteRateLimiter{} }
 
-func inKey(tenantID, model string) string  { return "i\x00" + bucketKey(tenantID, model) }
-func outKey(tenantID, model string) string { return "o\x00" + bucketKey(tenantID, model) }
+// inKey and outKey build the input and output bucket keys: the direction,
+// then the versioned key bucket name (bucketKey). They name shared-store
+// counters too, so routers running the earlier key-only shape during a
+// rolling upgrade do not add to these buckets.
+func inKey(tenantID, keyID, model string) string {
+	return "i\x00" + bucketKey(tenantID, keyID, model)
+}
+
+func outKey(tenantID, keyID, model string) string {
+	return "o\x00" + bucketKey(tenantID, keyID, model)
+}
 
 // bucket returns the token bucket for key, sized to limit. Like the RPM bucket
 // it applies the current rate/burst on every call so a reloaded limit takes
@@ -70,16 +81,16 @@ func (l *MinuteRateLimiter) bucket(key string, limit int) *rate.Limiter {
 	return actual.(*rate.Limiter)
 }
 
-// AllowInputTokens deducts count input tokens from the (tenant, model) ITPM
-// bucket, returning true when within the per-minute rate and false when it would
+// AllowInputTokens deducts count input tokens from the key's ITPM bucket for
+// model, returning true when within the per-minute rate and false when it would
 // exceed it. limit <= 0 (or count <= 0) disables the cap. The loader guarantees
 // ITPM capacity >= max_input_tokens, so a single request's input always fits the
 // burst and can be admitted when the bucket is full.
-func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, count int) bool {
+func (l *MinuteRateLimiter) AllowInputTokens(tenantID, keyID, model string, limit, count int) bool {
 	if limit <= 0 || count <= 0 {
 		return true
 	}
-	key := inKey(tenantID, model)
+	key := inKey(tenantID, keyID, model)
 	lim := l.bucket(key, limit)
 	if l.fleet == nil {
 		return lim.AllowN(time.Now(), count)
@@ -94,16 +105,16 @@ func (l *MinuteRateLimiter) AllowInputTokens(tenantID, model string, limit, coun
 	return true
 }
 
-// OutputExhausted reports whether the (tenant, model) OTPM bucket has run dry —
+// OutputExhausted reports whether the key's OTPM bucket for model has run dry —
 // the admission-time check that throttles new requests once a key's recent
 // output has blown its per-minute rate. Non-deducting. limit <= 0 disables it
 // (never exhausted). Output is metered post-response (ChargeOutputTokens), so
 // this is how OTPM gates: a key that over-produces is held off on its next call.
-func (l *MinuteRateLimiter) OutputExhausted(tenantID, model string, limit int) bool {
+func (l *MinuteRateLimiter) OutputExhausted(tenantID, keyID, model string, limit int) bool {
 	if limit <= 0 {
 		return false
 	}
-	return l.bucket(outKey(tenantID, model), limit).TokensAt(time.Now()) < 1
+	return l.bucket(outKey(tenantID, keyID, model), limit).TokensAt(time.Now()) < 1
 }
 
 // ChargeOutputTokens deducts count output tokens from the OTPM bucket after a
@@ -111,18 +122,38 @@ func (l *MinuteRateLimiter) OutputExhausted(tenantID, model string, limit int) b
 // key's subsequent requests via OutputExhausted. The charge is capped at one
 // minute's capacity so a single huge response drains at most the full bucket.
 // limit <= 0 (or count <= 0) is a no-op.
-func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, model string, limit, count int) {
+func (l *MinuteRateLimiter) ChargeOutputTokens(tenantID, keyID, model string, limit, count int) {
 	if limit <= 0 || count <= 0 {
 		return
 	}
 	if count > limit {
 		count = limit
 	}
-	key := outKey(tenantID, model)
+	key := outKey(tenantID, keyID, model)
 	count = silentCharge(l.fleet, count)
 	debit(l.bucket(key, limit), count)
 	if l.fleet != nil {
 		l.fleet.Record(shared.KindOTPM, key, limit, count)
+	}
+}
+
+// ChargeInputTokens deducts count input tokens from the ITPM bucket after a
+// response: what the backend reported beyond the estimate AllowInputTokens
+// admitted, so the input rate counts the prompt actually processed. Capped
+// at one minute's capacity, like ChargeOutputTokens. limit <= 0 (or count
+// <= 0) is a no-op.
+func (l *MinuteRateLimiter) ChargeInputTokens(tenantID, keyID, model string, limit, count int) {
+	if limit <= 0 || count <= 0 {
+		return
+	}
+	if count > limit {
+		count = limit
+	}
+	key := inKey(tenantID, keyID, model)
+	count = silentCharge(l.fleet, count)
+	debit(l.bucket(key, limit), count)
+	if l.fleet != nil {
+		l.fleet.Record(shared.KindITPM, key, limit, count)
 	}
 }
 

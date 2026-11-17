@@ -98,6 +98,7 @@ type keyStoreQuota struct {
 	OutputTokensPerMinute int                         `json:"output_tokens_per_minute"`
 	MaxOccupancyShare     float64                     `json:"max_occupancy_share"`
 	PerModel              map[string]keyStorePerModel `json:"per_model,omitempty"`
+	TenantTokensPerDay    int                         `json:"tenant_tokens_per_day,omitempty"`
 }
 
 type keyStorePerModel struct {
@@ -531,6 +532,7 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 		InputTokensPerMinute:  q.InputTokensPerMinute,
 		OutputTokensPerMinute: q.OutputTokensPerMinute,
 		MaxOccupancyShare:     q.MaxOccupancyShare,
+		TenantTokensPerDay:    q.TenantTokensPerDay,
 	}
 	if len(q.PerModel) > 0 {
 		wq.PerModel = make(map[string]keyStorePerModel, len(q.PerModel))
@@ -559,6 +561,7 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 		InputTokensPerMinute:  w.Quota.InputTokensPerMinute,
 		OutputTokensPerMinute: w.Quota.OutputTokensPerMinute,
 		MaxOccupancyShare:     w.Quota.MaxOccupancyShare,
+		TenantTokensPerDay:    w.Quota.TenantTokensPerDay,
 	}
 	if len(w.Quota.PerModel) > 0 {
 		q.PerModel = make(map[string]PerModelQuotaLimits, len(w.Quota.PerModel))

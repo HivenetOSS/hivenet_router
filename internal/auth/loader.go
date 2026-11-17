@@ -38,6 +38,9 @@ type PerModelQuotaConfig struct {
 //     absent. Every entry must declare BOTH requests_per_minute_per_replica
 //     AND tokens_per_day (partial entries are rejected at load — "forgot a
 //     field" must never silently mean "unlimited").
+//
+// tenant_tokens_per_day is not a key limit and fits either shape: it is the
+// daily budget of the key's whole tenant (see QuotaLimits.TenantTokensPerDay).
 type QuotaConfig struct {
 	RequestsPerMinute int `yaml:"requests_per_minute,omitempty" json:"requests_per_minute,omitempty"`
 	TokensPerDay      int `yaml:"tokens_per_day,omitempty"      json:"tokens_per_day,omitempty"`
@@ -51,6 +54,11 @@ type QuotaConfig struct {
 	OutputTokensPerMinute int `yaml:"output_tokens_per_minute,omitempty" json:"output_tokens_per_minute,omitempty"`
 
 	PerModel map[string]*PerModelQuotaConfig `yaml:"per_model,omitempty" json:"per_model,omitempty"`
+
+	// TenantTokensPerDay is the daily token budget of the key's tenant,
+	// spent by all its keys together, site-wide. Zero means unset. When the
+	// tenant's keys declare different values, the lowest applies.
+	TenantTokensPerDay int `yaml:"tenant_tokens_per_day,omitempty" json:"tenant_tokens_per_day,omitempty"`
 }
 
 // Validate checks the quota block for shape consistency and converts it into
@@ -61,12 +69,16 @@ func (q QuotaConfig) Validate(label string) (QuotaLimits, error) {
 		return QuotaLimits{}, fmt.Errorf(
 			"auth: %s: input_tokens_per_minute and output_tokens_per_minute must be >= 0", label)
 	}
+	if q.TenantTokensPerDay < 0 {
+		return QuotaLimits{}, fmt.Errorf("auth: %s: tenant_tokens_per_day must be >= 0", label)
+	}
 	if q.PerModel == nil {
 		return QuotaLimits{
 			RequestsPerMinute:     q.RequestsPerMinute,
 			TokensPerDay:          q.TokensPerDay,
 			InputTokensPerMinute:  q.InputTokensPerMinute,
 			OutputTokensPerMinute: q.OutputTokensPerMinute,
+			TenantTokensPerDay:    q.TenantTokensPerDay,
 		}, nil
 	}
 	if q.RequestsPerMinute != 0 || q.TokensPerDay != 0 ||
@@ -88,7 +100,7 @@ func (q QuotaConfig) Validate(label string) (QuotaLimits, error) {
 		}
 		resolved[model] = validated
 	}
-	return QuotaLimits{PerModel: resolved}, nil
+	return QuotaLimits{PerModel: resolved, TenantTokensPerDay: q.TenantTokensPerDay}, nil
 }
 
 // validatePerModelEntry runs the six per-entry guards (non-empty model name,

@@ -87,7 +87,7 @@ type RequestProcessor struct {
 	// providers maps provider engine name ("openai", "anthropic") to its implementation.
 	// Populated at startup from config; only configured providers are present (missing key means not configured).
 	providers map[string]provider.Provider
-	// limiter enforces the per-tenant daily token budget on the output side.
+	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
 	// peers drops dead libp2p connections to an agent on a connection-level forward
@@ -779,9 +779,11 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// the handler (before the request was queued) and are NOT rolled back here.
 	// Only the completion tokens (n) are withheld — AllowOutputTokens does not add n
 	// to b.used when it returns allowed=false, but the prompt deduction stands.
-	if p.limiter != nil && pending.TokensPerDay > 0 && chatResp.Usage.CompletionTokens > 0 {
-		allowed, remaining, limErr := p.limiter.AllowOutputTokens(
-			pending.TenantID, pending.QuotaModel, pending.TokensPerDay, chatResp.Usage.CompletionTokens)
+	// The prompt tokens the backend reported beyond the admission estimate are
+	// charged with the completion: the budgets count the prompt it processed.
+	shortfall := pending.InputShortfall(chatResp.Usage.PromptTokens)
+	if p.limiter != nil && chatResp.Usage.CompletionTokens+shortfall > 0 {
+		allowed, remaining, limErr := p.limiter.AllowOutputTokens(dailyBudget(pending), chatResp.Usage.CompletionTokens+shortfall)
 		if limErr != nil {
 			// Redis error — fail-open: treat as allowed and proceed.
 			log.Warnf("Output token check error for request %s: %v (fail-open)", pending.ID, limErr)
@@ -798,8 +800,12 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			// Copy Usage so only the token counts are retained — &chatResp.Usage would
 			// keep the entire ChatResponse (including completion content) alive until GC.
 			usageCopy := chatResp.Usage
-			re := domain.NewRouterError(
-				domain.ErrCodeTokenLimitExceeded, "daily token budget exceeded", domain.SourceRouter)
+			re := domain.NewRouterError(domain.ErrCodeTokenLimitExceeded,
+				// An output charge is judged against the budgets alone, never
+				// this router's share, and it already filled the budget it
+				// overflowed: name that one.
+				auth.ExplainSpent(p.limiter, dailyBudget(pending)).Message("daily token budget exceeded"),
+				domain.SourceRouter)
 			re.Usage = &usageCopy
 			re.AgentID = agent.ID.String()
 			return nil, rttMs, re
@@ -916,8 +922,12 @@ func (p *RequestProcessor) drainStream(
 	pending.StreamedPromptTokens.Store(int64(prompt))
 	pending.StreamedCompletionTokens.Store(int64(completion))
 	pending.StreamedPromptExact.Store(meter.HaveUsage())
-	if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
-		allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
+	shortfall := 0
+	if meter.HaveUsage() {
+		shortfall = pending.InputShortfall(prompt)
+	}
+	if p.limiter != nil && completion+shortfall > 0 {
+		allowed, _, err := p.limiter.AllowOutputTokens(dailyBudget(pending), completion+shortfall)
 		if err != nil {
 			log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
 		} else if !allowed {
@@ -934,6 +944,15 @@ func (p *RequestProcessor) drainStream(
 	// reads GetLoad() directly, so this is metric-accuracy only.
 	releaseSlot()
 	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
+}
+
+// dailyBudget names the daily token budgets a request's output is charged
+// to: the same buckets its prompt estimate was charged to at admission. A
+// request with neither budget is still charged, so it counts in its tenant's
+// usage today.
+func dailyBudget(p *domain.PendingRequest) auth.DailyBudget {
+	return auth.DailyBudget{TenantID: p.TenantID, KeyID: p.KeyID, Model: p.QuotaModel,
+		KeyTokensPerDay: p.TokensPerDay, TenantTokensPerDay: p.TenantTokensPerDay}
 }
 
 // truncationFrame returns the terminal SSE error frame drainStream injects into
