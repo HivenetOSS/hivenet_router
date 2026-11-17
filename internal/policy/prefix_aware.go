@@ -88,6 +88,10 @@ type PrefixRequest struct {
 	match    prefixindex.Match
 	newToks  int
 	selected bool
+	// outcome of the last selection, counted once per request at Commit (a
+	// lost slot race selects again; a retry is the same request).
+	outcome string
+	counted bool
 	// reserved is the agent whose prefill queue holds reservedToks of this
 	// request; released at the first response byte (Session.ReleasePrefill).
 	reserved     peer.ID
@@ -211,7 +215,6 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	}
 	pr := req.Prefix
 	if pr == nil || len(pr.Anchors) == 0 || s.index == nil {
-		s.observe(req.Model, PrefixOutcomeNoAnchor)
 		return leastLoadedStrategy{}.Select(candidates, req)
 	}
 
@@ -229,8 +232,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		ok = append(ok, c)
 	}
 	if len(ok) == 0 {
-		pr.match, pr.newToks, pr.selected = prefixindex.Match{}, sum(pr.Sizes), true
-		s.observe(req.Model, PrefixOutcomeBusy)
+		pr.match, pr.newToks, pr.selected, pr.outcome = prefixindex.Match{}, sum(pr.Sizes), true, PrefixOutcomeBusy
 		return leastLoadedStrategy{}.Select(candidates, req)
 	}
 
@@ -277,11 +279,11 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	pr.match, pr.newToks, pr.selected = m, max(0, prompt-h), true
 	switch {
 	case m.Depth[chosen.ID] > 0:
-		s.observe(req.Model, PrefixOutcomeHit)
+		pr.outcome = PrefixOutcomeHit
 	case chosen.ID == m.Pending && pendingToks > 0:
-		s.observe(req.Model, PrefixOutcomePending)
+		pr.outcome = PrefixOutcomePending
 	default:
-		s.observe(req.Model, PrefixOutcomeMiss)
+		pr.outcome = PrefixOutcomeMiss
 	}
 	return chosen
 }
@@ -291,7 +293,17 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 func (s prefixAwareStrategy) Commit(req SelectRequest, chosen *domain.Agent) {
 	pr := req.Prefix
 	if pr == nil || !pr.selected || s.index == nil || len(pr.Anchors) == 0 {
+		if pr == nil || !pr.counted {
+			s.observe(req.Model, PrefixOutcomeNoAnchor)
+		}
+		if pr != nil {
+			pr.counted = true
+		}
 		return
+	}
+	if !pr.counted {
+		s.observe(req.Model, pr.outcome)
+		pr.counted = true
 	}
 	s.index.Commit(req.Model, chosen.ID, pr.Anchors, pr.match, s.PredictedTTL, s.PendingTTL)
 	pr.release() // a retry: the previous agent no longer prefills this request

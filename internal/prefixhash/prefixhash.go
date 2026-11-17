@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"hash"
 
@@ -61,7 +62,8 @@ func (k Keys) Valid() bool { return len(k.anchor) > 0 && len(k.block) > 0 }
 
 // Anchors returns one anchor per logical message of req: the top-level system
 // prompt of /v1/messages first when present, then each message. anchor[k]
-// covers model, scope, the tool definitions and messages[0..k]; equal anchors
+// covers model, scope, the tool definitions, the chat-template inputs
+// (chat_template, chat_template_kwargs, documents) and messages[0..k]; equal anchors
 // mean equal text so far. sizes[k] estimates the tokens of message k (bytes/4).
 // scope separates tenants when the engine's cache does (cache salt); it is
 // empty otherwise.
@@ -73,11 +75,12 @@ func (k Keys) Anchors(model, scope string, req *domain.ChatRequest) (anchors []u
 	m.Write([]byte("anchor/v1\x00"))
 	writeField(m, model)
 	writeField(m, scope)
-	if len(req.Tools) > 0 && string(req.Tools) != "null" {
-		writeField(m, string(req.Tools))
-	} else {
-		writeField(m, "")
-	}
+	writeField(m, rawField(req.Tools))
+	// The template inputs change the rendered prompt: same messages under
+	// other template arguments are other tokens.
+	writeField(m, canonical(req.ChatTemplate))
+	writeField(m, canonical(req.ChatTemplateKwargs))
+	writeField(m, canonical(req.Documents))
 	prev := m.Sum(nil)
 
 	add := func(role, text string) {
@@ -99,6 +102,31 @@ func (k Keys) Anchors(model, scope string, req *domain.ChatRequest) (anchors []u
 		add(msg.Role, domain.GetMessageTextContent(msg))
 	}
 	return anchors, sizes
+}
+
+// rawField is a raw JSON field as written, "" when absent or null.
+func rawField(v json.RawMessage) string {
+	if len(v) == 0 || string(v) == "null" {
+		return ""
+	}
+	return string(v)
+}
+
+// canonical is a raw JSON value with sorted keys and no spacing, so the same
+// arguments written another way give the same anchor; "" when absent or null.
+func canonical(v json.RawMessage) string {
+	if rawField(v) == "" {
+		return ""
+	}
+	var x any
+	if json.Unmarshal(v, &x) != nil {
+		return string(v)
+	}
+	b, err := json.Marshal(x)
+	if err != nil {
+		return string(v)
+	}
+	return string(b)
 }
 
 // writeField writes s with its length, so fields cannot shift into each other.

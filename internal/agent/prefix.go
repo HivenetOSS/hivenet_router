@@ -56,10 +56,10 @@ type prefixServedEntry struct {
 }
 
 const (
-	prefixOutboxCap   = 4096
-	prefixBatchMax    = 1024
-	prefixPushEvery   = 100 * time.Millisecond
-	prefixProbeTimout = 10 * time.Second
+	prefixOutboxCap    = 4096
+	prefixBatchMax     = 1024
+	prefixPushEvery    = 100 * time.Millisecond
+	prefixProbeTimeout = 10 * time.Second
 )
 
 // initPrefix enables prefix reporting when the engine can return prompt
@@ -70,14 +70,53 @@ func (a *Agent) initPrefix() {
 		return
 	}
 	st := &prefixState{keys: prefixhash.DeriveKeys([]byte(a.cfg.JWTSecret)), startToken: -1}
-	ctx, cancel := context.WithTimeout(context.Background(), prefixProbeTimout)
+	ctx, cancel := context.WithTimeout(context.Background(), prefixProbeTimeout)
 	defer cancel()
+	// return_token_ids is added to client requests: make sure the engine
+	// accepts it and answers with the prompt's tokens first, or an engine
+	// that rejects unknown fields would fail every request.
+	if err := probePromptTokenIDs(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model); err != nil {
+		log.Warnf("prefix-aware routing: the engine does not return prompt token IDs (%v); this agent reports no prefixes", err)
+		return
+	}
 	if t, err := pe.MessageStartToken(ctx, a.cfg.BackendURL, a.httpClient, a.cfg.Model); err == nil {
 		st.startToken = t
 	} else {
 		log.Infof("prefix-aware routing: no message-start token found (%v); only whole prompts are reported", err)
 	}
 	a.prefix = st
+}
+
+// probePromptTokenIDs sends a one-token chat request with return_token_ids
+// and checks the answer carries prompt_token_ids.
+func probePromptTokenIDs(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
+	body, _ := json.Marshal(map[string]any{
+		"model": model, "messages": []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1, "return_token_ids": true,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		PromptTokenIDs []int `json:"prompt_token_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return err
+	}
+	if len(out.PromptTokenIDs) == 0 {
+		return fmt.Errorf("no prompt_token_ids in the response")
+	}
+	return nil
 }
 
 // add queues one served prompt for every router.
@@ -248,8 +287,10 @@ func (a *Agent) learn(pr *prefixRequest, tokens []int) {
 
 // handleTokenFields reads the prompt's token IDs from one response body or
 // SSE data line (once per request) and, when the agent asked for them,
-// removes every token-ID field from it.
-func (a *Agent) handleTokenFields(pr *prefixRequest, b []byte) []byte {
+// removes every token-ID field from it. It fails closed: when a token-ID
+// field is there but cannot be removed (a malformed or truncated value), it
+// returns false and the caller must not forward b.
+func (a *Agent) handleTokenFields(pr *prefixRequest, b []byte) ([]byte, bool) {
 	if v, ok := tokenField(b, `"prompt_token_ids"`); ok {
 		var toks []int
 		if json.Unmarshal(v, &toks) == nil && len(toks) > 0 {
@@ -257,16 +298,18 @@ func (a *Agent) handleTokenFields(pr *prefixRequest, b []byte) []byte {
 		}
 	}
 	if !pr.strip {
-		return b
+		return b, true
 	}
-	b = removeField(b, `"prompt_token_ids"`)
-	for {
-		nb := removeField(b, `"token_ids"`)
-		if len(nb) == len(b) {
-			return nb
+	for _, key := range []string{`"prompt_token_ids"`, `"token_ids"`} {
+		for memberIndex(b, key) >= 0 {
+			nb := removeField(b, key)
+			if len(nb) == len(b) {
+				return nil, false
+			}
+			b = nb
 		}
-		b = nb
 	}
+	return b, true
 }
 
 // tokenField returns the raw value of the first JSON object member named key
@@ -337,27 +380,64 @@ func memberIndex(b []byte, key string) int {
 	}
 }
 
-// valueBounds returns where the value after the member name ending at i
-// starts and ends: an array of numbers, a number or null (what token-ID
-// fields hold). -1 when it is something else.
+// valueBounds returns where the JSON value after the member name ending at i
+// starts and ends, or -1 when it is malformed or cut off.
 func valueBounds(b []byte, i int) (int, int) {
 	for i < len(b) && (isSpace(b[i]) || b[i] == ':') {
 		i++
 	}
-	if i >= len(b) {
+	end := skipValue(b, i)
+	if end < 0 {
 		return -1, -1
 	}
-	switch {
-	case b[i] == '[':
-		j := bytes.IndexByte(b[i:], ']')
-		if j < 0 || bytes.ContainsAny(b[i+1:i+j], "[{\"") {
-			return -1, -1
-		}
-		return i, i + j + 1
-	case bytes.HasPrefix(b[i:], []byte("null")):
-		return i, i + 4
+	return i, end
+}
+
+// skipValue returns the index just past the JSON value starting at i, or -1.
+func skipValue(b []byte, i int) int {
+	if i >= len(b) {
+		return -1
 	}
-	return -1, -1
+	switch b[i] {
+	case '"':
+		for j := i + 1; j < len(b); j++ {
+			switch b[j] {
+			case '\\':
+				j++
+			case '"':
+				return j + 1
+			}
+		}
+		return -1
+	case '[', '{':
+		depth := 0
+		for j := i; j < len(b); j++ {
+			switch b[j] {
+			case '"':
+				k := skipValue(b, j)
+				if k < 0 {
+					return -1
+				}
+				j = k - 1
+			case '[', '{':
+				depth++
+			case ']', '}':
+				if depth--; depth == 0 {
+					return j + 1
+				}
+			}
+		}
+		return -1
+	default: // number, true, false, null
+		j := i
+		for j < len(b) && !isSpace(b[j]) && b[j] != ',' && b[j] != '}' && b[j] != ']' {
+			j++
+		}
+		if j == i || j == len(b) {
+			return -1 // empty, or cut off before the enclosing object ends
+		}
+		return j
+	}
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
@@ -380,7 +460,7 @@ func (w *tokenFieldWriter) Write(p []byte) (int, error) {
 		}
 		line := w.buf[:i+1]
 		if bytes.HasPrefix(line, []byte("data:")) {
-			line = w.a.handleTokenFields(w.pr, line)
+			line = w.filter(line)
 		}
 		if _, err := w.dst.Write(line); err != nil {
 			return 0, err
@@ -396,8 +476,19 @@ func (w *tokenFieldWriter) flush() {
 	}
 	line := w.buf
 	if bytes.HasPrefix(line, []byte("data:")) {
-		line = w.a.handleTokenFields(w.pr, line)
+		line = w.filter(line)
 	}
 	w.dst.Write(line) //nolint:errcheck
 	w.buf = nil
+}
+
+// filter passes one SSE data line through handleTokenFields and drops it
+// when its token IDs cannot be removed.
+func (w *tokenFieldWriter) filter(line []byte) []byte {
+	out, ok := w.a.handleTokenFields(w.pr, line)
+	if !ok {
+		log.Warnf("prefix: dropped a stream chunk whose token IDs could not be removed")
+		return nil
+	}
+	return out
 }

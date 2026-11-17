@@ -140,16 +140,23 @@ func TestPrefixAware_Busy(t *testing.T) {
 	full, fine := 0.95, 0.1
 	cands := []ScoredCandidate{{Agent: a, Snapshot: AgentSnapshot{KVCacheUtilization: &full}}, {Agent: b, Snapshot: AgentSnapshot{KVCacheUtilization: &fine}}}
 	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100}, Sizes: []int{640}}}
-	if got := s.Select(cands, req); got != b {
+	pick := func(r SelectRequest) *domain.Agent {
+		got := s.Select(cands, r)
+		s.Select(cands, r) // a lost slot race selects again: counted once
+		s.Commit(r, got)
+		s.Commit(r, got) // a retry of the same request: counted once
+		return got
+	}
+	if got := pick(req); got != b {
 		t.Errorf("chose %s, want b (a's KV cache is full)", got.ID)
 	}
 	cands[1].Snapshot.KVCacheUtilization = &full
-	s.Select(cands, req)
-	if got := s.Select(cands, SelectRequest{Model: "m"}); got == nil {
+	pick(SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100}, Sizes: []int{640}}})
+	if got := pick(SelectRequest{Model: "m", Prefix: &PrefixRequest{}}); got == nil {
 		t.Fatal("no anchors: want least-loaded")
 	}
-	if rec[PrefixOutcomeBusy] != 1 || rec[PrefixOutcomeNoAnchor] != 1 {
-		t.Errorf("outcomes %v", rec)
+	if rec[PrefixOutcomeMiss] != 1 || rec[PrefixOutcomeBusy] != 1 || rec[PrefixOutcomeNoAnchor] != 1 {
+		t.Errorf("outcomes %v, want one miss, one busy, one no-anchor", rec)
 	}
 }
 

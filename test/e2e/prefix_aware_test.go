@@ -72,8 +72,14 @@ func startPrefixBackend(t *testing.T) *prefixBackend {
 		var req struct {
 			Messages       []map[string]string `json:"messages"`
 			ReturnTokenIDs bool                `json:"return_token_ids"`
+			Stream         bool                `json:"stream"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !req.Stream { // the agent's start-up probe
+			ids, _ := json.Marshal(renderMsgs(req.Messages, true))
+			fmt.Fprintf(w, `{"id":"c","object":"chat.completion","model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"token_ids":[1]}],"prompt_token_ids":%s}`, stubModel, ids)
+			return
+		}
 		b.mu.Lock()
 		for _, m := range req.Messages {
 			if m["role"] == "user" {

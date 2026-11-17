@@ -19,7 +19,7 @@ The strategy is off unless a policy step names it. It applies to chat requests (
 
 The router never tokenizes a request and never stores prompt text.
 
-1. **Anchors.** For each request the router computes one *anchor* per message prefix: a keyed hash of the text of messages 1 to *k*, plus the model and the tool definitions. All turns of a conversation repeat their earlier messages, so a later turn shares the earlier turn's anchors.
+1. **Anchors.** For each request the router computes one *anchor* per message prefix: a keyed hash of the text of messages 1 to *k*, plus the model, the tool definitions and the chat-template inputs (`chat_template`, `chat_template_kwargs`, `documents`). All turns of a conversation repeat their earlier messages, so a later turn shares the earlier turn's anchors.
 2. **What agents served.** The router sends the anchors to the agent with the request. A vLLM agent asks the engine for the prompt's token IDs (`return_token_ids`), removes them from the response before it leaves the agent, and hashes the prompt into keyed blocks of 64 tokens. It then tells every router of the site which blocks each anchor maps to.
 3. **Memo and board.** Each router keeps a *memo* (anchor → blocks) and a *board* (block → the agents that recently served it). A new request is matched through the memo, without tokenizing it, and the board tells how many leading blocks each candidate holds.
 4. **New text.** Text the memo does not know yet gets a short *pending note*: copies of the same new text that arrive before the agent reports go to the same agent.
@@ -48,6 +48,10 @@ Everything the strategy knows is advice. The engine checks its own cache, so a w
 For vLLM, the agent finds the token that opens each message in the model's chat template (for example `<|im_start|>`) at start-up, through the engine's `/tokenize`. With it, the router learns each message prefix, so conversations that share a system prompt find it. A template without such a token reports whole prompts only: the turns of one conversation still find each other.
 
 If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
+
+At start-up the agent sends the engine one short request with `return_token_ids`. If the engine rejects it or answers without the prompt's token IDs (an older vLLM), the agent logs a warning and leaves every request untouched: that agent reports no prefixes, and the router places its requests on load alone. Tested with vLLM 0.30 and 0.31.
+
+If the agent cannot remove the token IDs from a response (a malformed or cut-off value), it does not forward that response: a streamed chunk is dropped and a whole response becomes an error. Token IDs never reach the client unless it asked for them.
 
 ## Busy agents
 

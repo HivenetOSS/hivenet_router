@@ -1035,7 +1035,12 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pr != nil {
-		respBytes = a.handleTokenFields(pr, respBytes)
+		var ok bool
+		if respBytes, ok = a.handleTokenFields(pr, respBytes); !ok {
+			log.Warnf("prefix: dropped a response whose token IDs could not be removed")
+			writeErrorJSON(w, domain.NewRouterError(domain.ErrCodeBackendUnavailable, "malformed backend response", domain.SourceBackend))
+			return
+		}
 	}
 
 	inferenceMs := float64(time.Since(start).Milliseconds())

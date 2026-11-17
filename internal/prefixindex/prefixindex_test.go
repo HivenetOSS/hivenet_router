@@ -117,3 +117,42 @@ func TestRemoveAgentAndCaps(t *testing.T) {
 		t.Errorf("memo %d entries, cap 10", s.Memo)
 	}
 }
+
+// Sweep lets other users in every sweepChunk entries and still removes every
+// expired entry, while entries learned meanwhile stay.
+func TestSweepInChunks(t *testing.T) {
+	ix, c := newTestIndex(Config{BlocksPerAgent: 1 << 20})
+	old := make([]uint64, 5*sweepChunk)
+	for i := range old {
+		old[i] = uint64(i + 1)
+	}
+	ix.Learn("m", a1, []uint64{100}, []int{len(old)}, old, 10*time.Second)
+	c.t = c.t.Add(11 * time.Second)
+	done := make(chan struct{})
+	go func() { ix.Sweep(); close(done) }()
+	learned := 0
+	for i := 0; ; i++ {
+		select {
+		case <-done:
+			if s := ix.Stats(); s.Blocks != learned {
+				t.Errorf("%d blocks after sweep, want the %d learned during it", s.Blocks, learned)
+			}
+			return
+		default:
+		}
+		ix.Learn("m", a2, []uint64{uint64(1000 + i)}, []int{1}, []uint64{uint64(1<<40 + i)}, time.Minute)
+		ix.Lookup("m", []uint64{100}, []peer.ID{a1, a2})
+		learned++
+	}
+}
+
+// A short memo entry does not keep a long prompt's blocks alive.
+func TestMemoBlocks(t *testing.T) {
+	blocks := make([]uint64, 100)
+	if b := memoBlocks(blocks, 10); cap(b) != 10 || &b[0] == &blocks[0] {
+		t.Error("a short entry must get its own copy")
+	}
+	if b := memoBlocks(blocks, 80); cap(b) != 80 || &b[0] != &blocks[0] {
+		t.Error("a long entry shares the prompt's array")
+	}
+}

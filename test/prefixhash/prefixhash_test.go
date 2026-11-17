@@ -50,11 +50,14 @@ func TestAnchors_Separation(t *testing.T) {
 	base, _ := keys.Anchors("m", "", r)
 	other := prefixhash.DeriveKeys([]byte("another-site-secret-32-bytes-long!!!"))
 	for name, a := range map[string]uint64{
-		"key":   first(other.Anchors("m", "", r)),
-		"model": first(keys.Anchors("m2", "", r)),
-		"scope": first(keys.Anchors("m", "tenant-a", r)),
-		"tools": first(keys.Anchors("m", "", chat(t, `{"tools":[{"name":"f"}],"messages":[{"role":"user","content":"hello"}]}`))),
-		"role":  first(keys.Anchors("m", "", chat(t, `{"messages":[{"role":"system","content":"hello"}]}`))),
+		"key":                  first(other.Anchors("m", "", r)),
+		"model":                first(keys.Anchors("m2", "", r)),
+		"scope":                first(keys.Anchors("m", "tenant-a", r)),
+		"tools":                first(keys.Anchors("m", "", chat(t, `{"tools":[{"name":"f"}],"messages":[{"role":"user","content":"hello"}]}`))),
+		"role":                 first(keys.Anchors("m", "", chat(t, `{"messages":[{"role":"system","content":"hello"}]}`))),
+		"chat_template_kwargs": first(keys.Anchors("m", "", chat(t, `{"chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"hello"}]}`))),
+		"chat_template":        first(keys.Anchors("m", "", chat(t, `{"chat_template":"{{ messages }}","messages":[{"role":"user","content":"hello"}]}`))),
+		"documents":            first(keys.Anchors("m", "", chat(t, `{"documents":[{"text":"d"}],"messages":[{"role":"user","content":"hello"}]}`))),
 	} {
 		if a == base[0] {
 			t.Errorf("%s does not change the anchor", name)
@@ -67,6 +70,12 @@ func TestAnchors_Separation(t *testing.T) {
 	am, _ := keys.Anchors("m", "", inMsgs)
 	if !slices.Equal(as, am) {
 		t.Error("top-level system and a system message must give the same anchors")
+	}
+	// The same template arguments written another way are the same prompt.
+	k1, _ := keys.Anchors("m", "", chat(t, `{"chat_template_kwargs":{"a":1,"b":[true]},"messages":[{"role":"user","content":"hello"}]}`))
+	k2, _ := keys.Anchors("m", "", chat(t, `{"chat_template_kwargs": { "b": [ true ], "a": 1 },"messages":[{"role":"user","content":"hello"}]}`))
+	if k1[0] != k2[0] {
+		t.Error("key order and spacing of chat_template_kwargs must not change the anchor")
 	}
 	if a, _ := (prefixhash.Keys{}).Anchors("m", "", r); a != nil {
 		t.Error("no key: want no anchors")

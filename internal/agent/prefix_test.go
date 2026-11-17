@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,6 +31,7 @@ type fakeVLLM struct {
 	mu      sync.Mutex
 	bodies  []map[string]any
 	headers []http.Header
+	old     bool // an engine without return_token_ids that rejects unknown fields
 }
 
 func render(msgs []any, gen bool) []int {
@@ -61,6 +63,10 @@ func (f *fakeVLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gen, _ := body["add_generation_prompt"].(bool)
 		json.NewEncoder(w).Encode(map[string]any{"tokens": render(msgs, gen)}) //nolint:errcheck
 	case "/v1/chat/completions":
+		if _, ok := body["return_token_ids"]; ok && f.old {
+			http.Error(w, `{"error":"extra fields not permitted"}`, http.StatusBadRequest)
+			return
+		}
 		ids, _ := body["return_token_ids"].(bool)
 		prompt, _ := json.Marshal(render(msgs, true))
 		if stream, _ := body["stream"].(bool); stream {
@@ -220,6 +226,12 @@ func TestRemoveField(t *testing.T) {
 		{`{"a":"say \"token_ids\":[1]","b":1}`, `"token_ids"`, `{"a":"say \"token_ids\":[1]","b":1}`},
 		{`{"a":1}`, `"token_ids"`, `{"a":1}`},
 		{`{"a":1, "token_ids" : [ 1 , 2 ] }`, `"token_ids"`, `{"a":1 }`},
+		{`{"a":1,"token_ids":[[1,2],[3]],"b":2}`, `"token_ids"`, `{"a":1,"b":2}`},
+		{`{"a":1,"token_ids":{},"b":2}`, `"token_ids"`, `{"a":1,"b":2}`},
+		{`{"a":1,"token_ids":{"x":"]}\"","y":[1]},"b":2}`, `"token_ids"`, `{"a":1,"b":2}`},
+		{`{"a":1,"token_ids":7}`, `"token_ids"`, `{"a":1}`},
+		{`{"a":1,"token_ids":[1,2`, `"token_ids"`, `{"a":1,"token_ids":[1,2`},
+		{`{"a":1,"token_ids":12`, `"token_ids"`, `{"a":1,"token_ids":12`},
 	} {
 		if got := string(removeField([]byte(tc.in), tc.key)); got != tc.want {
 			t.Errorf("removeField(%s) = %s, want %s", tc.in, got, tc.want)
@@ -233,5 +245,47 @@ func TestMessageStartFromProbes(t *testing.T) {
 	}
 	if tok, err := messageStartFromProbes([]int{7, 1, 8}, []int{7, 1, 8, 7, 2, 8}); err != nil || tok != 7 {
 		t.Errorf("got %d, %v; want 7", tok, err)
+	}
+}
+
+// Token IDs that cannot be removed are never forwarded.
+func TestHandleTokenFields_FailsClosed(t *testing.T) {
+	a := &Agent{}
+	pr := &prefixRequest{strip: true}
+	for _, tc := range []struct {
+		in, want string
+		ok       bool
+	}{
+		{`data: {"choices":[{"token_ids":[[1,2]]}],"prompt_token_ids":null}`, `data: {"choices":[{}]}`, true},
+		{`data: {"choices":[{"token_ids":{}}]}`, `data: {"choices":[{}]}`, true},
+		{`data: {"choices":[{"token_ids":[1,2`, ``, false},
+		{`data: {"prompt_token_ids":[],"x":1,"token_ids":[3`, ``, false},
+	} {
+		got, ok := a.handleTokenFields(pr, []byte(tc.in))
+		if ok != tc.ok || string(got) != tc.want {
+			t.Errorf("handleTokenFields(%s) = %q, %v; want %q, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+	var out bytes.Buffer
+	w := &tokenFieldWriter{a: a, pr: pr, dst: &out}
+	if _, err := w.Write([]byte("data: {\"token_ids\":[1]}\n\ndata: {\"token_ids\":[[1]\n")); err != nil {
+		t.Fatal(err)
+	}
+	w.flush()
+	if strings.Contains(out.String(), "token_ids") {
+		t.Errorf("token IDs forwarded: %q", out.String())
+	}
+}
+
+// An engine that rejects return_token_ids gets no prefix work: client
+// requests are forwarded untouched.
+func TestPrefix_ProbeOffOnOldEngine(t *testing.T) {
+	fake := &fakeVLLM{old: true}
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	a := &Agent{cfg: &config.AgentConfig{BackendURL: srv.URL, Model: "m", JWTSecret: testSecret}, engine: &VLLMEngine{}, httpClient: srv.Client()}
+	a.initPrefix()
+	if a.prefix != nil {
+		t.Fatal("an engine that rejects return_token_ids must disable prefix reporting")
 	}
 }

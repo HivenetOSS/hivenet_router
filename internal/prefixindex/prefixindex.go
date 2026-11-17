@@ -15,6 +15,8 @@
 package prefixindex
 
 import (
+	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -122,7 +124,7 @@ func (ix *Index) Learn(modelName string, agent peer.ID, anchors []uint64, ends [
 		if e <= 0 {
 			continue
 		}
-		m.memo[a] = memoEntry{blocks: blocks[:e:e], exp: memoExp}
+		m.memo[a] = memoEntry{blocks: memoBlocks(blocks, e), exp: memoExp}
 	}
 	ix.capMemo(m, now)
 	ix.predict(m, agent, blocks, now.Add(blockTTL).UnixNano(), now)
@@ -298,17 +300,22 @@ func (ix *Index) Sweep() {
 	ix.mu.RUnlock()
 	for _, m := range ms {
 		m.mu.Lock()
+		n := 0
 		for a, e := range m.memo {
 			if e.exp <= nanos {
 				delete(m.memo, a)
 			}
+			m.pause(&n)
 		}
-		for a, n := range m.pending {
-			if n.exp <= nanos {
+		for a, p := range m.pending {
+			if p.exp <= nanos {
 				delete(m.pending, a)
 			}
+			m.pause(&n)
 		}
-		for b, hs := range m.board {
+		for b := range m.board {
+			m.pause(&n)
+			hs := m.board[b] // read after the pause: it may have changed
 			kept := hs[:0]
 			for _, h := range hs {
 				if h.exp == 0 || h.exp > nanos {
@@ -324,6 +331,32 @@ func (ix *Index) Sweep() {
 			}
 		}
 		m.mu.Unlock()
+	}
+}
+
+// memoBlocks is the first e blocks of a prompt for a memo entry. The anchors
+// of one prompt share its array; an entry much shorter than the prompt gets
+// its own copy, so it does not keep the whole prompt's blocks alive once the
+// longer entries are gone.
+func memoBlocks(blocks []uint64, e int) []uint64 {
+	if 2*e < len(blocks) {
+		return slices.Clone(blocks[:e])
+	}
+	return blocks[:e:e]
+}
+
+// sweepChunk is how many entries Sweep visits before letting the model's
+// other users (Lookup, Learn, Commit) in.
+const sweepChunk = 8192
+
+// pause releases m.mu every sweepChunk calls. A map range continues
+// correctly across it: the map changes only under m.mu, and the range then
+// skips deleted entries and may or may not visit new ones.
+func (m *model) pause(n *int) {
+	if *n++; *n%sweepChunk == 0 {
+		m.mu.Unlock()
+		runtime.Gosched()
+		m.mu.Lock()
 	}
 }
 
