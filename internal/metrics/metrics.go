@@ -504,7 +504,7 @@ func NewRouterMetrics() *RouterMetrics {
 		}),
 		cacheSaltSecretMismatch: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "hivenet_cache_salt_secret_mismatch",
-			Help: "Live routers of the site whose cache-salt secret differs from this router's (fingerprints compared through the shared store); each tenant's prefix cache is split across them.",
+			Help: "Live routers of the site whose cache-salt setting differs from this router's: another secret, or the salt off where this one has it on (and the reverse); compared through the shared store.",
 		}),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{

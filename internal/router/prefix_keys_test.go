@@ -55,3 +55,18 @@ func TestPrefixKeysAndScope(t *testing.T) {
 		t.Error("salt on: two tenants' identical prompts share anchors")
 	}
 }
+
+// Routers compare their cache-salt setting: another secret, salt off among
+// routers with it, and salt on among routers without it all count.
+func TestCompareFingerprints(t *testing.T) {
+	vals := map[string]string{"r1": "aaaa", "r2": "aaaa", "r3": "bbbb", "r4": saltOff}
+	if got, want := compareFingerprints("aaaa", vals), (saltMismatch{secret: 1, off: 1}); got != want {
+		t.Errorf("salt on: %+v, want %+v", got, want)
+	}
+	if got, want := compareFingerprints(saltOff, vals), (saltMismatch{on: 3}); got != want {
+		t.Errorf("salt off: %+v, want %+v", got, want)
+	}
+	if got := compareFingerprints(saltOff, map[string]string{"r1": saltOff}); got != (saltMismatch{}) {
+		t.Errorf("all off: %+v", got)
+	}
+}

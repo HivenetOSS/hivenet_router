@@ -49,8 +49,7 @@ func TestIsolation_PrefixIndexPerTenant(t *testing.T) {
 			for range 2 {
 				startPrefixAgent(t, r, startPrefixBackend(t).URL)
 			}
-			waitFor(t, 20*time.Second, "2 agents registered", func() bool { return modelHealthyAs(base, isoKeyA, stubModel) })
-			time.Sleep(time.Second) // both agents, not just the first
+			waitFor(t, 20*time.Second, "2 agents registered", func() bool { return healthyAgentsAs(base, isoKeyA, stubModel) == 2 })
 
 			msgs := []map[string]string{
 				{"role": "system", "content": strings.Repeat("You are a careful assistant. ", 30)},
@@ -60,25 +59,26 @@ func TestIsolation_PrefixIndexPerTenant(t *testing.T) {
 			hits := func() int { return prefixOutcome(t, metricsURL, "hit") }
 
 			streamChatAs(t, base, isoKeyA, msgs)
-			// Let the agent report the prompt (every 100 ms) and the
-			// pending note expire into the memo's answer.
-			time.Sleep(500 * time.Millisecond)
-			streamChatAs(t, base, isoKeyA, msgs)
-			if hits() != 1 {
-				t.Fatalf("tenant A's repeat: %d hits, want 1", hits())
-			}
+			// The agent reports the prompt within ~100 ms; until then A's
+			// repeat counts as pending. Repeat until it counts as a hit.
+			waitFor(t, 10*time.Second, "tenant A's repeat to hit", func() bool {
+				streamChatAs(t, base, isoKeyA, msgs)
+				return hits() >= 1
+			})
 
+			before := hits()
 			streamChatAs(t, base, isoKeyB, msgs)
-			wantB := 1
+			wantB := 0 // salt on: B's identical prompt is another tenant's
 			if !salt {
-				wantB = 2
+				wantB = 1 // salt off: the control, B finds A's prompt
 			}
-			if got := hits(); got != wantB {
-				t.Fatalf("tenant B's identical prompt: hits %d, want %d", got, wantB)
+			if got := hits() - before; got != wantB {
+				t.Fatalf("tenant B's identical prompt: %d new hits, want %d", got, wantB)
 			}
+			before = hits()
 			streamChatAs(t, base, isoKeyA, msgs)
-			if got := hits(); got != wantB+1 {
-				t.Fatalf("tenant A again: hits %d, want %d", got, wantB+1)
+			if got := hits() - before; got != 1 {
+				t.Fatalf("tenant A again: %d new hits, want 1", got)
 			}
 		})
 	}

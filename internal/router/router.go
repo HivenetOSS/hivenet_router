@@ -806,9 +806,9 @@ func (r *Router) Start() error {
 		for _, c := range r.credits {
 			c.Start(processorCtx)
 		}
-		if r.salter != nil {
-			go r.checkSaltFingerprints(processorCtx)
-		}
+		// With or without the salt: a router without it is reported by
+		// the others (and reports them).
+		go r.checkSaltFingerprints(processorCtx)
 	}
 	go r.publishTenantUsage(processorCtx)
 	// A reservation an exit path forgot to release would hold its budget
