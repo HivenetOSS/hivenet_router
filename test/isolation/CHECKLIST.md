@@ -81,7 +81,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.2 | No log contains a prompt, response, backend error body, credential, salt secret or salt (doc-18 G7, as a regression test), on successful requests and on backend errors (4xx, 5xx, retried or not). | done | `TestIsolation_LogsContentFree`, `TestIsolation_BackendErrorsContentFree`, `TestDecodeAgentError` |
 | 4.3 | The audit log file and the decision log are readable by their owner only (0600). | done | `TestIsolation_AuditFileMode`, `TestDecisionLog_FileMode` |
 | 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage counts every key; the limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
-| 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | planned (PR-7) | `TestMetricsHandler_BearerToken`, `TestIsPrivateBindAddr` |
+| 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | done | `TestMetricsHandler_BearerToken`, `TestIsPrivateBindAddr` |
 | 4.6 | Multi-tenant mode refuses to start with `/metrics` open to anything but a loopback or private address without a token. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics`, `TestValidateIsolationConfig` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |
 | 4.8 | Every request's spans carry `tenant.id`, and no span status or event carries a prompt or a backend error body. | done | `TestIsolation_SpansContentFree`, `TestDecodeAgentError` |

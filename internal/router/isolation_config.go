@@ -51,12 +51,14 @@ type namedSecret struct{ name, value string }
 // secret. The salt secret must differ from all of them: each is held by more
 // parties than the router (the JWT secret by every agent, a redirect secret by
 // every site that verifies redirect tokens, the Valkey password by the shared
-// store) or protects something else, and with it a salt could be computed.
+// store, the metrics token by every scraper) or protects something else, and
+// with it a salt could be computed.
 func otherSecrets(cfg *config.Config) []namedSecret {
 	out := []namedSecret{
 		{"JWT secret, which agents hold", cfg.JWTSecret},
 		{"key-store secret", cfg.KeyStoreSecret},
 		{"Valkey password", cfg.SyncValkeyPassword},
+		{"/metrics bearer token, which every scraper holds", cfg.MetricsBearerToken},
 	}
 	if secrets, err := redirect.ParseSecrets(cfg.RedirectSecrets); err == nil {
 		for _, s := range secrets {

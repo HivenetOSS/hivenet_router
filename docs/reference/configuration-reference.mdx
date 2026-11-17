@@ -240,7 +240,8 @@ tags:
 | --- | --- | --- | --- |
 | `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` | Client, health, and administration HTTP listen address |
 | `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` | Agent-authentication gRPC listen address |
-| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics listen address |
+| `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` | Prometheus metrics listen address (`:port` for every interface, or `host:port`) |
+| `--metrics-bearer-token-file` | `HIVENET_ROUTER_METRICS_BEARER_TOKEN` | — | Bearer token `/metrics` requires; empty leaves it open |
 | `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` | Router libp2p TCP port |
 | `--p2p-listen-addr` | — | `127.0.0.1` | IP address used to bind the router’s libp2p host |
 | `--p2p-announce-addr` | — | Empty | Dialable multiaddress advertised to agents |
@@ -478,7 +479,7 @@ These settings harden a router that serves several customers. Each one is off by
 | `--require-model-allowlist` | `HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST` | `false` | A key without a model allowlist (`models` / `allowed_models`, or `quota.per_model`) can call and list no model, instead of every model. Refused with API auth mode `none` |
 | `--hide-agent-identity` | `HIVENET_ROUTER_HIDE_AGENT_IDENTITY` | `false` | Leave agent `peer_id`, `version`, `organization`, `machine` and `last_seen` out of `GET /v1/models/{model}` (the admin view keeps them), and pass on only the backend response headers that describe the body |
 | `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` | Isolate tenants in the prefix cache of the agents whose engine supports it (a per-tenant `cache_salt`, or llama.cpp's `cache_prompt: false`) and remove any client-sent `cache_salt`. See the engine table in [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) |
-| `--cache-salt-secret-file` | `HIVENET_ROUTER_CACHE_SALT_SECRET` | — | Router-only secret for the salt HMAC; required with `--cache-salt`, at least 32 bytes, different from every other router secret (JWT, key store, redirect, Valkey password), the same on every router in front of the same agents |
+| `--cache-salt-secret-file` | `HIVENET_ROUTER_CACHE_SALT_SECRET` | — | Router-only secret for the salt HMAC; required with `--cache-salt`, at least 32 bytes, different from every other router secret (JWT, key store, redirect, Valkey password, metrics token), the same on every router in front of the same agents |
 
 An unparsable boolean value stops startup.
 
@@ -777,6 +778,7 @@ The complete current router flag set is:
 | `--http-port` | `HIVENET_ROUTER_HTTP_PORT` | `:8080` |
 | `--grpc-port` | `HIVENET_ROUTER_GRPC_PORT` | `:50051` |
 | `--metrics-port` | `HIVENET_ROUTER_METRICS_PORT` | `:2112` |
+| `--metrics-bearer-token-file` | `HIVENET_ROUTER_METRICS_BEARER_TOKEN` | Empty (no token) |
 | `--p2p-port` | `HIVENET_ROUTER_P2P_PORT` | `9000` |
 | `--p2p-listen-addr` | — | `127.0.0.1` |
 | `--p2p-announce-addr` | — | Empty |

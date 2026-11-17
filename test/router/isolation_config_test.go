@@ -55,6 +55,10 @@ func TestValidateIsolationConfig(t *testing.T) {
 			c.SyncValkeyPassword = strings.Repeat("v", 32)
 			c.CacheSalt, c.CacheSaltSecret = true, strings.Repeat("v", 32)
 		}, static, true},
+		{"salt with the metrics token", func(c *config.Config) {
+			c.MetricsBearerToken = strings.Repeat("m", 32)
+			c.CacheSalt, c.CacheSaltSecret = true, strings.Repeat("m", 32)
+		}, static, true},
 		{"salt with its own secret", salt(strings.Repeat("s", 32)), static, false},
 		{"secret without salting", func(c *config.Config) { c.CacheSaltSecret = "short" }, static, false},
 	} {
