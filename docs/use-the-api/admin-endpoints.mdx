@@ -847,6 +847,7 @@ Response:
 | `allowed_models` | No | Model allowlist; empty means unrestricted |
 | `quota` | No | Flat or per-model quota configuration; the flat shape also accepts serverless input and output tokens per minute |
 | `max_occupancy_share` | No | Serverless key-level share of replica-scaled KV occupancy; `0` is unset, otherwise valid through `1` |
+| `routing_strategies` | No | Ranking strategies the key may use, the first its default; empty leaves routing to the models' policies ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 
 A stale version returns HTTP `409`:
 
@@ -864,6 +865,7 @@ A key hash cannot belong to two different IDs. Delete the existing entry before 
 `PUT /admin/api-keys/{id}` and `POST /admin/api-keys/replace` enforce the same admission invariants as static configuration:
 
 - `max_occupancy_share` must be `0` or in `(0, 1]`.
+- Every `routing_strategies` entry must be an implemented strategy (`least-loaded`, `prefix-aware`), listed once.
 - `input_tokens_per_minute` and `output_tokens_per_minute` cannot be negative.
 - For every reachable `mode: serverless` model, a nonzero `input_tokens_per_minute` must be at least that policy's `max_input_tokens`.
 

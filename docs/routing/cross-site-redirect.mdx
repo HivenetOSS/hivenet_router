@@ -59,7 +59,7 @@ Location: https://site-de-1.example.com/v1/chat/completions?rt=v2.<secret id>.<c
 Cache-Control: no-store
 ```
 
-The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the origin site, the target site, the request path, the hop count, a SHA-256 hash of the request body, its issue and expiry times, and a random token ID that is new for every token. The target checks, in order:
+The token is an HMAC-SHA256 signature over the key ID, the request ID, the model, the scope, the routing strategy the client asked for with `X-Hivenet-Routing-Strategy` (if any), the origin site, the target site, the request path, the hop count, a SHA-256 hash of the request body, its issue and expiry times, and a random token ID that is new for every token. The target checks, in order:
 
 1. the token is well formed, its signature is valid, and its request ID (and client request ID, when present) is a UUID;
 2. it has not expired, with 5 seconds of grace for clock drift between routers;

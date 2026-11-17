@@ -109,6 +109,7 @@ Do not depend on a particular JSON error body for `413` responses. Handle the HT
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Client-Request-ID: <uuid>` | No | Your own ID for the request, returned in the response and stored in the audit log. `X-Request-ID` is also accepted |
 | `X-Hivenet-Scope: <scope>` | No | Where the request may be [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`. Default: the country of the site the request reached ([details](/routing/cross-site-redirect#scope)) |
+| `X-Hivenet-Routing-Strategy: <strategy>` | No | Ranking strategy for this request, one of the API key's `routing_strategies`; another value is a `403` `routing_strategy_forbidden`. Default: the key's first strategy ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 | `X-Session-ID: <id>` | No | Keeps a conversation on the same site when the request is [redirected](/routing/cross-site-redirect#choosing-the-site) |
 
 Hivenet Router gives every request its own ID, a UUIDv7, returned in the `X-Request-ID` response header and used in its logs and at the backend. If you send a valid UUID as your own ID, it is returned in `X-Client-Request-ID` and stored with the request. Resend the same ID when you retry, so both attempts can be found by it. See [request IDs](/observability/audit-logging#request-ids).
@@ -503,6 +504,7 @@ Common responses include:
 | `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
 | `401` | `unauthorized` | Missing or invalid credentials |
 | `403` | `model_forbidden` | API key cannot use the requested model |
+| `403` | `routing_strategy_forbidden` | `X-Hivenet-Routing-Strategy` names a strategy the API key does not allow |
 | `404` | `model_not_found` | No registered model matches the request |
 | `429` | `rate_limit_exceeded` | Request rate or a serverless per-key token or occupancy limit is exhausted |
 | `429` | `concurrency_limit_exceeded` | Pool occupancy, `max_inflight`, or front-door pressure shed rejected the request |
