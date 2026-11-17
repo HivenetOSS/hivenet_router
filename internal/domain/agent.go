@@ -229,6 +229,17 @@ func (a *Agent) InFlight() int {
 	return max(a.ActiveRequests, a.reportedInFlight)
 }
 
+// ReportedInFlight is the agent's last reported count of requests in flight
+// from all routers, and whether that report is fresh.
+func (a *Agent) ReportedInFlight() (int, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
+		return 0, false
+	}
+	return a.reportedInFlight, true
+}
+
 // SetReportedPrefill records the prompt tokens waiting for prefill on the
 // agent, from all routers, as its last report says.
 func (a *Agent) SetReportedPrefill(n int) {

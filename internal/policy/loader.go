@@ -55,8 +55,9 @@ var knownShedIfFields = map[string]struct{}{
 // knownStrategies is the set of strategy names that are currently implemented.
 // Add entries here as new strategies are written (see strategy.go).
 var knownStrategies = map[string]struct{}{
-	"least-loaded": {},
-	"prefix-aware": {},
+	"least-loaded":   {},
+	"lowest-latency": {},
+	"prefix-aware":   {},
 	// "lowest-srtt":  {},  // add when implemented
 	// "round-robin":  {},
 }
@@ -221,11 +222,11 @@ func validateStep(name string, step PolicyStep) error {
 	}
 	if _, ok := knownStrategies[step.Strategy]; !ok {
 		if _, isEngine := engineSpecificStrategies[step.Strategy]; isEngine {
-			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: least-loaded, prefix-aware",
-				name, step.Strategy)
+			return fmt.Errorf("policy: step %q: strategy %q is not yet implemented — supported strategies: %s",
+				name, step.Strategy, strings.Join(KnownStrategyNames(), ", "))
 		}
-		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: least-loaded, prefix-aware",
-			name, step.Strategy)
+		return fmt.Errorf("policy: step %q: unknown strategy %q — supported strategies: %s",
+			name, step.Strategy, strings.Join(KnownStrategyNames(), ", "))
 	}
 	// Engine-specific strategies (future) require engine: vllm in the match block.
 	if _, isEngine := engineSpecificStrategies[step.Strategy]; isEngine {

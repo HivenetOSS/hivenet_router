@@ -368,7 +368,7 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 ## Ranking strategy
 
-After matching and gates, Hivenet Router ranks the surviving agents with the step's strategy: `least-loaded` (the default) or [`prefix-aware`](/routing/prefix-aware-routing), which sends a chat request to the agent that already holds the start of its prompt in cache.
+After matching and gates, Hivenet Router ranks the surviving agents with the step's strategy: `least-loaded` (the default), [`lowest-latency`](/routing/policy-yaml-reference#lowest-latency), which sends a request to the agent expected to give its first token soonest from what the engines report, or [`prefix-aware`](/routing/prefix-aware-routing), which sends a chat request to the agent that already holds the start of its prompt in cache.
 
 ```yaml
 strategy: least-loaded
@@ -397,7 +397,7 @@ Because streaming requests hold their agent slot until the stream fully drains, 
 
 The following strategies are not implemented:
 
-- `lowest-srtt`
+- `lowest-srtt` (see [`lowest-latency`](/routing/policy-yaml-reference#lowest-latency))
 - `round-robin`
 - `lowest-kv-cache`
 - `lowest-queue`
@@ -619,7 +619,7 @@ For each policy step, Hivenet Router evaluates agents in this order:
 5. **Previous failures**<br />Remove agents that already produced a forward failure in the current step.
 6. **Capacity gate**<br />Remove agents whose load is greater than or equal to their declared capacity. Agents registered over the network declare none and skip this gate.
 7. **Dynamic gates**<br />Apply the configured `exclude_if` thresholds.
-8. **Strategy ranking**<br />Rank the remaining candidates with `least-loaded`.
+8. **Strategy ranking**<br />Rank the remaining candidates with the step's strategy (`least-loaded` by default).
 9. **Atomic slot acquisition**<br />Attempt to reserve one capacity slot on the selected agent.
 10. **Retry selection after a race**<br />If another request acquired the final slot first, select again without consuming a forward try.
 11. **Wait queue**<br />If all eligible agents are full and queueing is enabled, wait for capacity and evaluate again.
@@ -726,7 +726,7 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
     - an incomplete provider fallback
     - invalid YAML indentation
 
-    Only `least-loaded` and `prefix-aware` are accepted as strategies, and `prefix_aware` is accepted only with `prefix-aware`.
+    Only `least-loaded`, `lowest-latency` and `prefix-aware` are accepted as strategies, and `prefix_aware` is accepted only with `prefix-aware`.
   </Accordion>
 
   <Accordion title="An agent does not match">

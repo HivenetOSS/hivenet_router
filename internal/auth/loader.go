@@ -170,7 +170,7 @@ type APIKeyEntry struct {
 	Models []string `yaml:"models,omitempty"`
 
 	// RoutingStrategies lists the ranking strategies this key may route with
-	// (least-loaded, prefix-aware); the first is its default, and a request
+	// (least-loaded, lowest-latency, prefix-aware); the first is its default, and a request
 	// may pick another one from the list with the X-Hivenet-Routing-Strategy
 	// header. Empty (the default) leaves routing to the models' policies.
 	RoutingStrategies []string `yaml:"routing_strategies,omitempty"`

@@ -572,21 +572,9 @@ Use tags or a staged policy when new agents need a warm-up period before product
 
 ## SRTT is not a ranking strategy
 
-The only currently implemented ranking strategy is:
+SRTT is not a ranking signal: `strategy: lowest-srtt` is rejected during validation, and [`lowest-latency`](/routing/policy-yaml-reference#lowest-latency) does not use it either. SRTT is measured only on the requests a router sends an agent, so ranking on it would keep avoiding an agent that was slow once.
 
-```text
-least-loaded
-```
-
-This is not supported:
-
-```yaml
-strategy: lowest-srtt
-```
-
-A policy using it is rejected during validation.
-
-SRTT can currently be used as an exclusion gate and observability signal.
+SRTT can also be used as an exclusion gate and observability signal.
 
 ## Choose a threshold
 

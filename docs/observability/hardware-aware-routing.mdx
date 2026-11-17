@@ -448,7 +448,7 @@ highest-throughput
 lowest-srtt
 ```
 
-Hardware and latency values can exclude agents. They do not sort the survivors.
+Hardware values can exclude agents. They do not sort the survivors. What engines are busy with (requests running and waiting, prompt tokens queued) sorts them with [`lowest-latency`](/routing/policy-yaml-reference#lowest-latency).
 
 For example:
 

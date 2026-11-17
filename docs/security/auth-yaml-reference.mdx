@@ -193,7 +193,7 @@ api:
 routing_strategies: ["prefix-aware", "least-loaded"]
 ```
 
-The ranking strategies this key's requests may use. The first one is the default; a request may pick another one from the list with the `X-Hivenet-Routing-Strategy` header. Each entry must be an implemented strategy (`least-loaded`, `prefix-aware`), listed once, or the router does not start. See [Strategy chosen by the API key](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key).
+The ranking strategies this key's requests may use. The first one is the default; a request may pick another one from the list with the `X-Hivenet-Routing-Strategy` header. Each entry must be an implemented strategy (`least-loaded`, `lowest-latency`, `prefix-aware`), listed once, or the router does not start. See [Strategy chosen by the API key](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key).
 
 ### `key_hash`
 

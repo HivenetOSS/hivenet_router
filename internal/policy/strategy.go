@@ -36,7 +36,8 @@ type Committer interface {
 // registry maps strategy names to their implementations.
 // Validate checks names against this map at policy load time.
 var registry = map[string]Strategy{
-	"least-loaded": leastLoadedStrategy{},
+	"least-loaded":   leastLoadedStrategy{},
+	"lowest-latency": lowestLatencyStrategy{},
 	// "lowest-srtt":  lowestSRTTStrategy{},   // add when implemented
 	// "round-robin":  roundRobinStrategy{},   // add when implemented
 	// "prefix-aware" is built per policy step from its prefix_aware block

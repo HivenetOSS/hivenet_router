@@ -551,7 +551,7 @@ A CPU-only agent has no GPU values, so GPU gates are skipped for that agent.
 
 ## Ranking strategy
 
-Every policy step requires a ranking strategy: `least-loaded` or `prefix-aware`.
+Every policy step requires a ranking strategy: `least-loaded`, `lowest-latency` or `prefix-aware`.
 
 ### least-loaded
 
@@ -567,6 +567,23 @@ max(this router's in-flight requests to the agent,
 ```
 
 The agent reports its in-flight requests from all routers about every 500 ms. The lowest load ranks first.
+
+### lowest-latency
+
+```yaml
+strategy: lowest-latency
+```
+
+Sends a request to the candidate expected to give its first token soonest, from what each candidate is doing now:
+
+```text
+prompt tokens queued on the agent ÷ 10,000 tokens per second
++ busy requests × 20 ms
+```
+
+Busy requests are the requests in flight on the agent as the routers count them, which moves with each request, plus the requests its engine runs or queues that did not come through the routers: the engine's running and waiting requests minus the agent's own count, both from its last report. A metric a candidate does not report adds nothing. Candidates within 5% (or 5 ms) of the best estimate are a tie, broken by `least-loaded`, so without engine metrics it behaves like `least-loaded`.
+
+Unlike `least-loaded`, which counts the requests routers sent, it also sees what the engine is busy with: a replica slowed by traffic that did not come through these routers, or with a long prefill backlog, ranks lower. Signals that only change when an agent is used are left out, or an agent that was slow once would be avoided long after it recovered: the engine's average time to first token and inter-token latency (agents report averages since the engine started) and SRTT (measured on the requests a router sent the agent). It does not look at what candidates hold in their KV cache: for that, use `prefix-aware`, whose estimate adds the cache term to the same cost.
 
 ### prefix-aware
 
@@ -599,7 +616,7 @@ A field left out takes its default. `prefix_aware` is rejected on a step with an
 The following names are not currently supported:
 
 ```text
-lowest-srtt
+lowest-srtt (see lowest-latency)
 round-robin
 lowest-kv-cache
 lowest-queue
