@@ -164,7 +164,7 @@ Every router of a site must be started with the same:
 | Secret | Why |
 | --- | --- |
 | JWT secret (`HIVENET_ROUTER_JWT_SECRET`) | Every agent authenticates to every router with it |
-| Cache-salt secret (`--cache-salt-secret-file`), with `--cache-salt` | A tenant's salt is derived from it; with different secrets, one tenant's requests through different routers stop sharing its own prefix cache, with no error |
+| Cache-salt secret (`--cache-salt-secret-file`), with `--cache-salt` | A tenant's salt is derived from it; with different secrets, one tenant's requests through different routers stop sharing its own prefix cache, with no error. The routers compare fingerprints of their secrets through the shared store and report a mismatch in `hivenet_cache_salt_secret_mismatch` |
 | Redirect secrets (`HIVENET_ROUTER_REDIRECT_SECRETS`), with cross-site redirect | Any router of the site may verify a token another one issued |
 | Valkey password (`--sync-valkey-password-file`) | All routers use the same store |
 

@@ -48,7 +48,7 @@ http://<router-host>:9212/metrics
 
 `--metrics-port` takes a full listen address, so you can bind one interface, for example `--metrics-port 127.0.0.1:2112` or a private IP. A value with no host, such as `:2112`, or `0.0.0.0:2112` listens on every interface.
 
-Only a loopback address (`127.0.0.1`, `::1`, `localhost`) or a private IP (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) counts as private. A public IP, every interface and any other hostname, whose address DNS could change, count as public: do not serve `/metrics` there without a token.
+Only a loopback address (`127.0.0.1`, `::1`, `localhost`) or a private IP (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) counts as private. A public IP, every interface and any other hostname, whose address DNS could change, count as public: do not serve `/metrics` there without a token. A [multi-tenant](/security/multi-tenant-isolation) router refuses to start that way.
 
 ### Require a bearer token
 
@@ -314,6 +314,18 @@ hivenet_cache_isolation_enabled
 
 ```promql
 min(hivenet_cache_isolation_enabled) == 0
+```
+
+```promql
+hivenet_cache_salt_secret_mismatch
+```
+
+With `--cache-salt` and [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt secret differs from this router's. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
+
+Alert when any router of the site disagrees:
+
+```promql
+max(hivenet_cache_salt_secret_mismatch) > 0
 ```
 
 ### Routed requests

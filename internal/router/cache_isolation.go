@@ -6,18 +6,32 @@ package router
 import (
 	"strings"
 
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/domain"
 )
 
 // cacheIsolationGaps returns the generation paths an agent serves without
-// per-tenant prefix-cache isolation, for its engine and engine version. Only
-// LLM agents are checked, and only while the router isolates tenants
-// (--cache-salt): otherwise nothing is promised, so nothing is a gap.
+// per-tenant prefix-cache isolation. Only LLM agents are checked, and only
+// while the router promises isolation: with --cache-salt, the paths its
+// engine (at its version) cannot isolate; on a multi-tenant router whose
+// isolation was switched off, every generation path.
 func (r *Router) cacheIsolationGaps(a *domain.Agent) []string {
-	if r.salter == nil || a.Metadata.Capability != domain.CapabilityLLM {
+	if a.Metadata.Capability != domain.CapabilityLLM {
 		return nil
 	}
-	return r.salter.Gaps(a.Metadata.Engine, a.Metadata.EngineVersion)
+	switch {
+	case r.salter != nil:
+		return r.salter.Gaps(a.Metadata.Engine, a.Metadata.EngineVersion)
+	case cacheSaltOptedOut(r.cfg):
+		return cachesalt.LLMPaths
+	}
+	return nil
+}
+
+// promisesCacheIsolation reports whether gaps are counted at all: with
+// --cache-salt, or on a multi-tenant router whose isolation was switched off.
+func (r *Router) promisesCacheIsolation() bool {
+	return r.salter != nil || cacheSaltOptedOut(r.cfg)
 }
 
 // checkCacheIsolation warns when a newly registered LLM agent leaves a path

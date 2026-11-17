@@ -349,7 +349,7 @@ When an LLM agent registers with a generation path that is not isolated, the rou
 The secret:
 
 - must be at least 32 bytes and differ from every other secret of the router: the JWT secret (which every agent holds), the key-store secret, each redirect secret (which every site that verifies redirect tokens holds), the Valkey password and the `/metrics` bearer token; the router refuses to start otherwise
-- must be the same on every router in front of the same agents, or one tenant's requests through different routers do not share its own cache (see [Run several routers](/deploy/multiple-routers))
+- must be the same on every router in front of the same agents, or one tenant's requests through different routers do not share its own cache (see [Run several routers](/deploy/multiple-routers)). With shared counters, the routers compare fingerprints of their secrets and report a mismatch in `hivenet_cache_salt_secret_mismatch`
 - changes every salt when rotated, which costs one cold prefix cache
 
 <Note>

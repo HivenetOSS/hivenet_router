@@ -1,0 +1,112 @@
+---
+title: "Multi-tenant isolation"
+description: "Run Hivenet Router for several customers: per-key limits shared across a site's routers, required model allowlists, per-tenant prefix-cache isolation, protected metrics and admin endpoints, all switched on with --multi-tenant."
+sidebarTitle: "Multi-tenant isolation"
+---
+
+When the routers of a site serve several customers, nothing outside the routers separates them. They must make sure one customer cannot use, observe or slow down another. This page describes what keeps tenants apart and how to turn it all on.
+
+A **tenant** is the owner of an API key: `metadata.owner` for keys in `auth.yaml`, `owner` for keys pushed through `/admin/api-keys`. One tenant can have several keys.
+
+## Turn on multi-tenant mode
+
+Start every router of the site with `--multi-tenant` (`HIVENET_ROUTER_MULTI_TENANT=true`). It needs a salt secret, a protected metrics endpoint, and [shared counters](/deploy/multiple-routers) in Valkey with a password, even on a site with one router:
+
+```bash
+openssl rand -base64 48 > /etc/hivenet-router/cache-salt.secret
+openssl rand -hex 32 > /etc/hivenet-router/metrics.token
+
+hivenet-router \
+  --multi-tenant \
+  --auth-config-file /etc/hivenet-router/auth.yaml \
+  --cache-salt-secret-file /etc/hivenet-router/cache-salt.secret \
+  --metrics-bearer-token-file /etc/hivenet-router/metrics.token \
+  --sync-store valkey \
+  --sync-valkey-addrs valkey:6379 \
+  --sync-valkey-password-file /etc/hivenet-router/valkey.password \
+  --sync-valkey-tls
+```
+
+Shared counters are required however many routers the site runs: a router cannot tell whether it is the only one, and without shared counters each router of a site enforces every key's and tenant's limits on its own, so a key gets its limits once per router. A site with one router runs a Valkey next to it.
+
+Every router of a site must use the same salt secret: every agent serves every router, so a tenant's requests through any router must land in the same cache namespace. Each router checks this through the shared store: every 30 sync intervals (`--sync-interval`, 30 seconds by default) it publishes a fingerprint of its secret, an HMAC of a fixed label that reveals neither the secret nor any salt, and compares it with the other routers'. A router that finds another secret logs a warning and reports how many routers use one in `hivenet_cache_salt_secret_mismatch`. It keeps running, so you can roll out a new secret one router at a time.
+
+`--multi-tenant` turns on these settings:
+
+| Setting | Effect |
+| --- | --- |
+| `--require-model-allowlist` | A key with no model allowlist can call and list no model. Cannot be turned off |
+| `--cache-salt` | Each tenant gets its own prefix-cache namespace on every engine that supports it. On by default; see the opt-out below |
+| `--hide-agent-identity` | `GET /v1/models/{model}` leaves out agent peer IDs, organization, machine, version and last-seen time, and only the backend response headers that describe the body reach the client. Cannot be turned off |
+
+The router refuses to start in multi-tenant mode when:
+
+- API authentication mode is `none`, because every caller would be the same tenant
+- admin authentication is disabled (`HIVENET_ROUTER_ALLOW_INSECURE_ADMIN`)
+- `/metrics` has no bearer token and listens on anything but a loopback address, `localhost` or a private IP: every interface, a public IP and any other hostname are refused (see [Prometheus metrics](/observability/prometheus-metrics))
+- `--sync-store=valkey` is not set
+- the Valkey has no password (`--sync-valkey-password-file` or `HIVENET_ROUTER_SYNC_VALKEY_PASSWORD`): the store holds every tenant's usage
+- the cache-salt secret is missing, shorter than 32 bytes, or equal to another router secret: the JWT secret, the key-store secret, a redirect secret, the Valkey password or the `/metrics` bearer token
+- the audit log (`HIVENET_ROUTER_AUDIT_LOG_PATH`) cannot be opened, because its lines, which name every tenant and key, would otherwise go to standard output with the application logs
+
+These rules are checked before anything else at startup, so a refused start changes nothing, even with `--reset-disk-db`.
+
+The router starts but logs a warning when a Valkey address is neither loopback nor `localhost` and `--sync-valkey-tls` is off: the Valkey password and every tenant's usage then cross the network in clear.
+
+A `SIGHUP` reload of `auth.yaml` that would turn API or admin authentication off is rejected, and the previous keys stay in force.
+
+### Opt out of prefix-cache isolation
+
+To run a multi-tenant router without prefix-cache isolation, for example while an engine does not support it, set `--cache-salt=false` (or `HIVENET_ROUTER_CACHE_SALT=false`) explicitly. The router then forwards bodies unchanged, logs a warning at startup, and counts every LLM agent in `hivenet_cache_isolation_gaps`. Tenants sharing an engine then share its prefix cache, so one tenant can infer another's prompts from response timing.
+
+Each setting can also be used on its own, without `--multi-tenant`. See the [configuration reference](/reference/configuration-reference#tenant-isolation-settings).
+
+## What isolates tenants
+
+### Identity comes from the key
+
+The tenant and key of a request come only from its credential. Headers such as `X-Tenant-ID` or body fields such as `user` change nothing. Every key has a key ID: the registry ID for dynamic keys, and an ID derived from `key_hash` for `auth.yaml` keys (`static-` followed by 16 hex characters). Key IDs and owners may not start or end with a space or contain control, invisible or line-separator characters or whitespace other than a plain space, so two tenants cannot look alike in a log or on a dashboard, and they may not take an identity the router uses for its own callers: the owners `admin`, `default` and `anonymous`, the key ID `anonymous`, and key IDs starting with `static-` or `admin-`. See [API keys](/security/api-keys).
+
+### Limits are per key, with an optional tenant budget
+
+Request-rate, daily-token and serverless token-rate limits are counted per key, against that key's own limits, and with shared counters across all the routers of the site. One key exhausting its budget never causes a `429` for another key, of the same tenant or another. A tenant with several keys can use up to the sum of their limits, unless its keys set `quota.tenant_tokens_per_day`: a daily token budget that all the tenant's keys spend together, site-wide. See [Tenant daily budget](/security/auth-yaml-reference#tenant-daily-budget).
+
+`hivenet_tenant_tokens_used_today` reports each tenant's usage today over all its keys, with or without a daily budget; with shared counters every router reports the site total, so aggregate it with `max by (tenant_id)`.
+
+### Keys reach only their models
+
+With an allowlist required, a key can only use the models in its `models` / `allowed_models` list or its `quota.per_model` block, and a key with both only the models in both. This applies to chat, messages, embeddings, reranking, `count_tokens`, semantic aliases, cross-site redirects, scaled-to-zero models and model discovery. A request for a model outside the allowlist gets `403` before any limit is charged or any model is woken. The model checked is the one the backend serves: a body with a field the router reads sent twice or in another letter case (such as `Model` next to `model`) is refused with `400`, since the router and the backend would read different values. See [Model restrictions](/security/model-restrictions).
+
+### The prefix cache is isolated per tenant
+
+Engines share cached prompt blocks between requests with the same prefix, so a faster first token can reveal that someone else sent the same prompt. The router sets a per-tenant `cache_salt` on requests to vLLM (every path; `/v1/messages` only from vLLM 0.27.0) and SGLang (chat completions), turns llama.cpp's prompt cache off per request, and removes any `cache_salt` the client sent. Some of these work only from an engine version on, which the agent reports: an LLM agent left with a path it cannot isolate, on its engine and version, is logged and counted in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
+
+### Logs and metrics are attributable and protected
+
+- Every authenticated audit record names its `tenant_id` and `key_id`, and, with `--router-id`, the router that wrote it. Records hold metadata only, never prompts, completions or credentials. The audit file is created with mode `0600`. See [Audit logging](/observability/audit-logging).
+- A backend error body, which often repeats the input, is returned to the client but kept out of every log line and span.
+- Tenant metrics carry `tenant_id` and `key_id` labels. Require a bearer token on `/metrics`, or bind it to a loopback or private address. See [Prometheus metrics](/observability/prometheus-metrics).
+
+### The admin API stays with the operator
+
+`/admin/*` uses its own keys, which are not API keys. Tenant keys never reach it, and its responses carry no CORS headers. There is no per-tenant admin role.
+
+## Limits of this isolation
+
+<Warning>
+  Tenants share the router's capacity. Admission budgets, queues and agent slots are shared per model, so a burst from one tenant can make another wait or get a `429` or `503`. A key's `max_occupancy_share` caps how much of a model one key can hold in flight. A dedicated replica removes the sharing entirely.
+</Warning>
+
+- Prefix-cache isolation covers only what each engine supports: Ollama, custom backends, `/v1/messages` on SGLang, chat completions on SGLang before 0.5.11, and `/v1/messages` on llama.cpp builds before b11795, and `/v1/messages` on vLLM before 0.27.0 are not isolated. An agent that reports no engine version counts as an older one, except on vLLM chat completions, embeddings and rerank (see `hivenet_cache_isolation_gaps`).
+- The operator of the router and of the agents can read prompts and completions. These controls separate tenants from each other, not from the operator.
+- A tenant budget spans the routers of one site, not several sites. A key's maximum scope (`scope_max`) is not part of this release.
+
+## Check the isolation
+
+The repository's isolation checklist maps each control to the test that proves it. Run it with:
+
+```bash
+go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
+```
+
+The checklist itself is `test/isolation/CHECKLIST.md`.

@@ -35,7 +35,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 1.4 | Key IDs and owners cannot contain characters that alias another key's counters or disguise a log line (control, invisible and line-separator characters, whitespace other than a plain space, a space at either end), and cannot take an identity the router assigns itself (`admin`, `default`, `anonymous`, `static-…`, `admin-…`). | done | `TestKeyIdentifiers_RejectControlChars`, `TestKeyIdentifiers_RejectReserved` |
 | 1.5 | A redirect token resolves to its own key and tenant at the target. | done | `TestRedirect_AtTheTarget` |
 | 1.6 | Concurrent responses are never delivered to the wrong request or tenant, streaming or not. | done | `TestIsolation_ConcurrentResponsesNotCrossWired` |
-| 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP (the previous keys stay in force). | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
+| 1.7 | Multi-tenant mode refuses API auth `none`, at startup and on SIGHUP (the previous keys stay in force). | done | `TestValidateIsolationConfig`, `TestIsolation_SIGHUPCannotDropToNoAuth` |
 | 1.8 | A static key's hash is checked like a dynamic key's (64 hex characters, either case): a hash that could never authenticate fails at load. | done | `TestStaticKeyProvider_KeyHashNormalized` |
 | 1.9 | The router reads a request the way the backend does: a body with a repeated name, or with a differently cased spelling of a field the router reads (Unicode case folding included, e.g. `Model` next to `model`), at the top level or in an object it reads inside (each message, content part or block, `system` block), is refused with 400 before any allowlist, quota or routing decision, on every inference endpoint. | done | `TestIsolation_AmbiguousFieldsRefused`, `TestIsolation_ForbiddenModelCostsNothing`, `TestCheckNames`, `TestCheckShape` |
 
@@ -82,7 +82,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 4.3 | The audit log file and the decision log are readable by their owner only (0600). | done | `TestIsolation_AuditFileMode`, `TestDecisionLog_FileMode` |
 | 4.4 | A request moves only its own tenant's `hivenet_tenant_*` series, labelled with its own key ID. Tenant usage counts every key; the limit gauges sum the tenant's keys. | done | `TestIsolation_TenantMetricsAttribution`, `TestInMemoryLimiter_TenantUsageSumsKeysAndModels`, `TestTenants_AggregatesKeyLimits` |
 | 4.5 | `/metrics` can require a bearer token and bind one interface (doc-18 G3). | done | `TestMetricsHandler_BearerToken`, `TestIsPrivateBindAddr` |
-| 4.6 | Multi-tenant mode refuses to start with `/metrics` open to anything but a loopback or private address without a token. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesOpenMetrics`, `TestValidateIsolationConfig` |
+| 4.6 | Multi-tenant mode refuses to start with `/metrics` open to anything but a loopback or private address without a token. | done | `TestRouterNew_MultiTenantRefusesOpenMetrics`, `TestValidateIsolationConfig` |
 | 4.7 | Splitting logs per customer. | out of scope | none: done in the log pipeline (for example a Loki label on `tenant_id`) |
 | 4.8 | Every request's spans carry `tenant.id`, and no span status or event carries a prompt or a backend error body. | done | `TestIsolation_SpansContentFree`, `TestDecodeAgentError` |
 
@@ -97,7 +97,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine, version, last seen); the admin view keeps it. | done | `TestIsolation_ModelDetailHidesAgentIdentity` |
 | 5.6 | Model discovery (`/v1/models`, `/v1/models/:model`) never names models outside the key's allowlist, from `models` or `quota.per_model`; a hidden model answers like an unknown one. | done | `TestIsolation_DiscoveryHidesModelsOutsideAllowlist` |
 | 5.7 | A per-customer admin role. | out of scope | none: admin stays operator-only |
-| 5.8 | Multi-tenant mode refuses insecure admin. | planned (PR-8) | `TestValidateIsolationConfig` |
+| 5.8 | Multi-tenant mode refuses insecure admin. | done | `TestValidateIsolationConfig` |
 | 5.9 | `/v1` answers CORS with `*`. This is safe: `/v1` accepts only bearer credentials, which a browser never attaches on its own, so a page on another origin gets nothing it could not fetch without the browser. | done | `TestCORSMiddleware_Preflight` |
 | 5.10 | With agent identity hidden, only an allowlist of backend response headers reaches the client. | done | `TestIsolation_HiddenIdentityFiltersBackendHeaders` |
 
@@ -105,11 +105,11 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 6.1 | `--multi-tenant` always turns on the model allowlist and hides agent identity; prefix-cache isolation is on unless explicitly switched off (6.3). It works with static keys and with dynamic keys pushed by key-sync, as in production. | planned (PR-8) | `TestIsolation_MultiTenantProductionProfile`, `TestApplyMultiTenant` |
-| 6.2 | Multi-tenant mode always needs shared counters (`--sync-store=valkey`) with a password, however many routers the site runs, so per-key and tenant limits hold site-wide. A Valkey that is not on loopback and has no TLS gets a startup warning. | planned (PR-8) | `TestValidateIsolationConfig`, `TestIsolation_MultiTenantWarnsOnPlaintextValkey` |
-| 6.3 | Prefix-cache isolation is on by default in multi-tenant mode and can be switched off only explicitly; the router then warns and counts every LLM agent as a gap. | planned (PR-8) | `TestApplyMultiTenant`, `TestIsolation_MultiTenantCacheSaltOptOut` |
-| 6.4 | The settings are checked before anything irreversible: a refused start leaves the disk database untouched, even with `--reset-disk-db`. | planned (PR-8) | `TestRouterNew_RefusedStartKeepsDiskDB` |
-| 6.5 | A multi-tenant router whose audit log path cannot be opened refuses to start instead of writing every tenant's audit lines to stdout. | planned (PR-8) | `TestRouterNew_MultiTenantRefusesUnopenableAuditLog` |
+| 6.1 | `--multi-tenant` always turns on the model allowlist and hides agent identity; prefix-cache isolation is on unless explicitly switched off (6.3). It works with static keys and with dynamic keys pushed by key-sync, as in production. | done | `TestIsolation_MultiTenantProductionProfile`, `TestApplyMultiTenant` |
+| 6.2 | Multi-tenant mode always needs shared counters (`--sync-store=valkey`) with a password, however many routers the site runs, so per-key and tenant limits hold site-wide. A Valkey that is not on loopback and has no TLS gets a startup warning. | done | `TestValidateIsolationConfig`, `TestIsolation_MultiTenantWarnsOnPlaintextValkey` |
+| 6.3 | Prefix-cache isolation is on by default in multi-tenant mode and can be switched off only explicitly; the router then warns and counts every LLM agent as a gap. | done | `TestApplyMultiTenant`, `TestIsolation_MultiTenantCacheSaltOptOut` |
+| 6.4 | The settings are checked before anything irreversible: a refused start leaves the disk database untouched, even with `--reset-disk-db`. | done | `TestRouterNew_RefusedStartKeepsDiskDB` |
+| 6.5 | A multi-tenant router whose audit log path cannot be opened refuses to start instead of writing every tenant's audit lines to stdout. | done | `TestRouterNew_MultiTenantRefusesUnopenableAuditLog` |
 
 ## 7. Doc-18 gaps owned elsewhere
 
@@ -136,4 +136,4 @@ the shared state is where one tenant could reach another's.
 | 8.4 | Occupancy budgets (B2, B4) are shared exactly: the routers together never hold more than the budget. | done | `TestOccupancySharedAcrossRouters`, `TestCreditsNeverOversubscribe` |
 | 8.5 | A cross-site redirect token is accepted once by the whole site: a replay, or a token used by someone else, is refused. | done | `TestRedirect_SingleUseCannotBeStolen`, `TestReplayGuard`, `TestTokenAuth_SingleUseIsLast` |
 | 8.6 | Every agent serves every router of the site and finds them through the routers themselves. | done | `TestAgentServesEveryRouterOfTheSite`, `TestAgentDiscoversEveryRouterOfTheSite` |
-| 8.7 | Every router of the site uses the same cache-salt secret: a router that finds another secret's fingerprint in the shared store warns and counts it. | planned (PR-8) | `TestSaltFingerprintMismatchReported` |
+| 8.7 | Every router of the site uses the same cache-salt secret: a router that finds another secret's fingerprint in the shared store warns and counts it. | done | `TestSaltFingerprintMismatchReported`, `TestShareValue` |

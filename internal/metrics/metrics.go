@@ -133,6 +133,10 @@ type RouterMetrics struct {
 	// caches (cache salt on), else 0 (SetCacheIsolation).
 	cacheIsolationEnabled prometheus.Gauge
 
+	// cacheSaltSecretMismatch counts the live routers of the site whose
+	// cache-salt secret differs from this router's (SetCacheSaltSecretMismatch).
+	cacheSaltSecretMismatch prometheus.Gauge
+
 	// tenantQuotaRPMLimit exposes the configured RPM limit per tenant (0 = unlimited).
 	// Populated only for keys on the legacy flat quota shape. Per-model keys
 	// leave this series at its seeded 0 value — see tenantPerModelQuotaRPMLimit
@@ -485,6 +489,10 @@ func NewRouterMetrics() *RouterMetrics {
 		cacheIsolationEnabled: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "hivenet_cache_isolation_enabled",
 			Help: "1 when the router isolates tenants' prefix caches on the engines that support it (cache salt on), else 0.",
+		}),
+		cacheSaltSecretMismatch: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "hivenet_cache_salt_secret_mismatch",
+			Help: "Live routers of the site whose cache-salt secret differs from this router's (fingerprints compared through the shared store); each tenant's prefix cache is split across them.",
 		}),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -990,6 +998,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantRequestFailed,
 		m.tenantRateLimited,
 		m.cacheIsolationEnabled,
+		m.cacheSaltSecretMismatch,
 		m.tenantQuotaRPMLimit,
 		m.tenantQuotaTPDLimit,
 		m.tenantPerModelQuotaRPMLimit,
@@ -1931,6 +1940,11 @@ func (m *RouterMetrics) SetCacheIsolation(enabled bool, gaps func() map[[2]strin
 			"Registered LLM agents serving a generation path without per-tenant prefix-cache isolation, per model and engine.",
 			[]string{"model", "engine"}, nil)})
 	}
+}
+
+// SetCacheSaltSecretMismatch sets hivenet_cache_salt_secret_mismatch.
+func (m *RouterMetrics) SetCacheSaltSecretMismatch(n int) {
+	m.cacheSaltSecretMismatch.Set(float64(n))
 }
 
 // cacheIsolationGaps is the scrape-time collector behind

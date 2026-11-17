@@ -340,10 +340,23 @@ func pathsOverlap(a, b string) bool {
 
 // New creates a new Router instance with initialized components.
 func New(cfg *config.Config) (*Router, error) {
+	ApplyMultiTenant(cfg)
+	// Everything up to --reset-disk-db below needs only the configuration:
+	// the isolation rules are all checked before anything that cannot be
+	// undone, so a start they refuse changes nothing.
+	if err := ValidateIsolationSettings(cfg); err != nil {
+		return nil, err
+	}
+	for _, w := range IsolationWarnings(cfg) {
+		log.Warn(w)
+	}
 	// Open the audit log now, so a wrong path or a missing volume shows at
 	// startup rather than on the first audited request.
 	api.SetAuditRouterID(cfg.RouterID)
 	if err := api.OpenAuditLog(); err != nil {
+		if cfg.MultiTenant {
+			return nil, fmt.Errorf("--multi-tenant refuses to write audit lines, which name every tenant and key, to stdout with the application output: %w", err)
+		}
 		log.Errorf("%v: audit lines, which name every tenant and key, go to stdout with the application output", err)
 	}
 	if cfg.JWTSecret == "" {
@@ -351,6 +364,21 @@ func New(cfg *config.Config) (*Router, error) {
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return nil, fmt.Errorf("JWT secret too short (%d bytes): minimum 32 bytes required for HS256 (RFC 7518 §3.2)", len(cfg.JWTSecret))
+	}
+	// Build HTTP auth providers from config (or defaults if AuthConfigFile is empty).
+	apiProv, adminProv, keyRegistry, err := auth.ProvidersFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("auth providers: %w", err)
+	}
+	if err := ValidateIsolationProviders(cfg, apiProv, adminProv); err != nil {
+		return nil, err
+	}
+	salter, err := newCacheSalter(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cacheSaltOptedOut(cfg) {
+		log.Warn("--multi-tenant with --cache-salt=false: prefix-cache isolation is OFF. Tenants sharing an engine share its prefix cache, so one tenant can infer another's prompts from response timing. Every LLM agent is counted in hivenet_cache_isolation_gaps.")
 	}
 
 	if cfg.ResetDiskDB {
@@ -428,21 +456,6 @@ func New(cfg *config.Config) (*Router, error) {
 		dirHashes = snap.Hashes
 	}
 
-	// Build HTTP auth providers from config (or defaults if AuthConfigFile is empty).
-	apiProv, adminProv, keyRegistry, err := auth.ProvidersFromConfig(cfg)
-	if err != nil {
-		store.Close() //nolint:errcheck
-		return nil, fmt.Errorf("auth providers: %w", err)
-	}
-	if err := ValidateIsolationConfig(cfg, apiProv); err != nil {
-		store.Close() //nolint:errcheck
-		return nil, err
-	}
-	salter, err := newCacheSalter(cfg)
-	if err != nil {
-		store.Close() //nolint:errcheck
-		return nil, err
-	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -555,8 +568,8 @@ func New(cfg *config.Config) (*Router, error) {
 	r.occupancy.SetQueue(admissionDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
 	// hivenet_cache_isolation_enabled always; the gap count while the router
 	// isolates tenants, computed at every scrape from the registry.
-	if r.salter != nil {
-		routerMetrics.SetCacheIsolation(true, r.cacheIsolationGapCounts)
+	if r.promisesCacheIsolation() {
+		routerMetrics.SetCacheIsolation(r.salter != nil, r.cacheIsolationGapCounts)
 	} else {
 		routerMetrics.SetCacheIsolation(false, nil)
 	}
@@ -762,6 +775,9 @@ func (r *Router) Start() error {
 		r.shared.Start(processorCtx)
 		for _, c := range r.credits {
 			c.Start(processorCtx)
+		}
+		if r.salter != nil {
+			go r.checkSaltFingerprints(processorCtx)
 		}
 	}
 	go r.publishTenantUsage(processorCtx)
@@ -1197,6 +1213,10 @@ func (r *Router) reloadAuthProviders() {
 	}
 	if r.keyRegistry != nil {
 		// DynamicKeyProvider managed via admin API — preserve it, only reload admin
+		if err := ValidateIsolationProviders(r.cfg, apiProv, adminProv); err != nil {
+			log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+			return
+		}
 		r.adminAuth.Swap(adminProv)
 		log.Info("SIGHUP: admin auth provider reloaded (dynamic API key registry preserved)")
 		return
@@ -1216,7 +1236,7 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
-	if err := ValidateIsolationConfig(r.cfg, apiProv); err != nil {
+	if err := ValidateIsolationProviders(r.cfg, apiProv, adminProv); err != nil {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
@@ -1234,6 +1254,11 @@ func (r *Router) reloadAuthProviders() {
 		log.Info("SIGHUP: auth providers reloaded (no auth config file — both sections use mode=none)")
 	}
 }
+
+// ReloadAuthProviders re-reads the auth configuration exactly as SIGHUP does
+// (keeping the previous providers when the new ones are invalid). It exists
+// so tests can drive a reload without sending a signal to their process.
+func (r *Router) ReloadAuthProviders() { r.reloadAuthProviders() }
 
 // newRedirector builds the cross-site redirect state, or returns nil when
 // cfg.SiteID is empty (redirect disabled). cmd/router validates the secrets

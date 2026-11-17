@@ -472,13 +472,14 @@ Agents normally:
 
 ## Tenant isolation settings
 
-These settings harden a router that serves several customers. Each one is off by default.
+These settings harden a router that serves several customers. Each one is off by default. See [Multi-tenant isolation](/security/multi-tenant-isolation).
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
+| `--multi-tenant` | `HIVENET_ROUTER_MULTI_TENANT` | `false` | Turn on `--require-model-allowlist`, `--hide-agent-identity` and (unless set to `false` explicitly) `--cache-salt`; refuse to start with API or admin auth mode `none`, a `/metrics` without a bearer token on anything but a loopback address, `localhost` or a private IP, no `--sync-store=valkey` with a password (however many routers the site runs), or an audit log it cannot open; warn when a remote Valkey has no `--sync-valkey-tls`. See [Multi-tenant isolation](/security/multi-tenant-isolation) |
 | `--require-model-allowlist` | `HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST` | `false` | A key without a model allowlist (`models` / `allowed_models`, or `quota.per_model`) can call and list no model, instead of every model. Refused with API auth mode `none` |
 | `--hide-agent-identity` | `HIVENET_ROUTER_HIDE_AGENT_IDENTITY` | `false` | Leave agent `peer_id`, `version`, `organization`, `machine` and `last_seen` out of `GET /v1/models/{model}` (the admin view keeps them), and pass on only the backend response headers that describe the body |
-| `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` | Isolate tenants in the prefix cache of the agents whose engine supports it (a per-tenant `cache_salt`, or llama.cpp's `cache_prompt: false`) and remove any client-sent `cache_salt`. See the engine table in [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) |
+| `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` (`true` with `--multi-tenant`) | Isolate tenants in the prefix cache of the agents whose engine supports it (a per-tenant `cache_salt`, or llama.cpp's `cache_prompt: false`) and remove any client-sent `cache_salt`. See the engine table in [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) |
 | `--cache-salt-secret-file` | `HIVENET_ROUTER_CACHE_SALT_SECRET` | — | Router-only secret for the salt HMAC; required with `--cache-salt`, at least 32 bytes, different from every other router secret (JWT, key store, redirect, Valkey password, metrics token), the same on every router in front of the same agents |
 
 An unparsable boolean value stops startup.
@@ -797,6 +798,7 @@ The complete current router flag set is:
 | `--key-store-secret-file` | `HIVENET_ROUTER_KEY_STORE_SECRET` | Empty (required with `badger`) |
 | `--key-store-max-age` | `HIVENET_ROUTER_KEY_STORE_MAX_AGE` | `15m` |
 | `--reset-key-store` | `HIVENET_ROUTER_RESET_KEY_STORE` | `false` |
+| `--multi-tenant` | `HIVENET_ROUTER_MULTI_TENANT` | `false` |
 | `--require-model-allowlist` | `HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST` | `false` |
 | `--hide-agent-identity` | `HIVENET_ROUTER_HIDE_AGENT_IDENTITY` | `false` |
 | `--cache-salt` | `HIVENET_ROUTER_CACHE_SALT` | `false` |
