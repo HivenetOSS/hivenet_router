@@ -99,7 +99,7 @@ func TestQuota_ZeroMaxInputSkipped(t *testing.T) {
 // share) loads and every value reaches the resolved QuotaLimits.
 func TestStaticKeyProvider_ServerlessKeyFullQuota(t *testing.T) {
 	entries := []auth.APIKeyEntry{{
-		KeyHash:           "hashserverless",
+		KeyHash:           hashOf("serverless"),
 		Metadata:          auth.KeyMetadata{Name: "some-customer", Owner: "serverless-tenant"},
 		Models:            []string{"gemma-4-31b"},
 		MaxOccupancyShare: 0.64,
@@ -127,7 +127,7 @@ func TestStaticKeyProvider_ServerlessKeyFullQuota(t *testing.T) {
 // (unlimited) limits — the reserved product has no per-key caps.
 func TestStaticKeyProvider_ReservedKeyNoQuota(t *testing.T) {
 	entries := []auth.APIKeyEntry{{
-		KeyHash:  "hashreserved",
+		KeyHash:  hashOf("reserved"),
 		Metadata: auth.KeyMetadata{Name: "acme-reserved-r0", Owner: "reserved-tenant"},
 		Models:   []string{"gemma-4-31b"},
 	}}
@@ -160,7 +160,7 @@ func TestStaticKeyProvider_OccupancyShareRange(t *testing.T) {
 	}
 	for _, c := range cases {
 		entries := []auth.APIKeyEntry{{
-			KeyHash:           "hashshare",
+			KeyHash:           hashOf("share"),
 			Metadata:          auth.KeyMetadata{Name: "k", Owner: "acme"},
 			MaxOccupancyShare: c.share,
 		}}

@@ -18,5 +18,5 @@ func NewNoAuthProvider() *NoAuthProvider {
 
 // Authenticate always succeeds and returns TenantID "default" with no quota limits.
 func (n *NoAuthProvider) Authenticate(_ *http.Request) (*AuthResult, error) {
-	return &AuthResult{TenantID: "default"}, nil
+	return &AuthResult{TenantID: NoAuthTenantID}, nil
 }

@@ -174,11 +174,11 @@ export HIVENET_ROUTER_AUTH_CONFIG=/etc/hivenet-router/auth.yaml
 | `models` | No | Exact model allowlist; empty means unrestricted |
 | `quota` | No | Flat or per-model quota configuration |
 
-Duplicate `key_hash` values are rejected when static configuration is loaded.
+A static `key_hash` must be 64 hexadecimal characters, like a dynamic one. Uppercase is stored lowercase; anything else is rejected when static configuration is loaded, as are duplicate values in any letter case.
 
-Use the exact lowercase SHA-256 output produced by `hivenet-router keygen` or `sha256sum`. Do not edit a hash manually.
+Use the exact SHA-256 output produced by `hivenet-router keygen` or `sha256sum`. Do not edit a hash manually.
 
-`metadata.name` and `metadata.owner` must not be empty.
+`metadata.name` and `metadata.owner` must not be empty. The owner must be valid UTF-8 and must not start or end with a space. It must not contain control characters (such as NUL, tab, newline, DEL or NEL), characters that render as nothing (format characters such as a right-to-left override, a zero-width space or a byte-order mark, variation selectors, tag characters, the Hangul fillers and the combining grapheme joiner), line and paragraph separators, or whitespace other than a plain space (such as a no-break or ideographic space). Plain spaces inside it and other text are allowed. The owners `admin`, `default` and `anonymous` are reserved, in any letter case: the router uses them for admin keys, auth mode `none` and unidentified callers.
 
 ## Static key expiration
 
@@ -351,9 +351,7 @@ This has an important consequence:
 
 The request-rate limiter uses a token bucket. It begins with up to one minute's configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the burst window; `0` preserves the full-minute capacity.
 
-<Warning>
-  Dynamic keys have stable IDs, so serverless occupancy and token-rate state is isolated per key. Static-key authentication currently leaves the key ID empty, causing static keys to share the `anonymous` B4 state for a model. See the [auth YAML reference](/security/auth-yaml-reference) before using static keys with serverless limits.
-</Warning>
+Serverless occupancy and token-rate state is isolated per key. Dynamic keys use their registry ID. Static `auth.yaml` keys use a key ID derived one-way from `key_hash`: `static-` followed by 16 hex characters.
 
 The daily token counter resets at midnight UTC.
 
@@ -683,6 +681,18 @@ See [Admin endpoints](/use-the-api/admin-endpoints) for individual add, update, 
 | `expires_at` | No | RFC 3339 expiry timestamp |
 | `allowed_models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
+
+`id` and `owner` follow the same character rules as a static owner: valid UTF-8, no space at either end, and no control, invisible or line-separator characters or whitespace other than a plain space. The owners `admin`, `default` and `anonymous`, the ID `anonymous`, and IDs starting with `static-` or `admin-` are reserved, in any letter case (compared as Unicode case folding does, so a long `ſ` counts as `s`): the router uses them for its own callers and for the IDs it derives.
+
+A push with one invalid entry is refused as a whole with `400`, so the registry keeps its previous keys (`ReplaceAll` is all-or-nothing). The router logs a warning naming the entry and counts the push in `hivenet_api_key_push_rejected_total`. A key restored from the key store that no longer passes these checks is skipped at startup, logged, counted, and deleted from the store; key-sync must push it again in a valid form.
+
+<Warning>
+  These rules are stricter than in earlier releases. Before upgrading, check your `auth.yaml` owners and your key-sync data against them:
+
+  - A static owner that breaks them stops the router at startup.
+  - A dynamic key that breaks them makes every push that contains it fail with `400`, a full replace included. Nothing in a refused push is applied, so the keys that replace would have revoked stay in force until the entry is fixed.
+  - A persisted key (`--key-store=badger`) that breaks them is dropped at startup and stops authenticating until key-sync pushes it in a valid form.
+</Warning>
 
 Dynamic expiration uses RFC 3339:
 

@@ -543,6 +543,22 @@ Exported only with `--sync-store=valkey`. See [Run several routers](/deploy/mult
 | `hivenet_sync_unknown_routers` | gauge | Routers the agents report a connection to that the store does not list |
 | `hivenet_admission_reaped_total` | counter | Occupancy reservations released because they outlived any request (a leak caught; should stay `0`) |
 
+## Dynamic key pushes
+
+```promql
+hivenet_api_key_push_rejected_total
+```
+
+Label: `endpoint` (`upsert` or `replace`). Pushes to `/admin/api-keys` refused with `400` because an entry is invalid, such as an owner the [identifier rules](/security/api-keys) refuse. Nothing in a refused push is applied: a refused full replace also leaves the keys it would have revoked in force. The router logs a warning naming the entry. A stale version (`409`) is not counted.
+
+Alert on any refused push:
+
+```yaml
+- alert: HivenetAPIKeyPushRejected
+  expr: increase(hivenet_api_key_push_rejected_total[5m]) > 0
+  labels: {severity: critical}
+```
+
 ## Dynamic key store metrics
 
 Exported only with `--key-store=badger`.
@@ -1194,7 +1210,7 @@ Tenant metrics attribute activity to clients and deployments.
 | Label | Source | Default |
 | --- | --- | --- |
 | `tenant_id` | Authenticated owner or tenant | `default` in no-auth mode |
-| `key_id` | Dynamic registry entry ID | `anonymous` for static or no-auth access |
+| `key_id` | Dynamic registry entry ID, or `static-` plus 16 hex characters derived from the key hash for static keys | `anonymous` for no-auth access |
 | `deployment_id` | Selected agent registration metadata | `unset` before routing or when absent |
 | `model` | Request body | Requested model |
 
@@ -1910,13 +1926,11 @@ groups:
     key_id="anonymous"
     ```
 
-    Static API keys currently use:
+    Static API keys use a key ID derived from their `key_hash`, for example:
 
     ```text
-    key_id="anonymous"
+    key_id="static-3c1f9a7e5b2d4086"
     ```
-
-    because stable key IDs belong to dynamic registry entries.
 
     `deployment_id="unset"` is expected before an agent is selected or when the agent does not advertise a deployment ID.
   </Accordion>

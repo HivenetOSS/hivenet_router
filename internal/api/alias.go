@@ -244,9 +244,9 @@ func cachedBody(c *gin.Context) ([]byte, bool) {
 	return b, ok
 }
 
-// callerIdentity scopes task pins and fingerprints to one API key. Dynamic
-// keys carry a key_id; static auth.yaml keys do not, so fall back to the
-// tenant plus the key's masked preview, which distinguishes keys of one tenant.
+// callerIdentity scopes task pins and fingerprints to one API key: its key
+// ID, which every dynamic, static and admin key carries. Only auth mode none
+// has no key ID; it falls back to the tenant plus the key's masked preview.
 func callerIdentity(c *gin.Context) string {
 	if id := c.GetString("key_id"); id != "" {
 		return id

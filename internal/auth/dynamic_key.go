@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -170,24 +169,31 @@ func resultFor(entry *DynamicKeyEntry, ok bool) (*AuthResult, error) {
 // and hex format. Mutates the entry in place. Returns a descriptive error if any
 // field is invalid. SHA-256 hashes are case-insensitive — accepting uppercase
 // avoids spurious 400s when callers use stdlib formatters that emit uppercase.
+// ValidateDynamicKeyEntry reports whether the registry would accept e
+// (Upsert, ReplaceAll), without changing anything: the admin handlers check
+// each entry of a push with it, so a refused push names the entry at fault.
+func ValidateDynamicKeyEntry(e DynamicKeyEntry) error {
+	return normalizeAndValidateKeyEntry(&e)
+}
+
 func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	if e.ID == "" {
 		return fmt.Errorf("auth: key entry: id must not be empty")
 	}
-	if e.KeyHash == "" {
-		return fmt.Errorf("auth: key entry %q: key_hash must not be empty", e.ID)
+	label := fmt.Sprintf("key entry %q", e.ID)
+	if err := validateKeyID(label, "id", e.ID); err != nil {
+		return err
 	}
-	e.KeyHash = strings.ToLower(e.KeyHash)
-	if len(e.KeyHash) != 64 {
-		return fmt.Errorf("auth: key entry %q: key_hash must be 64 hex characters (SHA-256), got %d", e.ID, len(e.KeyHash))
+	hash, err := normalizeKeyHash(label, e.KeyHash)
+	if err != nil {
+		return err
 	}
-	for _, c := range e.KeyHash {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return fmt.Errorf("auth: key entry %q: key_hash contains non-hex character %q", e.ID, c)
-		}
-	}
+	e.KeyHash = hash
 	if e.Owner == "" {
 		return fmt.Errorf("auth: key entry %q: owner must not be empty", e.ID)
+	}
+	if err := validateOwner(label, "owner", e.Owner); err != nil {
+		return err
 	}
 	if e.Name == "" {
 		return fmt.Errorf("auth: key entry %q: name must not be empty", e.ID)
