@@ -701,6 +701,7 @@ type AgentConfig struct {
 	Capacity       int
 	Version        string
 	Region         string
+	Country        string // ISO 3166-1 alpha-2 country the agent runs in; empty = undeclared
 	Tags           []string
 	Organization   string // Cloud provider / compute provider (e.g. AWS, OVH, Hivenet Compute)
 	Machine        string // Machine name within the organization

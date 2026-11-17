@@ -1372,6 +1372,7 @@ func (a *Agent) authenticate(routerAddr string, peerID peer.ID) (*pb.AuthRespons
 		LlmInfo:       a.cfg.LLMInfo,
 		Capability:    a.cfg.Capability,
 		GpuModel:      a.cfg.GPUModel,
+		Country:       a.cfg.Country,
 	}, 30*time.Second)
 
 	if err != nil {

@@ -112,7 +112,7 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 	})
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(redirect.Wrap(s.rd, keys, keys))).
-		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
+		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.RoutingStrategy(), h.Scope(), h.AliasMiddleware(), h.ModelACL(),
 			h.RedirectDecision(), api.QuotaMiddlewareWithReplicas(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)

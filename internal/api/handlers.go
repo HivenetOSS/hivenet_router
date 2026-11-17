@@ -229,6 +229,10 @@ type Handlers struct {
 	// legacy flat path.
 	healthyAgentCount func(model string) int
 
+	// healthyInScope counts the healthy agents serving a model whose declared
+	// country is inside a scope (SetHealthyInScope); nil = healthyAgentCount.
+	healthyInScope func(model string, scope domain.Scope) int
+
 	// registrationFeed is the live agent-registration change feed the SSE
 	// handler on /admin/registration-stream consumes. Nil-safe: the handler
 	// returns 501 when no feed is wired (e.g. tests).
@@ -517,6 +521,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
 	setRoutingStrategy(c, pending)
+	pending.Scope = requestScope(c)
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
@@ -1627,6 +1632,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	pending.DeploymentID = deploymentID
 	pending.Capability = capability
 	setRoutingStrategy(c, pending)
+	pending.Scope = requestScope(c)
 
 	select {
 	case h.requestQueue <- pending:
@@ -1805,3 +1811,10 @@ func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCa
 // SetDefaultMaxInflight sets the requests in flight allowed per healthy
 // replica of a model nothing else bounds; 0 leaves such models unbounded.
 func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }
+
+// SetHealthyInScope wires the count of healthy agents serving a model inside
+// a scope, used by the redirect decision for requests that carry a scope.
+// Must be called before the server starts.
+func (h *Handlers) SetHealthyInScope(f func(model string, scope domain.Scope) int) {
+	h.healthyInScope = f
+}

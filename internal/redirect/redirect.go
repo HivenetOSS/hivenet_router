@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"hivenet_router/internal/domain"
 )
 
 const (
@@ -528,19 +530,17 @@ func Location(siteURL string, req *url.URL, token string) string {
 // Scope bounds where a request may be served: "all", "EU" or "country:XX".
 type Scope string
 
-// ScopeAll is the widest scope. Until scope_max lands on keys (W5.5), every
-// request's effective scope is ScopeAll.
+// ScopeAll is the widest scope.
 const ScopeAll Scope = "all"
 
-// ParseScope validates a scope string.
+// ParseScope validates a scope string (the same rules as domain.ParseScope,
+// which the router uses for the request's scope).
 func ParseScope(s string) (Scope, error) {
-	switch {
-	case s == string(ScopeAll), s == "EU":
-		return Scope(s), nil
-	case strings.HasPrefix(s, "country:") && countryCode.MatchString(strings.TrimPrefix(s, "country:")):
-		return Scope(s), nil
+	d, err := domain.ParseScope(s)
+	if err != nil {
+		return "", fmt.Errorf("redirect: %w", err)
 	}
-	return "", fmt.Errorf("redirect: invalid scope %q", s)
+	return Scope(d), nil
 }
 
 // Contains reports whether site p is inside the scope. An unknown scope

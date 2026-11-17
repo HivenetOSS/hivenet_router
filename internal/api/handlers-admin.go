@@ -227,6 +227,11 @@ type apiKeyEntryRequest struct {
 	// rejected with 400.
 	RoutingStrategies []string `json:"routing_strategies"`
 
+	// ScopeMax and HomeCountry bound where the key's requests may be served
+	// (see auth.AuthResult); validated by the registry.
+	ScopeMax    string `json:"scope_max"`
+	HomeCountry string `json:"home_country"`
+
 	// MaxOccupancyShare is the key-level serverless occupancy share, matching
 	// the static auth.yaml field of the same name (it sits outside quota there
 	// too, because it is a fraction of the replica pool's admit budget rather
@@ -249,6 +254,8 @@ type upsertAPIKeyRequest struct {
 	Quota             apiKeyQuota `json:"quota"`
 	MaxOccupancyShare float64     `json:"max_occupancy_share"` // see apiKeyEntryRequest
 	RoutingStrategies []string    `json:"routing_strategies"`  // see apiKeyEntryRequest
+	ScopeMax          string      `json:"scope_max"`           // see apiKeyEntryRequest
+	HomeCountry       string      `json:"home_country"`        // see apiKeyEntryRequest
 }
 
 // replaceAPIKeysRequest is the JSON body for POST /admin/api-keys/replace.
@@ -288,6 +295,8 @@ func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 		Quota:         quota,
 
 		RoutingStrategies: k.RoutingStrategies,
+		ScopeMax:          k.ScopeMax,
+		HomeCountry:       k.HomeCountry,
 	}, nil
 }
 
@@ -406,6 +415,8 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		Quota:             req.Quota,
 		MaxOccupancyShare: req.MaxOccupancyShare,
 		RoutingStrategies: req.RoutingStrategies,
+		ScopeMax:          req.ScopeMax,
+		HomeCountry:       req.HomeCountry,
 	}.toEntry()
 	if err == nil {
 		err = h.checkPushedEntry(entry)

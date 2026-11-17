@@ -19,12 +19,15 @@ const (
 
 // AgentMetadata contains agent capabilities and identification
 type AgentMetadata struct {
-	Model    string   `json:"model"`
-	Capacity int      `json:"capacity"`
-	Version  string   `json:"version"`
-	Region   string   `json:"region,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
-	Engine   string   `json:"engine,omitempty"`
+	Model    string `json:"model"`
+	Capacity int    `json:"capacity"`
+	Version  string `json:"version"`
+	Region   string `json:"region,omitempty"`
+	// Country is the ISO 3166-1 alpha-2 country the agent declared it runs
+	// in; empty when it declared none (served only to scope "all").
+	Country string   `json:"country,omitempty"`
+	Tags    []string `json:"tags,omitempty"`
+	Engine  string   `json:"engine,omitempty"`
 	// EngineVersion is the version (or build) of the engine as the agent
 	// read it from the backend at startup: vLLM's version, SGLang's version,
 	// llama.cpp's build_info (b<build>-<commit>). Empty when unknown.

@@ -187,6 +187,15 @@ type APIKeyEntry struct {
 	// header. Empty (the default) leaves routing to the models' policies.
 	RoutingStrategies []string `yaml:"routing_strategies,omitempty"`
 
+	// ScopeMax is the widest scope this key's requests may be served in:
+	// "all" (the default), "EU" or "country:XX". A request may narrow it with
+	// the X-Hivenet-Scope header, never widen it.
+	ScopeMax string `yaml:"scope_max,omitempty"`
+
+	// HomeCountry (ISO 3166-1 alpha-2, inside scope_max) is the scope of a
+	// request that sends no X-Hivenet-Scope header.
+	HomeCountry string `yaml:"home_country,omitempty"`
+
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
 

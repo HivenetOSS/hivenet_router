@@ -90,6 +90,8 @@ type keyStoreEntry struct {
 	// RoutingStrategies is omitted when empty, so a snapshot written before
 	// the field existed reads back the same.
 	RoutingStrategies []string `json:"routing_strategies,omitempty"`
+	ScopeMax          string   `json:"scope_max,omitempty"`
+	HomeCountry       string   `json:"home_country,omitempty"`
 }
 
 // keyStoreQuota / keyStorePerModel mirror auth.QuotaLimits /
@@ -555,6 +557,8 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 		Quota:         wq,
 
 		RoutingStrategies: e.RoutingStrategies,
+		ScopeMax:          e.ScopeMax,
+		HomeCountry:       e.HomeCountry,
 	}
 }
 
@@ -586,5 +590,7 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 		Quota:         q,
 
 		RoutingStrategies: w.RoutingStrategies,
+		ScopeMax:          w.ScopeMax,
+		HomeCountry:       w.HomeCountry,
 	}
 }

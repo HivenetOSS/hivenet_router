@@ -40,6 +40,10 @@ type DynamicKeyEntry struct {
 	// RoutingStrategies: the ranking strategies the key may use, the first
 	// its default; empty = the models' policies decide. See AuthResult.
 	RoutingStrategies []string
+	// ScopeMax and HomeCountry bound where the key's requests may be served;
+	// see AuthResult.
+	ScopeMax    string
+	HomeCountry string
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -224,6 +228,8 @@ func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, 
 		KeyPreview:        entry.KeyPreview,
 		AllowedModels:     entry.AllowedModels,
 		RoutingStrategies: entry.RoutingStrategies,
+		ScopeMax:          entry.ScopeMax,
+		HomeCountry:       entry.HomeCountry,
 		QuotaLimits:       quota,
 	}, nil
 }
@@ -267,6 +273,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	// nonsense. Enforced here — not only in the HTTP DTO layer — so every
 	// registry mutation path is covered.
 	if err := validateOccupancyShare(fmt.Sprintf("key entry %q", e.ID), e.Quota.MaxOccupancyShare); err != nil {
+		return err
+	}
+	if err := validateKeyScope(fmt.Sprintf("key entry %q", e.ID), e.ScopeMax, e.HomeCountry); err != nil {
 		return err
 	}
 	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
@@ -321,6 +330,8 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		Quota:         e.Quota,
 
 		RoutingStrategies: e.RoutingStrategies,
+		ScopeMax:          e.ScopeMax,
+		HomeCountry:       e.HomeCountry,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -435,6 +446,8 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			Quota:         entries[i].Quota,
 
 			RoutingStrategies: entries[i].RoutingStrategies,
+			ScopeMax:          entries[i].ScopeMax,
+			HomeCountry:       entries[i].HomeCountry,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry

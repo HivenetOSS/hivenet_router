@@ -265,6 +265,7 @@ The agent waits until llama.cpp is healthy and exposes a model before registerin
 | `--router-grpc` | Router endpoint used for agent authentication. For a site with several routers, use `--routers`: every router's address, or one of them when the routers advertise their address ([Run several routers](/deploy/multiple-routers#connect-agents-to-every-router)) |
 | `--jwt-secret-file` | Shared secret used to authenticate the agent |
 | `--region` | Region metadata available to routing policies |
+| `--country` | ISO 3166-1 alpha-2 country the agent runs in, for [sovereignty](/routing/cross-site-redirect#scope): requests with a scope are served only by agents inside it, and an agent without a country serves only scope `all` |
 | `--organization` | Organization or infrastructure-provider metadata |
 | `--machine` | Stable machine identifier |
 | `--identity-path` | Persistent private key that keeps the peer ID stable |
