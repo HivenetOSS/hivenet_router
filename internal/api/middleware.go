@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"hivenet_router/internal/auth"
@@ -224,6 +225,15 @@ func CORSMiddleware() gin.HandlerFunc {
 
 	// Middleware in Gin is just a function that receives a request context.
 	return func(c *gin.Context) {
+
+		// The operator-only admin API is not offered to browsers: no CORS
+		// headers, so no web page on another origin can read an admin
+		// response with a credential it obtained. A preflight there gets
+		// no CORS answer: no /admin route takes OPTIONS, so it is a 404.
+		if p := c.Request.URL.Path; p == "/admin" || strings.HasPrefix(p, "/admin/") {
+			c.Next()
+			return
+		}
 
 		// Allow requests from ANY origin ("*").
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")

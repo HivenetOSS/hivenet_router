@@ -200,7 +200,7 @@ type Message struct {
 
 // ModelAgentEntry is a single agent entry in the per-model detail response.
 type ModelAgentEntry struct {
-	PeerID       string `json:"peer_id"`
+	PeerID       string `json:"peer_id,omitempty"`
 	Engine       string `json:"engine,omitempty"`
 	Version      string `json:"version,omitempty"`
 	Region       string `json:"region,omitempty"`
@@ -208,7 +208,7 @@ type ModelAgentEntry struct {
 	Machine      string `json:"machine,omitempty"`
 	Capacity     int    `json:"capacity"`
 	IsHealthy    bool   `json:"is_healthy"`
-	LastSeen     int64  `json:"last_seen"`
+	LastSeen     int64  `json:"last_seen,omitempty"`
 }
 
 // ModelAgents holds aggregated agent stats for a model.

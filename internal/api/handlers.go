@@ -583,6 +583,12 @@ type Isolation struct {
 	// list any model (instead of every model). For shared multi-tenant
 	// routers, where an unrestricted key would reach other customers' models.
 	RequireModelAllowlist bool
+
+	// HideAgentIdentity leaves out of GET /v1/models/:model what identifies
+	// an agent (peer ID, organization, machine, version, last seen), so a
+	// customer cannot map the fleet, including other customers' reserved
+	// replicas. GET /admin/models/:model keeps the full list.
+	HideAgentIdentity bool
 }
 
 // SetIsolation sets the tenant-isolation switches. Call before serving.
@@ -1257,7 +1263,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
-	copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
+	h.copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 	c.Status(http.StatusOK)
 
 	if resp.Body == nil {
@@ -1455,11 +1461,14 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 	}
 
 	// Populate the per-agent list for the detail view (all agents included).
+	// The client view can leave out what identifies an agent; applyAllowSet
+	// is false only for the admin view.
+	hideIdentity := applyAllowSet && h.isolation.HideAgentIdentity
 	for _, a := range agents {
 		if a.Model != modelID {
 			continue
 		}
-		m.Agents.List = append(m.Agents.List, domain.ModelAgentEntry{
+		entry := domain.ModelAgentEntry{
 			PeerID:       a.PeerID,
 			Engine:       a.Metadata.Engine,
 			Version:      a.Metadata.Version,
@@ -1469,7 +1478,11 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 			Capacity:     a.Capacity,
 			IsHealthy:    a.IsHealthy,
 			LastSeen:     a.LastSeen.Unix(),
-		})
+		}
+		if hideIdentity {
+			entry.PeerID, entry.Organization, entry.Machine, entry.Version, entry.LastSeen = "", "", "", "", 0
+		}
+		m.Agents.List = append(m.Agents.List, entry)
 	}
 
 	c.JSON(http.StatusOK, m)
@@ -1623,7 +1636,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	select {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
-		copyBackendHeaders(c, resp.HttpHeaders, requestID)
+		h.copyBackendHeaders(c, resp.HttpHeaders, requestID)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:
@@ -1720,7 +1733,15 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 // returns its own ID (a cloud provider, or a backend that ignores ours, or a
 // retry's ID: see domain.PendingRequest.ForwardID) keeps it visible in
 // X-Upstream-Request-ID.
-func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+//
+// With agent identity hidden (Isolation.HideAgentIdentity), only the headers
+// that describe the body itself pass (identityFreeHeaders): a Server header,
+// an engine's own headers or a proxy's would otherwise name the engine, its
+// version or its host to every tenant.
+func (hs *Handlers) copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+	if hs.isolation.HideAgentIdentity {
+		src = keepHeaders(src, identityFreeHeaders)
+	}
 	h := c.Writer.Header()
 	clientID := h.Get(headerClientRequestID)
 	domain.CopyHttpHeaders(h, src)
@@ -1733,6 +1754,27 @@ func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
 		h.Set(headerUpstreamRequestID, up)
 	}
 	h.Set(headerRequestID, requestID)
+}
+
+// identityFreeHeaders are the backend response headers a client still gets
+// when agent identity is hidden: what describes the body, and the request ID
+// (X-Upstream-Request-ID is derived from it). Canonical names.
+var identityFreeHeaders = map[string]bool{
+	"Content-Type":                           true,
+	"Content-Encoding":                       true,
+	"Cache-Control":                          true,
+	http.CanonicalHeaderKey(headerRequestID): true,
+}
+
+// keepHeaders returns the headers of src whose canonical name is in keep.
+func keepHeaders(src http.Header, keep map[string]bool) http.Header {
+	out := make(http.Header, len(keep))
+	for k, vv := range src {
+		if keep[http.CanonicalHeaderKey(k)] {
+			out[k] = vv
+		}
+	}
+	return out
 }
 
 // headerUpstreamRequestID carries the request ID an upstream returned when it

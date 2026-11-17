@@ -93,13 +93,13 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 5.1 | Every `/admin` route rejects missing credentials and every tenant's API key. | done | `TestIsolation_AdminRoutesRejectAPIKeys` |
 | 5.2 | The admin key cannot be used as an API key. | done | `TestIsolation_AdminKeyIsNotAnAPIKey` |
 | 5.3 | Admin auth fails closed unless insecure admin is explicitly allowed. | done | `TestProvidersFromConfig_AdminNoAuth_FailsClosed` |
-| 5.4 | `/admin` responses carry no CORS headers; `/v1` CORS is unchanged (part of doc-18 G4). | planned (PR-6) | `TestIsolation_CORSNotOnAdmin` |
-| 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine, version, last seen); the admin view keeps it. | planned (PR-6) | `TestIsolation_ModelDetailHidesAgentIdentity` |
+| 5.4 | `/admin` responses carry no CORS headers; `/v1` CORS is unchanged (part of doc-18 G4). | done | `TestIsolation_CORSNotOnAdmin` |
+| 5.5 | `/v1/models/:model` can hide agent identity (peer ID, organization, machine, version, last seen); the admin view keeps it. | done | `TestIsolation_ModelDetailHidesAgentIdentity` |
 | 5.6 | Model discovery (`/v1/models`, `/v1/models/:model`) never names models outside the key's allowlist, from `models` or `quota.per_model`; a hidden model answers like an unknown one. | done | `TestIsolation_DiscoveryHidesModelsOutsideAllowlist` |
 | 5.7 | A per-customer admin role. | out of scope | none: admin stays operator-only |
 | 5.8 | Multi-tenant mode refuses insecure admin. | planned (PR-8) | `TestValidateIsolationConfig` |
 | 5.9 | `/v1` answers CORS with `*`. This is safe: `/v1` accepts only bearer credentials, which a browser never attaches on its own, so a page on another origin gets nothing it could not fetch without the browser. | done | `TestCORSMiddleware_Preflight` |
-| 5.10 | With agent identity hidden, only an allowlist of backend response headers reaches the client. | planned (PR-6) | `TestIsolation_HiddenIdentityFiltersBackendHeaders` |
+| 5.10 | With agent identity hidden, only an allowlist of backend response headers reaches the client. | done | `TestIsolation_HiddenIdentityFiltersBackendHeaders` |
 
 ## 6. Multi-tenant mode
 
