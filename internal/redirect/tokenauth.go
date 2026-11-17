@@ -219,6 +219,16 @@ func (t *tokenAuth) Tenants() map[string]auth.QuotaLimits {
 	return nil
 }
 
+// KeysWithoutModelAllowlist passes through the wrapped provider's count, which
+// the router reads (by type assertion) to warn when a required allowlist
+// refuses keys on every model.
+func (t *tokenAuth) KeysWithoutModelAllowlist() int {
+	if c, ok := t.next.(interface{ KeysWithoutModelAllowlist() int }); ok {
+		return c.KeysWithoutModelAllowlist()
+	}
+	return 0
+}
+
 // TenantIDs passes through the wrapped provider's tenant list, which the
 // router reads (by type assertion) to publish each tenant's usage today.
 func (t *tokenAuth) TenantIDs() []string {

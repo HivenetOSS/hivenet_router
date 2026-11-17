@@ -14,7 +14,9 @@ import (
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/jsonbody"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -84,6 +86,92 @@ func BodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 		c.Request.ContentLength = int64(len(body))
+		c.Next()
+	}
+}
+
+// routerReadFields are the top-level request fields the router itself reads:
+// what the handlers decode (domain.ChatRequest; embeddings and rerank read
+// only "model"), what semantic aliases read (semantic.DecodedFields), and the
+// model and stream the middlewares peek at. A new struct the router decodes
+// from an inference body belongs here.
+var routerReadFields = func() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, names := range [][]string{jsonbody.FieldNames(domain.ChatRequest{}), semantic.DecodedFields(), {"model", "stream"}} {
+		for _, n := range names {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}()
+
+// routerReadShape is what the router decodes of an inference body, top level
+// and nested, built from the structs it decodes into so a field added to them
+// is covered: the top-level fields (routerReadFields); each messages[] entry
+// (domain.ChatCompletionMessage, the semantic view's message); each content
+// part or block, in a message's content, the Anthropic system array and a
+// tool_result's content (domain.ContentPart with its image_url and
+// input_audio, the semantic view's part). The prompt estimate behind every
+// input budget and the image cap are computed from these. Free-form subtrees
+// (tool definitions, tool_calls, metadata, response_format, reasoning,
+// thinking) are not in it: the router only counts their bytes or reads them
+// as hints for choosing among models the key may use, after which the model
+// allowlist is checked again.
+var routerReadShape = func() *jsonbody.Shape {
+	part := jsonbody.ObjectOf(jsonbody.FieldNames(domain.ContentPart{}), semantic.DecodedPartFields())
+	part.Fields["image_url"] = jsonbody.ObjectOf(jsonbody.FieldNames(domain.ImageURLConfig{}))
+	part.Fields["input_audio"] = jsonbody.ObjectOf(jsonbody.FieldNames(domain.InputAudioConfig{}))
+	parts := &jsonbody.Shape{Items: part} // a string is not looked into
+	part.Fields["content"] = parts
+	message := jsonbody.ObjectOf(jsonbody.FieldNames(domain.ChatCompletionMessage{}), semantic.DecodedMessageFields())
+	message.Fields["content"] = parts
+	top := jsonbody.ObjectOf(routerReadFields)
+	top.Fields["messages"] = &jsonbody.Shape{Items: message}
+	top.Fields["system"] = parts
+	return top
+}()
+
+// UnambiguousFields refuses, with 400 request_invalid, an inference body the
+// router and the backend would read differently. The router decodes with
+// encoding/json, which matches top-level names case-insensitively and keeps
+// the last of a repeated name, then forwards the body as sent to a backend
+// that matches names exactly. So {"model":"coder","Model":"chat"} would pass
+// the model allowlist as chat while the backend serves coder, and a
+// "Max_Tokens" would size the router's capacity reservation but not the
+// generation, and a "Content" next to a message's "content" would hide the
+// prompt from every input budget. Refused, in every object the router
+// decodes (routerReadShape): a name that appears twice, and a name that
+// matches one of the object's read fields only under case folding. A body that
+// is not one JSON object is refused too: this is the access boundary, and
+// the handlers' decoder would read the first object and ignore the rest.
+// Runs after BodyLimitMiddleware and before everything that reads the body.
+func UnambiguousFields() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		body, ok := cachedBody(c)
+		if !ok {
+			b, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+					"failed to read request body", domain.SourceRouter)
+				return
+			}
+			body = b
+			c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			c.Set(gin.BodyBytesKey, body)
+		}
+		if err := jsonbody.CheckShape(body, routerReadShape); err != nil {
+			msg := "Invalid request: the body must be exactly one JSON object"
+			var ne *jsonbody.NameError
+			if errors.As(err, &ne) {
+				msg = "Invalid request: " + ne.Error() + "; send each field once, spelled exactly"
+			}
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, msg, domain.SourceRouter)
+			return
+		}
 		c.Next()
 	}
 }

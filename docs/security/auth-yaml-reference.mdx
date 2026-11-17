@@ -540,25 +540,19 @@ There is:
 - no fallback entry
 - no implicit unlimited model
 
-A request for an unlisted model is rejected with HTTP `429`:
+A request for an unlisted model is rejected with HTTP `403`, before any quota is charged, exactly like a model outside an explicit `models` allowlist:
 
 ```json
 {
   "error": {
-    "code": "rate_limit_exceeded",
-    "message": "no quota declared for model unlisted-model on this API key",
+    "code": "model_forbidden",
+    "message": "your API key does not have access to model: unlisted-model",
     "source": "router"
   }
 }
 ```
 
-Model discovery hides unlisted models, and model detail returns `404`.
-
-<Note>
-  This differs from the explicit `models` allowlist.
-
-  An explicit allowlist violation returns `403 model_forbidden` for inference. An unlisted `quota.per_model` request is rejected earlier by quota admission with `429 rate_limit_exceeded`.
-</Note>
+Model discovery hides unlisted models, and model detail returns `404`. A key with both `models` and `quota.per_model` may use only the models in both.
 
 ### Per-replica request limit
 
@@ -1033,21 +1027,15 @@ During SIGHUP reload, a validation error leaves the previous authentication prov
   </Accordion>
 
   <Accordion title="A key receives `403 model_forbidden`">
-    The key uses the explicit `models` allowlist and the requested model is absent.
+    The requested model is absent from the key's `models` allowlist or `quota.per_model`.
 
     Check exact spelling and capitalization.
   </Accordion>
 
-  <Accordion title="A per-model key receives `429`">
-    Read the error message.
+  <Accordion title="A per-model key receives `403 model_forbidden`">
+    The model has no entry under `quota.per_model`, or the key also lists `models` and the model is not there.
 
-    When it says:
-
-    ```text
-    no quota declared for model <model> on this API key
-    ```
-
-    add an exact entry under:
+    Add an exact entry under:
 
     ```yaml
     quota:

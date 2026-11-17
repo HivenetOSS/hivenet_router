@@ -188,3 +188,36 @@ func TestMinute_ChargeInputTokens(t *testing.T) {
 		t.Error("another key was charged")
 	}
 }
+
+// TestProviders_KeysWithoutModelAllowlist: the router warns about the keys a
+// required model allowlist refuses on every model: keys with neither a model
+// list nor per-model quotas, static or dynamic.
+func TestProviders_KeysWithoutModelAllowlist(t *testing.T) {
+	zero := 0
+	listed := staticEntry("sk-listed", "t")
+	listed.Models = []string{"chat"}
+	perModel := staticEntry("sk-per-model", "t")
+	perModel.Quota.PerModel = map[string]*auth.PerModelQuotaConfig{"chat": {RequestsPerMinutePerReplica: &zero, TokensPerDay: &zero}}
+	sp, err := auth.NewStaticKeyProvider([]auth.APIKeyEntry{staticEntry("sk-open-1", "t"), staticEntry("sk-open-2", "u"), listed, perModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := sp.KeysWithoutModelAllowlist(); n != 2 {
+		t.Errorf("static: %d keys without an allowlist, want 2", n)
+	}
+
+	dp := auth.NewDynamicKeyProvider()
+	for _, e := range []auth.DynamicKeyEntry{
+		{ID: "open", KeyHash: hashOf("open"), Owner: "t", Name: "n", Enabled: true},
+		{ID: "listed", KeyHash: hashOf("listed"), Owner: "t", Name: "n", Enabled: true, AllowedModels: []string{"chat"}},
+		{ID: "per-model", KeyHash: hashOf("per-model"), Owner: "t", Name: "n", Enabled: true,
+			Quota: auth.QuotaLimits{PerModel: map[string]auth.PerModelQuotaLimits{"chat": {}}}},
+	} {
+		if err := dp.Upsert("v1", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := dp.KeysWithoutModelAllowlist(); n != 1 {
+		t.Errorf("dynamic: %d keys without an allowlist, want 1", n)
+	}
+}
