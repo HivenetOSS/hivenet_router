@@ -71,7 +71,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 3.7 | With salting off, bodies are forwarded byte-identical. | done | `TestSemanticAliasEndToEnd` |
 | 3.8 | vLLM runs with the `sha256` prefix hash, at a patched version (≥ 0.11.1, vLLM ③). | infra | none: vLLM launch flags |
 | 3.9 | An inference body must be exactly one JSON object. A body the router cannot prepare for the agent is refused before routing and never counts for or against an agent. | done | `TestIsolation_TrailingDataRejected`, `TestProcessor_UnsentRequestLeavesAgentCounters` |
-| 3.10 | Prefix-aware routing keys its prefix index per tenant. | planned (#102–#104) | none: the anchors are scoped through `WithPrefixScope` once Epic G is on `main` |
+| 3.10 | With the cache salt on, prefix-aware routing keys its prefix index per tenant: anchors are scoped by tenant and keyed by a sub-key of the cache-salt secret, which agents do not hold, and block hashes include the salt. A prompt one tenant taught the router never matches another tenant's request. | done | `TestIsolation_PrefixIndexPerTenant`, `TestSubKey`, `TestWithAnchorSecret` |
 
 ## 4. Customer-scoped logs and metrics
 

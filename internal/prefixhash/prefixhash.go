@@ -57,7 +57,22 @@ type Keys struct {
 // DeriveKeys derives the anchor and block keys from secret. Every router and
 // agent of a site must use the same secret.
 func DeriveKeys(secret []byte) Keys {
-	return Keys{anchor: derive(secret, "hivenet-prefix-anchor/v1"), block: derive(secret, "hivenet-prefix-block/v1")}
+	return Keys{anchor: derive(secret, anchorLabel), block: derive(secret, blockLabel)}
+}
+
+const (
+	anchorLabel = "hivenet-prefix-anchor/v1"
+	blockLabel  = "hivenet-prefix-block/v1"
+)
+
+// WithAnchorSecret returns k with the anchor key derived from secret instead.
+// Only routers compute anchors, so a secret the agents do not hold keeps
+// them from checking a guessed text against an anchor; the block key stays,
+// since agents compute the blocks. Every router of a site must use the same
+// secret.
+func (k Keys) WithAnchorSecret(secret []byte) Keys {
+	k.anchor = derive(secret, anchorLabel)
+	return k
 }
 
 func derive(secret []byte, label string) []byte {

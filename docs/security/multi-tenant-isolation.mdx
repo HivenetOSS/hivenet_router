@@ -81,6 +81,8 @@ With an allowlist required, a key can only use the models in its `models` / `all
 
 Engines share cached prompt blocks between requests with the same prefix, so a faster first token can reveal that someone else sent the same prompt. The router sets a per-tenant `cache_salt` on requests to vLLM (every path; `/v1/messages` only from vLLM 0.27.0) and SGLang (chat completions), turns llama.cpp's prompt cache off per request, and removes any `cache_salt` the client sent. Some of these work only from an engine version on, which the agent reports: an LLM agent left with a path it cannot isolate, on its engine and version, is logged and counted in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
 
+[Prefix-aware routing](/routing/prefix-aware-routing) follows the same split: with the salt on, it keeps what it learns about cached prompts per tenant, so one tenant's prompts never steer another's requests.
+
 ### Logs and metrics are attributable and protected
 
 - Every authenticated audit record names its `tenant_id` and `key_id`, and, with `--router-id`, the router that wrote it. Records hold metadata only, never prompts, completions or credentials. The audit file is created with mode `0600`. See [Audit logging](/observability/audit-logging).
