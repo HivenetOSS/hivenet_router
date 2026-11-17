@@ -315,7 +315,10 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 	if capability == "" {
 		capability = domain.CapabilityLLM
 	}
-	session := p.executor.NewSession(pending.Request.Model, capability)
+	session := p.executor.NewSessionWithStrategy(pending.Request.Model, pending.RoutingStrategy, capability)
+	if pending.RoutingStrategy != "" {
+		p.metrics.RoutingStrategy(pending.RoutingStrategy, pending.RoutingStrategySource)
+	}
 	p.setPrefix(session, pending, capability)
 	defer session.ReleasePrefill()
 

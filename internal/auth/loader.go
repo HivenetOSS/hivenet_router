@@ -169,6 +169,12 @@ type APIKeyEntry struct {
 	// An empty list (the default) grants access to all registered models.
 	Models []string `yaml:"models,omitempty"`
 
+	// RoutingStrategies lists the ranking strategies this key may route with
+	// (least-loaded, prefix-aware); the first is its default, and a request
+	// may pick another one from the list with the X-Hivenet-Routing-Strategy
+	// header. Empty (the default) leaves routing to the models' policies.
+	RoutingStrategies []string `yaml:"routing_strategies,omitempty"`
+
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
 

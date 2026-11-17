@@ -103,6 +103,12 @@ type AuthResult struct {
 	// Checked in the inference handlers after the request body is parsed.
 	AllowedModels []string
 
+	// RoutingStrategies lists the ranking strategies this key may route with;
+	// the first is its default. A request may pick another one from the list
+	// with the X-Hivenet-Routing-Strategy header. Empty means the models'
+	// policies decide and the header is refused.
+	RoutingStrategies []string
+
 	// QuotaLimits holds the rate/token limits for this tenant.
 	// Zero values mean unlimited. Enforcement is planned for Ticket 5.
 	QuotaLimits QuotaLimits
@@ -123,9 +129,13 @@ type RedirectInfo struct {
 	ClientRequestID string
 	Model           string // the concrete model the first router routed on, used as is
 	Scope           string // the effective scope at the first router
-	From            string // the first router's site ID, never redirected back to
-	TokenID         string // the token's jti, marked used once the body check passes
-	Exp             int64  // the token's expiry (Unix seconds), how long its jti is remembered
+	// Strategy is the routing strategy the client asked for at the first
+	// router (X-Hivenet-Routing-Strategy), or empty; checked again against
+	// the key here.
+	Strategy string
+	From     string // the first router's site ID, never redirected back to
+	TokenID  string // the token's jti, marked used once the body check passes
+	Exp      int64  // the token's expiry (Unix seconds), how long its jti is remembered
 }
 
 // Provider authenticates an incoming HTTP request and returns an AuthResult.

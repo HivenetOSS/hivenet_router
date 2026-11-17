@@ -185,6 +185,15 @@ api:
 | `models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
 | `max_occupancy_share` | No | Serverless key-level share of the replica-scaled KV occupancy capacity; `0` is unset, otherwise valid through `1` |
+| `routing_strategies` | No | Ranking strategies the key may use, the first its default; empty leaves routing to the models' policies |
+
+### `routing_strategies`
+
+```yaml
+routing_strategies: ["prefix-aware", "least-loaded"]
+```
+
+The ranking strategies this key's requests may use. The first one is the default; a request may pick another one from the list with the `X-Hivenet-Routing-Strategy` header. Each entry must be an implemented strategy (`least-loaded`, `prefix-aware`), listed once, or the router does not start. See [Strategy chosen by the API key](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key).
 
 ### `key_hash`
 

@@ -195,6 +195,7 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			ClientRequestID: c.GetString(ctxKeyClientRequestID),
 			Model:           model,
 			Scope:           scope,
+			Strategy:        requestedRoutingStrategy(c),
 			From:            from,
 			Site:            target.ID,
 			Path:            c.Request.URL.Path,

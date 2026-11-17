@@ -70,10 +70,11 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		quota.MaxOccupancyShare = e.MaxOccupancyShare
 		keys[e.KeyHash] = keyEntry{
 			result: AuthResult{
-				TenantID:      e.Metadata.Owner,
-				KeyPreview:    e.KeyPreview,
-				AllowedModels: e.Models,
-				QuotaLimits:   quota,
+				TenantID:          e.Metadata.Owner,
+				KeyPreview:        e.KeyPreview,
+				AllowedModels:     e.Models,
+				RoutingStrategies: e.RoutingStrategies,
+				QuotaLimits:       quota,
 			},
 			expiresAt: expiresAt,
 		}

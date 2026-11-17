@@ -258,6 +258,7 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set("key_id", result.KeyID)
 		c.Set("key_preview", result.KeyPreview)
 		c.Set("allowed_models", result.AllowedModels)
+		c.Set(ctxKeyRoutingStrategies, result.RoutingStrategies)
 		c.Set("quota_limits", result.QuotaLimits)
 		if result.Redirect != nil {
 			// Accepted once RedirectTarget has checked the body.

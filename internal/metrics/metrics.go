@@ -189,6 +189,12 @@ type RouterMetrics struct {
 	// Labels: model, site, hop.
 	redirects *prometheus.CounterVec
 
+	// routingStrategies counts requests routed with a strategy their API key
+	// chose, by strategy and source (key = the key's default, header =
+	// X-Hivenet-Routing-Strategy). Requests left to the model's policy are
+	// not counted.
+	routingStrategies *prometheus.CounterVec
+
 	// redirectRejections counts refused redirect tokens, by reason ∈
 	// {malformed, signature, expired, clock, site, path, scope, replay, key,
 	// body}.
@@ -533,6 +539,13 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Requests rejected by an admission gate, by gate/reason (b1, b2, b3, b4_occupancy, b4_itpm, b4_otpm) and model.",
 			},
 			[]string{"reason", "model"},
+		),
+		routingStrategies: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_routing_strategy_requests_total",
+				Help: "Requests routed with a strategy chosen by their API key, by strategy and source (key = the key's default, header = X-Hivenet-Routing-Strategy).",
+			},
+			[]string{"strategy", "source"},
 		),
 		redirects: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -1008,6 +1021,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.quotaBackendErrors,
 		m.admissionRejections,
 		m.redirects,
+		m.routingStrategies,
 		m.redirectRejections,
 		m.wakeHolds,
 		m.wakeHoldSeconds,
@@ -1306,6 +1320,12 @@ func (m *RouterMetrics) TenantSetPerModelTPDLimit(tenantID, model string, tpd in
 // b4_otpm}. B3 shed rate is rate(...{reason="b3"}); "429 by reason" sums over all.
 func (m *RouterMetrics) AdmissionRejected(reason, model string) {
 	m.admissionRejections.With(prometheus.Labels{"reason": reason, "model": model}).Inc()
+}
+
+// RoutingStrategy counts a request routed with a strategy its API key chose;
+// source is "key" or "header".
+func (m *RouterMetrics) RoutingStrategy(strategy, source string) {
+	m.routingStrategies.With(prometheus.Labels{"strategy": strategy, "source": source}).Inc()
 }
 
 // Redirect counts a 307 to a sibling site.

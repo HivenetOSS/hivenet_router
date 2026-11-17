@@ -374,21 +374,37 @@ func (e *Executor) SetNamedPoliciesFromSnapshot(named map[string]*Policy) {
 // capability filters agent selection to only agents whose Metadata.Capability
 // matches. Pass domain.CapabilityLLM ("llm") for chat completions.
 func (e *Executor) NewSession(model, capability string) *Session {
+	return e.NewSessionWithStrategy(model, "", capability)
+}
+
+// NewSessionWithStrategy is NewSession with the ranking strategy of every step
+// (the primary step and each fallback_chain step) replaced by strategy, the
+// one the request's API key chose. Only the ranking changes: each step's match
+// filter, exclude_if gates and max_tries, and the model's admission limits,
+// stay the policy's. An empty strategy keeps the policy's own. The caller
+// passes an implemented strategy (policy.KnownStrategy).
+func (e *Executor) NewSessionWithStrategy(model, strategy, capability string) *Session {
 	s := e.state.Load() // single atomic load — global and per-model are always consistent
 	pol := s.global
 	if mp, ok := s.modelPolicies[model]; ok {
 		pol = mp
 	}
+	withStrategy := func(step PolicyStep) PolicyStep {
+		if strategy != "" {
+			step.Strategy = strategy
+		}
+		return step
+	}
 
 	// Flatten primary step + fallback chain into a single linear slice.
 	steps := make([]resolvedStep, 0, 1+len(pol.FallbackChain))
-	steps = append(steps, e.resolve("routing_policy", pol.RoutingPolicy))
+	steps = append(steps, e.resolve("routing_policy", withStrategy(pol.RoutingPolicy)))
 	for i, fb := range pol.FallbackChain {
 		name := fb.Name
 		if name == "" {
 			name = fmt.Sprintf("fallback_chain[%d]", i)
 		}
-		steps = append(steps, e.resolve(name, fb.PolicyStep))
+		steps = append(steps, e.resolve(name, withStrategy(fb.PolicyStep)))
 	}
 
 	return &Session{

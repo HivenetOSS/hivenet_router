@@ -609,6 +609,40 @@ best-itl
 
 A policy using one of these strategies is rejected.
 
+## Strategy chosen by the API key
+
+An API key can choose the ranking strategy its requests use, with `routing_strategies`: a list of strategies the key may use, the first one its default. It is set on the key, in [`auth.yaml`](/security/auth-yaml-reference#routing_strategies) or with the [admin API](/use-the-api/admin-endpoints), not in the policy.
+
+```yaml
+routing_strategies: ["prefix-aware", "least-loaded"]
+```
+
+A request picks another strategy from the list with a header:
+
+```bash
+curl https://router.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $HIVENET_API_KEY" \
+  -H "X-Hivenet-Routing-Strategy: least-loaded" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3:70b", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+| Key's `routing_strategies` | Header | Strategy used |
+| --- | --- | --- |
+| `["prefix-aware", "least-loaded"]` | None | `prefix-aware`, the key's default |
+| `["prefix-aware", "least-loaded"]` | `least-loaded` | `least-loaded` |
+| `["prefix-aware", "least-loaded"]` | Any other value | None: `403` `routing_strategy_forbidden` |
+| Empty or absent | None | The model's policy decides |
+| Empty or absent | Any value | None: `403` `routing_strategy_forbidden` |
+
+The chosen strategy replaces the `strategy` of every step of the model's policy, the primary step and each `fallback_chain` step. Nothing else of the policy changes: the steps' `match`, `exclude_if` and `max_tries`, the `prefix_aware` tuning, and the admission fields (`mode`, `max_input_tokens`, `admit_budget_tokens`, `max_inflight`, `shed_if`) stay the policy's. A key therefore changes how a replica is ranked, never which replicas are eligible or how many requests are admitted.
+
+A refused request is refused before any quota is spent. When a request is [redirected](/routing/cross-site-redirect) to another site, the strategy the client asked for with the header travels in the signed redirect token, and the other site checks it again against the key.
+
+A key listing a strategy that does not exist, or the same strategy twice, is rejected: the admin API answers `400`, and the router does not start (or reload) with such a key in `auth.yaml`.
+
+The metric `hivenet_routing_strategy_requests_total{strategy, source}` counts the requests routed with a strategy chosen by their key, by source: `key` (the key's default) or `header`.
+
 ## Forward attempts
 
 ```yaml

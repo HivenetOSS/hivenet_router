@@ -38,6 +38,9 @@ type DynamicKeyEntry struct {
 	ExpiresAt     *time.Time // nil = never
 	AllowedModels []string   // empty = unrestricted
 	Quota         QuotaLimits
+	// RoutingStrategies: the ranking strategies the key may use, the first
+	// its default; empty = the models' policies decide. See AuthResult.
+	RoutingStrategies []string
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -95,6 +98,7 @@ func (r *DynamicKeyProvider) Snapshot() (string, []DynamicKeyEntry) {
 	for _, e := range r.byID {
 		cp := *e
 		cp.AllowedModels = append([]string(nil), e.AllowedModels...)
+		cp.RoutingStrategies = append([]string(nil), e.RoutingStrategies...)
 		if e.Quota.PerModel != nil {
 			cp.Quota.PerModel = make(map[string]PerModelQuotaLimits, len(e.Quota.PerModel))
 			for model, lim := range e.Quota.PerModel {
@@ -158,11 +162,12 @@ func resultFor(entry *DynamicKeyEntry, ok bool) (*AuthResult, error) {
 	}
 
 	return &AuthResult{
-		TenantID:      entry.Owner,
-		KeyID:         entry.ID,
-		KeyPreview:    entry.KeyPreview,
-		AllowedModels: entry.AllowedModels,
-		QuotaLimits:   entry.Quota,
+		TenantID:          entry.Owner,
+		KeyID:             entry.ID,
+		KeyPreview:        entry.KeyPreview,
+		AllowedModels:     entry.AllowedModels,
+		RoutingStrategies: entry.RoutingStrategies,
+		QuotaLimits:       entry.Quota,
 	}, nil
 }
 
@@ -250,6 +255,8 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		ExpiresAt:     e.ExpiresAt,
 		AllowedModels: e.AllowedModels,
 		Quota:         e.Quota,
+
+		RoutingStrategies: e.RoutingStrategies,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -360,6 +367,8 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			ExpiresAt:     entries[i].ExpiresAt,
 			AllowedModels: entries[i].AllowedModels,
 			Quota:         entries[i].Quota,
+
+			RoutingStrategies: entries[i].RoutingStrategies,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry

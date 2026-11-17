@@ -502,6 +502,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.TokensPerDay = m.tpd
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
+	setRoutingStrategy(c, pending)
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	if len(reservation) > 0 {
@@ -1500,6 +1501,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	pending.KeyID = keyID
 	pending.DeploymentID = deploymentID
 	pending.Capability = capability
+	setRoutingStrategy(c, pending)
 
 	select {
 	case h.requestQueue <- pending:

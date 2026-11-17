@@ -119,6 +119,7 @@ Clients should therefore handle:
 | `input_too_long` | `400` | `router` | Policy input-token or image cap exceeded |
 | `unauthorized` | `401` | `router` | Client or administrator credentials are missing or invalid |
 | `model_forbidden` | `403` | `router` | The client key’s explicit allowlist does not permit the model |
+| `routing_strategy_forbidden` | `403` | `router` | `X-Hivenet-Routing-Strategy` names a strategy the client key does not allow |
 | `model_not_found` | `404` | `router` | The model is not registered or is deliberately hidden from the caller |
 | `model_redirected` | `307` | `router` | Another site serves the model: repeat the request at the `Location` URL ([Cross-site redirect](/routing/cross-site-redirect)) |
 | Not guaranteed | `413` | Server | The request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |
@@ -312,6 +313,25 @@ Use an allowed model or update the key’s access configuration.
   That strict-enumeration case produces `rate_limit_exceeded`.
 </Note>
 
+### `routing_strategy_forbidden`
+
+```text
+HTTP 403
+```
+
+The request’s `X-Hivenet-Routing-Strategy` header names a strategy that is not in the key’s `routing_strategies`, or the key has no `routing_strategies` at all.
+
+```json
+{
+  "error": {
+    "code": "routing_strategy_forbidden",
+    "message": "routing strategy \"least-loaded\" is not allowed for this API key (allowed: prefix-aware)",
+    "source": "router"
+  }
+}
+```
+
+Do not retry with the same header. Remove it to use the key’s default strategy, pick one the message lists, or update the key’s `routing_strategies`. See [Strategy chosen by the API key](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key).
 ### `model_not_found`
 
 ```text
