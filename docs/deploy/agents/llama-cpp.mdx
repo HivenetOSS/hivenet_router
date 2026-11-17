@@ -315,6 +315,15 @@ The agent then sends `Authorization: Bearer <key>` on every request to llama.cpp
 The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
 </Note>
 
+## Isolate tenants in the prompt cache
+
+llama.cpp has no per-tenant cache salt. With the router's `--cache-salt` on, requests forwarded to a llama.cpp agent carry `cache_prompt: false`, so no request reuses a cached prefix and cache timing cannot reveal another tenant's prompt. Every request then processes its whole prompt, including a tenant's own repeated prefixes.
+
+- Chat completions get `cache_prompt: false` at the top level.
+- `/v1/messages` gets it inside `extra_params` (and at the top level), which llama.cpp merges into the request it runs from build b11795. A client's other `extra_params` are kept; one that is not an object is refused with `400`.
+
+The agent reads the build from `GET /props` (`build_info`) and reports it. An agent with an older or unknown build counts as not isolated on `/v1/messages`: the router logs a warning and counts it in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
+
 ## How load is bounded
 
 llama.cpp does not report a KV-cache size, so the router sets no automatic token budget for this agent. Instead, the router allows `HIVENET_ROUTER_DEFAULT_MAX_INFLIGHT_PER_REPLICA` (default `8`) requests in flight per healthy replica of the model. To choose your own bound, set `admit_budget_tokens` or `max_inflight` in the model's policy. See [Admission control](/routing/admission-control#b2-pool-occupancy).

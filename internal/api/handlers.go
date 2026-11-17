@@ -40,6 +40,7 @@ const headerRateLimitRemainingRequests = "X-RateLimit-Remaining-Requests"
 type AgentMetadataView struct {
 	Model         string   `json:"model"`
 	Engine        string   `json:"engine"`
+	EngineVersion string   `json:"engine_version,omitempty"`
 	Region        string   `json:"region,omitempty"`
 	Organization  string   `json:"organization,omitempty"`
 	Machine       string   `json:"machine,omitempty"`

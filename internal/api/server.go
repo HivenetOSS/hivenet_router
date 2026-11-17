@@ -155,6 +155,9 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
+	// Exactly one JSON object, checked once here: every later step reads and
+	// edits the body as one object.
+	inference.Use(JSONObjectBody())
 	// The router and the backend must read the same fields: a repeated or
 	// differently cased top-level name is refused before anything reads it.
 	inference.Use(UnambiguousFields())

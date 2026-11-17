@@ -62,15 +62,15 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 
 | # | Line | Status | Tests |
 |---|---|---|---|
-| 3.1 | vLLM agents get a per-tenant `cache_salt` on chat (streaming and not), `/v1/messages`, embeddings and rerank. Keys of one tenant share it; tenants never do. | planned (PR-4) | `TestIsolation_CacheSaltPerTenant` |
-| 3.2 | The salt is an HMAC of the tenant under a dedicated secret: 43 base64url characters, unguessable. | planned (PR-4) | `TestSalt_FormatAndStability` |
-| 3.3 | A `cache_salt` sent by the client is always removed (duplicates and escaped spellings included). | planned (PR-4) | `TestSetTopLevel`, `TestRemoveTopLevel`, `FuzzSetTopLevel`, `TestIsolation_CacheSaltPerTenant` |
-| 3.4 | Every engine that can isolate its prefix cache does: SGLang chat gets the salt (isolated from v0.5.11, as the agent reports it), llama.cpp skips its prompt cache. Engines, versions and paths that cannot get no client salt, and each LLM agent left with a gap is logged and counted (`hivenet_cache_isolation_gaps`). | planned (PR-4) | `TestApply_EngineCapabilities`, `TestCapabilities_Gaps`, `TestIsolation_CacheSaltPerTenant` |
-| 3.5 | The salt never reaches the OpenAI/Anthropic fallback providers. | planned (PR-4) | `TestProviderFallback_NeverSendsCacheSalt` |
-| 3.6 | Salting requires its own secret: at least 32 bytes, and none of the router's other secrets (JWT, key store, redirect, metrics token, Valkey password). | planned (PR-4) | `TestValidateIsolationConfig`, `TestNew_RejectsShortSecret` |
+| 3.1 | vLLM agents get a per-tenant `cache_salt` on chat (streaming and not), `/v1/messages`, embeddings and rerank. Keys of one tenant share it; tenants never do. | done | `TestIsolation_CacheSaltPerTenant` |
+| 3.2 | The salt is an HMAC of the tenant under a dedicated secret: 43 base64url characters, unguessable. | done | `TestSalt_FormatAndStability` |
+| 3.3 | A `cache_salt` sent by the client is always removed (escaped spellings included); one sent twice is refused before routing (1.9). | done | `TestSetTopLevel`, `TestRemoveTopLevel`, `FuzzSetTopLevel`, `TestIsolation_CacheSaltPerTenant` |
+| 3.4 | Every engine that can isolate its prefix cache does: vLLM gets the salt (chat isolated from v0.9.0, `/v1/messages` from v0.27.0, as the agent reports it, also after the engine restarts with another build), SGLang chat gets the salt (isolated from v0.5.11), llama.cpp skips its prompt cache (on `/v1/messages` through `extra_params`, from build b11795). Engines, versions and paths that cannot get no client salt, and each LLM agent left with a gap is logged and counted (`hivenet_cache_isolation_gaps`). | done | `TestApply_EngineCapabilities`, `TestCapabilities_Gaps`, `TestAtLeast`, `TestEngineVersion_ReadFromBackend`, `TestIsolation_CacheSaltPerTenant`, `TestEngineVersionFollowsBackendRestart` |
+| 3.5 | The salt never reaches the OpenAI/Anthropic fallback providers. | done | `TestProviderFallback_NeverSendsCacheSalt` |
+| 3.6 | Salting requires its own secret: at least 32 bytes, and none of the router's other secrets (JWT, key store, redirect, metrics token, Valkey password). | done | `TestValidateIsolationConfig`, `TestNew_RejectsShortSecret` |
 | 3.7 | With salting off, bodies are forwarded byte-identical. | done | `TestSemanticAliasEndToEnd` |
 | 3.8 | vLLM runs with the `sha256` prefix hash, at a patched version (≥ 0.11.1, vLLM ③). | infra | none: vLLM launch flags |
-| 3.9 | An inference body must be exactly one JSON object. A body the router cannot prepare for the agent is refused before routing and never counts for or against an agent. | planned (PR-4) | `TestIsolation_TrailingDataRejected`, `TestProcessor_UnsentRequestLeavesAgentCounters` |
+| 3.9 | An inference body must be exactly one JSON object. A body the router cannot prepare for the agent is refused before routing and never counts for or against an agent. | done | `TestIsolation_TrailingDataRejected`, `TestProcessor_UnsentRequestLeavesAgentCounters` |
 | 3.10 | Prefix-aware routing keys its prefix index per tenant. | planned (#102–#104) | none: the anchors are scoped through `WithPrefixScope` once Epic G is on `main` |
 
 ## 4. Customer-scoped logs and metrics

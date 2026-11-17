@@ -128,6 +128,108 @@ func ReplaceTopLevel(body []byte, key string, raw []byte) ([]byte, error) {
 	return append(out, body[m.end:]...), nil
 }
 
+// GetTopLevel returns the raw value of the top-level member key (the last
+// one with duplicate keys, the one encoding/json decodes) and whether the
+// body has one.
+func GetTopLevel(body []byte, key string) ([]byte, bool, error) {
+	o, err := scan(body)
+	if err != nil {
+		return nil, false, err
+	}
+	var raw []byte
+	found := false
+	for _, m := range o.members {
+		if isKey(keyOf(body, m), key) {
+			raw, found = body[m.valStart:m.end], true
+		}
+	}
+	return raw, found, nil
+}
+
+// ValidObject reports whether body is exactly one well-formed JSON object,
+// with nothing but whitespace around it: ErrNotObject for another JSON value,
+// ErrMalformed for anything that is not valid JSON (trailing data included).
+// The router checks every inference body with it before routing, so a body
+// the edits above cannot handle never reaches an agent.
+func ValidObject(body []byte) error {
+	if !json.Valid(body) {
+		return ErrMalformed
+	}
+	if i := skipWS(body, 0); i >= len(body) || body[i] != '{' {
+		return ErrNotObject
+	}
+	return nil
+}
+
+// SetTopLevel removes every top-level member named key (nested members of
+// the same name are left alone) and inserts "key": raw as the first member,
+// so the body carries exactly one, with the given value. raw must be an
+// already-encoded JSON value. When the body had no such member, everything
+// after the opening brace is kept byte for byte; otherwise the kept members
+// are kept byte for byte but the whitespace between members is not. The
+// result is always a new slice.
+func SetTopLevel(body []byte, key string, raw []byte) ([]byte, error) {
+	o, kept, err := without(body, key)
+	if err != nil {
+		return nil, err
+	}
+	quoted, _ := json.Marshal(key)
+	out := make([]byte, 0, len(body)+len(quoted)+len(raw)+2)
+	out = append(out, body[:o.open+1]...)
+	out = append(out, quoted...)
+	out = append(out, ':')
+	out = append(out, raw...)
+	if len(kept) == len(o.members) {
+		// Nothing removed: keep the rest exactly as sent.
+		if len(o.members) > 0 {
+			out = append(out, ',')
+		}
+		return append(out, body[o.open+1:]...), nil
+	}
+	for _, m := range kept {
+		out = append(out, ',')
+		out = append(out, body[m.start:m.end]...)
+	}
+	return append(out, body[o.close:]...), nil
+}
+
+// RemoveTopLevel removes every top-level member named key. When there is
+// none, it returns body itself, unchanged; otherwise a new slice with the
+// kept members byte for byte (whitespace between members is not kept).
+func RemoveTopLevel(body []byte, key string) ([]byte, error) {
+	o, kept, err := without(body, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(kept) == len(o.members) {
+		return body, nil
+	}
+	out := make([]byte, 0, len(body))
+	out = append(out, body[:o.open+1]...)
+	for i, m := range kept {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, body[m.start:m.end]...)
+	}
+	return append(out, body[o.close:]...), nil
+}
+
+// without scans body and returns its members other than those named key.
+func without(body []byte, key string) (object, []member, error) {
+	o, err := scan(body)
+	if err != nil {
+		return o, nil, err
+	}
+	kept := make([]member, 0, len(o.members))
+	for _, m := range o.members {
+		if !isKey(keyOf(body, m), key) {
+			kept = append(kept, m)
+		}
+	}
+	return o, kept, nil
+}
+
 func skipWS(b []byte, i int) int {
 	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
 		i++

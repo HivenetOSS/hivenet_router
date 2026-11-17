@@ -19,20 +19,24 @@ const (
 
 // AgentMetadata contains agent capabilities and identification
 type AgentMetadata struct {
-	Model         string   `json:"model"`
-	Capacity      int      `json:"capacity"`
-	Version       string   `json:"version"`
-	Region        string   `json:"region,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	Engine        string   `json:"engine,omitempty"`
-	Organization  string   `json:"organization,omitempty"`
-	Machine       string   `json:"machine,omitempty"`
-	HideLLM       bool     `json:"hide_llm,omitempty"`
-	LLMPrettyName string   `json:"llm_pretty_name,omitempty"`
-	LLMInfo       string   `json:"llm_info,omitempty"`
-	Capability    string   `json:"capability,omitempty"`    // "llm" | "embedding" | "reranker"
-	GPUModel      string   `json:"gpu_model,omitempty"`     // operator-set hardware identifier (e.g. "RTX4090")
-	DeploymentID  string   `json:"deployment_id,omitempty"` // logical deployment id supplied via HIVENET_ROUTER_DEPLOYMENT_ID env
+	Model    string   `json:"model"`
+	Capacity int      `json:"capacity"`
+	Version  string   `json:"version"`
+	Region   string   `json:"region,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Engine   string   `json:"engine,omitempty"`
+	// EngineVersion is the version (or build) of the engine as the agent
+	// read it from the backend at startup: vLLM's version, SGLang's version,
+	// llama.cpp's build_info (b<build>-<commit>). Empty when unknown.
+	EngineVersion string `json:"engine_version,omitempty"`
+	Organization  string `json:"organization,omitempty"`
+	Machine       string `json:"machine,omitempty"`
+	HideLLM       bool   `json:"hide_llm,omitempty"`
+	LLMPrettyName string `json:"llm_pretty_name,omitempty"`
+	LLMInfo       string `json:"llm_info,omitempty"`
+	Capability    string `json:"capability,omitempty"`    // "llm" | "embedding" | "reranker"
+	GPUModel      string `json:"gpu_model,omitempty"`     // operator-set hardware identifier (e.g. "RTX4090")
+	DeploymentID  string `json:"deployment_id,omitempty"` // logical deployment id supplied via HIVENET_ROUTER_DEPLOYMENT_ID env
 	// ReplicaID identifies this replica, supplied via HIVENET_ROUTER_REPLICA_ID. It
 	// pairs with DeploymentID to form a stable join key an external scheduler
 	// can use to map a router-side row back to the workload it started. Empty

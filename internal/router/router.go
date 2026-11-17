@@ -22,6 +22,7 @@ import (
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
@@ -70,6 +71,24 @@ type agentRegistrationPayload struct {
 	PeerID       string `json:"peer_id"`
 	DeploymentID string `json:"deployment_id,omitempty"` // logical deployment id; empty when the agent was not given one
 	ReplicaID    string `json:"replica_id,omitempty"`    // replica id; empty when the agent was not given one
+	// EngineVersion is the backend's version as the agent read it; empty
+	// when unknown (or an agent older than the field).
+	EngineVersion string `json:"engine_version,omitempty"`
+}
+
+// boundedEngineVersion keeps an agent-reported engine version to what can
+// name a release or build: at most 64 printable ASCII characters, else
+// unknown ("").
+func boundedEngineVersion(v string) string {
+	if len(v) > 64 {
+		return ""
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return ""
+		}
+	}
+	return v
 }
 
 // agentRoutingSignalPayload is the JSON body sent by the agent every RoutingSignalInterval
@@ -201,6 +220,8 @@ type Router struct {
 	// (internal/wake); nil when redirect is disabled, since the sibling map
 	// says which models may be held.
 	wake *wake.Holder
+	// salter salts forwarded bodies per tenant; nil when --cache-salt is off.
+	salter *cachesalt.Salter
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -411,6 +432,11 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, err
 	}
+	salter, err := newCacheSalter(cfg)
+	if err != nil {
+		store.Close() //nolint:errcheck
+		return nil, err
+	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -510,6 +536,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
+		salter:       salter,
 	}
 	// Over-budget requests wait in a per-model queue (--admission-queue-depth,
 	// by default --queue-depth) for room before a 429: half the request timeout
@@ -520,6 +547,13 @@ func New(cfg *config.Config) (*Router, error) {
 		admissionDepth = cfg.QueueDepth
 	}
 	r.occupancy.SetQueue(admissionDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
+	// hivenet_cache_isolation_enabled always; the gap count while the router
+	// isolates tenants, computed at every scrape from the registry.
+	if r.salter != nil {
+		routerMetrics.SetCacheIsolation(true, r.cacheIsolationGapCounts)
+	} else {
+		routerMetrics.SetCacheIsolation(false, nil)
+	}
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck
 		return nil, err
@@ -695,7 +729,8 @@ func (r *Router) Start() error {
 	}
 
 	// Create request processor now that httpHost is ready
-	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter)
+	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
+		WithCacheSalter(r.salter))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -1549,6 +1584,7 @@ func (r *Router) GetRoutingTable() []api.AgentView {
 			GPUModel:      agent.Metadata.GPUModel,
 			DeploymentID:  agent.Metadata.DeploymentID,
 			ReplicaID:     agent.Metadata.ReplicaID,
+			EngineVersion: agent.Metadata.EngineVersion,
 		}
 		status := api.AgentStatusView{
 			Healthy:        agent.Healthy,
@@ -1701,6 +1737,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		GPUModel:      session.Metadata.GpuModel,
 		DeploymentID:  payload.DeploymentID,
 		ReplicaID:     payload.ReplicaID,
+		EngineVersion: boundedEngineVersion(payload.EngineVersion),
 	}
 
 	// Capture old session token before overwriting the registry entry.
@@ -1945,6 +1982,7 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 	if connected {
 		r.agentJoined()
 	}
+	r.checkCacheIsolation(a)
 	return connected
 }
 

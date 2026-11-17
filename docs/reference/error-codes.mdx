@@ -150,6 +150,7 @@ Common triggers include:
 - malformed JSON, or a body that is not exactly one JSON object
 - empty request body
 - missing `model`
+- on `/v1/messages`, an `extra_params` that is neither an object nor `null`
 - a field name that appears twice, or a field the router reads spelled in another letter case, such as `Model`, at the top level (`model`, `max_tokens`, `stream`, `messages`…) or in an object the router reads inside it: each message (`role`, `content`), each content part or block, a message's or the `system` array's, including a `tool_result`'s (`type`, `text`, `image_url`…). The router would read a different value than the backend, which matches field names exactly. Free-form objects such as tool schemas, `tool_calls` and `metadata` are not checked
 - model ID longer than 256 characters
 - an inference engine used with an unsupported capability

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/jsonbody"
 	"hivenet_router/internal/metrics"
@@ -90,6 +91,55 @@ func BodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
 	}
 }
 
+// requestBody returns the request body, reading and caching it for the
+// middlewares and handlers after it when no earlier step has. ok is false
+// once it has answered 400 because the body could not be read.
+func requestBody(c *gin.Context) (body []byte, ok bool) {
+	if body, ok := cachedBody(c); ok {
+		return body, true
+	}
+	b, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+			"failed to read request body", domain.SourceRouter)
+		return nil, false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(b))
+	c.Set(gin.BodyBytesKey, b)
+	return b, true
+}
+
+// JSONObjectBody refuses, with 400 request_invalid, an inference body that is
+// not exactly one JSON object: invalid JSON, another JSON value, or an object
+// followed by more data; and one the cache salt could not prepare for some
+// engine (cachesalt.CheckBody: an extra_params that is not an object on
+// /v1/messages). The handlers' JSON decoding stops after the first
+// value, so such a body would otherwise be accepted and only fail later, when
+// the router edits it for the agent (cache salt, alias rewrite), after an
+// agent was already chosen. Runs after BodyLimitMiddleware; the body it read
+// is kept for the middlewares and handlers after it.
+func JSONObjectBody() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		body, ok := requestBody(c)
+		if !ok {
+			return
+		}
+		if err := jsonbody.ValidObject(body); err != nil {
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+				"Invalid request: the body must be exactly one JSON object", domain.SourceRouter)
+			return
+		}
+		// What some engine's edit could not handle is refused here too, so
+		// the answer does not depend on which agent would serve the request.
+		if err := cachesalt.CheckBody(c.FullPath(), body); err != nil {
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+				"Invalid request: "+err.Error(), domain.SourceRouter)
+			return
+		}
+		c.Next()
+	}
+}
+
 // routerReadFields are the top-level request fields the router itself reads:
 // what the handlers decode (domain.ChatRequest; embeddings and rerank read
 // only "model"), what semantic aliases read (semantic.DecodedFields), and the
@@ -148,20 +198,12 @@ var routerReadShape = func() *jsonbody.Shape {
 // matches one of the object's read fields only under case folding. A body that
 // is not one JSON object is refused too: this is the access boundary, and
 // the handlers' decoder would read the first object and ignore the rest.
-// Runs after BodyLimitMiddleware and before everything that reads the body.
+// Runs after JSONObjectBody and before everything that reads the body.
 func UnambiguousFields() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, ok := cachedBody(c)
+		body, ok := requestBody(c)
 		if !ok {
-			b, err := io.ReadAll(c.Request.Body)
-			if err != nil {
-				abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
-					"failed to read request body", domain.SourceRouter)
-				return
-			}
-			body = b
-			c.Request.Body = io.NopCloser(bytes.NewReader(body))
-			c.Set(gin.BodyBytesKey, body)
+			return
 		}
 		if err := jsonbody.CheckShape(body, routerReadShape); err != nil {
 			msg := "Invalid request: the body must be exactly one JSON object"
