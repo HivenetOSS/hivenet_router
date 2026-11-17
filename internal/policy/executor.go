@@ -499,7 +499,16 @@ type Session struct {
 	// scope bounds the candidates by the country they declare (SetScope);
 	// empty means no bound.
 	scope domain.Scope
+
+	// reservation is the pool the request may use (SetReservation): the
+	// agents reserved for it, or the shared agents when empty.
+	reservation string
 }
+
+// SetReservation sends the session to one pool: the agents whose
+// reserved_for is reservation, or, when empty, the agents reserved for no one.
+// A hard filter on every step, like the scope.
+func (s *Session) SetReservation(reservation string) { s.reservation = reservation }
 
 // SetScope bounds the session's candidates to agents whose declared country
 // is inside scope, on every step: a hard filter no policy step can widen. An
@@ -576,7 +585,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			// per-model wait queue instead of immediately escalating to a fallback
 			// step. The goroutine wakes when a slot is freed or new capacity joins.
 			if s.lastReason == ErrNoCapacity && s.executor.defaultQueueDepth > 0 {
-				queue := s.executor.getOrCreateQueue(s.model)
+				queue := s.executor.getOrCreateQueue(domain.PoolKey(s.model, s.reservation))
 				_, queueSpan := otel.Tracer("hivenet-router").Start(ctx, "queue_wait",
 					trace.WithAttributes(attribute.String("model", s.model)),
 				)
@@ -789,6 +798,12 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 		// served in. Applied before the policy, so no step can widen it.
 		if s.scope != "" && !s.scope.AllowsCountry(agent.Metadata.Country) {
 			filterMiss["scope"]++
+			continue
+		}
+		// Pool (dedicated replicas): a reserved agent serves only its
+		// reservation's keys, a shared one only keys without a reservation.
+		if agent.Metadata.ReservedFor != s.reservation {
+			filterMiss["reservation"]++
 			continue
 		}
 		// Layer 1: static match filter.

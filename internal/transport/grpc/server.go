@@ -150,6 +150,9 @@ func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
 	if meta.Country != "" && !domain.ValidCountry(meta.Country) {
 		return fmt.Errorf("country %q must be an upper-case ISO 3166-1 alpha-2 code such as FR", meta.Country)
 	}
+	if meta.ReservedFor != "" && !domain.ValidReservation(meta.ReservedFor) {
+		return fmt.Errorf("reserved_for %q must be 1-64 letters, digits, '.', '_' or '-'", meta.ReservedFor)
+	}
 	return nil
 }
 

@@ -1255,7 +1255,9 @@ Registered only when `--semantic-decision-log` is set. Dropped records were not 
 
 ## Queue metrics
 
-`hivenet_admission_queue_depth` counts the requests waiting in the per-model wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--admission-queue-depth` (default: `--queue-depth`, normally `30`). `hivenet_queue_depth` and `hivenet_queue_wait_seconds` count the requests waiting for a declared capacity slot (agents with a declared capacity only). These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
+Both queue gauges carry `model` and `pool` (empty for the shared replicas, the reservation of [dedicated replicas](/routing/dedicated-replicas) otherwise), and so do the occupancy gauges below; `hivenet_pool_healthy_agents{model, pool}` counts the healthy agents of each pool.
+
+`hivenet_admission_queue_depth` counts the requests waiting in the per-pool wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--admission-queue-depth` (default: `--queue-depth`, normally `30`). `hivenet_queue_depth` and `hivenet_queue_wait_seconds` count the requests waiting for a declared capacity slot (agents with a declared capacity only). These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
 
 ### Current queue depth
 
@@ -1568,10 +1570,10 @@ The LLM admission gates publish one rejection counter and four live pool gauges:
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by B1 through B4 |
-| `hivenet_admission_occupancy_tokens` | Gauge | `model` | Current token-weighted in-flight sum |
-| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective full-pool B2 token budget after the admit fraction and healthy-replica scaling (or from the engines' KV capacity); not the router's current credit balance |
-| `hivenet_admission_inflight_requests` | Gauge | `model` | Current in-flight request count |
-| `hivenet_admission_max_inflight` | Gauge | `model` | Effective `max_inflight × healthy_replicas` backstop |
+| `hivenet_admission_occupancy_tokens` | Gauge | `model`, `pool` | Current token-weighted in-flight sum |
+| `hivenet_admission_budget_tokens` | Gauge | `model`, `pool` | Effective full-pool B2 token budget after the admit fraction and healthy-replica scaling (or from the engines' KV capacity); not the router's current credit balance |
+| `hivenet_admission_inflight_requests` | Gauge | `model`, `pool` | Current in-flight request count |
+| `hivenet_admission_max_inflight` | Gauge | `model`, `pool` | Effective `max_inflight × healthy_replicas` backstop |
 
 The `reason` label identifies the gate:
 

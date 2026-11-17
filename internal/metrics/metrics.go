@@ -606,30 +606,30 @@ func NewRouterMetrics() *RouterMetrics {
 		admissionOccupancyTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_admission_occupancy_tokens",
-				Help: "Current weighted in-flight token sum (Σw) per model — the occupancy-budget numerator.",
+				Help: "Current weighted in-flight token sum (Σw) per model and pool — the occupancy-budget numerator.",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		admissionBudgetTokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_admission_budget_tokens",
-				Help: "Effective occupancy admit budget (admit_fraction × admit_budget_tokens) per model — the occupancy-budget denominator.",
+				Help: "Effective occupancy admit budget (admit_fraction × admit_budget_tokens) per model and pool — the occupancy-budget denominator.",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		admissionInflightRequests: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_admission_inflight_requests",
-				Help: "Current in-flight request count per model, against the max_inflight backstop.",
+				Help: "Current in-flight request count per model and pool, against the max_inflight backstop.",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		admissionMaxInflight: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_admission_max_inflight",
-				Help: "Configured max_inflight backstop per model — the concurrency-utilization denominator. 0 = no backstop.",
+				Help: "Configured max_inflight backstop per model and pool — the concurrency-utilization denominator. 0 = no backstop.",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		agentSuccessTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -937,16 +937,16 @@ func NewRouterMetrics() *RouterMetrics {
 		queueDepth: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_queue_depth",
-				Help: "Current number of requests waiting for a concurrency slot per model.",
+				Help: "Current number of requests waiting for a concurrency slot per model and pool (pool=\"\" is the shared replicas, else the reservation of dedicated ones).",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		admissionQueueDepth: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_admission_queue_depth",
-				Help: "Current number of requests waiting for room in the occupancy budget per model.",
+				Help: "Current number of requests waiting for room in the occupancy budget per model and pool (pool=\"\" is the shared replicas).",
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		prefixPrefillRate: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -1451,11 +1451,43 @@ func (c *pendingDemandCollector) Collect(ch chan<- prometheus.Metric) {
 // tracks real utilization. The budget is always written — including 0 — so a
 // model with no token budget (max_inflight-only), or one whose budget was
 // disabled on reload, reports the true denominator rather than a stale value.
-func (m *RouterMetrics) SetAdmissionOccupancy(model string, sumW int64, count int, budget int64, maxInflight int) {
-	m.admissionOccupancyTokens.With(prometheus.Labels{"model": model}).Set(float64(sumW))
-	m.admissionInflightRequests.With(prometheus.Labels{"model": model}).Set(float64(count))
-	m.admissionBudgetTokens.With(prometheus.Labels{"model": model}).Set(float64(budget))
-	m.admissionMaxInflight.With(prometheus.Labels{"model": model}).Set(float64(maxInflight))
+//
+// key is a pool key (domain.PoolKey): the model for its shared replicas, or
+// the model and a reservation for dedicated ones (label pool).
+func (m *RouterMetrics) SetAdmissionOccupancy(key string, sumW int64, count int, budget int64, maxInflight int) {
+	model, pool := domain.SplitPoolKey(key)
+	labels := prometheus.Labels{"model": model, "pool": pool}
+	m.admissionOccupancyTokens.With(labels).Set(float64(sumW))
+	m.admissionInflightRequests.With(labels).Set(float64(count))
+	m.admissionBudgetTokens.With(labels).Set(float64(budget))
+	m.admissionMaxInflight.With(labels).Set(float64(maxInflight))
+}
+
+// RegisterPoolReplicas publishes hivenet_pool_healthy_agents{model, pool}:
+// the healthy agents of each pool, read at scrape time. pool="" is a model's
+// shared replicas, the ones an autoscaler sizes; another value is the
+// reservation of dedicated replicas, whose count is fixed by the reservation.
+func (m *RouterMetrics) RegisterPoolReplicas(pools func() map[string]int) {
+	m.registry.MustRegister(&poolReplicasCollector{pools: pools})
+}
+
+var poolReplicasDesc = prometheus.NewDesc(
+	"hivenet_pool_healthy_agents",
+	"Healthy agents per model and pool. pool=\"\" is the shared replicas (what an autoscaler sizes); another value is the reservation of dedicated replicas.",
+	[]string{"model", "pool"}, nil,
+)
+
+type poolReplicasCollector struct {
+	pools func() map[string]int // pool key (domain.PoolKey) → healthy agents
+}
+
+func (c *poolReplicasCollector) Describe(ch chan<- *prometheus.Desc) { ch <- poolReplicasDesc }
+
+func (c *poolReplicasCollector) Collect(ch chan<- prometheus.Metric) {
+	for key, n := range c.pools() {
+		model, pool := domain.SplitPoolKey(key)
+		ch <- prometheus.MustNewConstMetric(poolReplicasDesc, prometheus.GaugeValue, float64(n), model, pool)
+	}
 }
 
 // Gather returns the current metric families from this instance's registry. It
@@ -1815,15 +1847,19 @@ func (m *RouterMetrics) AgentEnginePunctualUnregistered(peerID, model, engine, o
 	})
 }
 
-// QueueDepthUpdated sets the per-model queue depth gauge.
+// QueueDepthUpdated sets the per-pool queue depth gauge; key is a pool key
+// (domain.PoolKey), which is the model name for the shared pool.
 // Implements policy.QueueMetrics.
-func (m *RouterMetrics) QueueDepthUpdated(model string, depth int) {
-	m.queueDepth.With(prometheus.Labels{"model": model}).Set(float64(depth))
+func (m *RouterMetrics) QueueDepthUpdated(key string, depth int) {
+	model, pool := domain.SplitPoolKey(key)
+	m.queueDepth.With(prometheus.Labels{"model": model, "pool": pool}).Set(float64(depth))
 }
 
-// AdmissionQueueDepthUpdated sets the per-model occupancy-budget queue gauge.
-func (m *RouterMetrics) AdmissionQueueDepthUpdated(model string, depth int) {
-	m.admissionQueueDepth.With(prometheus.Labels{"model": model}).Set(float64(depth))
+// AdmissionQueueDepthUpdated sets the per-pool occupancy-budget queue gauge;
+// key is a pool key (domain.PoolKey).
+func (m *RouterMetrics) AdmissionQueueDepthUpdated(key string, depth int) {
+	model, pool := domain.SplitPoolKey(key)
+	m.admissionQueueDepth.With(prometheus.Labels{"model": model, "pool": pool}).Set(float64(depth))
 }
 
 // QueueWaitObserved records a successful wait duration in the per-model histogram.

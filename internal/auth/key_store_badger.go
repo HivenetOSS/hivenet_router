@@ -92,6 +92,7 @@ type keyStoreEntry struct {
 	RoutingStrategies []string `json:"routing_strategies,omitempty"`
 	ScopeMax          string   `json:"scope_max,omitempty"`
 	HomeCountry       string   `json:"home_country,omitempty"`
+	Reservation       string   `json:"reservation,omitempty"`
 }
 
 // keyStoreQuota / keyStorePerModel mirror auth.QuotaLimits /
@@ -559,6 +560,7 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 		RoutingStrategies: e.RoutingStrategies,
 		ScopeMax:          e.ScopeMax,
 		HomeCountry:       e.HomeCountry,
+		Reservation:       e.Reservation,
 	}
 }
 
@@ -592,5 +594,6 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 		RoutingStrategies: w.RoutingStrategies,
 		ScopeMax:          w.ScopeMax,
 		HomeCountry:       w.HomeCountry,
+		Reservation:       w.Reservation,
 	}
 }

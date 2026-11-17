@@ -196,6 +196,11 @@ type APIKeyEntry struct {
 	// request that sends no X-Hivenet-Scope header.
 	HomeCountry string `yaml:"home_country,omitempty"`
 
+	// Reservation sends this key's requests only to the agents started with
+	// the same --reserved-for (dedicated replicas). Empty (the default): the
+	// shared replicas only.
+	Reservation string `yaml:"reservation,omitempty"`
+
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
 

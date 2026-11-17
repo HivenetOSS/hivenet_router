@@ -86,6 +86,9 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 		if err := validateKeyScope(label, e.ScopeMax, e.HomeCountry); err != nil {
 			return nil, err
 		}
+		if err := validateReservation(label, e.Reservation); err != nil {
+			return nil, err
+		}
 		keys[hash] = keyEntry{
 			result: AuthResult{
 				TenantID:          e.Metadata.Owner,
@@ -95,6 +98,7 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 				RoutingStrategies: e.RoutingStrategies,
 				ScopeMax:          e.ScopeMax,
 				HomeCountry:       e.HomeCountry,
+				Reservation:       e.Reservation,
 				QuotaLimits:       quota,
 			},
 			expiresAt: expiresAt,

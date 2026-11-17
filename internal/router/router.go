@@ -962,6 +962,14 @@ func (r *Router) startHTTPServer() {
 		tokenizer.NewEstimator(),
 	)
 	handlers.SetHealthyInScope(r.agents.CountHealthyByModelInScope)
+	// Admission, wake and quota are sized per pool: a reserved pool's
+	// replicas never count for the shared pool, and the reverse.
+	r.metrics.RegisterPoolReplicas(r.agents.HealthyByPool)
+	handlers.SetPoolSignals(api.PoolSignals{
+		Healthy:    r.agents.CountHealthyInPool,
+		KVCapacity: r.EngineKVCapacityForPool,
+		Pressure:   r.EnginePressureForPool,
+	})
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
 	handlers.SetKeyPushRejectedObserver(r.metrics.APIKeyPushRejected)
@@ -1576,6 +1584,36 @@ func (r *Router) EnginePressureForModel(model string) (kvUtil, waiting *float64)
 	return MeanEnginePressure(metrics)
 }
 
+// EnginePressureForPool is EnginePressureForModel over the healthy agents of
+// one pool of the model (see domain.PoolKey).
+func (r *Router) EnginePressureForPool(model, pool string) (kvUtil, waiting *float64) {
+	var metrics []*domain.BackendMetrics
+	for _, agent := range r.agents.ListByModel(model) {
+		if !agent.IsHealthy() || agent.Metadata.ReservedFor != pool {
+			continue
+		}
+		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil {
+			metrics = append(metrics, ep)
+		}
+	}
+	return MeanEnginePressure(metrics)
+}
+
+// EngineKVCapacityForPool is EngineKVCapacityForModel over the healthy agents
+// of one pool of the model.
+func (r *Router) EngineKVCapacityForPool(model, pool string) int {
+	total := 0.0
+	for _, agent := range r.agents.ListByModel(model) {
+		if !agent.IsHealthy() || agent.Metadata.ReservedFor != pool {
+			continue
+		}
+		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil {
+			total += *ep.KVCapacityTokens
+		}
+	}
+	return int(total)
+}
+
 // EngineKVCapacityForModel sums the KV-cache size, in tokens, that the healthy
 // agents serving model report (0 when none reports it).
 func (r *Router) EngineKVCapacityForModel(model string) int {
@@ -1793,6 +1831,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		Version:       session.Metadata.Version,
 		Region:        session.Metadata.Region,
 		Country:       session.Metadata.Country,
+		ReservedFor:   session.Metadata.ReservedFor,
 		Tags:          session.Metadata.Tags,
 		Engine:        session.Metadata.Engine,
 		Organization:  session.Metadata.Organization,
@@ -1839,7 +1878,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 	// held while the model was scaled to zero. An agent without a connection
 	// cannot serve them, so it wakes nothing.
 	if connected {
-		r.executor.BroadcastCapacity(metadata.Model)
+		r.executor.BroadcastCapacity(domain.PoolKey(metadata.Model, metadata.ReservedFor))
 		if r.wake != nil {
 			r.wake.Wake(metadata.Model)
 		}
@@ -1940,7 +1979,7 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
 			r.agentJoined()
-			r.executor.BroadcastCapacity(model)
+			r.executor.BroadcastCapacity(domain.PoolKey(model, session.Metadata.ReservedFor))
 			if r.wake != nil {
 				r.wake.Wake(model)
 			}

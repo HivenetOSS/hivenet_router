@@ -702,6 +702,7 @@ type AgentConfig struct {
 	Version        string
 	Region         string
 	Country        string // ISO 3166-1 alpha-2 country the agent runs in; empty = undeclared
+	ReservedFor    string // reservation this agent serves exclusively (dedicated); empty = shared
 	Tags           []string
 	Organization   string // Cloud provider / compute provider (e.g. AWS, OVH, Hivenet Compute)
 	Machine        string // Machine name within the organization

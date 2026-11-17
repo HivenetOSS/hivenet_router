@@ -151,7 +151,8 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := endpointKinds[c.Request.URL.Path]
-		if h.redirect == nil || h.healthyAgentCount == nil || kind == "" {
+		// A dedicated request stays on its reserved replicas: never redirected.
+		if h.redirect == nil || h.healthyAgentCount == nil || kind == "" || requestPool(c) != domain.SharedPool {
 			c.Next()
 			return
 		}

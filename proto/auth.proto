@@ -27,6 +27,7 @@ message AgentMetadata {
     string capability = 12;        // "llm" (default), "embedding", or "reranker"
     string gpu_model  = 13;        // hardware identifier set by operator (e.g. "RTX4090", "RTX5090")
     string country    = 14;        // ISO 3166-1 alpha-2 country the agent runs in (e.g. "FR"); empty = undeclared, served only to scope "all"
+    string reserved_for = 15;      // reservation this agent serves exclusively (dedicated); empty = shared
 }
 
 message AuthResponse {

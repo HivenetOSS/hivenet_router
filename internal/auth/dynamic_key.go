@@ -44,6 +44,8 @@ type DynamicKeyEntry struct {
 	// see AuthResult.
 	ScopeMax    string
 	HomeCountry string
+	// Reservation names the dedicated replicas the key uses; see AuthResult.
+	Reservation string
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -230,6 +232,7 @@ func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, 
 		RoutingStrategies: entry.RoutingStrategies,
 		ScopeMax:          entry.ScopeMax,
 		HomeCountry:       entry.HomeCountry,
+		Reservation:       entry.Reservation,
 		QuotaLimits:       quota,
 	}, nil
 }
@@ -276,6 +279,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 		return err
 	}
 	if err := validateKeyScope(fmt.Sprintf("key entry %q", e.ID), e.ScopeMax, e.HomeCountry); err != nil {
+		return err
+	}
+	if err := validateReservation(fmt.Sprintf("key entry %q", e.ID), e.Reservation); err != nil {
 		return err
 	}
 	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
@@ -332,6 +338,7 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		RoutingStrategies: e.RoutingStrategies,
 		ScopeMax:          e.ScopeMax,
 		HomeCountry:       e.HomeCountry,
+		Reservation:       e.Reservation,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -448,6 +455,7 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			RoutingStrategies: entries[i].RoutingStrategies,
 			ScopeMax:          entries[i].ScopeMax,
 			HomeCountry:       entries[i].HomeCountry,
+			Reservation:       entries[i].Reservation,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry

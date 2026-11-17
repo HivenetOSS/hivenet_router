@@ -1,0 +1,54 @@
+---
+title: "Dedicated replicas"
+description: "Reserve replicas of a model for one client: its keys use only them, and no one else does."
+---
+
+A dedicated replica serves one client only. The agent is started with a reservation name, and the client's API keys carry the same name: those keys are served only by the agents reserved for them, and every other key is served only by the shared agents. The two never mix, on any policy step, fallback chain included.
+
+```bash
+hivenet-router-agent --engine vllm --model llama3:70b --reserved-for acme ...
+```
+
+```yaml
+# auth.yaml (or the admin API: "reservation": "acme")
+reservation: "acme"
+```
+
+| Agent `--reserved-for` | Key `reservation` | Served? |
+| --- | --- | --- |
+| Empty (shared) | Empty | Yes |
+| Empty (shared) | `acme` | No |
+| `acme` | `acme` | Yes |
+| `acme` | Empty, or `other` | No |
+
+A reservation name is 1 to 64 letters, digits, `.`, `_` or `-`. The agent flag can also be set with `HIVENET_AGENT_RESERVED_FOR`. An invalid name stops the agent, is refused at registration, is a `400` on the admin API, and stops the router in `auth.yaml`.
+
+## Pools
+
+A pool is the replicas of a model that serve the same clients: the shared replicas, or the replicas of one reservation. The router keeps per pool what it used to keep per model, so a reserved pool's load never sizes or fills the shared one, and the reverse:
+
+| | Shared pool | Reserved pool |
+| --- | --- | --- |
+| Agents | `--reserved-for` empty | `--reserved-for acme` |
+| Keys | No `reservation` | `reservation: acme` |
+| [Occupancy budget](/routing/admission-control#b2-pool-occupancy) and `max_inflight` | Scaled by the pool's healthy replicas | Scaled by the pool's healthy replicas |
+| Front-door shed (`shed_if`) | The pool's engine pressure | The pool's engine pressure |
+| Per-key serverless caps (`max_occupancy_share`, ITPM, OTPM) | As the policy's `mode` says | Never: the reservation is the entitlement |
+| [Cross-site redirect](/routing/cross-site-redirect) | Yes | Never: the replicas are the client's own |
+| [Hold at zero](/routing/hold-at-zero) | Yes | Never: dedicated replicas do not scale to zero |
+| No healthy agent | Redirect, hold, or `503` | `503 no_agents_available` |
+
+The model's policy (`match`, `exclude_if`, strategy, `fallback_chain`) applies to both pools; the reservation is a filter on top of it, like the [scope](/routing/cross-site-redirect#scope).
+
+## Metrics and autoscaling
+
+Per-pool gauges carry a `pool` label: empty for the shared replicas, the reservation name for dedicated ones.
+
+| Metric | Labels |
+| --- | --- |
+| `hivenet_pool_healthy_agents` | `model`, `pool` |
+| `hivenet_queue_depth` | `model`, `pool` |
+| `hivenet_admission_queue_depth` | `model`, `pool` |
+| `hivenet_admission_occupancy_tokens`, `hivenet_admission_budget_tokens`, `hivenet_admission_inflight_requests`, `hivenet_admission_max_inflight` | `model`, `pool` |
+
+An autoscaler sizes only the shared pool: filter its queries on `pool=""`. A reserved pool's replica count is fixed by the reservation; its gauges show how full the client keeps its replicas. `hivenet_pending_demand` never counts a dedicated request, since such a request is never held.
