@@ -74,7 +74,8 @@
           "routing/policy-gates",
           "routing/admission-control",
             "routing/semantic-routing",
-          "routing/prefix-aware-routing"
+          "routing/prefix-aware-routing",
+          "routing/prefix-aware-report"
         ]
       },
       {
