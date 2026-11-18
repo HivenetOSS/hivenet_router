@@ -34,7 +34,7 @@ type PerModelQuotaLimits struct {
 	TokensPerDay int
 }
 
-// QuotaLimits defines per-tenant rate limits. Zero means unlimited.
+// QuotaLimits defines one key's rate limits. Zero means unlimited.
 //
 // Two shapes are supported and the loader rejects mixing them on the same key:
 //
@@ -65,6 +65,31 @@ type QuotaLimits struct {
 	// names as they appear in request bodies. A nil map is the legacy shape;
 	// an empty non-nil map is invalid and rejected at load.
 	PerModel map[string]PerModelQuotaLimits
+
+	// TenantTokensPerDay is the daily token budget of the key's tenant, which
+	// all the tenant's keys spend together (site-wide with shared counters),
+	// in either shape; zero means unset. A key entry holds the value it
+	// declares; the AuthResult of a request holds the tenant's budget: the
+	// lowest value among the tenant's keys (tenantBudgets), so a budget
+	// lowered on one key applies at once and a budget is raised once every
+	// key carries the new value.
+	TenantTokensPerDay int
+}
+
+// tenantBudgets returns, per tenant, its daily budget: the lowest non-zero
+// TenantTokensPerDay among its keys (0 when none sets one).
+func tenantBudgets(byTenant map[string][]QuotaLimits) map[string]int {
+	out := make(map[string]int, len(byTenant))
+	for tenant, keys := range byTenant {
+		budget := 0
+		for _, q := range keys {
+			if v := q.TenantTokensPerDay; v > 0 && (budget == 0 || v < budget) {
+				budget = v
+			}
+		}
+		out[tenant] = budget
+	}
+	return out
 }
 
 // ResolvePerModel returns the per-model quota entry that exactly matches the
@@ -80,6 +105,68 @@ func (q QuotaLimits) ResolvePerModel(model string) (PerModelQuotaLimits, bool) {
 	return entry, ok
 }
 
+// addCeiling sums two per-key ceilings where 0 means unlimited: the sum is
+// unlimited if either is.
+func addCeiling(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	return a + b
+}
+
+// tenantCeilings sums the limits of one tenant's keys into the tenant's total
+// ceiling, for the per-tenant limit gauges. Limits are enforced per key, so a
+// tenant can use up to the sum of its keys' limits; a key with an unlimited
+// (0) value makes that total unlimited. Flat-shape fields are summed over the
+// flat-shape keys only, and each per-model entry over the keys that declare
+// that model (a per-model key cannot call an undeclared model). With one key,
+// the result is that key's limits unchanged.
+func tenantCeilings(keys []QuotaLimits) QuotaLimits {
+	var out QuotaLimits
+	flat := 0
+	for _, q := range keys {
+		if q.PerModel != nil {
+			if out.PerModel == nil {
+				out.PerModel = make(map[string]PerModelQuotaLimits, len(q.PerModel))
+			}
+			for model, e := range q.PerModel {
+				if prev, ok := out.PerModel[model]; ok {
+					e.RequestsPerMinutePerReplica = addCeiling(prev.RequestsPerMinutePerReplica, e.RequestsPerMinutePerReplica)
+					e.TokensPerDay = addCeiling(prev.TokensPerDay, e.TokensPerDay)
+				}
+				out.PerModel[model] = e
+			}
+		}
+		if q.PerModel != nil && q.RequestsPerMinute == 0 && q.TokensPerDay == 0 {
+			// A per-model key has no flat ceiling; it must not turn the
+			// tenant's flat total into "unlimited".
+			continue
+		}
+		if flat == 0 {
+			out.RequestsPerMinute, out.TokensPerDay = q.RequestsPerMinute, q.TokensPerDay
+		} else {
+			out.RequestsPerMinute = addCeiling(out.RequestsPerMinute, q.RequestsPerMinute)
+			out.TokensPerDay = addCeiling(out.TokensPerDay, q.TokensPerDay)
+		}
+		flat++
+	}
+	out.TenantTokensPerDay = tenantBudgets(map[string][]QuotaLimits{"": keys})[""]
+	return out
+}
+
+// DailyTokenCeiling is the most tokens a tenant whose ceilings are q can
+// spend in a day over its flat-shape keys: the sum of their budgets, capped
+// by the tenant's own budget; 0 when unlimited.
+func (q QuotaLimits) DailyTokenCeiling() int {
+	switch t := q.TenantTokensPerDay; {
+	case t == 0:
+		return q.TokensPerDay
+	case q.TokensPerDay == 0 || t < q.TokensPerDay:
+		return t
+	}
+	return q.TokensPerDay
+}
+
 // AuthResult is returned by a successful Provider.Authenticate call.
 // It carries the resolved identity, quota limits, and access restrictions
 // for downstream enforcement and audit logging.
@@ -88,9 +175,11 @@ type AuthResult struct {
 	// Gin context as "tenant_id" and used by the quota enforcement layer (Ticket 5).
 	TenantID string
 
-	// KeyID is the upstream key-sync service key identifier (e.g. "key-abc123").
-	// Injected into the Gin context as "key_id" for metric labeling and audit.
-	// Empty string for StaticKeyProvider.
+	// KeyID identifies the key: the upstream key-sync service ID for dynamic
+	// keys (e.g. "key-abc123"), "static-" + 16 hex of the key hash for
+	// auth.yaml keys, "admin-" + 16 hex for admin keys. Injected into the Gin
+	// context as "key_id" for per-key limits, metric labels and audit.
+	// Empty only in auth mode none.
 	KeyID string
 
 	// KeyPreview is the truncated key (e.g. "sk-...KJ4") stored in
@@ -103,8 +192,8 @@ type AuthResult struct {
 	// Checked in the inference handlers after the request body is parsed.
 	AllowedModels []string
 
-	// QuotaLimits holds the rate/token limits for this tenant.
-	// Zero values mean unlimited. Enforcement is planned for Ticket 5.
+	// QuotaLimits holds this key's rate/token limits, enforced per key by
+	// QuotaMiddleware and the handlers. Zero values mean unlimited.
 	QuotaLimits QuotaLimits
 
 	// Redirect is set only for a request authenticated by a cross-site

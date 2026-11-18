@@ -201,6 +201,7 @@ func (r *DynamicKeyProvider) DegradeKeyStore(reason string) {
 	r.mu.Lock()
 	r.byHash = make(map[string]*DynamicKeyEntry)
 	r.byID = make(map[string]*DynamicKeyEntry)
+	r.rebuildTenantsLocked()
 	r.version = ""
 	r.mu.Unlock()
 	r.ks.restored.Store(false)
@@ -347,6 +348,7 @@ func (r *DynamicKeyProvider) LoadKeyStore(opts KeyStoreLoadOptions) (KeyStoreLoa
 
 	r.mu.Lock()
 	r.byHash, r.byID = byHash, byID
+	r.rebuildTenantsLocked()
 	// The version is restored even when no key survived: otherwise a stale
 	// push below the persisted version would be accepted after a restart.
 	if snap.Version > r.version {

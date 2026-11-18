@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-// handlers_models_test exercises effectiveAllowedModels, the per-key model
+// handlers_models_test exercises allowedModels, the per-key model
 // visibility helper shared by ListModels, GetModel, and authorizeModel.
 //
 // Lives in package api (white-box) so it can reach the unexported helper
@@ -48,7 +48,7 @@ func TestEffectiveAllowedModels_PerModelQuotaIsTheAllowSet(t *testing.T) {
 	}
 	c := stampedContext(&limits, nil)
 
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := (&Handlers{}).allowedModels(c)
 	if unrestricted {
 		t.Fatalf("per-model key must NOT be unrestricted — strict enumeration is the whole point")
 	}
@@ -65,29 +65,35 @@ func TestEffectiveAllowedModels_PerModelQuotaIsTheAllowSet(t *testing.T) {
 	}
 }
 
-// TestEffectiveAllowedModels_PerModelTakesPrecedenceOverAllowedModels verifies
-// that when BOTH per_model AND allowed_models are present on a key, the
-// per_model map wins. This avoids a confusing state where /v1/models could
-// show models the strict per-model check would 429 on (or vice versa); the
-// most specific declaration governs the visibility surface.
-func TestEffectiveAllowedModels_PerModelTakesPrecedenceOverAllowedModels(t *testing.T) {
+// TestEffectiveAllowedModels_PerModelAndAllowedModelsIntersect verifies that
+// when BOTH per_model AND allowed_models are present on a key, the key may use
+// only the models in both: neither list widens the other. A model in per_model
+// but not in allowed_models is refused (it used to be allowed, per_model
+// winning), and one in allowed_models but not in per_model too (it has no
+// quota entry, so admission would 429 anyway).
+func TestEffectiveAllowedModels_PerModelAndAllowedModelsIntersect(t *testing.T) {
 	limits := auth.QuotaLimits{
 		PerModel: map[string]auth.PerModelQuotaLimits{
-			"Qwen/Qwen3.6-27B-A3B": {RequestsPerMinutePerReplica: 187},
+			"chat":  {RequestsPerMinutePerReplica: 187},
+			"coder": {RequestsPerMinutePerReplica: 187},
 		},
 	}
-	// allowed_models lists a different model — must be ignored.
-	c := stampedContext(&limits, []string{"openai/gpt-oss-20b"})
+	c := stampedContext(&limits, []string{"chat", "openai/gpt-oss-20b"})
 
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := (&Handlers{}).allowedModels(c)
 	if unrestricted {
-		t.Fatalf("per-model key must NOT be unrestricted regardless of allowed_models")
+		t.Fatalf("a key with both lists must NOT be unrestricted")
 	}
-	if _, ok := allowSet["Qwen/Qwen3.6-27B-A3B"]; !ok {
-		t.Errorf("per_model entry must drive the allow-set")
+	if len(allowSet) != 1 {
+		t.Fatalf("allow-set %v, want only the model in both lists (chat)", allowSet)
 	}
-	if _, ok := allowSet["openai/gpt-oss-20b"]; ok {
-		t.Errorf("allowed_models must be ignored when per_model is set (per_model is the source of truth)")
+	if _, ok := allowSet["chat"]; !ok {
+		t.Errorf("chat is in both lists and must be allowed")
+	}
+	for _, m := range []string{"coder", "openai/gpt-oss-20b"} {
+		if _, ok := allowSet[m]; ok {
+			t.Errorf("%s is in only one list and must not be allowed", m)
+		}
 	}
 }
 
@@ -99,7 +105,7 @@ func TestEffectiveAllowedModels_LegacyAllowedModelsList(t *testing.T) {
 	limits := auth.QuotaLimits{RequestsPerMinute: 100, TokensPerDay: 1_000_000} // no PerModel
 	c := stampedContext(&limits, []string{"openai/gpt-oss-20b", "BAAI/bge-m3"})
 
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := (&Handlers{}).allowedModels(c)
 	if unrestricted {
 		t.Fatalf("non-empty allowed_models must produce a restricted allow-set")
 	}
@@ -122,7 +128,7 @@ func TestEffectiveAllowedModels_Unrestricted_NoQuotaNoAllowList(t *testing.T) {
 	limits := auth.QuotaLimits{RequestsPerMinute: 100, TokensPerDay: 1_000_000} // no PerModel
 	c := stampedContext(&limits, nil)                                           // no allowed_models
 
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := (&Handlers{}).allowedModels(c)
 	if !unrestricted {
 		t.Fatalf("a key with neither per_model nor allowed_models must be unrestricted; got allowSet=%v", allowSet)
 	}
@@ -140,7 +146,7 @@ func TestEffectiveAllowedModels_Unrestricted_NoQuotaNoAllowList(t *testing.T) {
 func TestEffectiveAllowedModels_Unrestricted_EmptyAllowedModelsList(t *testing.T) {
 	c := stampedContext(nil, []string{}) // empty but non-nil
 
-	_, unrestricted := effectiveAllowedModels(c)
+	_, unrestricted := (&Handlers{}).allowedModels(c)
 	if !unrestricted {
 		t.Fatalf("empty allowed_models list must be unrestricted (len==0 means 'allow all', matching authorizeModel)")
 	}
@@ -153,7 +159,7 @@ func TestEffectiveAllowedModels_Unrestricted_EmptyAllowedModelsList(t *testing.T
 func TestEffectiveAllowedModels_NoContextKeysAtAll(t *testing.T) {
 	c := stampedContext(nil, nil)
 
-	_, unrestricted := effectiveAllowedModels(c)
+	_, unrestricted := (&Handlers{}).allowedModels(c)
 	if !unrestricted {
 		t.Fatalf("no context keys set must be unrestricted (no auth → no restriction)")
 	}
@@ -177,7 +183,7 @@ func TestApplyAllowSet_AdminBypassReturnsFullCatalog(t *testing.T) {
 	c := stampedContext(&limits, nil)
 
 	// Tenant view: the helper produces a restricted allow-set as expected.
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := (&Handlers{}).allowedModels(c)
 	if unrestricted {
 		t.Fatalf("precondition: per-model key should produce a restricted allow-set")
 	}

@@ -105,7 +105,7 @@ func (h *Handlers) WakeHold() gin.HandlerFunc {
 			return
 		}
 		model := peekModel(c)
-		if model == "" || !modelAllowed(c, model) || h.healthyAgentCount(model) > 0 {
+		if model == "" || !h.modelAllowed(c, model) || h.healthyAgentCount(model) > 0 {
 			c.Next()
 			return
 		}
@@ -200,7 +200,7 @@ func rejectReleased(c *gin.Context, model string) bool {
 		domain.SourceRouter)
 	rerr.RetryAfter = int(wakeRetryAfter.Seconds())
 	c.Set(auditKeyErrorCode, string(rerr.Code))
-	setRootSpanError(c, rerr.Message)
+	setRootSpanError(c, rerr)
 	c.JSON(http.StatusServiceUnavailable, domain.RouterErrorResponse{Error: rerr})
 	return true
 }
@@ -269,8 +269,8 @@ func (r *heldResponse) keepAliveOn(w gin.ResponseWriter) (gin.ResponseWriter, er
 func (r *heldResponse) fail(msg string) {
 	c := r.c
 	c.Set(auditKeyErrorCode, string(domain.ErrCodeModelWaking))
-	setRootSpanError(c, msg)
 	rerr := domain.NewRouterError(domain.ErrCodeModelWaking, msg, domain.SourceRouter)
+	setRootSpanError(c, rerr)
 	rerr.RetryAfter = int(wakeRetryAfter.Seconds())
 	body, _ := json.Marshal(domain.RouterErrorResponse{Error: rerr})
 	if !r.committed {

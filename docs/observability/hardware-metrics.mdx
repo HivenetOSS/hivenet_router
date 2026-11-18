@@ -435,7 +435,7 @@ or:
 export HIVENET_ROUTER_GPU_MODEL=RTX5090
 ```
 
-Hivenet Router does not currently derive this metadata automatically from NVML.
+When `--gpu-model` is unset, the agent uses the GPU model name NVML reports (for example `NVIDIA GeForce RTX 5090`) if all the GPUs it uses are one model. It uses the GPUs listed in `--gpu-devices-file`, or every visible GPU when that flag is unset. If NVML is unavailable or the GPUs are of several models, the agent logs a warning and reports no GPU model. `--gpu-model` always overrides the detected name.
 
 Keep the value consistent across agents when policies use it.
 

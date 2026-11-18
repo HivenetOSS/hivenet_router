@@ -17,7 +17,6 @@ import (
 
 	"hivenet_router/internal/agent"
 	"hivenet_router/internal/config"
-	"hivenet_router/internal/router"
 )
 
 // siteRouter is one router of a multi-router site that a test can stop.
@@ -44,23 +43,7 @@ func startSiteRouterOn(t *testing.T, cfg *config.Config) *siteRouter {
 	cfg.P2PListenAddr = "127.0.0.1"
 	cfg.JWTSecret = jwtSecret // one secret for the whole site
 	cfg.DiskDBPath = filepath.Join(t.TempDir(), "badger")
-	r, err := router.New(cfg)
-	if err != nil {
-		t.Fatalf("router.New: %v", err)
-	}
-	go r.Start() //nolint:errcheck
-	var once sync.Once
-	stop := func() { once.Do(func() { r.Close() }) } //nolint:errcheck
-	t.Cleanup(stop)
-	base := "http://127.0.0.1" + cfg.HTTPPort
-	waitFor(t, 15*time.Second, "router HTTP API ready", func() bool {
-		resp, err := http.Get(base + "/v1/models")
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	})
+	base, _, stop := launchRouter(t, cfg)
 	return &siteRouter{baseURL: base, cfg: cfg, stop: stop}
 }
 

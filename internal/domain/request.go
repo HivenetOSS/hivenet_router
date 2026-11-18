@@ -34,19 +34,35 @@ type PendingRequest struct {
 	// Metadata.Capability matches this value are considered. Defaults to "llm".
 	Capability string
 
+	// PrefixAnchors is HeaderPrefixAnchors for this request, empty when its
+	// policy does not route on prefixes.
+	PrefixAnchors string
+	// PrefillTokens is HeaderPrefillTokens for the current forward attempt.
+	PrefillTokens int
+	// PredictedBlocks is the leading prompt blocks the current attempt's
+	// agent holds in cache by its engine's confirmed cache events
+	// (prefix-aware), as of PredictedAt (unix nanos), to check against the
+	// engine's report.
+	PredictedBlocks []uint64
+	PredictedAt     int64
+
 	// Path is the agent-facing HTTP path the processor forwards this request to
 	// (e.g. "/v1/messages" for the Anthropic passthrough). Empty means the
 	// default "/v1/chat/completions", so existing chat requests are unaffected.
 	Path string
 
-	// TokensPerDay is the tenant's configured daily token budget (0 = unlimited).
+	// TokensPerDay is the key's configured daily token budget (0 = unlimited).
 	// Copied from QuotaLimits at enqueue time so the processor can enforce it
 	// without re-reading the Gin context.
 	TokensPerDay int
 
+	// TenantTokensPerDay is the daily token budget of the key's tenant, shared
+	// by all its keys (0 = unlimited). Copied like TokensPerDay.
+	TenantTokensPerDay int
+
 	// QuotaModel selects the limiter bucket for AllowOutputTokens. Empty for
-	// legacy flat keys (one bucket per tenant); set to the requested model
-	// name for per-model keys (one bucket per (tenant, model)). Stamped by the
+	// flat keys (one bucket per key); set to the requested model name for
+	// per-model keys (one bucket per (key, model)). Stamped by the
 	// handler at enqueue time so the processor charges the SAME bucket the
 	// front-door admission charged AllowInputTokens against.
 	QuotaModel string
@@ -91,6 +107,13 @@ type PendingRequest struct {
 	// stashed so the handler can true up the reservation by the difference once
 	// the backend reports the exact prompt_tokens.
 	EstimatedInputTokens int
+
+	// ChargedInputTokens is what the daily budgets were charged for the prompt
+	// at admission (0 when nothing was, as for count_tokens). Once the backend
+	// reports its prompt_tokens, the processor charges what they exceed this by
+	// together with the completion (InputShortfall): the daily budgets count
+	// the prompt the backend processed, not only the router's estimate of it.
+	ChargedInputTokens int
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.
@@ -112,6 +135,18 @@ type Reservation interface {
 // by then, so an engine still running it would hold capacity no one counts.
 // A duration, not a time, so the hosts' clocks do not matter.
 const HeaderTimeout = "X-Hivenet-Timeout-Ms"
+
+// HeaderPrefixAnchors carries, from router to agent, the request's prefix
+// anchors (prefixhash.EncodeAnchors): keyed hashes of its message prefixes,
+// never text. The agent reports which blocks each anchor maps to once the
+// engine has the prompt's tokens, and never forwards the header.
+const HeaderPrefixAnchors = "X-Hivenet-Prefix-Anchors"
+
+// HeaderPrefillTokens carries, from router to agent, the prompt tokens the
+// router expects the engine to prefill for this request (those not already
+// in its cache). The agent sums them over the requests it has not started
+// answering and reports the sum to every router.
+const HeaderPrefillTokens = "X-Hivenet-Prefill-Tokens"
 
 // TimeoutHeader is the value of HeaderTimeout for a request due at deadline.
 func TimeoutHeader(deadline time.Time) string {
@@ -177,4 +212,15 @@ func (p *PendingRequest) ForwardID() string {
 		return p.ID
 	}
 	return p.ID + "-" + strconv.Itoa(int(n))
+}
+
+// InputShortfall is how many prompt tokens the backend reported beyond what
+// the daily budgets were charged at admission: 0 when none were charged,
+// when the backend reported none, or when the estimate was not below them.
+// An estimate above the backend's count is not refunded.
+func (p *PendingRequest) InputShortfall(promptTokens int) int {
+	if p.ChargedInputTokens <= 0 || promptTokens <= p.ChargedInputTokens {
+		return 0
+	}
+	return promptTokens - p.ChargedInputTokens
 }

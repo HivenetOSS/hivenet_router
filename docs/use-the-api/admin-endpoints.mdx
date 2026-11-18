@@ -43,6 +43,8 @@ The dynamic key endpoints return HTTP `501` unless the router is using dynamic A
 
 ## Configure admin authentication
 
+The admin API is for operators, not browsers: its responses carry no CORS headers, and a CORS preflight to `/admin/*` is not answered, so a web page on another origin cannot read admin responses.
+
 Admin authentication is separate from client authentication for `/v1/*`.
 
 Enable it in `auth.yaml`:
@@ -981,6 +983,7 @@ The operation:
 - validates every entry before applying changes
 - rejects duplicate IDs
 - rejects duplicate key hashes
+- rejects an `id` or `owner` that breaks the [identifier rules](/security/api-keys) (invalid UTF-8, a space at either end, control, invisible or line-separator characters, whitespace other than a plain space, or a reserved name), logging a warning that names the entry and counting the push in `hivenet_api_key_push_rejected_total`
 - replaces the registry atomically
 - accepts request bodies up to 16 MiB (`16777216` bytes)
 

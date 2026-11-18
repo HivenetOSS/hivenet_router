@@ -80,7 +80,7 @@ func (p *openAIProvider) Complete(ctx context.Context, req *domain.ChatRequest, 
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("openai: HTTP %d: %s", resp.StatusCode, string(errBody))
+		return nil, &HTTPError{Provider: "openai", Status: resp.StatusCode, Body: string(errBody)}
 	}
 
 	var chatResp domain.ChatResponse

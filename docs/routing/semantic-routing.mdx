@@ -6,7 +6,7 @@ sidebarTitle: "Semantic model aliases"
 
 A semantic model alias is a virtual model name, such as `auto`, that you declare in a per-model policy document. When a request names an alias, Hivenet Router picks one concrete model from the request's content, rewrites the request's `model` field, and then applies quota, admission control, and replica routing to that model exactly as if the client had named it.
 
-Requests that name a concrete model never enter this path. They cost one map lookup and are forwarded byte-identical.
+Requests that name a concrete model never enter this path. They cost one map lookup and are forwarded byte-identical (apart from `cache_salt` when [per-tenant prefix-cache salting](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) is on).
 
 <Info>
 The decision uses **structural signals only**: tool activity, conversation size, images, output constraints, and lexical markers for code, stack traces, and maths, plus keyword lists you write. It does not call a model or an embedding service. Topics without such markers (for example, "why is the sky blue?") fall through to the alias's default route.
@@ -247,14 +247,14 @@ The error message names only models the API key may use.
 
 ### Decision log
 
-Set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision. Each line holds the requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds.
+Set `--semantic-decision-log` (or `HIVENET_ROUTER_SEMANTIC_DECISION_LOG`) to a file path to append one JSON line per decision. Each line holds the caller's `tenant_id` and `key_id`, the requested alias, resolved model, route, source, per-route scores, matched signals, features, rejected candidates with reasons, task key hash, and decision time in microseconds.
 
 A single background writer appends to the file, so logging never blocks a request. When more than `--semantic-decision-log-buffer` records are queued, new records are dropped and counted in `hivenet_semantic_decision_log_dropped_total`. Encode and write failures, such as a full disk, are counted in `hivenet_semantic_decision_log_write_errors_total`.
 
 The router opens the file once, in append mode, and never rotates or reopens it. Rotate it with copy-and-truncate (for example, `copytruncate` in logrotate). With rename-based rotation the router keeps writing to the renamed file until it restarts.
 
 <Info>
-Prompt text is not written, but the log is still sensitive. `route_matches` lists which of your configured keywords matched each request, which reveals that the prompt contained those words. `key_id` holds the caller's key ID, or the tenant and masked key preview for static keys. `filtered_out` names every rejected candidate, including models the caller's key may not use. The router creates the file with mode `0600`. Keep it at least as protected as your audit log.
+Prompt text is not written, but the log is still sensitive. `route_matches` lists which of your configured keywords matched each request, which reveals that the prompt contained those words. `key_id` holds the caller's key ID, as in the audit log (`anonymous` in auth mode `none`). `filtered_out` names every rejected candidate, including models the caller's key may not use. The router creates the file with mode `0600`, and narrows an existing file to `0600`. Keep it at least as protected as your audit log.
 </Info>
 
 ## Reload

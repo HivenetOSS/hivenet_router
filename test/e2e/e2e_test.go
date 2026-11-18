@@ -18,6 +18,8 @@ package e2e
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -120,14 +123,45 @@ func startStubBackend(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// routerOpts customises startRouterWith. The zero value is the default
+// no-auth stack (insecure admin allowed) every older test uses.
+type routerOpts struct {
+	// AuthYAML, when set, is written to a temp auth.yaml and loaded. Use
+	// writeAuthYAML to build one with real key hashes.
+	AuthYAML string
+	// AdminKey, when set, is the raw admin key (HIVENET_ROUTER_ADMIN_API_KEYS)
+	// and the insecure-admin opt-in is not set.
+	AdminKey string
+	// Mutate, when set, edits the config after the defaults are applied.
+	Mutate func(*config.Config)
+}
+
 // startRouter builds and starts a router on ephemeral ports and returns its
 // HTTP base URL plus the config (for the agent to derive addresses from).
 func startRouter(t *testing.T) (baseURL string, cfg *config.Config) {
 	t.Helper()
-	// This test exercises the inference path, not admin auth, so allow the
-	// default no-auth admin surface instead of configuring admin keys.
-	t.Setenv("HIVENET_ROUTER_ALLOW_INSECURE_ADMIN", "true")
-	cfg = config.DefaultConfig()
+	return startRouterWith(t, routerOpts{})
+}
+
+// startRouterWith is startRouter with auth and config options.
+func startRouterWith(t *testing.T, opts routerOpts) (baseURL string, cfg *config.Config) {
+	t.Helper()
+	baseURL, cfg, _ = startRouterHandle(t, opts)
+	return baseURL, cfg
+}
+
+// routerConfig builds the config startRouterWith uses, without starting a
+// router: ephemeral ports, a temp Badger dir, and the auth options.
+func routerConfig(t *testing.T, opts routerOpts) *config.Config {
+	t.Helper()
+	if opts.AdminKey != "" {
+		t.Setenv("HIVENET_ROUTER_ADMIN_API_KEYS", opts.AdminKey)
+	} else {
+		// These tests exercise the inference path, not admin auth, so allow
+		// the default no-auth admin surface instead of configuring admin keys.
+		t.Setenv("HIVENET_ROUTER_ALLOW_INSECURE_ADMIN", "true")
+	}
+	cfg := config.DefaultConfig()
 	cfg.HTTPPort = fmt.Sprintf(":%d", freePort(t))
 	cfg.GRPCPort = fmt.Sprintf(":%d", freePort(t))
 	cfg.MetricsPort = fmt.Sprintf(":%d", freePort(t))
@@ -135,30 +169,113 @@ func startRouter(t *testing.T) (baseURL string, cfg *config.Config) {
 	cfg.P2PListenAddr = "127.0.0.1"
 	cfg.JWTSecret = jwtSecret
 	cfg.DiskDBPath = filepath.Join(t.TempDir(), "badger")
+	if opts.AuthYAML != "" {
+		p := filepath.Join(t.TempDir(), "auth.yaml")
+		if err := os.WriteFile(p, []byte(opts.AuthYAML), 0o600); err != nil {
+			t.Fatalf("write auth.yaml: %v", err)
+		}
+		cfg.AuthConfigFile = p
+	}
+	if opts.Mutate != nil {
+		opts.Mutate(cfg)
+	}
+	return cfg
+}
 
+// startRouterHandle is startRouterWith that also returns the router.
+func startRouterHandle(t *testing.T, opts routerOpts) (baseURL string, cfg *config.Config, r *router.Router) {
+	t.Helper()
+	cfg = routerConfig(t, opts)
+	baseURL, r, _ = launchRouter(t, cfg)
+	return baseURL, cfg, r
+}
+
+// launchRouter starts a router on cfg and waits until its HTTP API answers
+// /health, which is public, so readiness does not depend on the auth mode.
+// The router stops when the test ends; stop stops it earlier (idempotent).
+// freePort picks ports below the ephemeral range, so no outgoing connection
+// can take one before the router binds it.
+func launchRouter(t *testing.T, cfg *config.Config) (baseURL string, r *router.Router, stop func()) {
+	t.Helper()
 	r, err := router.New(cfg)
 	if err != nil {
 		t.Fatalf("router.New: %v", err)
 	}
-	go r.Start()                    //nolint:errcheck // blocks until Close; failures surface as readiness timeout below
-	t.Cleanup(func() { r.Close() }) //nolint:errcheck
-
+	started := make(chan error, 1)
+	go func() { started <- r.Start() }() // blocks until Close
+	var once sync.Once
+	stop = func() { once.Do(func() { r.Close() }) } //nolint:errcheck
+	t.Cleanup(stop)
 	baseURL = "http://127.0.0.1" + cfg.HTTPPort
-	waitFor(t, 15*time.Second, "router HTTP API ready", func() bool {
-		resp, err := http.Get(baseURL + "/v1/models")
-		if err != nil {
-			return false
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		select {
+		case err := <-started:
+			t.Fatalf("router stopped before its HTTP API was ready: %v", err)
+		default:
 		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	})
-	return baseURL, cfg
+		if resp, err := http.Get(baseURL + "/health"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return baseURL, r, stop
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("router HTTP API not ready on %s", baseURL)
+		}
+	}
+}
+
+// testKey is one static auth.yaml key: the raw token a client presents, the
+// tenant (metadata.owner) it belongs to, and optional flat quota limits
+// (0 = unlimited).
+type testKey struct {
+	Token, Owner, Name string
+	RPM, TPD           int
+	TenantTPD          int      // quota.tenant_tokens_per_day
+	Models             []string // model allowlist; empty = every model
+}
+
+// writeAuthYAML returns an api-key auth.yaml for the given keys, hashing each
+// token the way the router does (hex SHA-256). Admin auth is api-key, so pair
+// it with routerOpts.AdminKey.
+func writeAuthYAML(keys ...testKey) string {
+	var b strings.Builder
+	b.WriteString("api:\n  mode: api-key\n  keys:\n")
+	for _, k := range keys {
+		h := sha256.Sum256([]byte(k.Token))
+		fmt.Fprintf(&b, "    - key_hash: %q\n      metadata:\n        name: %q\n        owner: %q\n",
+			hex.EncodeToString(h[:]), k.Name, k.Owner)
+		if len(k.Models) > 0 {
+			fmt.Fprintf(&b, "      models: [%s]\n", strings.Join(k.Models, ", "))
+		}
+		if k.RPM > 0 || k.TPD > 0 || k.TenantTPD > 0 {
+			fmt.Fprintf(&b, "      quota:\n        requests_per_minute: %d\n        tokens_per_day: %d\n", k.RPM, k.TPD)
+			if k.TenantTPD > 0 {
+				fmt.Fprintf(&b, "        tenant_tokens_per_day: %d\n", k.TenantTPD)
+			}
+		}
+	}
+	b.WriteString("admin:\n  mode: api-key\n")
+	return b.String()
 }
 
 // startAgent builds and runs an agent against the given router and stub
 // backend. Note: no announce address, no listen port, no address config of
 // any kind — agents are outbound-only.
 func startAgent(t *testing.T, routerCfg *config.Config, backendURL, identityPath string) *agent.Agent {
+	t.Helper()
+	return startAgentWith(t, routerCfg, backendURL, identityPath, nil)
+}
+
+// startAgentWith is startAgent with a hook to edit the agent config.
+func startAgentWith(t *testing.T, routerCfg *config.Config, backendURL, identityPath string, mutate func(*config.AgentConfig)) *agent.Agent {
+	t.Helper()
+	return startAgentWithEngine(t, routerCfg, backendURL, identityPath, nil, mutate)
+}
+
+// startAgentWithEngine is startAgentWith for a given engine (nil = the
+// custom engine on backendURL/health).
+func startAgentWithEngine(t *testing.T, routerCfg *config.Config, backendURL, identityPath string, engine agent.Engine, mutate func(*config.AgentConfig)) *agent.Agent {
 	t.Helper()
 	cfg := config.DefaultAgentConfig()
 	cfg.JWTSecret = jwtSecret
@@ -171,8 +288,15 @@ func startAgent(t *testing.T, routerCfg *config.Config, backendURL, identityPath
 	cfg.IdentityPath = identityPath
 	cfg.Capacity = 2
 	cfg.Region = "e2e"
+	if engine == nil {
+		engine = &agent.CustomEngine{HealthURL: cfg.HealthURL}
+	}
+	cfg.Engine = engine.Name()
+	if mutate != nil {
+		mutate(cfg)
+	}
 
-	a := agent.NewAgent(cfg, &agent.CustomEngine{HealthURL: cfg.HealthURL})
+	a := agent.NewAgent(cfg, engine)
 	go a.Run() //nolint:errcheck // exits via Stop; failures surface as readiness timeout in callers
 	t.Cleanup(a.Stop)
 	return a
@@ -201,9 +325,28 @@ func postChat(baseURL string, stream bool) (*http.Response, error) {
 
 // modelHealthy reports whether /v1/models lists stubModel with ≥1 healthy agent.
 func modelHealthy(baseURL string) bool {
-	resp, err := http.Get(baseURL + "/v1/models")
+	return modelHealthyAs(baseURL, "", stubModel)
+}
+
+// modelHealthyAs is modelHealthy for any model, presenting the given API key
+// ("" sends none, for the no-auth stack).
+func modelHealthyAs(baseURL, apiKey, model string) bool {
+	return healthyAgentsAs(baseURL, apiKey, model) >= 1
+}
+
+// healthyAgentsAs is the number of healthy agents /v1/models lists for model
+// (0 on any error).
+func healthyAgentsAs(baseURL, apiKey, model string) int {
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/models", nil)
 	if err != nil {
-		return false
+		return 0
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -215,14 +358,14 @@ func modelHealthy(baseURL string) bool {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false
+		return 0
 	}
 	for _, m := range out.Data {
-		if m.ID == stubModel && m.Agents.Healthy >= 1 {
-			return true
+		if m.ID == model {
+			return m.Agents.Healthy
 		}
 	}
-	return false
+	return 0
 }
 
 // TestRouterAgentEndToEnd runs one router+agent stack and drives it through

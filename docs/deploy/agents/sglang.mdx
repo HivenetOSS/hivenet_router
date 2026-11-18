@@ -298,6 +298,10 @@ The agent then sends `Authorization: Bearer <key>` on every request to SGLang: r
 The agent never forwards the client's router credentials to the backend: `Authorization`, `X-Api-Key`, `Cookie` and `Proxy-Authorization` are removed first. If the backend requires authentication, set a backend API key.
 </Note>
 
+## Isolate tenants in the prefix cache
+
+With the router's `--cache-salt` on, chat completions forwarded to an SGLang agent carry a per-tenant `cache_salt`, so tenants never share RadixAttention prefix-cache entries. This needs SGLang v0.5.11 or later: older versions accept the field and ignore it. The agent reads SGLang's version from `GET /server_info` (or `/get_server_info`) and reports it; an agent with an older or unknown version counts as not isolated on chat completions too. `/v1/messages` is not isolated: released SGLang versions drop the salt on that endpoint. For every path left without isolation, the router logs a warning and counts the agent in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
+
 ## How load is bounded
 
 The agent reports SGLang's KV-cache size in tokens, read from `sglang:max_total_num_tokens`. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
@@ -408,6 +412,23 @@ curl http://192.168.1.100:8080/admin/routing-table \
           waiting_requests: .engine.waiting_requests
         }'
 ```
+
+## Prefix-aware routing
+
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent tokenizes each served chat request with SGLang's `/v1/tokenize` after forwarding it (SGLang returns no token IDs while streaming), and reports keyed hashes of the prompt's blocks to every router. Tested with SGLang 0.5.23.
+
+To report what SGLang stores and evicts, publish its KV-cache events on a **local** address and give the agent that address ([KV events](/routing/prefix-aware-routing#kv-events)):
+
+```bash
+python -m sglang.launch_server --model-path MODEL \
+  --kv-events-config '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557"}'
+```
+
+```bash
+--kv-events-endpoint tcp://127.0.0.1:5557
+```
+
+Add `--enable-cache-report` to SGLang so it reports the prompt tokens it served from cache: the router uses them to check its predictions ([agent trust](/routing/prefix-aware-routing#agent-trust)).
 
 ## Use SGLang metrics in routing policies
 

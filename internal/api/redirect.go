@@ -157,7 +157,7 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			return
 		}
 		model := peekModel(c)
-		if model == "" || !modelAllowed(c, model) {
+		if model == "" || !h.modelAllowed(c, model) {
 			c.Next()
 			return
 		}
@@ -239,16 +239,6 @@ func (h *Handlers) requestedScope(c *gin.Context) (redirect.Scope, bool) {
 
 // scopeHeader is the request header that asks for a redirect scope.
 const scopeHeader = "X-Hivenet-Scope"
-
-// modelAllowed reports whether the authenticated key may use model.
-func modelAllowed(c *gin.Context, model string) bool {
-	allowSet, unrestricted := effectiveAllowedModels(c)
-	if unrestricted {
-		return true
-	}
-	_, ok := allowSet[model]
-	return ok
-}
 
 // clientBody returns the request body as the client sent it: the copy kept
 // before a middleware rewrote the model, else the cached body.

@@ -276,6 +276,49 @@ type Config struct {
 	// Flag: --reset-key-store   Env: HIVENET_ROUTER_RESET_KEY_STORE
 	ResetKeyStore bool
 
+	// MultiTenant hardens the router for serving several customers: it turns
+	// on RequireModelAllowlist, CacheSalt (unless explicitly off) and
+	// HideAgentIdentity, and startup refuses API or admin auth mode none, a
+	// /metrics without a bearer token on anything but a loopback or private
+	// address, no Valkey store (SyncStore) or no Valkey password, and an
+	// audit log it cannot open (see router.ApplyMultiTenant,
+	// ValidateIsolationSettings, ValidateIsolationProviders).
+	// Flag: --multi-tenant   Env: HIVENET_ROUTER_MULTI_TENANT
+	MultiTenant bool
+
+	// RequireModelAllowlist makes a key with no model allowlist (no `models`
+	// / `allowed_models` and no `quota.per_model`) unable to call or list any
+	// model, instead of every model. For shared multi-tenant routers, where an
+	// unrestricted key would reach models served for other customers.
+	// Flag: --require-model-allowlist   Env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST
+	RequireModelAllowlist bool
+
+	// MetricsBearerToken, when set, makes /metrics require
+	// "Authorization: Bearer <token>". The series name every tenant and key.
+	// Flag: --metrics-bearer-token-file   Env: HIVENET_ROUTER_METRICS_BEARER_TOKEN
+	MetricsBearerToken string
+
+	// HideAgentIdentity leaves the agent's peer ID, organization, machine,
+	// version and last-seen time out of the client-facing GET /v1/models/:model
+	// (the admin view keeps them).
+	// Flag: --hide-agent-identity   Env: HIVENET_ROUTER_HIDE_AGENT_IDENTITY
+	HideAgentIdentity bool
+
+	// CacheSalt sets a per-tenant cache_salt on every request forwarded to an
+	// engine that supports it (vLLM) and strips any client-sent cache_salt, so
+	// tenants never share prefix-cache blocks (prefix-cache timing side
+	// channel). Requires CacheSaltSecret.
+	// Flag: --cache-salt   Env: HIVENET_ROUTER_CACHE_SALT
+	CacheSalt bool
+	// CacheSaltSet records that CacheSalt was set explicitly (flag or env), so
+	// --multi-tenant turns salting on by default but honours an explicit off.
+	CacheSaltSet bool
+
+	// CacheSaltSecret keys the per-tenant salt HMAC. At least 32 bytes, the same
+	// on every router in front of the same agents, and never given to agents.
+	// Flag: --cache-salt-secret-file   Env: HIVENET_ROUTER_CACHE_SALT_SECRET
+	CacheSaltSecret string
+
 	// EnvErrors collects invalid environment values that LoadFromEnv could
 	// not apply and that must stop startup (see the key-store settings).
 	EnvErrors []error
@@ -593,6 +636,19 @@ func LoadFromEnv() *Config {
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_KEY_STORE_SECRET")); v != "" {
 		cfg.KeyStoreSecret = v
 	}
+	envBool(cfg, "HIVENET_ROUTER_MULTI_TENANT", &cfg.MultiTenant)
+	envBool(cfg, "HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST", &cfg.RequireModelAllowlist)
+	// Only a value that parses counts as set: an empty variable must not opt
+	// a multi-tenant router out of prefix-cache isolation.
+	cfg.CacheSaltSet = envBool(cfg, "HIVENET_ROUTER_CACHE_SALT", &cfg.CacheSalt)
+	envBool(cfg, "HIVENET_ROUTER_HIDE_AGENT_IDENTITY", &cfg.HideAgentIdentity)
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_METRICS_BEARER_TOKEN")); v != "" {
+		cfg.MetricsBearerToken = v
+	}
+	// Trimmed like --cache-salt-secret-file, so either source gives the same salts.
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_CACHE_SALT_SECRET")); v != "" {
+		cfg.CacheSaltSecret = v
+	}
 	if v := os.Getenv("HIVENET_ROUTER_OPENAI_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "openai", APIKey: v})
 	}
@@ -619,6 +675,23 @@ func (c *AgentConfig) RouterList() []string {
 		}
 	}
 	return out
+}
+
+// envBool sets *dst from the boolean environment variable name when it is
+// set and not empty, collecting an unparsable value in cfg.EnvErrors (which
+// stops startup). It reports whether it assigned a value.
+func envBool(cfg *Config, name string, dst *bool) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("%s=%q: %w", name, v, err))
+		return false
+	}
+	*dst = b
+	return true
 }
 
 // AgentConfig holds configuration specific to agents
@@ -684,6 +757,16 @@ type AgentConfig struct {
 	// until a new one is collected — this is harmless. Set this to EngineSampleInterval
 	// (500ms) so engine metrics reach the router without additional delay.
 	RoutingSignalInterval time.Duration
+
+	// KVEventsEndpoint is the ZMQ address the engine publishes its KV-cache
+	// events on (vLLM and SGLang --kv-events-config), for prefix-aware
+	// routing. Empty: not subscribed. Must be a local address: the events
+	// carry prompt token IDs.
+	KVEventsEndpoint string
+
+	// KVEventsAllowRemote accepts a KVEventsEndpoint that is not a loopback
+	// address. Off: such an endpoint is refused (no subscription).
+	KVEventsAllowRemote bool
 
 	// GPUDevicesFile is an optional path to a file containing the GPU UUIDs the
 	// engine was assigned (one UUID per line or comma-separated). When set, the

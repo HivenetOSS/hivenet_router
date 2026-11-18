@@ -11,14 +11,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixhash"
 	"hivenet_router/internal/provider"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -87,9 +90,12 @@ type RequestProcessor struct {
 	// providers maps provider engine name ("openai", "anthropic") to its implementation.
 	// Populated at startup from config; only configured providers are present (missing key means not configured).
 	providers map[string]provider.Provider
-	// limiter enforces the per-tenant daily token budget on the output side.
+	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
+
+	// salter, when set, salts each forwarded body per tenant (WithCacheSalter).
+	salter *cachesalt.Salter
 	// peers drops dead libp2p connections to an agent on a connection-level forward
 	// failure so the next attempt re-dials. Defaults to httpHost.StreamHost.Network().
 	peers PeerCloser
@@ -99,6 +105,15 @@ type RequestProcessor struct {
 	lastEvict     map[peer.ID]time.Time
 	// forwardFn performs the actual forward; defaults to forwardToAgent.
 	forwardFn ForwardFunc
+
+	// prefixKeys key the prefix anchors (prefix-aware routing); prefixScope
+	// returns the scope of a tenant's anchors (nil: one scope for everyone).
+	prefixKeys  prefixhash.Keys
+	prefixScope func(tenantID string) string
+	// prefixCheck receives, after an answer, the blocks the agent's engine
+	// confirmed holding at the routing decision and the cached prompt tokens
+	// the engine reported.
+	prefixCheck func(agent peer.ID, model string, blocks []uint64, at int64, actual int)
 }
 
 // NewRequestProcessor creates a new request processor.
@@ -149,6 +164,64 @@ func NewRequestProcessor(
 // Intended for tests.
 func WithPeerCloser(pc PeerCloser) ProcessorOption {
 	return func(p *RequestProcessor) { p.peers = pc }
+}
+
+// WithCacheSalter makes every forward attempt salt the body for the tenant
+// (see cachesalt.Salter.Apply). nil (the default) forwards bodies unchanged.
+func WithCacheSalter(s *cachesalt.Salter) ProcessorOption {
+	return func(p *RequestProcessor) { p.salter = s }
+}
+
+// WithPrefixKeys sets the keys of the prefix anchors computed for requests
+// whose policy routes on prefixes. Without them no anchor is computed.
+func WithPrefixKeys(k prefixhash.Keys) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixKeys = k }
+}
+
+// WithPrefixScope sets the scope of a tenant's prefix anchors. The anchors
+// must follow the engine's prefix cache: when the cache is separated per
+// tenant (cache salt), scope returns the tenant so tenants never share an
+// anchor; when the cache is shared, leave it unset.
+func WithPrefixScope(scope func(tenantID string) string) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixScope = scope }
+}
+
+// WithPrefixCheck sets the function that checks what an agent's engine
+// confirmed holding (blocks, as of at) against the cached tokens it reported
+// (agent trust).
+func WithPrefixCheck(f func(agent peer.ID, model string, blocks []uint64, at int64, actual int)) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixCheck = f }
+}
+
+// checkPrefix reports a prediction check when the engine reported its cached
+// tokens and a prediction was made.
+func (p *RequestProcessor) checkPrefix(agent *domain.Agent, pending *domain.PendingRequest, actual int, known bool) {
+	if p.prefixCheck == nil || !known || len(pending.PredictedBlocks) == 0 {
+		return
+	}
+	p.prefixCheck(agent.ID, agent.Metadata.Model, pending.PredictedBlocks, pending.PredictedAt, actual)
+}
+
+// countTokensPath is the Anthropic token-counting endpoint: it holds no KV
+// cache, so it gets no prefix anchors.
+const countTokensPath = "/v1/messages/count_tokens"
+
+// setPrefix computes the request's prefix anchors when its policy routes on
+// them, hands them to the session and keeps them for the agent.
+func (p *RequestProcessor) setPrefix(session *policy.Session, pending *domain.PendingRequest, capability string) {
+	if !p.prefixKeys.Valid() || capability != domain.CapabilityLLM || pending.Path == countTokensPath || !session.WantsPrefix() {
+		return
+	}
+	scope := ""
+	if p.prefixScope != nil {
+		scope = p.prefixScope(pending.TenantID)
+	}
+	anchors, sizes := p.prefixKeys.Anchors(pending.Request.Model, scope, pending.Request)
+	if len(anchors) == 0 {
+		return
+	}
+	session.SetPrefix(&policy.PrefixRequest{Anchors: anchors, Sizes: sizes})
+	pending.PrefixAnchors = prefixhash.EncodeAnchors(anchors)
 }
 
 // WithForwardFunc overrides the per-attempt forward function. Intended for tests.
@@ -253,6 +326,8 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		capability = domain.CapabilityLLM
 	}
 	session := p.executor.NewSession(pending.Request.Model, capability)
+	p.setPrefix(session, pending, capability)
+	defer session.ReleasePrefill()
 
 	// Inherit the trace context from the inbound HTTP request so spans
 	// created here become children of the Gin middleware root span.
@@ -321,7 +396,12 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 					p.metrics.RequestFailed("cloud", fp.Engine, fp.Model, pending.TenantID)
 					p.metrics.PolicyExhausted(pending.Request.Model)
 					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-					pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, provErr.Error(), domain.SourceBackend)
+					msg := provErr.Error()
+					var he *provider.HTTPError
+					if errors.As(provErr, &he) {
+						msg = fmt.Sprintf("provider %s: %s", fp.Engine, he.ClientMessage())
+					}
+					pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
 					return
 				}
 			}
@@ -369,7 +449,12 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// forwardToAgent releases the slot and wakes one waiter when the slot is
 		// actually free: on return for errors and non-streaming responses, at
 		// the end of the stream for streaming ones.
+		pending.PrefillTokens = session.PrefillTokens()
+		pending.PredictedBlocks, pending.PredictedAt = session.PredictedClaim()
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
+		// The agent has answered (the first byte, for a stream) or failed:
+		// its prefill no longer waits on this request.
+		session.ReleasePrefill()
 
 		if fwdErr == nil {
 			if stepName == "routing_policy" {
@@ -378,6 +463,18 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 				p.metrics.PolicyFallbackRouted(pending.Request.Model)
 			}
 			pending.Response <- resp
+			return
+		}
+
+		// Nothing reached the agent: the router could not prepare the request
+		// (e.g. a body it cannot salt). That says nothing about the agent, so
+		// it fails the request without touching any agent counter: neither a
+		// failure, nor a success with the near-zero RTT of a request that was
+		// never sent, which would make the agent look fast.
+		var unsent *unsentError
+		if errors.As(fwdErr, &unsent) {
+			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+			pending.Error <- unsent.err
 			return
 		}
 
@@ -534,7 +631,32 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	pending.DispatchedAgentID.Store(agent.ID.String())
 
 	if pending.Request == nil {
-		return nil, 0, fmt.Errorf("missing request")
+		return nil, 0, NotSent(fmt.Errorf("missing request"))
+	}
+
+	// The path this attempt forwards to: embeddings and rerank by capability,
+	// otherwise the handler's path (e.g. "/v1/messages" for the Anthropic
+	// passthrough), defaulting to chat completions.
+	forwardPath := pending.Path
+	switch {
+	case pending.Capability == domain.CapabilityEmbedding:
+		forwardPath = "/v1/embeddings"
+	case pending.Capability == domain.CapabilityReranker:
+		forwardPath = "/v1/rerank"
+	case forwardPath == "":
+		forwardPath = "/v1/chat/completions"
+	}
+
+	// Salt per attempt, for the engine this attempt lands on: a retry or a
+	// fallback step may reach a different engine. RawBytes is shared by every
+	// attempt and is never modified.
+	body := pending.Request.RawBytes
+	if p.salter != nil {
+		salted, err := p.salter.Apply(body, engine, forwardPath, pending.TenantID)
+		if err != nil {
+			return nil, 0, NotSent(domain.NewRouterError(domain.ErrCodeRequestInvalid, "Invalid request body: "+err.Error(), domain.SourceRouter))
+		}
+		body = salted
 	}
 
 	// AddrInfo carries the peer ID only — no dial addresses. The stream is opened
@@ -582,13 +704,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 
 	// Embedding and reranking: simple synchronous forward — no streaming, no token accounting.
 	if pending.Capability == domain.CapabilityEmbedding || pending.Capability == domain.CapabilityReranker {
-		path := "/v1/embeddings"
-		if pending.Capability == domain.CapabilityReranker {
-			path = "/v1/rerank"
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(pending.Request.RawBytes))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, forwardPath, bytes.NewReader(body))
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
+			return nil, 0, NotSent(fmt.Errorf("failed to build HTTP request: %w", err))
 		}
 		// Forward the headers the handler set (only X-Request-ID: client headers
 		// are not forwarded on this path), then enforce Content-Type and inject
@@ -628,17 +746,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}
 		if resp.StatusCode != http.StatusOK {
 			p.metrics.RequestFailed(region, engine, model, pending.TenantID)
-			var errResp domain.RouterErrorResponse
-			if jsonErr := json.Unmarshal(rawBytes, &errResp); jsonErr == nil && errResp.Error != nil {
-				return nil, rttMs, errResp.Error
-			}
-			// Fall back to the raw body (e.g. FastAPI {"detail":"..."}) so the
-			// caller sees the actual backend error rather than a generic status code.
-			msg := string(rawBytes)
-			if msg == "" {
-				msg = fmt.Sprintf("agent returned HTTP %d", resp.StatusCode)
-			}
-			return nil, rttMs, domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
+			return nil, rttMs, domain.DecodeAgentError(resp.StatusCode, rawBytes)
 		}
 
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
@@ -654,16 +762,10 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}, rttMs, nil
 	}
 
-	// Forward to the path the handler requested (e.g. "/v1/messages" for the
-	// Anthropic passthrough); default to chat/completions for native LLM requests.
-	forwardPath := pending.Path
-	if forwardPath == "" {
-		forwardPath = "/v1/chat/completions"
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		forwardPath, bytes.NewReader(pending.Request.RawBytes))
+		forwardPath, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to build HTTP request: %w", err)
+		return nil, 0, NotSent(fmt.Errorf("failed to build HTTP request: %w", err))
 	}
 	// apply original request headers (including any custom headers added by the openAI client library) so they are forwarded to the backend engine.
 	// A copy, so one attempt's headers never leak into the next or into the pending request.
@@ -673,6 +775,16 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// Each attempt its own backend request ID: see ForwardID.
 	req.Header.Set("X-Request-ID", pending.ForwardID())
 	req.Header.Set(domain.HeaderTimeout, domain.TimeoutHeader(pending.Deadline))
+	if pending.PrefixAnchors != "" {
+		req.Header.Set(domain.HeaderPrefixAnchors, pending.PrefixAnchors)
+	} else {
+		req.Header.Del(domain.HeaderPrefixAnchors) // never trust a client's copy
+	}
+	if pending.PrefillTokens > 0 {
+		req.Header.Set(domain.HeaderPrefillTokens, strconv.Itoa(pending.PrefillTokens))
+	} else {
+		req.Header.Del(domain.HeaderPrefillTokens)
+	}
 
 	// Inject W3C trace context headers so the agent can create child spans.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
@@ -707,23 +819,9 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RequestFailed(region, engine, model, pending.TenantID)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		// Parse only the first 4 KB for JSON: structured error bodies are always short.
-		// Using the full (potentially truncated) slice would break JSON parsing silently
-		// and degrade a structured context_length_exceeded into a retryable backend_error.
-		jsonSlice := body
-		if len(jsonSlice) > 4*1024 {
-			jsonSlice = jsonSlice[:4*1024]
-		}
-		var errResp domain.RouterErrorResponse
-		if jsonErr := json.Unmarshal(jsonSlice, &errResp); jsonErr == nil && errResp.Error != nil {
-			return nil, rttMs, errResp.Error
-		}
-		// Fallback: agent returned a non-structured error body.
-		msg := string(body)
-		if msg == "" {
-			msg = fmt.Sprintf("agent returned HTTP %d", resp.StatusCode)
-		}
-		return nil, rttMs, domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
+		// The agent's envelope when it is one the router can trust, else the
+		// body classified as the backend's (DecodeAgentError).
+		return nil, rttMs, domain.DecodeAgentError(resp.StatusCode, body)
 	}
 
 	var chatResp domain.ChatResponse
@@ -779,9 +877,11 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// the handler (before the request was queued) and are NOT rolled back here.
 	// Only the completion tokens (n) are withheld — AllowOutputTokens does not add n
 	// to b.used when it returns allowed=false, but the prompt deduction stands.
-	if p.limiter != nil && pending.TokensPerDay > 0 && chatResp.Usage.CompletionTokens > 0 {
-		allowed, remaining, limErr := p.limiter.AllowOutputTokens(
-			pending.TenantID, pending.QuotaModel, pending.TokensPerDay, chatResp.Usage.CompletionTokens)
+	// The prompt tokens the backend reported beyond the admission estimate are
+	// charged with the completion: the budgets count the prompt it processed.
+	shortfall := pending.InputShortfall(chatResp.Usage.PromptTokens)
+	if p.limiter != nil && chatResp.Usage.CompletionTokens+shortfall > 0 {
+		allowed, remaining, limErr := p.limiter.AllowOutputTokens(dailyBudget(pending), chatResp.Usage.CompletionTokens+shortfall)
 		if limErr != nil {
 			// Redis error — fail-open: treat as allowed and proceed.
 			log.Warnf("Output token check error for request %s: %v (fail-open)", pending.ID, limErr)
@@ -798,8 +898,12 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			// Copy Usage so only the token counts are retained — &chatResp.Usage would
 			// keep the entire ChatResponse (including completion content) alive until GC.
 			usageCopy := chatResp.Usage
-			re := domain.NewRouterError(
-				domain.ErrCodeTokenLimitExceeded, "daily token budget exceeded", domain.SourceRouter)
+			re := domain.NewRouterError(domain.ErrCodeTokenLimitExceeded,
+				// An output charge is judged against the budgets alone, never
+				// this router's share, and it already filled the budget it
+				// overflowed: name that one.
+				auth.ExplainSpent(p.limiter, dailyBudget(pending)).Message("daily token budget exceeded"),
+				domain.SourceRouter)
 			re.Usage = &usageCopy
 			re.AgentID = agent.ID.String()
 			return nil, rttMs, re
@@ -810,6 +914,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 
 	p.metrics.RequestRouted(region, engine, model, pending.TenantID)
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+	p.checkPrefix(agent, pending, chatResp.Usage.CachedTokens, chatResp.Usage.CachedKnown)
 	decrement()
 	p.counters.RecordSuccess(agent, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens, rttMs)
 	chatResp.ProcessedBy = agent.ID.String()
@@ -916,8 +1021,12 @@ func (p *RequestProcessor) drainStream(
 	pending.StreamedPromptTokens.Store(int64(prompt))
 	pending.StreamedCompletionTokens.Store(int64(completion))
 	pending.StreamedPromptExact.Store(meter.HaveUsage())
-	if p.limiter != nil && pending.TokensPerDay > 0 && completion > 0 {
-		allowed, _, err := p.limiter.AllowOutputTokens(pending.TenantID, pending.QuotaModel, pending.TokensPerDay, completion)
+	shortfall := 0
+	if meter.HaveUsage() {
+		shortfall = pending.InputShortfall(prompt)
+	}
+	if p.limiter != nil && completion+shortfall > 0 {
+		allowed, _, err := p.limiter.AllowOutputTokens(dailyBudget(pending), completion+shortfall)
 		if err != nil {
 			log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
 		} else if !allowed {
@@ -927,6 +1036,9 @@ func (p *RequestProcessor) drainStream(
 		}
 	}
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
+	if cached, known := meter.Cached(); known {
+		p.checkPrefix(agent, pending, cached, true)
+	}
 	// Release the in-flight slot before recording the success, mirroring the
 	// non-streaming path (decrement before RecordSuccess) so the
 	// CapacityUtilization published by RecordSuccess reflects post-completion
@@ -934,6 +1046,28 @@ func (p *RequestProcessor) drainStream(
 	// reads GetLoad() directly, so this is metric-accuracy only.
 	releaseSlot()
 	p.counters.RecordSuccess(agent, prompt, completion, rttMs)
+}
+
+// unsentError marks an error the router raised before it sent anything to the
+// agent (preparing the body, building the request). dispatchWithPolicy fails
+// the request on it without recording anything on the agent.
+type unsentError struct{ err error }
+
+func (e *unsentError) Error() string { return e.err.Error() }
+func (e *unsentError) Unwrap() error { return e.err }
+
+// NotSent wraps an error a ForwardFunc raised before it sent anything to the
+// agent, such as a body it could not prepare. The request fails with err, and
+// nothing is recorded on the agent: the error says nothing about it.
+func NotSent(err error) error { return &unsentError{err: err} }
+
+// dailyBudget names the daily token budgets a request's output is charged
+// to: the same buckets its prompt estimate was charged to at admission. A
+// request with neither budget is still charged, so it counts in its tenant's
+// usage today.
+func dailyBudget(p *domain.PendingRequest) auth.DailyBudget {
+	return auth.DailyBudget{TenantID: p.TenantID, KeyID: p.KeyID, Model: p.QuotaModel,
+		KeyTokensPerDay: p.TokensPerDay, TenantTokensPerDay: p.TenantTokensPerDay}
 }
 
 // truncationFrame returns the terminal SSE error frame drainStream injects into

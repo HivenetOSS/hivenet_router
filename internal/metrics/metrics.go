@@ -4,8 +4,12 @@
 package metrics
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,6 +128,14 @@ type RouterMetrics struct {
 
 	// tenantRateLimited counts requests rejected due to RPM quota per tenant.
 	tenantRateLimited *prometheus.CounterVec
+
+	// cacheIsolationEnabled is 1 when the router isolates tenants' prefix
+	// caches (cache salt on), else 0 (SetCacheIsolation).
+	cacheIsolationEnabled prometheus.Gauge
+
+	// cacheSaltSecretMismatch counts the live routers of the site whose
+	// cache-salt secret differs from this router's (SetCacheSaltSecretMismatch).
+	cacheSaltSecretMismatch prometheus.Gauge
 
 	// tenantQuotaRPMLimit exposes the configured RPM limit per tenant (0 = unlimited).
 	// Populated only for keys on the legacy flat quota shape. Per-model keys
@@ -259,6 +271,21 @@ type RouterMetrics struct {
 	// queue before a slot becomes available and it is dispatched.
 	// Label: model.
 	queueWaitSeconds *prometheus.HistogramVec
+
+	// apiKeyPushRejected counts admin key pushes refused for an invalid entry.
+	apiKeyPushRejected *prometheus.CounterVec
+	// prefixRoutingTotal counts prefix-aware selections per model and outcome.
+	prefixRoutingTotal *prometheus.CounterVec
+
+	// prefixPrefillRate and prefixDecodeStep are the prefill speed and decode
+	// step the prefix-aware cost learned per model, engine and GPU.
+	prefixPrefillRate *prometheus.GaugeVec
+	prefixDecodeStep  *prometheus.GaugeVec
+	// prefixIndexEntries is the size of the prefix memory, per kind.
+	prefixIndexEntries *prometheus.GaugeVec
+	// prefixChecksTotal counts cache-hit predictions checked against the
+	// engines' reports, per model and result.
+	prefixChecksTotal *prometheus.CounterVec
 
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
@@ -471,6 +498,14 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"tenant_id", "key_id"},
 		),
+		cacheIsolationEnabled: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "hivenet_cache_isolation_enabled",
+			Help: "1 when the router isolates tenants' prefix caches on the engines that support it (cache salt on), else 0.",
+		}),
+		cacheSaltSecretMismatch: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "hivenet_cache_salt_secret_mismatch",
+			Help: "Live routers of the site whose cache-salt setting differs from this router's: another secret, or the salt off where this one has it on (and the reverse); compared through the shared store.",
+		}),
 		tenantQuotaRPMLimit: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_tenant_quota_rpm_limit",
@@ -502,7 +537,7 @@ func NewRouterMetrics() *RouterMetrics {
 		tenantTokensUsedToday: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_tenant_tokens_used_today",
-				Help: "Tokens consumed by the tenant so far today (UTC calendar day). Resets at midnight UTC.",
+				Help: "Tokens the tenant's keys were charged today (UTC calendar day) on chat and messages, with or without a daily budget; with shared counters, the site total (aggregate with max, not sum). Resets at midnight UTC.",
 			},
 			[]string{"tenant_id"},
 		),
@@ -900,6 +935,41 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		prefixPrefillRate: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_prefill_rate_tokens_per_second",
+				Help: "Prefill speed the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
+		prefixDecodeStep: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_decode_step_seconds",
+				Help: "Decode step the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
+		prefixRoutingTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_routing_total",
+				Help: "Prefix-aware routing selections per model and outcome: hit (the chosen agent holds blocks of the prompt), pending (the same new text was just sent there), miss, busy (every candidate busy: least-loaded), no_anchor (no prompt text: least-loaded).",
+			},
+			[]string{"model", "outcome"},
+		),
+		prefixIndexEntries: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_index_entries",
+				Help: "Entries in the router's prefix memory, per kind: memo (text prefixes), memo_ends (memo entries indexed by their last block; follows memo), blocks (cached blocks on the board), pending (notes for text in flight).",
+			},
+			[]string{"kind"},
+		),
+		prefixChecksTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_checks_total",
+				Help: "Prefix-aware checks of the blocks an agent's engine confirmed holding against the cached tokens it reported, per model: held (half or more came true), missed, or evicted (evicted before the request reached the engine: not judged).",
+			},
+			[]string{"model", "result"},
+		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
@@ -930,6 +1000,13 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Unix timestamp (seconds) of the most recent request per tenant, API key, and deployment. Use max() to get last-used time per key.",
 			},
 			[]string{"tenant_id", "key_id", "deployment_id"},
+		),
+		apiKeyPushRejected: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_api_key_push_rejected_total",
+				Help: "Admin API key pushes refused with 400 because an entry is invalid, by endpoint (upsert|replace). Nothing in a refused push is applied: a refused replace also leaves the keys it would have revoked in force.",
+			},
+			[]string{"endpoint"},
 		),
 		policyReloadTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -967,6 +1044,8 @@ func NewRouterMetrics() *RouterMetrics {
 		m.tenantRequestSuccess,
 		m.tenantRequestFailed,
 		m.tenantRateLimited,
+		m.cacheIsolationEnabled,
+		m.cacheSaltSecretMismatch,
 		m.tenantQuotaRPMLimit,
 		m.tenantQuotaTPDLimit,
 		m.tenantPerModelQuotaRPMLimit,
@@ -1038,8 +1117,14 @@ func NewRouterMetrics() *RouterMetrics {
 		m.queueDepth,
 		m.admissionQueueDepth,
 		m.queueWaitSeconds,
+		m.prefixRoutingTotal,
+		m.prefixPrefillRate,
+		m.prefixDecodeStep,
+		m.prefixIndexEntries,
+		m.prefixChecksTotal,
 		// Policy management
 		m.policyReloadTotal,
+		m.apiKeyPushRejected,
 		// Semantic alias routing
 		m.semanticDecisions,
 		m.semanticDecisionSeconds,
@@ -1727,6 +1812,40 @@ func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64)
 	m.queueWaitSeconds.With(prometheus.Labels{"model": model}).Observe(durationSeconds)
 }
 
+// APIKeyPushRejected counts one admin key push refused for an invalid entry;
+// endpoint is "upsert" or "replace".
+func (m *RouterMetrics) APIKeyPushRejected(endpoint string) {
+	m.apiKeyPushRejected.With(prometheus.Labels{"endpoint": endpoint}).Inc()
+}
+
+// PrefixRouted counts one prefix-aware selection.
+// Implements policy.PrefixMetrics.
+func (m *RouterMetrics) PrefixRouted(model, outcome string) {
+	m.prefixRoutingTotal.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
+}
+
+// LatencyModel publishes the learned prefill speed and decode step of a
+// group of replicas. Implements policy.LatencyMetrics.
+func (m *RouterMetrics) LatencyModel(model, engine, gpu string, prefillRate, decodeStep float64) {
+	l := prometheus.Labels{"model": model, "engine": engine, "gpu": gpu}
+	m.prefixPrefillRate.With(l).Set(prefillRate)
+	m.prefixDecodeStep.With(l).Set(decodeStep)
+}
+
+// PrefixIndexSize sets the prefix-memory gauges.
+func (m *RouterMetrics) PrefixIndexSize(memo, memoEnds, blocks, pending int) {
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo"}).Set(float64(memo))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo_ends"}).Set(float64(memoEnds))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "blocks"}).Set(float64(blocks))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
+}
+
+// PrefixChecked counts one check of an agent's confirmed cache: result is
+// held, missed or evicted.
+func (m *RouterMetrics) PrefixChecked(model, result string) {
+	m.prefixChecksTotal.With(prometheus.Labels{"model": model, "result": result}).Inc()
+}
+
 // PolicyReload increments the policy reload counter.
 // trigger is "api" (PUT /admin/policy) or "sighup".
 // result is "success" or "error".
@@ -1856,17 +1975,71 @@ func (m *RouterMetrics) ObserveHTTPClientRequest(provider string, statusCode int
 	}).Observe(durationSeconds)
 }
 
-// ServeMetrics starts the Prometheus metrics HTTP server on the given address
-// (e.g. ":2112"). It runs in its own goroutine and logs fatal errors.
-func (m *RouterMetrics) ServeMetrics(addr string) {
+// ServeMetrics starts the Prometheus metrics HTTP server on the given listen
+// address (":2112" for every interface, "127.0.0.1:2112" for one), requiring
+// "Authorization: Bearer <token>" when token is non-empty (see
+// MetricsHandler). It runs in its own goroutine and logs fatal errors. A
+// client must send its request headers within metricsReadHeaderTimeout, so a
+// connection that never finishes them (slowloris) cannot be held open.
+func (m *RouterMetrics) ServeMetrics(addr, token string) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", m.MetricsHandler(token))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: metricsReadHeaderTimeout,
+		IdleTimeout:       2 * time.Minute,
+	}
 	go func() {
 		log.Infof("Prometheus metrics server listening on %s/metrics", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			log.Errorf("metrics server error: %v", err)
 		}
 	}()
+}
+
+// metricsReadHeaderTimeout bounds how long the metrics server waits for a
+// request's headers.
+const metricsReadHeaderTimeout = 10 * time.Second
+
+// SetCacheIsolation sets hivenet_cache_isolation_enabled and, when gaps is
+// not nil, registers hivenet_cache_isolation_gaps: the registered LLM agents,
+// per model and engine, that serve a generation path without per-tenant
+// prefix-cache isolation, computed from gaps at every scrape, so it is always
+// the current registry and never shows a partial update. Call once, at
+// startup.
+func (m *RouterMetrics) SetCacheIsolation(enabled bool, gaps func() map[[2]string]int) {
+	if enabled {
+		m.cacheIsolationEnabled.Set(1)
+	} else {
+		m.cacheIsolationEnabled.Set(0)
+	}
+	if gaps != nil {
+		m.registry.MustRegister(&cacheIsolationGaps{gaps: gaps, desc: prometheus.NewDesc(
+			"hivenet_cache_isolation_gaps",
+			"Registered LLM agents serving a generation path without per-tenant prefix-cache isolation, per model and engine.",
+			[]string{"model", "engine"}, nil)})
+	}
+}
+
+// SetCacheSaltSecretMismatch sets hivenet_cache_salt_secret_mismatch.
+func (m *RouterMetrics) SetCacheSaltSecretMismatch(n int) {
+	m.cacheSaltSecretMismatch.Set(float64(n))
+}
+
+// cacheIsolationGaps is the scrape-time collector behind
+// hivenet_cache_isolation_gaps (SetCacheIsolation).
+type cacheIsolationGaps struct {
+	desc *prometheus.Desc
+	gaps func() map[[2]string]int
+}
+
+func (c *cacheIsolationGaps) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *cacheIsolationGaps) Collect(ch chan<- prometheus.Metric) {
+	for k, n := range c.gaps() {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), k[0], k[1])
+	}
 }
 
 // Register adds extra collectors to this instance's registry. Used by optional
@@ -1886,4 +2059,46 @@ func (m *RouterMetrics) AdmissionReaped(n int) {
 		m.registry.MustRegister(m.admissionReaped)
 	})
 	m.admissionReaped.Add(float64(n))
+}
+
+// MetricsHandler serves the registry in the Prometheus text format. The
+// series name every tenant and key with their usage, so on a shared router a
+// non-empty token makes the handler answer 401 unless the request carries
+// "Authorization: Bearer <token>". The header and the expected value are
+// compared as SHA-256 digests in constant time, so neither the content nor
+// the length of the token leaks through timing.
+func (m *RouterMetrics) MetricsHandler(token string) http.Handler {
+	h := promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	if token == "" {
+		return h
+	}
+	want := sha256.Sum256([]byte("Bearer " + token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// IsPrivateBindAddr reports whether a listen address is reachable only from
+// this host or a private network: a loopback IP (127.0.0.0/8, ::1),
+// "localhost", or a private IP (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+// fc00::/7). Every other address is public as far as it can tell: every
+// interface (":2112", "0.0.0.0", "::"), a public IP, and any other hostname,
+// whose address DNS could change. An address that does not parse is public
+// too, so a check built on it errs on the safe side.
+func IsPrivateBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }

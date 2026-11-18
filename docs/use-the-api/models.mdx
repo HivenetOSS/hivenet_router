@@ -261,6 +261,8 @@ Peer IDs and timestamps will differ.
 | `is_healthy` | Current router health state for the agent |
 | `last_seen` | Unix timestamp of the most recent recorded heartbeat |
 
+When the router runs with `--hide-agent-identity` (`HIVENET_ROUTER_HIDE_AGENT_IDENTITY=true`), this endpoint leaves out `peer_id`, `version`, `organization`, `machine` and `last_seen`, so callers sharing the router cannot map its agents. `GET /admin/models/{model}` always returns every field. Inference responses then pass on only the backend response headers that describe the body (`Content-Type`, `Content-Encoding`, `Cache-Control`) and the request IDs: a `Server` header or an engine's or proxy's own headers, which can name the engine, its version or its host, are dropped.
+
 Check the health of every agent serving a model:
 
 ```bash
@@ -325,7 +327,7 @@ Hivenet Router determines that catalog in this order:
 
 1. When the key has `quota.per_model`, only models declared in that map are visible.
 2. Otherwise, when the key has a non-empty `allowed_models` list, only those models are visible.
-3. When neither restriction exists, the key sees the full public catalog.
+3. When neither restriction exists, the key sees the full public catalog, unless the router runs with `--require-model-allowlist`, in which case it sees no models.
 
 For example, a key limited to:
 

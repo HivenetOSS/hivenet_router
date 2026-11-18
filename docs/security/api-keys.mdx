@@ -174,11 +174,11 @@ export HIVENET_ROUTER_AUTH_CONFIG=/etc/hivenet-router/auth.yaml
 | `models` | No | Exact model allowlist; empty means unrestricted |
 | `quota` | No | Flat or per-model quota configuration |
 
-Duplicate `key_hash` values are rejected when static configuration is loaded.
+A static `key_hash` must be 64 hexadecimal characters, like a dynamic one. Uppercase is stored lowercase; anything else is rejected when static configuration is loaded, as are duplicate values in any letter case.
 
-Use the exact lowercase SHA-256 output produced by `hivenet-router keygen` or `sha256sum`. Do not edit a hash manually.
+Use the exact SHA-256 output produced by `hivenet-router keygen` or `sha256sum`. Do not edit a hash manually.
 
-`metadata.name` and `metadata.owner` must not be empty.
+`metadata.name` and `metadata.owner` must not be empty. The owner must be valid UTF-8 and must not start or end with a space. It must not contain control characters (such as NUL, tab, newline, DEL or NEL), characters that render as nothing (format characters such as a right-to-left override, a zero-width space or a byte-order mark, variation selectors, tag characters, the Hangul fillers and the combining grapheme joiner), line and paragraph separators, or whitespace other than a plain space (such as a no-break or ideographic space). Plain spaces inside it and other text are allowed. The owners `admin`, `default` and `anonymous` are reserved, in any letter case: the router uses them for admin keys, auth mode `none` and unidentified callers.
 
 ## Static key expiration
 
@@ -315,8 +315,8 @@ quota:
 
 | Field | Meaning |
 | --- | --- |
-| `requests_per_minute` | Shared request-rate ceiling |
-| `tokens_per_day` | Shared daily chat-token budget |
+| `requests_per_minute` | Request-rate ceiling for this key |
+| `tokens_per_day` | Daily chat-token budget for this key |
 | `input_tokens_per_minute` | Serverless per-key input-token rate, charged before forwarding |
 | `output_tokens_per_minute` | Serverless per-key output-token rate, metered after local responses |
 | `0` | Unlimited |
@@ -335,25 +335,15 @@ For every reachable serverless model, a nonzero `input_tokens_per_minute` must b
 
 The `auth.DeriveKeyDefaults` helper can calculate suggested values from certified model limits. The current runtime does not load `router_limits.yaml` or apply those defaults automatically.
 
-The flat quota bucket is keyed by:
+Quota buckets are per key: each key is counted against its own limits, even when several keys share a `metadata.owner`. A tenant with several keys can therefore use up to the sum of their limits. The owner groups keys into one tenant for metrics, audit records and dashboards.
 
-```text
-metadata.owner
-```
-
-This has an important consequence:
-
-<Warning>
-  Several keys with the same `metadata.owner` share the same flat request and token budgets.
-
-  Use different owner values when keys require independent quota buckets.
-</Warning>
+<Note>
+  Before per-key buckets, keys of one owner shared one bucket. Upgrading restarts each key's daily token count from zero once (the old per-owner counters are no longer read).
+</Note>
 
 The request-rate limiter uses a token bucket. It begins with up to one minute's configured capacity and refills continuously rather than resetting at fixed clock-minute boundaries. Set `HIVENET_ROUTER_RPM_BURST_SECONDS` to a value from `1` through `59` to reduce the burst window; `0` preserves the full-minute capacity.
 
-<Warning>
-  Dynamic keys have stable IDs, so serverless occupancy and token-rate state is isolated per key. Static-key authentication currently leaves the key ID empty, causing static keys to share the `anonymous` B4 state for a model. See the [auth YAML reference](/security/auth-yaml-reference) before using static keys with serverless limits.
-</Warning>
+Serverless occupancy and token-rate state is isolated per key. Dynamic keys use their registry ID. Static `auth.yaml` keys use a key ID derived one-way from `key_hash`: `static-` followed by 16 hex characters.
 
 The daily token counter resets at midnight UTC.
 
@@ -454,15 +444,17 @@ At admission, Hivenet Router:
 3. checks whether the estimated prompt and requested maximum output fit in the remaining budget
 4. charges the prompt estimate when the request is admitted
 
-After a non-streaming backend response, Hivenet Router charges the actual completion-token count.
+After the backend response, Hivenet Router charges the actual completion-token count, together with any prompt tokens the backend reports beyond the estimate charged at admission, so the budget counts the prompt the backend processed. An estimate above the backend's count is not refunded. The per-minute input rate (`input_tokens_per_minute`) is trued up the same way.
 
-If the completion no longer fits in the remaining budget, Hivenet Router discards the response and returns HTTP `429`. The previously charged prompt estimate remains counted.
+If the completion and that difference no longer fit in the remaining budget, Hivenet Router discards a non-streaming response and returns HTTP `429`. The previously charged prompt estimate remains counted. A streaming response, already delivered, is still charged.
 
 For streaming responses, the bytes may already have reached the client before the final completion-token total is known. Hivenet Router records the output usage after the stream finishes, but it cannot retract an already delivered stream.
 
 <Note>
   Embedding and reranking requests currently participate in request-rate quotas but do not charge their input against `tokens_per_day`.
 </Note>
+
+A key may also carry `quota.tenant_tokens_per_day`, a budget its whole owner spends together, in auth.yaml and in the dynamic registry alike. A request must fit both budgets; see [Tenant daily budget](/security/auth-yaml-reference#tenant-daily-budget).
 
 ## Rate-limit headers
 
@@ -476,7 +468,7 @@ X-RateLimit-Remaining-Tokens
 | Header | Meaning |
 | --- | --- |
 | `X-RateLimit-Remaining-Requests` | Estimated requests remaining in the active rate bucket |
-| `X-RateLimit-Remaining-Tokens` | Tokens remaining in the current UTC-day budget |
+| `X-RateLimit-Remaining-Tokens` | Tokens remaining in the current UTC-day budget: the tighter of the key's own budget and its tenant's (`tenant_tokens_per_day`) |
 
 Unlimited values do not produce a remaining-value header.
 
@@ -683,6 +675,18 @@ See [Admin endpoints](/use-the-api/admin-endpoints) for individual add, update, 
 | `expires_at` | No | RFC 3339 expiry timestamp |
 | `allowed_models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
+
+`id` and `owner` follow the same character rules as a static owner: valid UTF-8, no space at either end, and no control, invisible or line-separator characters or whitespace other than a plain space. The owners `admin`, `default` and `anonymous`, the ID `anonymous`, and IDs starting with `static-` or `admin-` are reserved, in any letter case (compared as Unicode case folding does, so a long `ſ` counts as `s`): the router uses them for its own callers and for the IDs it derives.
+
+A push with one invalid entry is refused as a whole with `400`, so the registry keeps its previous keys (`ReplaceAll` is all-or-nothing). The router logs a warning naming the entry and counts the push in `hivenet_api_key_push_rejected_total`. A key restored from the key store that no longer passes these checks is skipped at startup, logged, counted, and deleted from the store; key-sync must push it again in a valid form.
+
+<Warning>
+  These rules are stricter than in earlier releases. Before upgrading, check your `auth.yaml` owners and your key-sync data against them:
+
+  - A static owner that breaks them stops the router at startup.
+  - A dynamic key that breaks them makes every push that contains it fail with `400`, a full replace included. Nothing in a refused push is applied, so the keys that replace would have revoked stay in force until the entry is fixed.
+  - A persisted key (`--key-store=badger`) that breaks them is dropped at startup and stops authenticating until key-sync pushes it in a valid form.
+</Warning>
 
 Dynamic expiration uses RFC 3339:
 
@@ -939,19 +943,10 @@ The router refuses to start with unauthenticated administrator endpoints unless 
     When `quota.per_model` exists, its keys define the effective allowlist and take precedence over `models`.
   </Accordion>
 
-  <Accordion title="Several keys consume one quota unexpectedly">
-    Check their owner values.
+  <Accordion title="A tenant uses more than one key's quota">
+    Quotas are per key, not per owner. A tenant with several keys can use up to the sum of their limits.
 
-    Keys with the same:
-
-    ```yaml
-    metadata:
-      owner: acme-corp
-    ```
-
-    share quota buckets.
-
-    Assign different owners when the limits should remain independent.
+    To cap a tenant at one budget, give it one key, or split the budget across its keys.
   </Accordion>
 
   <Accordion title="The effective per-model RPM is unexpected">

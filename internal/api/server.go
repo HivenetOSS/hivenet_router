@@ -5,6 +5,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/metrics"
@@ -34,7 +35,7 @@ type Server struct {
 	// adminAuth authenticates requests to /admin/* endpoints.
 	adminAuth auth.Provider
 
-	// rateLimiter enforces per-tenant RPM and daily token limits on /v1/* endpoints.
+	// rateLimiter enforces per-key RPM and daily token limits on /v1/* endpoints.
 	rateLimiter auth.RateLimiter
 
 	// routerMetrics provides tenant quota gauge recording.
@@ -47,7 +48,7 @@ type Server struct {
 	// May be nil. A nil counter does NOT disable per-model quota enforcement —
 	// per-model keys remain enforced, but the per-replica multiplication is
 	// skipped and requests_per_minute_per_replica is treated as a flat ceiling
-	// for the (tenant, model) bucket. The "no live backends → skip quota and
+	// for the (key, model) bucket. The "no live backends → skip quota and
 	// let routing surface its own error" behaviour also stops applying when
 	// the counter is nil (with no way to read replica count, we can't detect
 	// the zero-replicas case). Production wiring always passes a non-nil
@@ -154,6 +155,12 @@ func (s *Server) registerRoutes() {
 	inference := v1.Group("")
 	// Cap body size before quota/handler work buffers the payload into memory.
 	inference.Use(BodyLimitMiddleware(s.maxRequestBytes))
+	// Exactly one JSON object, checked once here: every later step reads and
+	// edits the body as one object.
+	inference.Use(JSONObjectBody())
+	// The router and the backend must read the same fields: a repeated or
+	// differently cased top-level name is refused before anything reads it.
+	inference.Use(UnambiguousFields())
 	// A request that arrived with a cross-site redirect token must carry the
 	// exact body the token was issued for (refused before quota is spent), and
 	// is routed on the token's model. No-op for other requests.
@@ -162,6 +169,10 @@ func (s *Server) registerRoutes() {
 	// so quota, authorization, admission and routing all see the resolved model.
 	// A no-op map lookup for concrete model names.
 	inference.Use(s.handlers.AliasMiddleware())
+	// A model outside the key's allowlist is refused here, on the model the
+	// request will be served as, before any quota is charged, a model is
+	// woken or a redirect is issued: always a 403 that costs nothing.
+	inference.Use(s.handlers.ModelACL())
 	// Cross-site redirect: a model with no healthy agent here, served by a
 	// sibling site, gets a 307 now — on the concrete model, before quota,
 	// so the redirecting router charges nothing. No-op when disabled.
@@ -251,6 +262,19 @@ func (s *Server) registerRoutes() {
 		admin.GET("/sibling-map", s.handlers.GetSiblingMap)
 		admin.POST("/sibling-map", s.handlers.ReplaceSiblingMap)
 	}
+}
+
+// ServeHTTP serves one request through the full middleware chain and route
+// table, exactly as Start does over TCP. Tests use it to exercise the real
+// wiring (auth groups, middleware order) without opening a port.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.engine.ServeHTTP(w, r)
+}
+
+// Routes returns every registered method+path. Tests walk it so that a new
+// route cannot be added outside the expected auth group unnoticed.
+func (s *Server) Routes() gin.RoutesInfo {
+	return s.engine.Routes()
 }
 
 // Start starts the HTTP server

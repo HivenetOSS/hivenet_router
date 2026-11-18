@@ -72,11 +72,12 @@ func Wrap(rd *Redirector, next auth.Provider, keys *auth.DynamicKeyProvider) aut
 }
 
 // CheckAuthMode rejects cross-site redirect (a non-empty siteID) with static
-// auth.yaml keys: they carry no key ID, so a sibling site could not
-// resolve a token to its key. Dynamic keys and auth mode none both work.
+// auth.yaml keys: a sibling site resolves a token's key ID through its
+// dynamic key registry, and a static key's derived ID is not in it. Dynamic
+// keys and auth mode none both work.
 func CheckAuthMode(siteID string, apiProv auth.Provider) error {
 	if _, static := apiProv.(*auth.StaticKeyProvider); static && siteID != "" {
-		return fmt.Errorf("cross-site redirect (site ID %q) requires dynamic API keys or auth mode none; static auth.yaml keys have no key ID", siteID)
+		return fmt.Errorf("cross-site redirect (site ID %q) requires dynamic API keys or auth mode none; a sibling site cannot resolve a static auth.yaml key from a redirect token", siteID)
 	}
 	return nil
 }
@@ -214,6 +215,25 @@ func (t *tokenAuth) Tenants() map[string]auth.QuotaLimits {
 		Tenants() map[string]auth.QuotaLimits
 	}); ok {
 		return l.Tenants()
+	}
+	return nil
+}
+
+// KeysWithoutModelAllowlist passes through the wrapped provider's count, which
+// the router reads (by type assertion) to warn when a required allowlist
+// refuses keys on every model.
+func (t *tokenAuth) KeysWithoutModelAllowlist() int {
+	if c, ok := t.next.(interface{ KeysWithoutModelAllowlist() int }); ok {
+		return c.KeysWithoutModelAllowlist()
+	}
+	return 0
+}
+
+// TenantIDs passes through the wrapped provider's tenant list, which the
+// router reads (by type assertion) to publish each tenant's usage today.
+func (t *tokenAuth) TenantIDs() []string {
+	if l, ok := t.next.(interface{ TenantIDs() []string }); ok {
+		return l.TenantIDs()
 	}
 	return nil
 }

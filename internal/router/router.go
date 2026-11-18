@@ -22,10 +22,12 @@ import (
 	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixindex"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
@@ -70,6 +72,24 @@ type agentRegistrationPayload struct {
 	PeerID       string `json:"peer_id"`
 	DeploymentID string `json:"deployment_id,omitempty"` // logical deployment id; empty when the agent was not given one
 	ReplicaID    string `json:"replica_id,omitempty"`    // replica id; empty when the agent was not given one
+	// EngineVersion is the backend's version as the agent read it; empty
+	// when unknown (or an agent older than the field).
+	EngineVersion string `json:"engine_version,omitempty"`
+}
+
+// boundedEngineVersion keeps an agent-reported engine version to what can
+// name a release or build: at most 64 printable ASCII characters, else
+// unknown ("").
+func boundedEngineVersion(v string) string {
+	if len(v) > 64 {
+		return ""
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return ""
+		}
+	}
+	return v
 }
 
 // agentRoutingSignalPayload is the JSON body sent by the agent every RoutingSignalInterval
@@ -88,6 +108,10 @@ type agentRoutingSignalPayload struct {
 	// ReportEveryMs is how often the agent sends routing signals; absent
 	// from older agents.
 	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
+	// PendingPrefill is the prompt tokens the agent's requests not yet
+	// answered still have to prefill, from all routers; absent from older
+	// agents.
+	PendingPrefill *int `json:"pending_prefill_tokens,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -126,6 +150,13 @@ type Router struct {
 	grpcTLSCert    tls.Certificate
 	agents         *AgentRegistry
 	executor       *policy.Executor
+	// prefixIndex is the prefix memory of prefix-aware routing (memo, board,
+	// pending notes), fed by the agents through /prefix-state.
+	prefixIndex *prefixindex.Index
+	// kvCursors tracks where each agent's cache changes stand.
+	kvCursors kvCursors
+	// prefixLimits bounds how often each agent may post /prefix-state.
+	prefixLimits   prefixRateLimits
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -201,6 +232,8 @@ type Router struct {
 	// (internal/wake); nil when redirect is disabled, since the sibling map
 	// says which models may be held.
 	wake *wake.Holder
+	// salter salts forwarded bodies per tenant; nil when --cache-salt is off.
+	salter *cachesalt.Salter
 }
 
 // wireKeyStore wires the optional persistent dynamic key registry
@@ -319,11 +352,45 @@ func pathsOverlap(a, b string) bool {
 
 // New creates a new Router instance with initialized components.
 func New(cfg *config.Config) (*Router, error) {
+	ApplyMultiTenant(cfg)
+	// Everything up to --reset-disk-db below needs only the configuration:
+	// the isolation rules are all checked before anything that cannot be
+	// undone, so a start they refuse changes nothing.
+	if err := ValidateIsolationSettings(cfg); err != nil {
+		return nil, err
+	}
+	for _, w := range IsolationWarnings(cfg) {
+		log.Warn(w)
+	}
+	// Open the audit log now, so a wrong path or a missing volume shows at
+	// startup rather than on the first audited request.
+	api.SetAuditRouterID(cfg.RouterID)
+	if err := api.OpenAuditLog(); err != nil {
+		if cfg.MultiTenant {
+			return nil, fmt.Errorf("--multi-tenant refuses to write audit lines, which name every tenant and key, to stdout with the application output: %w", err)
+		}
+		log.Errorf("%v: audit lines, which name every tenant and key, go to stdout with the application output", err)
+	}
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT secret is not configured — set --jwt-secret or HIVENET_ROUTER_JWT_SECRET")
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return nil, fmt.Errorf("JWT secret too short (%d bytes): minimum 32 bytes required for HS256 (RFC 7518 §3.2)", len(cfg.JWTSecret))
+	}
+	// Build HTTP auth providers from config (or defaults if AuthConfigFile is empty).
+	apiProv, adminProv, keyRegistry, err := auth.ProvidersFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("auth providers: %w", err)
+	}
+	if err := ValidateIsolationProviders(cfg, apiProv, adminProv); err != nil {
+		return nil, err
+	}
+	salter, err := newCacheSalter(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cacheSaltOptedOut(cfg) {
+		log.Warn("--multi-tenant with --cache-salt=false: prefix-cache isolation is OFF. Tenants sharing an engine share its prefix cache, so one tenant can infer another's prompts from response timing. Every LLM agent is counted in hivenet_cache_isolation_gaps.")
 	}
 
 	if cfg.ResetDiskDB {
@@ -372,6 +439,10 @@ func New(cfg *config.Config) (*Router, error) {
 	evaluator := policy.NewEvaluator(store, counters)
 	executor := policy.NewExecutor(agents, evaluator, activePolicy, cfg.MaxTriesPerStep, cfg.QueueDepth)
 	executor.SetQueueMetrics(routerMetrics)
+	prefixIx := prefixindex.New(prefixindex.Config{})
+	executor.SetPrefixIndex(prefixIx)
+	executor.SetPrefixMetrics(routerMetrics)
+	executor.SetLatencyMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so
@@ -401,12 +472,6 @@ func New(cfg *config.Config) (*Router, error) {
 		dirHashes = snap.Hashes
 	}
 
-	// Build HTTP auth providers from config (or defaults if AuthConfigFile is empty).
-	apiProv, adminProv, keyRegistry, err := auth.ProvidersFromConfig(cfg)
-	if err != nil {
-		store.Close() //nolint:errcheck
-		return nil, fmt.Errorf("auth providers: %w", err)
-	}
 	rd, err := newRedirector(cfg, apiProv, routerMetrics)
 	if err != nil {
 		store.Close() //nolint:errcheck
@@ -473,12 +538,6 @@ func New(cfg *config.Config) (*Router, error) {
 		store.Close() //nolint:errcheck
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	// Wire the today-usage gauge so hivenet_tenant_tokens_used_today is updated
-	// on every successful token deduction, regardless of backend strategy.
-	type tokenUsageReporter interface{ SetOnTokensUsed(func(string, int)) }
-	if r, ok := rateLimiter.(tokenUsageReporter); ok {
-		r.SetOnTokensUsed(routerMetrics.TenantSetTokensUsedToday)
-	}
 	// Wire the flush-error counter so diskDB write failures increment
 	// hivenet_quota_backend_errors_total instead of being silently dropped.
 	type flushErrorReporter interface{ SetOnFlushError(func()) }
@@ -494,6 +553,7 @@ func New(cfg *config.Config) (*Router, error) {
 		grpcTLSCert:          tlsCert,
 		agents:               agents,
 		executor:             executor,
+		prefixIndex:          prefixIx,
 		requestQueue:         requestQueue,
 		metrics:              routerMetrics,
 		counters:             counters,
@@ -512,6 +572,7 @@ func New(cfg *config.Config) (*Router, error) {
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
 		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
+		salter:       salter,
 	}
 	// Over-budget requests wait in a per-model queue (--admission-queue-depth,
 	// by default --queue-depth) for room before a 429: half the request timeout
@@ -522,6 +583,13 @@ func New(cfg *config.Config) (*Router, error) {
 		admissionDepth = cfg.QueueDepth
 	}
 	r.occupancy.SetQueue(admissionDepth, cfg.RequestTimeout/2, routerMetrics.AdmissionQueueDepthUpdated)
+	// hivenet_cache_isolation_enabled always; the gap count while the router
+	// isolates tenants, computed at every scrape from the registry.
+	if r.promisesCacheIsolation() {
+		routerMetrics.SetCacheIsolation(r.salter != nil, r.cacheIsolationGapCounts)
+	} else {
+		routerMetrics.SetCacheIsolation(false, nil)
+	}
 	if err := r.setupShared(); err != nil {
 		store.Close() //nolint:errcheck
 		return nil, err
@@ -530,11 +598,11 @@ func New(cfg *config.Config) (*Router, error) {
 	// so the Grafana $tenant_id variable picks up newly-pushed keys without
 	// waiting for the first request from each tenant.
 	if r.keyRegistry != nil {
-		r.keyRegistry.SetOnChange(r.publishTenantQuotas)
+		r.keyRegistry.SetOnChange(r.keysChanged)
 		// Seed the gauges once for keys restored from the key store: wireKeyStore
 		// ran before this wiring existed, so the restore's onChange fired nil.
 		if _, entries := r.keyRegistry.Snapshot(); len(entries) > 0 {
-			r.publishTenantQuotas()
+			r.keysChanged()
 		}
 	}
 	// Open the semantic decision log here, before Start launches any goroutine,
@@ -661,6 +729,7 @@ func (r *Router) Start() error {
 	mux.HandleFunc("/register", r.handleAgentRegister)
 	mux.HandleFunc("/heartbeat", r.handleAgentHeartbeat)
 	mux.HandleFunc("/routing-signals", r.handleRoutingSignals)
+	mux.HandleFunc("/prefix-state", r.handlePrefixState)
 	r.httpHost.SetHTTPHandler(routerProtocolID, mux)
 
 	go r.httpHost.Serve() //nolint:errcheck
@@ -697,7 +766,20 @@ func (r *Router) Start() error {
 	}
 
 	// Create request processor now that httpHost is ready
-	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter)
+	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
+		WithCacheSalter(r.salter),
+		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
+		WithPrefixScope(prefixScope(r.salter)),
+		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
+			// Wait for the engine's cache events that may have evicted the
+			// blocks before the request reached it (sent in batches every
+			// 100 ms, after the engine's next step).
+			time.AfterFunc(prefixCheckDelay, func() {
+				if res := r.prefixIndex.CheckClaim(model, agent, blocks, at, actual); res != "" {
+					r.metrics.PrefixChecked(model, res)
+				}
+			})
+		}))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -724,15 +806,20 @@ func (r *Router) Start() error {
 		for _, c := range r.credits {
 			c.Start(processorCtx)
 		}
+		// With or without the salt: a router without it is reported by
+		// the others (and reports them).
+		go r.checkSaltFingerprints(processorCtx)
 	}
+	go r.publishTenantUsage(processorCtx)
 	// A reservation an exit path forgot to release would hold its budget
 	// forever, with or without a shared store.
 	go r.reapLeakedReservations(processorCtx)
-	r.metrics.ServeMetrics(r.cfg.MetricsPort)
-	r.publishTenantQuotas()
+	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
+	r.keysChanged()
 	go r.startGRPCServer()
 	go r.healthMonitor()
 	go r.processor.Start(processorCtx)
+	go r.runPrefixIndex(processorCtx)
 	go r.startHTTPServer()
 
 	go func() {
@@ -876,6 +963,7 @@ func (r *Router) startHTTPServer() {
 	)
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
+	handlers.SetKeyPushRejectedObserver(r.metrics.APIKeyPushRejected)
 	if r.decisionLog != nil { // opened in NewRouter; nil = disabled
 		handlers.SetDecisionLog(r.decisionLog)
 	}
@@ -887,6 +975,10 @@ func (r *Router) startHTTPServer() {
 	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
 	}
+	handlers.SetIsolation(api.Isolation{
+		RequireModelAllowlist: r.cfg.RequireModelAllowlist,
+		HideAgentIdentity:     r.cfg.HideAgentIdentity,
+	})
 	server := api.NewServer(handlers, r.cfg.HTTPPort, r.apiAuth, r.adminAuth, r.rateLimiter, r.metrics, r.agents.CountHealthyByModel, r.cfg.MaxRequestBytes)
 	if err := server.Start(); err != nil {
 		log.Errorf("HTTP server error: %v", err)
@@ -1014,6 +1106,91 @@ func (r *Router) watchPolicyReload() {
 	}
 }
 
+// publishTenantUsage refreshes hivenet_tenant_tokens_used_today for every
+// tenant on each sync interval. It is the gauge's only writer, so concurrent
+// charges can never publish out of order. With shared counters the value is
+// the site-wide usage the routers keep per tenant, so every router of a site
+// exports the same value (aggregate it with max by (tenant_id), not sum),
+// including for tenants it served nothing for. A tenant whose site total
+// cannot be read keeps its last value instead of reading 0.
+func (r *Router) publishTenantUsage(ctx context.Context) {
+	type tenantUsage interface {
+		TenantUsageToday(tenantID string) (int, bool)
+	}
+	type tenantLister interface{ TenantIDs() []string }
+	usage, ok := r.rateLimiter.(tenantUsage)
+	if !ok {
+		return
+	}
+	t := time.NewTicker(r.cfg.SyncInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		lister, ok := r.apiAuth.Load().(tenantLister)
+		if !ok {
+			continue
+		}
+		r.publishTenantUsageOnce(lister.TenantIDs(), usage.TenantUsageToday, time.Now().Add(r.cfg.SyncInterval))
+	}
+}
+
+// tenantUsageReads bounds the site totals read from the shared store at once
+// by publishTenantUsageOnce. A total is read once a day per tenant, and again
+// after this router may have missed usage; each read waits at most 200 ms.
+const tenantUsageReads = 8
+
+// publishTenantUsageOnce sets the usage gauge of each tenant, reading the
+// totals it does not hold yet concurrently. Reads not started by deadline wait
+// for the next tick, so a hanging store never holds the loop past one
+// interval per pending read.
+func (r *Router) publishTenantUsageOnce(tenants []string, usageOf func(string) (int, bool), deadline time.Time) {
+	sem := make(chan struct{}, tenantUsageReads)
+	var wg sync.WaitGroup
+	for _, tenant := range tenants {
+		if time.Now().After(deadline) {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			if used, known := usageOf(tenant); known {
+				r.metrics.TenantSetTokensUsedToday(tenant, used)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// keysChanged runs whenever the API keys may have changed: at startup, after
+// SIGHUP and after every key push. It republishes the tenant quota gauges and
+// warns about keys a required model allowlist refuses on every model.
+func (r *Router) keysChanged() {
+	r.publishTenantQuotas()
+	r.warnKeysWithoutAllowlist()
+}
+
+// warnKeysWithoutAllowlist logs how many API keys have no model allowlist
+// while one is required (--require-model-allowlist): each of them is refused
+// on every model, and the request logs alone would only show the individual
+// refusals. Typically key-sync does not push allowlists yet.
+func (r *Router) warnKeysWithoutAllowlist() {
+	if !r.cfg.RequireModelAllowlist {
+		return
+	}
+	counter, ok := r.apiAuth.Load().(interface{ KeysWithoutModelAllowlist() int })
+	if !ok {
+		return
+	}
+	if n := counter.KeysWithoutModelAllowlist(); n > 0 {
+		log.Warnf("--require-model-allowlist: %d API key(s) have no model allowlist (models/allowed_models or quota.per_model) and are refused on every model", n)
+	}
+}
+
 // publishTenantQuotas pre-populates Prometheus quota gauges for every tenant
 // defined in the auth config. This ensures the Grafana $tenant_id variable is
 // populated within the first scrape (~5 s) instead of waiting for the first
@@ -1033,7 +1210,8 @@ func (r *Router) publishTenantQuotas() {
 		// reads as "this tenant has no flat ceiling — look at the per-model
 		// series instead."
 		r.metrics.TenantSetQuotaLimit(tenantID, limits.RequestsPerMinute)
-		r.metrics.TenantSetTPDLimit(tenantID, limits.TokensPerDay)
+		// Capped by the tenant's own daily budget, when it has one.
+		r.metrics.TenantSetTPDLimit(tenantID, limits.DailyTokenCeiling())
 		// Seed per-model gauges so the Grafana (tenant_id, model) variable
 		// populates within the first scrape. The RPM seed is per_replica
 		// directly — at startup the live replica count is unknown — and the
@@ -1066,6 +1244,10 @@ func (r *Router) reloadAuthProviders() {
 	}
 	if r.keyRegistry != nil {
 		// DynamicKeyProvider managed via admin API — preserve it, only reload admin
+		if err := ValidateIsolationProviders(r.cfg, apiProv, adminProv); err != nil {
+			log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+			return
+		}
 		r.adminAuth.Swap(adminProv)
 		log.Info("SIGHUP: admin auth provider reloaded (dynamic API key registry preserved)")
 		return
@@ -1085,6 +1267,10 @@ func (r *Router) reloadAuthProviders() {
 		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
 		return
 	}
+	if err := ValidateIsolationProviders(r.cfg, apiProv, adminProv); err != nil {
+		log.Errorf("SIGHUP: auth config reload rejected (%v) — keeping previous providers active", err)
+		return
+	}
 	// Dynamic mode returned above without touching apiAuth, so the redirect
 	// wrapper installed at startup survives; here the provider is rebuilt and
 	// must be wrapped again or every redirected request would get 401.
@@ -1092,13 +1278,18 @@ func (r *Router) reloadAuthProviders() {
 	r.adminAuth.Swap(adminProv)
 	r.rateLimiter.Reset()
 	r.minuteLimiter.Reset()
-	r.publishTenantQuotas()
+	r.keysChanged()
 	if r.cfg.AuthConfigFile != "" {
 		log.Infof("SIGHUP: auth providers reloaded from %s", r.cfg.AuthConfigFile)
 	} else {
 		log.Info("SIGHUP: auth providers reloaded (no auth config file — both sections use mode=none)")
 	}
 }
+
+// ReloadAuthProviders re-reads the auth configuration exactly as SIGHUP does
+// (keeping the previous providers when the new ones are invalid). It exists
+// so tests can drive a reload without sending a signal to their process.
+func (r *Router) ReloadAuthProviders() { r.reloadAuthProviders() }
 
 // newRedirector builds the cross-site redirect state, or returns nil when
 // cfg.SiteID is empty (redirect disabled). cmd/router validates the secrets
@@ -1458,6 +1649,7 @@ func (r *Router) GetRoutingTable() []api.AgentView {
 			GPUModel:      agent.Metadata.GPUModel,
 			DeploymentID:  agent.Metadata.DeploymentID,
 			ReplicaID:     agent.Metadata.ReplicaID,
+			EngineVersion: agent.Metadata.EngineVersion,
 		}
 		status := api.AgentStatusView{
 			Healthy:        agent.Healthy,
@@ -1610,6 +1802,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		GPUModel:      session.Metadata.GpuModel,
 		DeploymentID:  payload.DeploymentID,
 		ReplicaID:     payload.ReplicaID,
+		EngineVersion: boundedEngineVersion(payload.EngineVersion),
 	}
 
 	// Capture old session token before overwriting the registry entry.
@@ -1854,6 +2047,7 @@ func (r *Router) installAgent(a *domain.Agent) bool {
 	if connected {
 		r.agentJoined()
 	}
+	r.checkCacheIsolation(a)
 	return connected
 }
 
@@ -1921,6 +2115,9 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	}
 	if payload.InFlight != nil {
 		a.SetReportedLoad(*payload.InFlight)
+	}
+	if payload.PendingPrefill != nil {
+		a.SetReportedPrefill(*payload.PendingPrefill)
 	}
 	if payload.Routers != nil {
 		a.SetRouterReport(payload.Routers)
@@ -2034,6 +2231,9 @@ func (r *Router) healthMonitor() {
 				AgentID:      id.String(),
 				Timestamp:    time.Now().UTC(),
 			})
+			r.prefixIndex.RemoveAgent(id)
+			r.kvCursors.forget(id)
+			r.prefixLimits.forget(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)

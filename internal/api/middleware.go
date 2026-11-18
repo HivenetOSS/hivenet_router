@@ -10,11 +10,15 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"hivenet_router/internal/auth"
+	"hivenet_router/internal/cachesalt"
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/jsonbody"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/semantic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -88,12 +92,148 @@ func BodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
 	}
 }
 
+// requestBody returns the request body, reading and caching it for the
+// middlewares and handlers after it when no earlier step has. ok is false
+// once it has answered 400 because the body could not be read.
+func requestBody(c *gin.Context) (body []byte, ok bool) {
+	if body, ok := cachedBody(c); ok {
+		return body, true
+	}
+	b, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+			"failed to read request body", domain.SourceRouter)
+		return nil, false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(b))
+	c.Set(gin.BodyBytesKey, b)
+	return b, true
+}
+
+// JSONObjectBody refuses, with 400 request_invalid, an inference body that is
+// not exactly one JSON object: invalid JSON, another JSON value, or an object
+// followed by more data; and one the cache salt could not prepare for some
+// engine (cachesalt.CheckBody: an extra_params that is not an object on
+// /v1/messages). The handlers' JSON decoding stops after the first
+// value, so such a body would otherwise be accepted and only fail later, when
+// the router edits it for the agent (cache salt, alias rewrite), after an
+// agent was already chosen. Runs after BodyLimitMiddleware; the body it read
+// is kept for the middlewares and handlers after it.
+func JSONObjectBody() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		body, ok := requestBody(c)
+		if !ok {
+			return
+		}
+		if err := jsonbody.ValidObject(body); err != nil {
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+				"Invalid request: the body must be exactly one JSON object", domain.SourceRouter)
+			return
+		}
+		// What some engine's edit could not handle is refused here too, so
+		// the answer does not depend on which agent would serve the request.
+		if err := cachesalt.CheckBody(c.FullPath(), body); err != nil {
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
+				"Invalid request: "+err.Error(), domain.SourceRouter)
+			return
+		}
+		c.Next()
+	}
+}
+
+// routerReadFields are the top-level request fields the router itself reads:
+// what the handlers decode (domain.ChatRequest; embeddings and rerank read
+// only "model"), what semantic aliases read (semantic.DecodedFields), and the
+// model and stream the middlewares peek at. A new struct the router decodes
+// from an inference body belongs here.
+var routerReadFields = func() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, names := range [][]string{jsonbody.FieldNames(domain.ChatRequest{}), semantic.DecodedFields(), {"model", "stream"}} {
+		for _, n := range names {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}()
+
+// routerReadShape is what the router decodes of an inference body, top level
+// and nested, built from the structs it decodes into so a field added to them
+// is covered: the top-level fields (routerReadFields); each messages[] entry
+// (domain.ChatCompletionMessage, the semantic view's message); each content
+// part or block, in a message's content, the Anthropic system array and a
+// tool_result's content (domain.ContentPart with its image_url and
+// input_audio, the semantic view's part). The prompt estimate behind every
+// input budget and the image cap are computed from these. Free-form subtrees
+// (tool definitions, tool_calls, metadata, response_format, reasoning,
+// thinking) are not in it: the router only counts their bytes or reads them
+// as hints for choosing among models the key may use, after which the model
+// allowlist is checked again.
+var routerReadShape = func() *jsonbody.Shape {
+	part := jsonbody.ObjectOf(jsonbody.FieldNames(domain.ContentPart{}), semantic.DecodedPartFields())
+	part.Fields["image_url"] = jsonbody.ObjectOf(jsonbody.FieldNames(domain.ImageURLConfig{}))
+	part.Fields["input_audio"] = jsonbody.ObjectOf(jsonbody.FieldNames(domain.InputAudioConfig{}))
+	parts := &jsonbody.Shape{Items: part} // a string is not looked into
+	part.Fields["content"] = parts
+	message := jsonbody.ObjectOf(jsonbody.FieldNames(domain.ChatCompletionMessage{}), semantic.DecodedMessageFields())
+	message.Fields["content"] = parts
+	top := jsonbody.ObjectOf(routerReadFields)
+	top.Fields["messages"] = &jsonbody.Shape{Items: message}
+	top.Fields["system"] = parts
+	return top
+}()
+
+// UnambiguousFields refuses, with 400 request_invalid, an inference body the
+// router and the backend would read differently. The router decodes with
+// encoding/json, which matches top-level names case-insensitively and keeps
+// the last of a repeated name, then forwards the body as sent to a backend
+// that matches names exactly. So {"model":"coder","Model":"chat"} would pass
+// the model allowlist as chat while the backend serves coder, and a
+// "Max_Tokens" would size the router's capacity reservation but not the
+// generation, and a "Content" next to a message's "content" would hide the
+// prompt from every input budget. Refused, in every object the router
+// decodes (routerReadShape): a name that appears twice, and a name that
+// matches one of the object's read fields only under case folding. A body that
+// is not one JSON object is refused too: this is the access boundary, and
+// the handlers' decoder would read the first object and ignore the rest.
+// Runs after JSONObjectBody and before everything that reads the body.
+func UnambiguousFields() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		body, ok := requestBody(c)
+		if !ok {
+			return
+		}
+		if err := jsonbody.CheckShape(body, routerReadShape); err != nil {
+			msg := "Invalid request: the body must be exactly one JSON object"
+			var ne *jsonbody.NameError
+			if errors.As(err, &ne) {
+				msg = "Invalid request: " + ne.Error() + "; send each field once, spelled exactly"
+			}
+			abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid, msg, domain.SourceRouter)
+			return
+		}
+		c.Next()
+	}
+}
+
 // CORSMiddleware adds CORS headers to responses
 // CORS controls whether browsers are allowed to call this API
 func CORSMiddleware() gin.HandlerFunc {
 
 	// Middleware in Gin is just a function that receives a request context.
 	return func(c *gin.Context) {
+
+		// The operator-only admin API is not offered to browsers: no CORS
+		// headers, so no web page on another origin can read an admin
+		// response with a credential it obtained. A preflight there gets
+		// no CORS answer: no /admin route takes OPTIONS, so it is a 404.
+		if p := c.Request.URL.Path; p == "/admin" || strings.HasPrefix(p, "/admin/") {
+			c.Next()
+			return
+		}
 
 		// Allow requests from ANY origin ("*").
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
@@ -274,7 +414,7 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 const effectiveTPDContextKey = "effective_tpd"
 
 // quotaModelContextKey carries the model name used by the limiter buckets so
-// AllowInputTokens / AllowOutputTokens charge the same (tenant, model) bucket
+// AllowInputTokens / AllowOutputTokens charge the same (key, model) bucket
 // QuotaMiddleware admitted from. Empty for the legacy flat shape.
 const quotaModelContextKey = "quota_model"
 
@@ -289,7 +429,7 @@ type quotaCaller struct {
 // and applies the same defaults the old inline middleware used so external
 // behaviour stays identical.
 func resolveCaller(c *gin.Context) quotaCaller {
-	out := quotaCaller{tenantID: "anonymous", keyID: "anonymous", deploymentID: "unset"}
+	out := quotaCaller{tenantID: auth.AnonymousID, keyID: auth.AnonymousID, deploymentID: "unset"}
 	if raw, ok := c.Get("tenant_id"); ok {
 		if s, _ := raw.(string); s != "" {
 			out.tenantID = s
@@ -330,14 +470,13 @@ func setRemainingRequests(c *gin.Context, remaining int) {
 	}
 }
 
-// enforceFlatQuota runs the legacy per-tenant umbrella RPM check — bit-for-bit
-// what the middleware did before per-model quotas existed. Returns false (and
-// has already written the 429) when the request is denied.
+// enforceFlatQuota runs the flat-shape RPM check on the calling key's own
+// bucket. Returns false (and has already written the 429) when the request is
+// denied. The per-tenant limit gauges are not written here: limits are per key,
+// so the tenant gauges carry the sum over the tenant's keys, seeded by
+// publishTenantQuotas whenever the key set changes.
 func enforceFlatQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.RouterMetrics, caller quotaCaller, limits auth.QuotaLimits) bool {
-	m.TenantSetQuotaLimit(caller.tenantID, limits.RequestsPerMinute)
-	m.TenantSetTPDLimit(caller.tenantID, limits.TokensPerDay)
-
-	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, "", limits.RequestsPerMinute)
+	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, caller.keyID, "", limits.RequestsPerMinute)
 	if !allowed {
 		model := peekModel(c)
 		c.Set(auditKeyModel, model)
@@ -369,7 +508,7 @@ func effectivePerModelRPM(entry auth.PerModelQuotaLimits, model string, healthyA
 // the body and the matching entry is resolved by exact match — strict
 // enumeration, no wildcard. Returns false (and has already written the 429)
 // when the request is denied; sets the effective_tpd / quota_model context
-// keys so the downstream handler charges the SAME (tenant, model) bucket
+// keys so the downstream handler charges the SAME (key, model) bucket
 // admission ran against.
 func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.RouterMetrics, caller quotaCaller, limits auth.QuotaLimits, healthyAgentCount func(string) int) bool {
 	model := peekModel(c)
@@ -384,12 +523,10 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 		return false
 	}
 
-	// Emit per-(tenant, model) gauges so dashboards can render the right
-	// ceiling for THIS model rather than seeing the per-tenant gauges
-	// oscillate as different models hit the same key. Per-model keys leave
-	// the legacy per-tenant gauges alone — they were seeded to 0 at startup
-	// and stay there, which is the dashboard signal "use the per-model series."
-	m.TenantSetPerModelTPDLimit(caller.tenantID, model, entry.TokensPerDay)
+	// The per-(tenant, model) TPD gauge is seeded by publishTenantQuotas
+	// (summed over the tenant's keys). The RPM gauge is written here because
+	// its value depends on the live replica count; with several per-model
+	// keys in one tenant it shows the last admitting key's ceiling.
 
 	effectiveRPM, skipQuota := effectivePerModelRPM(entry, model, healthyAgentCount)
 	if skipQuota {
@@ -406,7 +543,7 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 	}
 	m.TenantSetPerModelQuotaLimit(caller.tenantID, model, effectiveRPM)
 
-	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, model, effectiveRPM)
+	allowed, remaining, _ := limiter.AllowRequest(caller.tenantID, caller.keyID, model, effectiveRPM)
 	if !allowed {
 		denyRPM(c, m, caller, model, "rate limit exceeded")
 		return false
@@ -417,15 +554,15 @@ func enforcePerModelQuota(c *gin.Context, limiter auth.RateLimiter, m *metrics.R
 	return true
 }
 
-// QuotaMiddleware enforces per-tenant RPM limits using a RateLimiter.
+// QuotaMiddleware enforces per-key RPM limits using a RateLimiter.
 // Applied on the /v1/* group after AuthMiddleware. Returns 429 with
-// rate_limit_exceeded on RPM exhaustion. Records configured RPM/TPD as
-// Prometheus gauges per request, and sets X-RateLimit-Remaining-Requests.
+// rate_limit_exceeded on RPM exhaustion, records the per-model RPM gauge, and
+// sets X-RateLimit-Remaining-Requests for the calling key.
 //
 // Two quota shapes are supported on a per-key basis:
 //
 //   - Legacy flat (QuotaLimits.PerModel == nil): one umbrella RPM + TPD that
-//     applies to every model. The limiter buckets are per-tenant. Enforced
+//     applies to every model. The limiter buckets are per key. Enforced
 //     by enforceFlatQuota.
 //
 //   - Per-model (QuotaLimits.PerModel != nil): the middleware peeks the

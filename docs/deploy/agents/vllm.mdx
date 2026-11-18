@@ -312,6 +312,50 @@ Start the second agent with a different model and identity:
 
 When several agents run on the same host, each one needs a separate `--identity-path` so every process keeps a distinct peer identity.
 
+## Isolate tenants in the prefix cache
+
+vLLM's automatic prefix caching shares cached prompt blocks between every request with the same prefix. When several customers share one vLLM server, a faster first token can reveal that another customer sent the same prefix (vLLM advisory CVE-2025-46570). vLLM's per-request `cache_salt` field closes this: only requests with the same salt share cached blocks.
+
+Start the router with `--cache-salt` (`HIVENET_ROUTER_CACHE_SALT=true`) and a salt secret to have Hivenet Router set the salt itself:
+
+```bash
+openssl rand -base64 48 > /etc/hivenet-router/cache-salt.secret
+
+hivenet-router \
+  --cache-salt \
+  --cache-salt-secret-file /etc/hivenet-router/cache-salt.secret
+```
+
+With salting on, for every request forwarded to an agent started with `--engine vllm` (other engines are in the table below):
+
+- The router sets `cache_salt` to a value derived from the tenant (the key's owner) with HMAC-SHA256 under the secret: 43 base64url characters. All keys of one tenant share their salt, so a tenant still reuses its own cached prefixes; two tenants never share one.
+- Any `cache_salt` the client sent is removed first, so a client cannot choose another tenant's salt.
+- The salt is set on `/v1/chat/completions` (streaming or not), `/v1/messages`, `/v1/embeddings` and `/v1/rerank`. `/v1/messages/count_tokens` runs no prefill, so it gets no salt; a client salt is still removed.
+- The salt is decided on each forward attempt, so a retry that lands on another engine gets the right treatment for that engine.
+
+Other engines get what they support. On every path, any client-sent `cache_salt` is removed first.
+
+| Engine (`--engine`) | Chat completions | `/v1/messages` | Embeddings and rerank |
+| --- | --- | --- | --- |
+| `vllm` | Tenant salt; isolated from v0.9.0 | Tenant salt; isolated from v0.27.0 (v0.11.1 to v0.26 serve this endpoint but ignore the salt there) | Tenant salt; isolated from v0.16.0 (an input long enough to be split into chunks keeps the salt from v0.32.0) |
+| `sglang` | Tenant salt; isolated from v0.5.11 (older versions accept the salt and ignore it) | Not isolated: released SGLang drops the salt on this endpoint | No salt field; not salted |
+| `llamacpp` | `cache_prompt: false`: the request reuses no cached prefix, so a tenant also loses its own cache reuse | `cache_prompt: false`, also inside `extra_params`; isolated from build b11795, which merges `extra_params` into the request | Not cached by llama.cpp |
+| `ollama`, `custom` (including vLLM run with `--engine custom`) | Not isolated | Not isolated | Not salted |
+
+The agent reads its engine's version (vLLM `GET /version`, SGLang `GET /server_info`, llama.cpp `GET /props` `build_info`) when the backend is ready, again before every registration, and whenever the backend answers a health check after failing one, as an engine restarted with another build does. It reports the version when it registers, and registers again with every router when the version changed; the admin routing table shows it as `engine_version`. Where isolation depends on the version, an older version counts as not isolated: the router still sends the field, but cannot show the engine honours it. An unknown version, from an agent built before it reported one, counts as not isolated too, except on vLLM chat completions, embeddings and rerank, which every vLLM still in use isolates.
+
+When an LLM agent registers with a generation path that is not isolated, the router logs a warning naming the engine, its version and the paths, and counts it in `hivenet_cache_isolation_gaps{model, engine}`. Keep such agents off models shared by several customers, or accept that cache timing can leak between them. `hivenet_cache_isolation_enabled` is `1` while salting is on. The OpenAI and Anthropic fallback providers never receive a salt.
+
+The secret:
+
+- must be at least 32 bytes and differ from every other secret of the router: the JWT secret (which every agent holds), the key-store secret, each redirect secret (which every site that verifies redirect tokens holds), the Valkey password and the `/metrics` bearer token; the router refuses to start otherwise
+- must be the same on every router in front of the same agents, or one tenant's requests through different routers do not share its own cache (see [Run several routers](/deploy/multiple-routers)). With shared counters, the routers compare fingerprints of their secrets and report a mismatch in `hivenet_cache_salt_secret_mismatch`
+- changes every salt when rotated, which costs one cold prefix cache
+
+<Note>
+  Salting changes which requests share prefix-cache blocks, not what the model computes. Run vLLM with the `sha256` prefix hash (the default since vLLM 0.11), at v0.27.0 or later so `/v1/messages` is isolated too. Before v0.10.2, vLLM ignores the salt on chat completions for gpt-oss models.
+</Note>
+
 ## How load is bounded
 
 The agent reports vLLM's KV-cache size in tokens, read from `vllm:cache_config_info`: its `kv_cache_size_tokens` label, or `num_gpu_blocks × block_size` on vLLM versions that do not report it. For hybrid models (attention plus mamba layers) only the first is right, because the blocks also hold mamba state. When the model's policy sets no `admit_budget_tokens`, the router's occupancy budget (B2) is the KV capacity of the model's healthy replicas × `HIVENET_ROUTER_ADMIT_FRACTION` (default `0.90`). A policy `admit_budget_tokens` overrides it. See [Admission control](/routing/admission-control).
@@ -425,6 +469,25 @@ curl http://192.168.1.100:8080/admin/routing-table \
           waiting_requests: .engine.waiting_requests
         }'
 ```
+
+## Prefix-aware routing
+
+With the [`prefix-aware`](/routing/prefix-aware-routing) strategy, the agent asks vLLM for each prompt's token IDs (`return_token_ids`), removes them from the response, and reports keyed hashes of the prompt's blocks to every router. Tested with vLLM 0.31.
+
+At start-up the agent calls vLLM's `/tokenize` to find the token that opens each message in the model's chat template. If it finds none, it reports whole prompts only and logs it once.
+
+So that the routers also see what vLLM evicts, publish its KV-cache events on a **local** address and give the agent that address ([KV events](/routing/prefix-aware-routing#kv-events)):
+
+```bash
+vllm serve MODEL --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":"kv-events"}'
+```
+
+```bash
+--kv-events-endpoint tcp://127.0.0.1:5557
+```
+
+Add `--enable-prompt-tokens-details` to vLLM so it reports the prompt tokens it served from cache: the router uses them to check its predictions ([agent trust](/routing/prefix-aware-routing#agent-trust)).
 
 ## Use vLLM metrics in routing policies
 

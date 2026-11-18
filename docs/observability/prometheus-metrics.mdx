@@ -17,9 +17,9 @@ curl http://localhost:2112/metrics
 ```
 
 <Warning>
-  The metrics endpoint does not have built-in authentication.
+  The tenant series name every tenant and key with their usage and limits. By default the metrics endpoint has no authentication.
 
-  Restrict it to Prometheus and trusted operators through a private network, firewall, reverse proxy, or equivalent network control.
+  Restrict it to Prometheus and trusted operators: bind it to a private address, require a bearer token (below), and use a firewall or network policy. A router serving several customers should do all of these.
 </Warning>
 
 ## Start the metrics server
@@ -44,6 +44,35 @@ The metrics endpoint is then available at:
 
 ```text
 http://<router-host>:9212/metrics
+```
+
+`--metrics-port` takes a full listen address, so you can bind one interface, for example `--metrics-port 127.0.0.1:2112` or a private IP. A value with no host, such as `:2112`, or `0.0.0.0:2112` listens on every interface.
+
+Only a loopback address (`127.0.0.1`, `::1`, `localhost`) or a private IP (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) counts as private. A public IP, every interface and any other hostname, whose address DNS could change, count as public: do not serve `/metrics` there without a token. A [multi-tenant](/security/multi-tenant-isolation) router refuses to start that way.
+
+### Require a bearer token
+
+Set a token with `--metrics-bearer-token-file` (a file holding the token) or `HIVENET_ROUTER_METRICS_BEARER_TOKEN`:
+
+```bash
+openssl rand -hex 32 > /etc/hivenet-router/metrics.token
+
+./bin/hivenet-router \
+  --metrics-bearer-token-file /etc/hivenet-router/metrics.token \
+  ...
+```
+
+Requests without `Authorization: Bearer <token>` then get HTTP `401` and no series. The token is compared in constant time, length included. A client must send its request headers within 10 seconds, so a connection that never finishes them cannot be held open. Give Prometheus the same token:
+
+```yaml
+scrape_configs:
+  - job_name: hivenet-router
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets:
+          - router.example.internal:2112
 ```
 
 ## Configure Prometheus
@@ -255,6 +284,48 @@ time()
   hivenet_routing_agent_last_seen_timestamp
   / 1000
 )
+```
+
+### Agents without prefix-cache isolation
+
+```promql
+hivenet_cache_isolation_gaps
+```
+
+Labels: `model`, `engine`. With `--cache-salt` on, the number of registered LLM agents that serve a generation path (`/v1/chat/completions` or `/v1/messages`) without per-tenant prefix-cache isolation, for their engine and engine version. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) for which engines and versions isolate which paths. The router computes it from its agent registry at every scrape, and also logs a warning when such an agent registers.
+
+Every agent registers with every router of a site, so each router exports the same agents. Aggregate with `max`, not `sum`, which would count each agent once per router:
+
+```promql
+max by (model, engine) (hivenet_cache_isolation_gaps)
+```
+
+Alert when a shared model has such agents:
+
+```promql
+max by (model) (hivenet_cache_isolation_gaps) > 0
+```
+
+```promql
+hivenet_cache_isolation_enabled
+```
+
+`1` while the router isolates tenants in the prefix cache (`--cache-salt` on), `0` otherwise. It is set at startup, so an alert can check it even before any agent registers; without it, salting off and salting on with no gap both show no gap series:
+
+```promql
+min(hivenet_cache_isolation_enabled) == 0
+```
+
+```promql
+hivenet_cache_salt_secret_mismatch
+```
+
+With [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt setting differs from this router's: another secret, or the salt off where this router has it on (and the reverse). A router without the salt publishes that instead of a fingerprint, and its requests share every tenant's prefix cache and prefix index. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
+
+Alert when any router of the site disagrees:
+
+```promql
+max(hivenet_cache_salt_secret_mismatch) > 0
 ```
 
 ### Routed requests
@@ -542,6 +613,22 @@ Exported only with `--sync-store=valkey`. See [Run several routers](/deploy/mult
 | `hivenet_occupancy_credit_reclaims_total` | counter | Routers given up early because no agent was connected to them |
 | `hivenet_sync_unknown_routers` | gauge | Routers the agents report a connection to that the store does not list |
 | `hivenet_admission_reaped_total` | counter | Occupancy reservations released because they outlived any request (a leak caught; should stay `0`) |
+
+## Dynamic key pushes
+
+```promql
+hivenet_api_key_push_rejected_total
+```
+
+Label: `endpoint` (`upsert` or `replace`). Pushes to `/admin/api-keys` refused with `400` because an entry is invalid, such as an owner the [identifier rules](/security/api-keys) refuse. Nothing in a refused push is applied: a refused full replace also leaves the keys it would have revoked in force. The router logs a warning naming the entry. A stale version (`409`) is not counted.
+
+Alert on any refused push:
+
+```yaml
+- alert: HivenetAPIKeyPushRejected
+  expr: increase(hivenet_api_key_push_rejected_total[5m]) > 0
+  labels: {severity: critical}
+```
 
 ## Dynamic key store metrics
 
@@ -1060,6 +1147,27 @@ sum by (model, reason) (
 )
 ```
 
+### Prefix-aware routing
+
+```promql
+hivenet_prefix_routing_total
+hivenet_prefix_index_entries
+```
+
+`hivenet_prefix_routing_total` counts the selections of the [`prefix-aware`](/routing/prefix-aware-routing) strategy, per `model` and `outcome`:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `hit` | The chosen agent holds blocks of the prompt |
+| `pending` | The same new text was just sent to the chosen agent |
+| `miss` | No candidate holds anything of the prompt |
+| `busy` | Every candidate was busy: `least-loaded` chose |
+| `no_anchor` | The request had no prompt text: `least-loaded` chose |
+
+`hivenet_prefix_checks_total{model, result}` counts the checks of the blocks an agent's engine confirmed holding (by KV events) against the prompt tokens it reported serving from cache: `held` (half or more of the blocks it kept came true), `missed`, or `evicted` (the engine evicted the blocks before the request reached it: not judged). It needs KV events and vLLM's `--enable-prompt-tokens-details` or SGLang's `--enable-cache-report`.
+
+`hivenet_prefix_index_entries` is the size of the router's prefix memory, per `kind`: `memo` (message prefixes it can match), `memo_ends` (memo entries indexed by their last block, so the memo forgets with the cache; it follows `memo`, and a gap between them is a leak), `blocks` (cached blocks on its board), `pending` (notes for new text in flight). It has no model, tenant or agent label.
+
 ### Policy reloads
 
 ```promql
@@ -1194,7 +1302,7 @@ Tenant metrics attribute activity to clients and deployments.
 | Label | Source | Default |
 | --- | --- | --- |
 | `tenant_id` | Authenticated owner or tenant | `default` in no-auth mode |
-| `key_id` | Dynamic registry entry ID | `anonymous` for static or no-auth access |
+| `key_id` | Dynamic registry entry ID, or `static-` plus 16 hex characters derived from the key hash for static keys | `anonymous` for no-auth access |
 | `deployment_id` | Selected agent registration metadata | `unset` before routing or when absent |
 | `model` | Request body | Requested model |
 
@@ -1317,7 +1425,7 @@ tenant_id
 
 A value of `0` means unlimited.
 
-These gauges describe keys using the flat quota shape.
+These gauges describe keys using the flat quota shape. Limits are enforced per key; the gauge is the tenant's total ceiling, the sum of its flat-shape keys' limits (`0` if any of them is unlimited). When the tenant has a daily budget of its own (`tenant_tokens_per_day`), the TPD gauge is the lower of that budget and the sum. It is set at startup, on reload and whenever the key registry changes.
 
 ### Per-model quota limits
 
@@ -1340,7 +1448,7 @@ requests per minute per replica
 × healthy replicas
 ```
 
-It can change as agent health and fleet size change.
+It can change as agent health and fleet size change. When several keys of one tenant declare the same model, the RPM gauge shows the effective ceiling of the key that was admitted last; the TPD gauge is the sum over those keys.
 
 ### Tokens used today
 
@@ -1354,15 +1462,21 @@ Label:
 tenant_id
 ```
 
-The value resets at midnight UTC.
+The value is the tenant's tokens used today on chat completions and `/v1/messages`, summed over all its keys and models, whether or not a key has a daily budget: the prompt estimate charged at admission, then the completion tokens and any prompt tokens the backend reports beyond the estimate, charged after the response. It counts only tokens that were charged: a request refused for a daily budget adds nothing, and when a response overflows a budget only what fitted is counted. Embeddings and reranking are not charged to daily budgets and are not counted. It resets at midnight UTC. This is the counter a tenant's daily budget (`tenant_tokens_per_day`) is checked against.
 
-Token-budget utilization for flat quotas:
+The router refreshes it for every tenant on each `--sync-interval`. With [shared counters](/deploy/multiple-routers) the value is the site total, so every router of the site exports the same value. Aggregate it with `max`, not `sum`, which would count it once per router. While a router cannot read a tenant's site total from the store, it keeps that tenant's last value instead of reporting `0`.
 
 ```promql
-hivenet_tenant_tokens_used_today
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
+```
+
+Token-budget utilization, for tenants whose keys all use the flat quota shape (the limit gauge leaves out per-model keys, so a tenant with per-model keys can read above 100%; compare those against the per-model TPD gauges, or use the tenant's own budget):
+
+```promql
+max by (tenant_id) (hivenet_tenant_tokens_used_today)
 /
 clamp_min(
-  hivenet_tenant_quota_tpd_limit,
+  max by (tenant_id) (hivenet_tenant_quota_tpd_limit),
   1
 )
 ```
@@ -1910,13 +2024,11 @@ groups:
     key_id="anonymous"
     ```
 
-    Static API keys currently use:
+    Static API keys use a key ID derived from their `key_hash`, for example:
 
     ```text
-    key_id="anonymous"
+    key_id="static-3c1f9a7e5b2d4086"
     ```
-
-    because stable key IDs belong to dynamic registry entries.
 
     `deployment_id="unset"` is expected before an agent is selected or when the agent does not advertise a deployment ID.
   </Accordion>

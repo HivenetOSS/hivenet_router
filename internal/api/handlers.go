@@ -40,6 +40,7 @@ const headerRateLimitRemainingRequests = "X-RateLimit-Remaining-Requests"
 type AgentMetadataView struct {
 	Model         string   `json:"model"`
 	Engine        string   `json:"engine"`
+	EngineVersion string   `json:"engine_version,omitempty"`
 	Region        string   `json:"region,omitempty"`
 	Organization  string   `json:"organization,omitempty"`
 	Machine       string   `json:"machine,omitempty"`
@@ -183,7 +184,7 @@ type Handlers struct {
 	// May be nil when metrics are not configured.
 	policyReloadObserver func(trigger, result string)
 
-	// limiter enforces per-tenant token budgets. The input check (AllowInputTokens)
+	// limiter enforces per-key token budgets. The input check (AllowInputTokens)
 	// runs here after the request body is parsed; the output check runs in the processor.
 	// May be nil when auth is disabled.
 	limiter auth.RateLimiter
@@ -193,6 +194,10 @@ type Handlers struct {
 	// without importing the metrics package directly.
 	// May be nil.
 	onTokenLimited func(MetricContext)
+
+	// keyPushRejected is called when an admin key push (endpoint "upsert" or
+	// "replace") is refused for an invalid entry. May be nil.
+	keyPushRejected func(endpoint string)
 
 	// onRequestReceived is called at handler entry (after auth) with the tenant, key, and deployment IDs.
 	// Used to update the last-request timestamp metric. May be nil.
@@ -283,6 +288,8 @@ type Handlers struct {
 	// wakes; nil (the default) disables holding. See WakeHold and SetWake.
 	wake    *wake.Holder
 	wakeCfg WakeConfig
+	// isolation holds the tenant-isolation switches (see SetIsolation).
+	isolation Isolation
 }
 
 // NewHandlers initializes a Handlers instance with all required dependencies.
@@ -471,6 +478,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	m.requestID = requestIDFrom(c)
 	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
 	m.tpd, m.quotaModel = quotaBudgetFromContext(c)
+	m.tenantTPD = quotaLimitsFromContext(c).TenantTokensPerDay
 
 	// Record last-seen timestamp for the tenant (every authenticated request).
 	if h.onRequestReceived != nil {
@@ -486,8 +494,13 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// count_tokens is also exempt from the daily token budget: it generates
 	// nothing, and a count-then-send client would otherwise pay for every
 	// prompt twice (once counted, once sent).
-	if !countOnly && !h.reserveInputBudget(c, &req, m) {
-		return
+	chargedInput := 0
+	if !countOnly {
+		ok, charged := h.reserveInputBudget(c, &req, m)
+		if !ok {
+			return
+		}
+		chargedInput = charged
 	}
 	if !captureRawBody(c, &req, m.requestID) {
 		return
@@ -500,10 +513,12 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.KeyID = m.keyID
 	pending.DeploymentID = m.deploymentID
 	pending.TokensPerDay = m.tpd
+	pending.TenantTokensPerDay = m.tenantTPD
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
+	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -517,18 +532,25 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 // reqMeta bundles the request-scoped identifiers and budget shared across the
 // Passthrough pipeline so the helpers below avoid long parameter lists.
 //
-// quotaModel selects the limiter bucket: empty for legacy-flat keys (one
-// bucket per tenant), non-empty for per-model keys (one bucket per
-// (tenant, model)). Stashed by QuotaMiddleware so the handler does not redo
-// the resolution.
+// quotaModel selects the limiter bucket: empty for flat keys (one bucket per
+// key), non-empty for per-model keys (one bucket per (key, model)). Stashed by
+// QuotaMiddleware so the handler does not redo the resolution. tenantTPD is
+// the daily budget of the key's tenant.
 type reqMeta struct {
 	requestID    string
 	tenantID     string
 	keyID        string
 	deploymentID string
 	tpd          int
+	tenantTPD    int
 	quotaModel   string
 	start        time.Time
+}
+
+// budget names the daily token budgets this request is charged to.
+func (m reqMeta) budget() auth.DailyBudget {
+	return auth.DailyBudget{TenantID: m.tenantID, KeyID: m.keyID, Model: m.quotaModel,
+		KeyTokensPerDay: m.tpd, TenantTokensPerDay: m.tenantTPD}
 }
 
 // parsePassthroughRequest binds the JSON body, validates the model field, and
@@ -554,18 +576,59 @@ func (h *Handlers) parsePassthroughRequest(c *gin.Context, req *domain.ChatReque
 	return true
 }
 
-// authorizeModel enforces the per-key model allowlist (empty allowlist = all
-// models). Returns false (after writing 403) when the model is not permitted.
-func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
-	allowSet, unrestricted := effectiveAllowedModels(c)
-	if unrestricted {
-		return true
+// Isolation holds the tenant-isolation switches for the client API. The zero
+// value changes nothing.
+type Isolation struct {
+	// RequireModelAllowlist makes a key with no allowlist unable to call or
+	// list any model (instead of every model). For shared multi-tenant
+	// routers, where an unrestricted key would reach other customers' models.
+	RequireModelAllowlist bool
+
+	// HideAgentIdentity leaves out of GET /v1/models/:model what identifies
+	// an agent (peer ID, organization, machine, version, last seen), so a
+	// customer cannot map the fleet, including other customers' reserved
+	// replicas. GET /admin/models/:model keeps the full list.
+	HideAgentIdentity bool
+}
+
+// SetIsolation sets the tenant-isolation switches. Call before serving.
+func (h *Handlers) SetIsolation(iso Isolation) { h.isolation = iso }
+
+// ModelACL refuses, with 403, a request for a model its key may not use,
+// before it is charged any quota, wakes a model scaled to zero, is redirected
+// or is queued. It runs after RedirectTarget and AliasMiddleware, so it sees
+// the model the request will be served as (a redirect token's model, or the
+// model an alias resolved to). A body without a model is left to the
+// handler's 400. The handlers check again, so a route outside this chain is
+// still refused.
+func (h *Handlers) ModelACL() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if model := peekModel(c); model != "" && !h.authorizeModel(c, model) {
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
-	if _, ok := allowSet[model]; ok {
+}
+
+// authorizeModel enforces the per-key model allowlist (allowedModels).
+// Returns false (after writing 403) when the model is not permitted.
+func (h *Handlers) authorizeModel(c *gin.Context, model string) bool {
+	if h.modelAllowed(c, model) {
 		return true
 	}
 	writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+model, domain.SourceRouter)
 	return false
+}
+
+// modelAllowed reports whether the authenticated key may use model.
+func (h *Handlers) modelAllowed(c *gin.Context, model string) bool {
+	allowSet, unrestricted := h.allowedModels(c)
+	if unrestricted {
+		return true
+	}
+	_, ok := allowSet[model]
+	return ok
 }
 
 // inputCapTolerance is how far the input estimate may exceed max_input_tokens
@@ -796,12 +859,12 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 	limits := quotaLimitsFromContext(c)
 	// Check the non-deducting OTPM gate before charging the ITPM bucket, so an
 	// output-rate rejection never spends input-rate tokens.
-	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.keyID, req.Model, limits.OutputTokensPerMinute) {
+	if limits.OutputTokensPerMinute > 0 && h.minuteLimiter.OutputExhausted(m.tenantID, m.keyID, req.Model, limits.OutputTokensPerMinute) {
 		h.fireAdmissionReject("b4_otpm", req.Model)
 		return h.writeRateLimited(c, m, req.Model, "output token rate exceeded, please retry")
 	}
 	if limits.InputTokensPerMinute > 0 {
-		if !h.minuteLimiter.AllowInputTokens(m.keyID, req.Model, limits.InputTokensPerMinute, inputEstimate) {
+		if !h.minuteLimiter.AllowInputTokens(m.tenantID, m.keyID, req.Model, limits.InputTokensPerMinute, inputEstimate) {
 			h.fireAdmissionReject("b4_itpm", req.Model)
 			return h.writeRateLimited(c, m, req.Model, "input token rate exceeded, please retry")
 		}
@@ -822,7 +885,26 @@ func (h *Handlers) chargeOutputRate(c *gin.Context, req *domain.ChatRequest, m r
 		return
 	}
 	if otpm := quotaLimitsFromContext(c).OutputTokensPerMinute; otpm > 0 {
-		h.minuteLimiter.ChargeOutputTokens(m.keyID, req.Model, otpm, completionTokens)
+		h.minuteLimiter.ChargeOutputTokens(m.tenantID, m.keyID, req.Model, otpm, completionTokens)
+	}
+}
+
+// chargeInputShortfall charges the key's ITPM bucket, after a serverless
+// response, for the prompt tokens the backend reported beyond the estimate
+// admission charged it (pending.EstimatedInputTokens), so the per-minute
+// input rate counts the prompt the backend processed. Post-hoc like
+// chargeOutputRate; an overestimate is not refunded. Needs the backend's
+// exact count (exact).
+func (h *Handlers) chargeInputShortfall(c *gin.Context, req *domain.ChatRequest, m reqMeta, pending *domain.PendingRequest, promptTokens int, exact bool) {
+	if h.minuteLimiter == nil || h.executor == nil || !exact || pending.EstimatedInputTokens <= 0 || promptTokens <= pending.EstimatedInputTokens {
+		return
+	}
+	pol := h.executor.EffectivePolicy(req.Model)
+	if pol == nil || !pol.IsServerless() {
+		return
+	}
+	if itpm := quotaLimitsFromContext(c).InputTokensPerMinute; itpm > 0 {
+		h.minuteLimiter.ChargeInputTokens(m.tenantID, m.keyID, req.Model, itpm, promptTokens-pending.EstimatedInputTokens)
 	}
 }
 
@@ -887,42 +969,67 @@ func (h *Handlers) estimatePromptTokens(req *domain.ChatRequest) int {
 	return promptTokens
 }
 
-// effectiveAllowedModels returns the set of models the calling API key may use.
-// The set is derived in this precedence order:
+// allowedModels returns the set of models the calling API key may use:
 //
-//  1. quota.per_model (strict per-model quotas): allow-set = the map's keys.
-//     The per_model declaration IS the allow-list — a caller that has no quota
-//     entry for a model cannot call it (admission would 429 anyway), so the
-//     discovery view must hide it too. This keeps a single source of truth.
+//  1. quota.per_model (strict per-model quotas): the map's keys. A caller with
+//     no quota entry for a model cannot call it (admission would 429 anyway),
+//     so the discovery view hides it too.
 //
-//  2. allowed_models (legacy explicit allowlist on the auth.yaml key entry):
-//     allow-set = that list, when non-empty.
+//  2. allowed_models (the explicit allowlist, models in auth.yaml): that list,
+//     when non-empty.
 //
-//  3. Neither set → unrestricted=true. Legacy flat keys with no allowlist see
-//     the full catalog, matching the pre-HAI-232 behaviour.
+//  3. Both: only the models in both lists. Neither list ever widens the other.
 //
-// Used by /v1/models and /v1/models/:model to filter the discovery surface so
-// callers only see models they can actually invoke (and don't learn the names
-// of other tenants' models). Also used by authorizeModel to enforce the same
-// rule on inference verbs.
-func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+//  4. Neither → unrestricted=true: the key sees and may call every model,
+//     unless an allowlist is required (Isolation.RequireModelAllowlist), in
+//     which case the set is empty and the key may use no model.
+//
+// Every model check on the client API goes through it: inference (ModelACL
+// and the handlers), discovery (/v1/models and /v1/models/:model), semantic
+// aliases, cross-site redirects and holds at zero. The require-allowlist rule
+// is read from h.isolation, not from the request, so no route can skip it.
+func (h *Handlers) allowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+	allowSet, unrestricted = resolveAllowedModels(c)
+	if unrestricted && h.isolation.RequireModelAllowlist {
+		// Fail closed: a key without an allowlist may use no model.
+		return map[string]struct{}{}, false
+	}
+	return allowSet, unrestricted
+}
+
+// resolveAllowedModels is allowedModels without the require-allowlist rule.
+func resolveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unrestricted bool) {
+	var perModel map[string]struct{}
 	if raw, ok := c.Get("quota_limits"); ok {
 		if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel != nil {
-			allowSet = make(map[string]struct{}, len(limits.PerModel))
+			perModel = make(map[string]struct{}, len(limits.PerModel))
 			for model := range limits.PerModel {
-				allowSet[model] = struct{}{}
+				perModel[model] = struct{}{}
 			}
-			return allowSet, false
 		}
 	}
+	var listed map[string]struct{}
 	if raw, ok := c.Get("allowed_models"); ok {
 		if list, ok := raw.([]string); ok && len(list) > 0 {
-			allowSet = make(map[string]struct{}, len(list))
+			listed = make(map[string]struct{}, len(list))
 			for _, m := range list {
-				allowSet[m] = struct{}{}
+				listed[m] = struct{}{}
 			}
-			return allowSet, false
 		}
+	}
+	switch {
+	case perModel != nil && listed != nil:
+		both := make(map[string]struct{}, min(len(perModel), len(listed)))
+		for m := range perModel {
+			if _, ok := listed[m]; ok {
+				both[m] = struct{}{}
+			}
+		}
+		return both, false
+	case perModel != nil:
+		return perModel, false
+	case listed != nil:
+		return listed, false
 	}
 	return nil, true
 }
@@ -932,7 +1039,7 @@ func effectiveAllowedModels(c *gin.Context) (allowSet map[string]struct{}, unres
 //
 //   - Per-model keys: QuotaMiddleware sets effectiveTPDContextKey and
 //     quotaModelContextKey to the resolved entry — used here verbatim so the
-//     handler charges the same (tenant, model) bucket admission used.
+//     handler charges the same (key, model) bucket admission used.
 //   - Legacy flat keys: neither context key is set; fall back to
 //     QuotaLimits.TokensPerDay and an empty model (legacy tenant-only bucket).
 //
@@ -949,7 +1056,7 @@ func quotaBudgetFromContext(c *gin.Context) (tpd int, model string) {
 		}
 	}
 	if model == "" {
-		// Legacy flat shape — read the per-tenant TPD from the umbrella limits.
+		// Flat shape — read the key's TPD from the umbrella limits.
 		if raw, ok := c.Get("quota_limits"); ok {
 			if limits, ok := raw.(auth.QuotaLimits); ok && limits.PerModel == nil {
 				tpd = limits.TokensPerDay
@@ -965,66 +1072,87 @@ func quotaBudgetFromContext(c *gin.Context) (tpd int, model string) {
 // the token-budget admission gate rather than bypassing it with a 0 estimate.
 const perMessageTokenOverhead = 4
 
-// reserveInputBudget enforces the daily token budget BEFORE queueing. It is a
-// pure admission check: it peeks the remaining budget WITHOUT charging and rejects
-// the request up front (clean 429) if its worst case — estimated prompt tokens
-// plus the requested max output — cannot fit, so a rejected request consumes no
-// budget. Only when the request is admitted is the prompt estimate charged; the
-// processor deducts the actual completion tokens after the response (max_tokens is
-// never deducted, only used to size the admission check). Returns false (after
-// writing 429) when the request cannot be admitted.
-func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta) bool {
-	if h.limiter == nil || m.tpd <= 0 {
-		return true
+// reserveInputBudget enforces the daily token budgets (the key's and its
+// tenant's) BEFORE queueing. It is a pure admission check: it peeks the
+// remaining budget WITHOUT charging and rejects the request up front (clean
+// 429) if its worst case — estimated prompt tokens plus the requested max
+// output — cannot fit, so a rejected request consumes no budget. Only when the
+// request is admitted is the prompt estimate charged; the processor deducts
+// the actual completion tokens after the response (max_tokens is never
+// deducted, only used to size the admission check). A request with no daily
+// budget is still charged, so it counts in its tenant's usage today. Returns
+// false (after writing 429) when the request cannot be admitted.
+func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta) (ok bool, charged int) {
+	if h.limiter == nil {
+		return true, 0
 	}
 	// EstimateTokens only sees text content; estimatePromptTokens floors a
 	// multimodal or tool-only message at a per-message overhead so it is charged
 	// (and passes through this gate) rather than bypassing it with a 0 estimate.
 	promptTokens := h.estimatePromptTokens(req)
 	if promptTokens == 0 {
-		return true // genuinely empty body — nothing to budget
+		return true, 0 // genuinely empty body — nothing to budget
 	}
-	// Worst-case output. max_completion_tokens is the 2026 field; fall back to
-	// max_tokens (also the Anthropic field name).
-	reservedOutput := req.MaxCompletionTokens
-	if reservedOutput == 0 {
-		reservedOutput = req.MaxTokens
-	}
-
-	// Admission check — peek, do not charge. If we cannot read the budget, fail open.
-	remaining, err := h.limiter.RemainingTokens(m.tenantID, m.quotaModel, m.tpd)
-	if err != nil {
-		log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
-		return true
-	}
-	if remaining >= 0 && promptTokens+reservedOutput > remaining {
-		h.fireTokenLimited(m, req.Model)
-		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
-		msg := "daily token budget exceeded"
-		if reservedOutput > 0 {
-			msg = "insufficient daily token budget for requested max_tokens"
+	budget := m.budget()
+	if budget.KeyTokensPerDay > 0 || budget.TenantTokensPerDay > 0 {
+		// Worst-case output. max_completion_tokens is the 2026 field; fall back to
+		// max_tokens (also the Anthropic field name).
+		reservedOutput := req.MaxCompletionTokens
+		if reservedOutput == 0 {
+			reservedOutput = req.MaxTokens
 		}
-		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeTokenLimitExceeded, msg, domain.SourceRouter)
-		return false
+		// Admission check — peek, do not charge. If we cannot read the budget, fail open.
+		remaining, err := h.limiter.RemainingTokens(budget)
+		if err != nil {
+			log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
+			return true, 0
+		}
+		if need := promptTokens + reservedOutput; remaining >= 0 && need > remaining {
+			h.fireTokenLimited(m, req.Model)
+			c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
+			msg := "daily token budget exceeded"
+			if reservedOutput > 0 {
+				msg = "insufficient daily token budget for requested max_tokens"
+			}
+			h.refuseBudget(c, budget, need, msg)
+			return false, 0
+		}
 	}
 
 	// Admitted — charge the prompt estimate now (the processor charges the actual
 	// completion after the response). A concurrent request may have consumed the
 	// budget between the peek and here, so honour a late deduction failure.
-	allowed, remainingAfter, err := h.limiter.AllowInputTokens(m.tenantID, m.quotaModel, m.tpd, promptTokens)
+	allowed, remainingAfter, err := h.limiter.AllowInputTokens(budget, promptTokens)
 	if err != nil {
 		log.Warnf("Input token check error for request %s: %v (fail-open)", m.requestID, err)
 	}
 	if !allowed {
 		h.fireTokenLimited(m, req.Model)
 		c.Header(headerRateLimitRemainingTokens, "0")
-		writeRouterError(c, http.StatusTooManyRequests, domain.ErrCodeTokenLimitExceeded, "daily token budget exceeded", domain.SourceRouter)
-		return false
+		h.refuseBudget(c, budget, promptTokens, "daily token budget exceeded")
+		return false, 0
 	}
 	if remainingAfter >= 0 {
 		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remainingAfter))
 	}
-	return true
+	return true, promptTokens
+}
+
+// refuseBudget answers 429 token_limit_exceeded for a request whose need
+// tokens the daily budgets refused, saying why (auth.Refusal): the key's
+// budget (def), the tenant's, or a refusal a retry shortly overcomes (this
+// router's share is spent for the moment, or today's usage cannot be read
+// yet), which also gets Retry-After.
+func (h *Handlers) refuseBudget(c *gin.Context, b auth.DailyBudget, need int, def string) {
+	r := auth.ExplainRefusal(h.limiter, b, need)
+	re := domain.NewRouterError(domain.ErrCodeTokenLimitExceeded, r.Message(def), domain.SourceRouter)
+	if s := r.RetryAfter(); s > 0 {
+		re.RetryAfter = s
+		c.Header("Retry-After", strconv.Itoa(s))
+	}
+	c.Set(auditKeyErrorCode, string(re.Code))
+	setRootSpanError(c, re)
+	c.JSON(http.StatusTooManyRequests, domain.RouterErrorResponse{Error: re})
 }
 
 // fireTokenLimited reports an input-phase token-limit rejection, if a callback is set.
@@ -1135,7 +1263,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
-	copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
+	h.copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 	c.Status(http.StatusOK)
 
 	if resp.Body == nil {
@@ -1147,6 +1275,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		// already released when the processor handed the request to the provider.
 		if !resp.ServedByProvider() {
 			h.chargeOutputRate(c, req, m, resp.Usage.CompletionTokens)
+			h.chargeInputShortfall(c, req, m, pending, resp.Usage.PromptTokens, usageExact)
 			h.learnInputTokens(req, pending, resp.Usage.PromptTokens, usageExact)
 		}
 		return
@@ -1171,6 +1300,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 		c.Set(auditKeyOutputTokens, ct)
 	}
 	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
+	h.chargeInputShortfall(c, req, m, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 }
 
@@ -1208,7 +1338,6 @@ func writeErrorResponse(c *gin.Context, pending *domain.PendingRequest, err erro
 	var re *domain.RouterError
 	if !errors.As(err, &re) {
 		c.Set(auditKeyErrorCode, string(domain.ErrCodeBackendError))
-		setRootSpanError(c, err.Error())
 		writeRouterError(c, http.StatusInternalServerError, domain.ErrCodeBackendError, err.Error(), domain.SourceBackend)
 		return
 	}
@@ -1223,7 +1352,7 @@ func writeErrorResponse(c *gin.Context, pending *domain.PendingRequest, err erro
 		c.Header(headerRateLimitRemainingTokens, "0")
 	}
 	c.Set(auditKeyErrorCode, string(re.Code))
-	setRootSpanError(c, re.Message)
+	setRootSpanError(c, re)
 	c.JSON(domain.HTTPStatusFor(re.Code), domain.RouterErrorResponse{Error: re})
 }
 
@@ -1265,7 +1394,7 @@ func (h *Handlers) writeModelList(c *gin.Context, applyAllowSet bool) {
 	}
 
 	models := buildModelMap(agents)
-	allowSet, unrestricted := effectiveAllowedModels(c)
+	allowSet, unrestricted := h.allowedModels(c)
 
 	data := make([]domain.ModelObject, 0, len(models))
 	for id, m := range models {
@@ -1308,7 +1437,7 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 	modelID := strings.TrimPrefix(c.Param("model"), "/")
 
 	if applyAllowSet {
-		allowSet, unrestricted := effectiveAllowedModels(c)
+		allowSet, unrestricted := h.allowedModels(c)
 		if !unrestricted {
 			if _, ok := allowSet[modelID]; !ok {
 				writeRouterError(c, http.StatusNotFound, domain.ErrCodeModelNotFound, "No agents registered for model: "+modelID, domain.SourceRouter)
@@ -1332,11 +1461,14 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 	}
 
 	// Populate the per-agent list for the detail view (all agents included).
+	// The client view can leave out what identifies an agent; applyAllowSet
+	// is false only for the admin view.
+	hideIdentity := applyAllowSet && h.isolation.HideAgentIdentity
 	for _, a := range agents {
 		if a.Model != modelID {
 			continue
 		}
-		m.Agents.List = append(m.Agents.List, domain.ModelAgentEntry{
+		entry := domain.ModelAgentEntry{
 			PeerID:       a.PeerID,
 			Engine:       a.Metadata.Engine,
 			Version:      a.Metadata.Version,
@@ -1346,7 +1478,11 @@ func (h *Handlers) writeModelDetail(c *gin.Context, applyAllowSet bool) {
 			Capacity:     a.Capacity,
 			IsHealthy:    a.IsHealthy,
 			LastSeen:     a.LastSeen.Unix(),
-		})
+		}
+		if hideIdentity {
+			entry.PeerID, entry.Organization, entry.Machine, entry.Version, entry.LastSeen = "", "", "", "", 0
+		}
+		m.Agents.List = append(m.Agents.List, entry)
 	}
 
 	c.JSON(http.StatusOK, m)
@@ -1460,22 +1596,11 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// Set audit model key now so all subsequent early returns carry the model in the audit log.
 	c.Set(auditKeyModel, req.Model)
 
-	// Check model access: if the authenticated key has a model allowlist, verify
-	// the requested model is on it. Empty allowlist = access to all models.
-	if raw, exists := c.Get("allowed_models"); exists {
-		if allowedModels, ok := raw.([]string); ok && len(allowedModels) > 0 {
-			permitted := false
-			for _, m := range allowedModels {
-				if m == req.Model {
-					permitted = true
-					break
-				}
-			}
-			if !permitted {
-				writeRouterError(c, http.StatusForbidden, domain.ErrCodeModelForbidden, "your API key does not have access to model: "+req.Model, domain.SourceRouter)
-				return
-			}
-		}
+	// Check model access with the same rule as chat: the key's allowlist, or
+	// its per_model quota entries, or none at all (unless an allowlist is
+	// required).
+	if !h.authorizeModel(c, req.Model) {
+		return
 	}
 
 	// Get the raw body cached by QuotaMiddleware.
@@ -1511,18 +1636,16 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	select {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
-		copyBackendHeaders(c, resp.HttpHeaders, requestID)
+		h.copyBackendHeaders(c, resp.HttpHeaders, requestID)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:
 		var re *domain.RouterError
 		if errors.As(err, &re) {
 			c.Set(auditKeyErrorCode, string(re.Code))
-			setRootSpanError(c, re.Message)
+			setRootSpanError(c, re)
 			c.JSON(domain.HTTPStatusFor(re.Code), domain.RouterErrorResponse{Error: re})
 		} else {
-			c.Set(auditKeyErrorCode, string(domain.ErrCodeBackendError))
-			setRootSpanError(c, err.Error())
 			writeRouterError(c, http.StatusInternalServerError, domain.ErrCodeBackendError, err.Error(), domain.SourceBackend)
 		}
 
@@ -1549,13 +1672,13 @@ var passthroughAllowlist = map[string]bool{
 // fire only when the router is called without the full middleware chain (e.g.
 // in tests or direct local calls).
 func callerIDs(c *gin.Context) (tenantID, keyID, deploymentID string) {
-	tenantID = "anonymous"
+	tenantID = auth.AnonymousID
 	if raw, ok := c.Get("tenant_id"); ok {
 		if s, ok := raw.(string); ok && s != "" {
 			tenantID = s
 		}
 	}
-	keyID = "anonymous"
+	keyID = auth.AnonymousID
 	if raw, ok := c.Get("key_id"); ok {
 		if s, ok := raw.(string); ok && s != "" {
 			keyID = s
@@ -1568,11 +1691,13 @@ func callerIDs(c *gin.Context) (tenantID, keyID, deploymentID string) {
 	return
 }
 
-// setRootSpanError sets the error status and message on the root HTTP span
-// so Tempo's statusMessage is visible in Grafana dashboards.
-func setRootSpanError(c *gin.Context, msg string) {
+// setRootSpanError sets the error status on the root HTTP span so Tempo's
+// statusMessage is visible in Grafana dashboards. The status is re.Error():
+// the router's own message, or only the code for an error from the backend,
+// whose message can echo the prompt and goes to the client alone.
+func setRootSpanError(c *gin.Context, re *domain.RouterError) {
 	if span := trace.SpanFromContext(c.Request.Context()); span.IsRecording() {
-		span.SetStatus(codes.Error, msg)
+		span.SetStatus(codes.Error, re.Error())
 	}
 }
 
@@ -1583,11 +1708,10 @@ func setRootSpanError(c *gin.Context, msg string) {
 // a 400/401/404 without this call shows up as "OK" in Grafana because the
 // span's OTEL status defaults to OK.
 func writeRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, message string, source domain.ErrorSource) {
+	re := domain.NewRouterError(code, message, source)
 	c.Set(auditKeyErrorCode, string(code))
-	setRootSpanError(c, message)
-	c.JSON(httpStatus, domain.RouterErrorResponse{
-		Error: domain.NewRouterError(code, message, source),
-	})
+	setRootSpanError(c, re)
+	c.JSON(httpStatus, domain.RouterErrorResponse{Error: re})
 }
 
 // abortWithRouterError is the middleware-side counterpart to writeRouterError
@@ -1595,11 +1719,10 @@ func writeRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, mes
 // run. Matches the span / audit side effects so early-reject middleware
 // failures (auth, rate limit) surface correctly in Grafana.
 func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode, message string, source domain.ErrorSource) {
+	re := domain.NewRouterError(code, message, source)
 	c.Set(auditKeyErrorCode, string(code))
-	setRootSpanError(c, message)
-	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{
-		Error: domain.NewRouterError(code, message, source),
-	})
+	setRootSpanError(c, re)
+	c.AbortWithStatusJSON(httpStatus, domain.RouterErrorResponse{Error: re})
 }
 
 // copyBackendHeaders copies the backend's response headers to the client and
@@ -1610,7 +1733,15 @@ func abortWithRouterError(c *gin.Context, httpStatus int, code domain.ErrorCode,
 // returns its own ID (a cloud provider, or a backend that ignores ours, or a
 // retry's ID: see domain.PendingRequest.ForwardID) keeps it visible in
 // X-Upstream-Request-ID.
-func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+//
+// With agent identity hidden (Isolation.HideAgentIdentity), only the headers
+// that describe the body itself pass (identityFreeHeaders): a Server header,
+// an engine's own headers or a proxy's would otherwise name the engine, its
+// version or its host to every tenant.
+func (hs *Handlers) copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
+	if hs.isolation.HideAgentIdentity {
+		src = keepHeaders(src, identityFreeHeaders)
+	}
 	h := c.Writer.Header()
 	clientID := h.Get(headerClientRequestID)
 	domain.CopyHttpHeaders(h, src)
@@ -1623,6 +1754,27 @@ func copyBackendHeaders(c *gin.Context, src http.Header, requestID string) {
 		h.Set(headerUpstreamRequestID, up)
 	}
 	h.Set(headerRequestID, requestID)
+}
+
+// identityFreeHeaders are the backend response headers a client still gets
+// when agent identity is hidden: what describes the body, and the request ID
+// (X-Upstream-Request-ID is derived from it). Canonical names.
+var identityFreeHeaders = map[string]bool{
+	"Content-Type":                           true,
+	"Content-Encoding":                       true,
+	"Cache-Control":                          true,
+	http.CanonicalHeaderKey(headerRequestID): true,
+}
+
+// keepHeaders returns the headers of src whose canonical name is in keep.
+func keepHeaders(src http.Header, keep map[string]bool) http.Header {
+	out := make(http.Header, len(keep))
+	for k, vv := range src {
+		if keep[http.CanonicalHeaderKey(k)] {
+			out[k] = vv
+		}
+	}
+	return out
 }
 
 // headerUpstreamRequestID carries the request ID an upstream returned when it

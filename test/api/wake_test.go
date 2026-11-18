@@ -75,7 +75,7 @@ type atomicLimiter struct {
 	n atomic.Int64
 }
 
-func (l *atomicLimiter) AllowRequest(string, string, int) (bool, int, error) {
+func (l *atomicLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
 	l.n.Add(1)
 	return true, -1, nil
 }
@@ -112,7 +112,7 @@ func newWakeSite(t *testing.T, cfg api.WakeConfig, maxHeld int, doc redirect.Map
 	})
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(redirect.Wrap(s.rd, keys, keys))).
-		Group("", api.BodyLimitMiddleware(1<<20), h.RedirectTarget(), h.AliasMiddleware(),
+		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
 			h.RedirectDecision(), api.QuotaMiddlewareWithReplicas(lim, metrics.NewRouterMetrics(), h.QuotaReplicas(s.count)), h.WakeHold())
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)

@@ -313,7 +313,7 @@ Send Anthropic-compatible requests to:
 POST /v1/messages
 ```
 
-The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend.
+The request is routed using its top-level `model` and forwarded unchanged to `/v1/messages` on the selected backend (apart from `cache_salt` when [per-tenant prefix-cache salting](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache) is on).
 
 ```bash
 curl -X POST \
@@ -332,7 +332,7 @@ curl -X POST \
   }'
 ```
 
-The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router.
+The backend must natively implement the Anthropic Messages endpoint. If it does not, its error is returned through Hivenet Router, in the router's error envelope with `source: "backend"` (see [error codes](/reference/error-codes#error-source)).
 
 Model names must match both:
 
@@ -456,8 +456,8 @@ X-RateLimit-Remaining-Tokens
 
 | Header | Meaning |
 | --- | --- |
-| `X-RateLimit-Remaining-Requests` | Requests remaining in the active per-minute bucket |
-| `X-RateLimit-Remaining-Tokens` | Tokens remaining in the active daily bucket |
+| `X-RateLimit-Remaining-Requests` | Requests remaining in this key's active per-minute bucket |
+| `X-RateLimit-Remaining-Tokens` | Tokens remaining in this key's active daily bucket |
 
 Unlimited quotas do not produce a remaining-value header.
 
@@ -497,7 +497,7 @@ Common responses include:
 
 | HTTP status | Example code | Meaning |
 | --- | --- | --- |
-| `400` | `request_invalid` | Malformed request or missing model |
+| `400` | `request_invalid` | Malformed request, missing model, or a field sent twice or in another letter case (see [error codes](/reference/error-codes#request_invalid)) |
 | `400` | `input_too_long` | Prompt estimate exceeds 1.5× `max_input_tokens`, or the request exceeds `images_max` |
 | `400` | `context_length_exceeded` | Backend rejected the context length |
 | `413` | Not guaranteed | Request body exceeds `HIVENET_ROUTER_MAX_REQUEST_BYTES` |

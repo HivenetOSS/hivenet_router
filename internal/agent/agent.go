@@ -82,8 +82,13 @@ type Agent struct {
 	cfg        *config.AgentConfig
 	engine     Engine
 	httpClient *http.Client
-	identity   crypto.PrivKey // persistent libp2p identity — same peer ID across reconnects
-	peerID     peer.ID        // derived from identity once at startup; stamped on agent-side spans so Tempo spanmetrics carry peer_id
+
+	// engineVersion is the backend's version as the engine reported it
+	// (VersionReporter), a string; unset when unknown. Read at startup,
+	// sent at every registration.
+	engineVersion atomic.Value
+	identity      crypto.PrivKey // persistent libp2p identity — same peer ID across reconnects
+	peerID        peer.ID        // derived from identity once at startup; stamped on agent-side spans so Tempo spanmetrics carry peer_id
 
 	// gater restricts the libp2p node to the routers this agent authenticated
 	// against. Set to the router's peer ID from the auth response before dialing.
@@ -99,6 +104,11 @@ type Agent struct {
 	// Stored in an atomic pointer so sendHeartbeat reads with zero lock contention.
 	// Nil until the first successful scrape or when the engine does not implement MetricsProvider.
 	engineMetrics atomic.Pointer[domain.BackendMetrics]
+	// engineWindow turns the engine's cumulative counters into figures over
+	// the last EngineWindow (see engine_window.go).
+	engineWindow *engineWindow
+	// prefillCheck logs once whether the engine's prefill speed can be measured.
+	prefillCheck sync.Once
 
 	// backendHealthy is the result of the most recent periodic backend health check.
 	// Initialised to true at the start of each session (backend was healthy at registration).
@@ -109,6 +119,19 @@ type Agent struct {
 	// routers together. It is reported in every routing signal so each router
 	// sees the backend's real load, not only the requests it sent itself.
 	inFlight atomic.Int64
+	// pendingPrefill sums HeaderPrefillTokens over the requests not yet
+	// answering: the engine's prefill backlog, reported to every router.
+	pendingPrefill atomic.Int64
+
+	// prefix is the prefix-aware routing state; nil when the engine cannot
+	// return prompt tokens (nothing is reported then).
+	prefix *prefixState
+	// kv mirrors the engine's KV cache from its events; nil without
+	// --kv-events-endpoint.
+	kv *kvMirror
+	// kvWarnMu guards kvWarnedAt, the last unusable-endpoint warning.
+	kvWarnMu   sync.Mutex
+	kvWarnedAt time.Time
 
 	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
 	// requests in flight per router peer, and sessions counts the sessions
@@ -130,10 +153,11 @@ type Agent struct {
 // The hardware collector is auto-detected: NVML when available, NullCollector otherwise.
 func NewAgent(cfg *config.AgentConfig, engine Engine) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		engine:    engine,
-		collector: hardware.NewCollector(cfg.GPUDevicesFile),
-		gater:     p2p.NewRouterGater(),
+		cfg:          cfg,
+		engine:       engine,
+		engineWindow: newEngineWindow(),
+		collector:    hardware.NewCollector(cfg.GPUDevicesFile),
+		gater:        p2p.NewRouterGater(),
 		// All backend traffic goes through this client, so the backend API key
 		// (if configured) applies to health checks and model discovery as well
 		// as inference. The key only goes to the backend and health URL hosts.
@@ -214,6 +238,8 @@ func (a *Agent) Run() error {
 	}
 	a.cfg.Model = model
 	log.Infof("Model ready: %s", a.cfg.Model)
+	a.detectGPUModel()
+	a.initPrefix()
 
 	var node host.Host
 	var httpHost *p2phttp.Host
@@ -499,11 +525,18 @@ func (a *Agent) buildRouterClient(node host.Host, httpHost *p2phttp.Host, authRe
 // always supply a timeout so a stalled libp2p connection cannot block
 // indefinitely (see runReAuth for the session-renewal path).
 func (a *Agent) registerWithRouter(ctx context.Context, routerClient *http.Client, node host.Host, sessionToken string) error {
+	// The engine may have been replaced since the last registration: every
+	// registration carries the version it reports now. Bounded, so a backend
+	// slow to answer does not hold the registration up.
+	vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
+	a.readEngineVersion(vctx)
+	vcancel()
 	payload := map[string]any{
-		"session_token": sessionToken,
-		"peer_id":       node.ID().String(),
-		"deployment_id": a.cfg.DeploymentID,
-		"replica_id":    a.cfg.ReplicaID,
+		"session_token":  sessionToken,
+		"peer_id":        node.ID().String(),
+		"deployment_id":  a.cfg.DeploymentID,
+		"replica_id":     a.cfg.ReplicaID,
+		"engine_version": a.EngineVersion(),
 	}
 
 	body, err := json.Marshal(payload)
@@ -552,8 +585,9 @@ func (a *Agent) runUntilDisconnect(rs *routerSession, node host.Host, authResp *
 	// goroutines; they have exited before the next session reuses rs.
 	pushDone := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); a.runRoutingSignalPusher(rs, pushDone) }()
+	go func() { defer wg.Done(); a.runPrefixStatePusher(rs, pushDone) }()
 	go func() { defer wg.Done(); a.runReAuth(rs, node, pushDone, sessionTTL) }()
 	defer wg.Wait()
 	defer close(pushDone)
@@ -597,6 +631,9 @@ type routingSignalPayload struct {
 	// ReportEveryMs is how often this agent sends these signals, so the
 	// router knows how old a report may be before it is stale.
 	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
+	// PendingPrefill is the prompt tokens (as the routers estimated them) of
+	// the requests this agent has not started answering, from all routers.
+	PendingPrefill int64 `json:"pending_prefill_tokens"`
 }
 
 // runRoutingSignalPusher sends fresh engine and hardware snapshots to the router at
@@ -647,6 +684,7 @@ func (a *Agent) pushRoutingSignals(rs *routerSession) error {
 		InFlight:       a.inFlight.Load(),
 		Routers:        a.routerReport(),
 		ReportEveryMs:  a.routingSignalInterval().Milliseconds(),
+		PendingPrefill: a.pendingPrefill.Load(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -700,6 +738,11 @@ func (a *Agent) runBackendHealthChecker(done <-chan struct{}) {
 			if err == nil {
 				if !a.backendHealthy.Load() {
 					log.Infof("Backend health check recovered")
+				}
+				// A backend that failed a check and answers again may be
+				// another engine build (a restart with a new image).
+				if consecutiveFailures > 0 {
+					a.refreshEngineVersion()
 				}
 				consecutiveFailures = 0
 				a.backendHealthy.Store(true)
@@ -810,6 +853,14 @@ func (a *Agent) scrapeEngineMetrics(provider MetricsProvider) bool {
 		log.Debugf("engine metrics scrape failed: %v", err)
 		return false
 	}
+	a.engineWindow.apply(bm) // latency figures over the last EngineWindow, not since the engine started
+	a.prefillCheck.Do(func() {
+		if bm.PrefillComputedTokensTotal == nil || bm.PrefillSecondsTotal == nil {
+			log.Infof("Engine %s exposes no prefill counters: routers cost this agent with their default prefill speed", a.engine.Name())
+		} else {
+			log.Infof("Engine %s exposes prefill counters: routers learn this replica group's prefill speed", a.engine.Name())
+		}
+	})
 	a.engineMetrics.Store(bm)
 	return true
 }
@@ -880,6 +931,10 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 	defer a.inFlight.Add(-1)
 	r, done := a.track(r)
 	defer done()
+	prefixHeader := r.Header.Get(domain.HeaderPrefixAnchors)
+	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
+	answering := a.holdPrefill(r)
+	defer answering()
 	// Extract W3C trace context from incoming headers so this span becomes
 	// a child of the router's forward_to_agent span.
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -938,6 +993,8 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatReq.RawBytes = rawBytes
+	var pr *prefixRequest
+	chatReq.RawBytes, pr = a.preparePrefix(prefixHeader, &chatReq)
 
 	// Record request attributes on the span.
 	span.SetAttributes(
@@ -952,10 +1009,19 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		// Streaming: pipe backend SSE directly to the libp2p response writer
 		// without buffering. forwardStreamingResponse writes headers+body to w,
 		// so we must not write anything to w after it returns on success.
+		opts := []EngineOption{WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
+			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout), WithFirstByte(answering)}
+		if pr != nil && a.prefix.source == sourceResponse {
+			opts = append(opts, WithStreamFilter(func(dst io.Writer) (io.Writer, func()) {
+				fw := &tokenFieldWriter{a: a, pr: pr, dst: dst}
+				return fw, fw.flush
+			}))
+		}
 		err := forwardStreamingResponse(ctx, w, a.cfg.BackendURL, a.httpClient,
-			chatReq.RawBytes, a.engine.Name(),
-			WithHttpHeader(forwardableHeaders(r.Header)), WithPeerID(a.peerID.String()),
-			WithStreamWriteTimeout(a.cfg.StreamWriteIdleTimeout))
+			chatReq.RawBytes, a.engine.Name(), opts...)
+		if err == nil {
+			a.served(pr, chatReq.RawBytes)
+		}
 		span.SetAttributes(attribute.Float64("duration_ms", float64(time.Since(start).Milliseconds())))
 		if err != nil {
 			span.RecordError(err)
@@ -999,6 +1065,16 @@ func (a *Agent) chatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErrorJSON(w, routerErr)
 		return
+	}
+
+	if pr != nil {
+		var ok bool
+		if respBytes, ok = a.handleTokenFields(pr, respBytes); !ok {
+			log.Warnf("prefix: dropped a response whose token IDs could not be removed")
+			writeErrorJSON(w, domain.NewRouterError(domain.ErrCodeBackendUnavailable, "malformed backend response", domain.SourceBackend))
+			return
+		}
+		a.served(pr, chatReq.RawBytes)
 	}
 
 	inferenceMs := float64(time.Since(start).Milliseconds())
@@ -1066,6 +1142,9 @@ func (a *Agent) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	defer a.inFlight.Add(-1)
 	r, done := a.track(r)
 	defer done()
+	r.Header.Del(domain.HeaderPrefixAnchors) // router to agent only, never to the backend
+	answering := a.holdPrefill(r)
+	defer answering()
 	a.proxyToBackend(w, r, r.URL.Path)
 }
 
@@ -1096,6 +1175,16 @@ func (a *Agent) proxyToBackend(w http.ResponseWriter, r *http.Request, path stri
 		return
 	}
 	defer resp.Body.Close()
+
+	// A backend error goes back in the router's envelope, classified like
+	// the native chat path's: its body (which can echo the input) becomes
+	// the message the client gets, from the backend, never something the
+	// router could log or trace as its own (see domain.DecodeAgentError).
+	if resp.StatusCode >= http.StatusBadRequest {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		writeErrorJSON(w, domain.ClassifyBackendError(resp.StatusCode, errBody))
+		return
+	}
 
 	domain.CopyHttpHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
@@ -1152,6 +1241,7 @@ func (a *Agent) waitForBackend() (string, error) {
 			}
 			model = models[0]
 		}
+		a.readEngineVersion(ctx)
 
 		// The warm-up is a chat completion, so only a chat model gets one:
 		// an embedding or rerank model would fail it on every try.
@@ -1168,6 +1258,75 @@ func (a *Agent) waitForBackend() (string, error) {
 		}
 		return model, nil
 	}
+}
+
+// readEngineVersion reads the backend's version, so the router can tell
+// which isolation features it has (see VersionReporter). It runs once the
+// backend first answers, before every registration and when the backend
+// recovers from a failed health check. An engine that cannot report one is
+// left unknown (see cachesalt.Support for how the router counts that); a
+// failed read keeps the last version read.
+func (a *Agent) readEngineVersion(ctx context.Context) {
+	vr, ok := a.engine.(VersionReporter)
+	if !ok {
+		return
+	}
+	v, err := vr.EngineVersion(ctx, a.cfg.BackendURL, a.httpClient)
+	if err != nil {
+		log.Warnf("Could not read the %s engine version (%v): the router treats it as unknown", a.engine.Name(), err)
+		return
+	}
+	if old, _ := a.engineVersion.Load().(string); old != v {
+		log.Infof("Engine %s version %s", a.engine.Name(), v)
+	}
+	a.engineVersion.Store(v)
+}
+
+// refreshEngineVersion reads the engine version again and, when it changed,
+// registers again with every router the agent is serving, so each router's
+// view of the engine (and of what it isolates, see cachesalt) follows a
+// restart with another build. A failed registration is logged and left to
+// the next session renewal.
+func (a *Agent) refreshEngineVersion() {
+	old := a.EngineVersion()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	a.readEngineVersion(ctx)
+	cancel()
+	if now := a.EngineVersion(); now != old {
+		log.Infof("Engine %s version changed from %q to %q: registering again with every router", a.engine.Name(), old, now)
+		a.reRegisterAll()
+	}
+}
+
+// reRegisterAll registers again with every router session that is up, with
+// its current session token. A session renewing its token concurrently
+// (runReAuth) registers with the current version itself.
+func (a *Agent) reRegisterAll() {
+	a.routers.mu.Lock()
+	node := a.routers.node
+	var up []*routerSession
+	for _, e := range a.routers.entries {
+		if e.rs != nil && e.rs.up.Load() {
+			up = append(up, e.rs)
+		}
+	}
+	a.routers.mu.Unlock()
+	if node == nil {
+		return
+	}
+	for _, rs := range up {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := a.registerWithRouter(ctx, rs.client, node, rs.sessionToken()); err != nil {
+			log.Warnf("Router %s: registering again after an engine version change failed: %v (the next session renewal carries the new version)", rs.addr, err)
+		}
+		cancel()
+	}
+}
+
+// EngineVersion returns the backend's version as last read, "" when unknown.
+func (a *Agent) EngineVersion() string {
+	v, _ := a.engineVersion.Load().(string)
+	return v
 }
 
 // authenticate performs gRPC authentication with the router.
@@ -1394,4 +1553,35 @@ func (a *Agent) routerReport() map[string]int64 {
 		out[p.String()] = n
 	}
 	return out
+}
+
+// holdPrefill counts the request's HeaderPrefillTokens in the agent's prefill
+// backlog and returns the function that takes them out (once): when the
+// engine starts answering, or when the request ends.
+func (a *Agent) holdPrefill(r *http.Request) func() {
+	n, err := strconv.ParseInt(r.Header.Get(domain.HeaderPrefillTokens), 10, 64)
+	r.Header.Del(domain.HeaderPrefillTokens) // router to agent only
+	if err != nil || n <= 0 {
+		return func() {}
+	}
+	n = min(n, 1<<24)
+	a.pendingPrefill.Add(n)
+	var once sync.Once
+	return func() { once.Do(func() { a.pendingPrefill.Add(-n) }) }
+}
+
+// detectGPUModel fills an unset --gpu-model from NVML when every GPU the
+// agent uses is the same model. Routers group replicas by model, engine and
+// GPU to learn their prefill speed and decode step; a replica with no GPU
+// model is pooled with every replica of its model and engine.
+func (a *Agent) detectGPUModel() {
+	if a.cfg.GPUModel != "" {
+		return
+	}
+	if name, why := hardware.DetectGPUModel(a.cfg.GPUDevicesFile); name != "" {
+		a.cfg.GPUModel = name
+		log.Infof("GPU model %q detected (--gpu-model overrides it)", name)
+	} else {
+		log.Warnf("GPU model not detected (%s): routers pool this replica's learned speeds with every replica of model %s on %s; on a host with GPUs of several models, set --gpu-model", why, a.cfg.Model, a.engine.Name())
+	}
 }

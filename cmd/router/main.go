@@ -69,10 +69,16 @@ func main() {
 	keyStorePath := flag.String("key-store-path", cfg.KeyStorePath, "Directory of the dynamic key-store BadgerDB (separate from --disk-db-path; created with mode 0700)")
 	keyStoreMaxAge := flag.Duration("key-store-max-age", cfg.KeyStoreMaxAge, "Discard a persisted key registry older than this at startup (0 = no limit; only for deployments without an upstream key-sync service)")
 	keyStoreSecretFile := flag.String("key-store-secret-file", "", "Path to file containing the router-only key-store secret (env: HIVENET_ROUTER_KEY_STORE_SECRET; required with --key-store=badger, >= 32 bytes, must differ from the JWT secret)")
+	cacheSalt := flag.Bool("cache-salt", cfg.CacheSalt, "Isolate tenants in the prefix cache of agents whose engine supports it (a per-tenant cache_salt, or cache_prompt=false on llama.cpp; see the engine table in the docs) and strip any client-sent cache_salt; requires a salt secret (env: HIVENET_ROUTER_CACHE_SALT)")
+	cacheSaltSecretFile := flag.String("cache-salt-secret-file", "", "Path to file containing the router-only cache-salt secret (env: HIVENET_ROUTER_CACHE_SALT_SECRET; required with --cache-salt, >= 32 bytes, must differ from every other router secret; the same on every router in front of the same agents)")
+	multiTenant := flag.Bool("multi-tenant", cfg.MultiTenant, "Harden for serving several customers: require model allowlists, isolate the prefix cache per tenant (opt out only with an explicit --cache-salt=false), hide agent identity; refuse auth mode none, insecure admin, a /metrics without a token on anything but a loopback or private address, no --sync-store=valkey with a password (however many routers), and an audit log it cannot open (env: HIVENET_ROUTER_MULTI_TENANT)")
+	hideAgentIdentity := flag.Bool("hide-agent-identity", cfg.HideAgentIdentity, "Leave agent peer IDs, organization, machine, version and last-seen time out of GET /v1/models/:model (the admin view keeps them), and pass on only the backend response headers that describe the body (env: HIVENET_ROUTER_HIDE_AGENT_IDENTITY)")
+	requireModelAllowlist := flag.Bool("require-model-allowlist", cfg.RequireModelAllowlist, "Refuse every model to a key that has no model allowlist (models / allowed_models / quota.per_model), instead of allowing all; for shared multi-tenant routers (env: HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST)")
 	resetKeyStore := flag.Bool("reset-key-store", cfg.ResetKeyStore, "Wipe the persisted dynamic API key registry (--key-store-path) on startup (use to recover from an unreadable snapshot; requires --key-store=badger). One-shot: remove it afterwards — a restart with it still set wipes the registry again")
 	diskDBTTLDays := flag.Int("disk-db-ttl", cfg.DiskDBTTLDays, "TTL for diskDB entries in days (0 = no expiry)")
 	universalFlushInterval := flag.Duration("universal-flush-interval", cfg.UniversalFlushInterval, "How often universal history counters are flushed to diskDB")
-	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics port")
+	metricsPort := flag.String("metrics-port", cfg.MetricsPort, "Prometheus metrics listen address: \":2112\" (every interface) or host:port such as \"127.0.0.1:2112\" (env: HIVENET_ROUTER_METRICS_PORT)")
+	metricsBearerTokenFile := flag.String("metrics-bearer-token-file", "", "Path to file containing a bearer token that /metrics requires (env: HIVENET_ROUTER_METRICS_BEARER_TOKEN); the series name every tenant and key")
 	maxConcurrentForwards := flag.Int("max-concurrent", cfg.MaxConcurrentForwards, "Max concurrent in-flight request forwards to agents")
 	policyFile := flag.String("policy-file", cfg.PolicyFile, "Path to routing policy YAML file (optional; omit to use built-in default)")
 	policyModelDir := flag.String("policy-model-dir", cfg.PolicyModelDir, "Path to directory of per-model policy YAML files (optional; env: HIVENET_ROUTER_POLICY_MODEL_DIR)")
@@ -130,6 +136,16 @@ func main() {
 	cfg.KeyStorePath = *keyStorePath
 	cfg.KeyStoreMaxAge = *keyStoreMaxAge
 	cfg.ResetKeyStore = *resetKeyStore
+	cfg.RequireModelAllowlist = *requireModelAllowlist
+	cfg.CacheSalt = *cacheSalt
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cache-salt" {
+			cfg.CacheSaltSet = true
+		}
+	})
+	cfg.HideAgentIdentity = *hideAgentIdentity
+	cfg.MultiTenant = *multiTenant
+	router.ApplyMultiTenant(cfg) // also applied by router.New; here so the banner shows the effective settings
 	cfg.DiskDBTTLDays = *diskDBTTLDays
 	cfg.UniversalFlushInterval = *universalFlushInterval
 	cfg.MetricsPort = *metricsPort
@@ -178,6 +194,24 @@ func main() {
 			log.Fatalf("cannot read --key-store-secret-file %q: %v", *keyStoreSecretFile, err)
 		}
 		cfg.KeyStoreSecret = strings.TrimSpace(string(data))
+	}
+	if *metricsBearerTokenFile != "" {
+		data, err := os.ReadFile(*metricsBearerTokenFile)
+		if err != nil {
+			log.Fatalf("cannot read --metrics-bearer-token-file %q: %v", *metricsBearerTokenFile, err)
+		}
+		cfg.MetricsBearerToken = strings.TrimSpace(string(data))
+		if cfg.MetricsBearerToken == "" {
+			// Asked for a token: an empty file must not leave /metrics open.
+			log.Fatalf("--metrics-bearer-token-file %q is empty", *metricsBearerTokenFile)
+		}
+	}
+	if *cacheSaltSecretFile != "" {
+		data, err := os.ReadFile(*cacheSaltSecretFile)
+		if err != nil {
+			log.Fatalf("cannot read --cache-salt-secret-file %q: %v", *cacheSaltSecretFile, err)
+		}
+		cfg.CacheSaltSecret = strings.TrimSpace(string(data))
 	}
 	for _, err := range cfg.EnvErrors {
 		log.Errorf("invalid environment value: %v", err)
@@ -297,6 +331,9 @@ func main() {
 	}
 	log.Infof("  libp2p max conns/IP: %d", cfg.P2PMaxConnsPerIP)
 	log.Infof("  Metrics (Prometheus):%s", cfg.MetricsPort)
+	if cfg.MetricsBearerToken != "" {
+		log.Info("  Metrics auth:        bearer token required")
+	}
 	log.Info("Queue & Timeouts:")
 	log.Infof("  Queue size:          %d", cfg.QueueSize)
 	log.Infof("  Max concurrent fwd:  %d", cfg.MaxConcurrentForwards)
@@ -325,6 +362,17 @@ func main() {
 			log.Infof("  Key store max age:   %v", cfg.KeyStoreMaxAge)
 		}
 		log.Infof("  Reset key store:     %v", cfg.ResetKeyStore)
+	}
+	if cfg.MultiTenant && cfg.CacheSalt {
+		log.Info("  Multi-tenant:        on (allowlists required, per-tenant cache isolation, agent identity hidden)")
+	} else if cfg.MultiTenant {
+		log.Warn("  Multi-tenant:        on, but prefix-cache isolation is OFF (--cache-salt=false)")
+	}
+	if cfg.CacheSalt {
+		log.Infof("  Prefix-cache salt:   per tenant, on agents whose engine supports it")
+	}
+	if cfg.RequireModelAllowlist {
+		log.Infof("  Model allowlist:     required (keys without one can use no model)")
 	}
 	log.Info("Security:")
 	log.Info("  JWT secret:          configured")

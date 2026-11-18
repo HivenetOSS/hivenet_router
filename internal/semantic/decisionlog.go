@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"hivenet_router/internal/logger"
 )
 
 // DecisionRecord is one line of the decision log (JSONL). It is both the audit
@@ -20,6 +22,7 @@ type DecisionRecord struct {
 	TS            time.Time           `json:"ts"`
 	RequestID     string              `json:"request_id,omitempty"`
 	Path          string              `json:"path"`
+	TenantID      string              `json:"tenant_id,omitempty"`
 	KeyID         string              `json:"key_id,omitempty"`
 	Alias         string              `json:"alias"`
 	ResolvedModel string              `json:"resolved_model,omitempty"`
@@ -53,9 +56,14 @@ type DecisionLog struct {
 // OpenDecisionLog opens (appending) path and starts the writer. buffer is the
 // number of records queued before new ones are dropped (<=0 means 4096).
 func OpenDecisionLog(path string, buffer int) (*DecisionLog, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
+	// Owner-only, like the audit log: the records name tenants and keys. An
+	// existing file is narrowed to 0600 too.
+	f, err := logger.OpenOwnerOnly(path)
+	if f == nil {
 		return nil, fmt.Errorf("semantic: open decision log %q: %w", path, err)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "semantic: decision log: %v\n", err)
 	}
 	if buffer <= 0 {
 		buffer = 4096

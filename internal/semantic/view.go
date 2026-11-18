@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"hivenet_router/internal/jsonbody"
 )
 
 // Dialect identifies the request schema.
@@ -80,6 +82,19 @@ type RequestView struct {
 	// window must hold prompt + output.
 	MaxOutputTokens int
 }
+
+// DecodedFields returns the top-level request fields ParseView reads, for
+// the router's check that the backend reads the same ones (see
+// api.UnambiguousFields).
+func DecodedFields() []string { return jsonbody.FieldNames(rawRequest{}) }
+
+// DecodedMessageFields and DecodedPartFields return the fields ParseView
+// reads in each message and in each content part or block (a tool_result's
+// content holds parts again), for the same check.
+func DecodedMessageFields() []string { return jsonbody.FieldNames(rawMessage{}) }
+
+// DecodedPartFields: see DecodedMessageFields.
+func DecodedPartFields() []string { return jsonbody.FieldNames(rawPart{}) }
 
 type rawRequest struct {
 	Messages            []rawMessage    `json:"messages"`

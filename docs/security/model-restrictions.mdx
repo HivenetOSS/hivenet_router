@@ -26,15 +26,27 @@ Hivenet Router supports two ways to define model access:
   Do not use the agent’s `--hide-llm` setting as an authorization control. It is registration metadata and does not replace API-key model restrictions.
 </Warning>
 
+When a key has both an explicit allowlist and `quota.per_model`, it may use only the models that appear in both. Neither list widens the other.
+
+The model checked is the one the backend serves: a body with `model` twice, or with `Model` or another spelling in a different letter case, is refused with `400 request_invalid` before the allowlist is checked. The same holds for the fields the router reads inside each message and content part, which its prompt estimate and every input budget are computed from (see [error codes](/reference/error-codes#request_invalid)).
+
 <Note>
   For predictable behavior, use either an explicit allowlist or `quota.per_model` on one key.
 
   Avoid defining different model sets in both places. A single source of truth is easier to review and less likely to produce inconsistent access expectations.
 </Note>
 
+<Warning>
+  Breaking change: a key with both lists used to get its `quota.per_model` set on chat, messages and `/v1/models`, ignoring the allowlist. It now gets only the models in both lists, on every endpoint. A model listed in `quota.per_model` but not in the allowlist is refused with `403`.
+</Warning>
+
 ## Full model access
 
 An empty or omitted allowlist grants access to every registered model, provided that `quota.per_model` is not configured.
+
+On a router shared by several customers, set `--require-model-allowlist` (`HIVENET_ROUTER_REQUIRE_MODEL_ALLOWLIST=true`). A key with no allowlist and no `quota.per_model` can then call and list no model at all, instead of every model. The setting applies to every model entry point: chat, messages, `count_tokens`, embeddings, reranking, semantic aliases, a request held for a model scaled to zero, cross-site redirects (on both sites) and `/v1/models`. The router refuses to start with it when API auth mode is `none`.
+
+With the setting on, the router logs a warning at startup, after a `SIGHUP` and after every key push when some keys have no allowlist, with their number: each of them is refused on every model. This shows when the key source does not send allowlists yet.
 
 ### Static key
 
@@ -310,9 +322,9 @@ Client and administration credentials are separate.
 
 The response depends on which restriction mechanism rejects the request.
 
-### Explicit allowlist rejection
+### Allowlist rejection
 
-A request outside `models` or `allowed_models` returns HTTP `403`:
+A request for a model outside the key's allowlist (`models`, `allowed_models` or the models in `quota.per_model`) returns HTTP `403`:
 
 ```json
 {
@@ -342,30 +354,17 @@ curl -X POST \
   }'
 ```
 
-### Missing per-model quota entry
-
-When `quota.per_model` is configured and the requested model is absent from the map, quota admission returns HTTP `429`:
-
-```json
-{
-  "error": {
-    "code": "rate_limit_exceeded",
-    "message": "no quota declared for model restricted-model on this API key",
-    "source": "router"
-  }
-}
-```
-
-This is a strict-enumeration failure rather than a depleted request-rate bucket.
-
-The model is also hidden from the client model catalog.
+A model missing from `quota.per_model` is refused the same way, with `403 model_forbidden`, before any quota is checked. The model is also hidden from the client model catalog.
 
 ## Restrictions apply before routing
 
-Hivenet Router checks model access before selecting an agent.
+Hivenet Router checks model access before selecting an agent, on the model the request will be served as: after a semantic alias resolves, and at the target site for a redirected request.
 
 A disallowed request does not:
 
+- consume any request or token quota, so a client retrying a forbidden model never spends its own limits
+- wake a model scaled to zero or wait for it
+- get redirected to another site
 - enter the routing queue
 - consume backend capacity
 - try fallback agents
@@ -602,9 +601,7 @@ keys:
       tokens_per_day: 200000
 ```
 
-Keys with the same owner share quota buckets.
-
-Use one owner only when shared quota accounting is intentional.
+Quota buckets are per key, even when keys share an owner. The owner groups keys into one tenant for metrics and audit records.
 
 ## Update static restrictions
 
@@ -755,7 +752,7 @@ sum by (tenant_id, model) (
 )
 ```
 
-These queries capture explicit `models` or `allowed_models` denials. A model missing from `quota.per_model` is recorded as `rate_limit_exceeded`, the same broad code used for RPM exhaustion. Use the request ID and router logs when you need to distinguish those two cases.
+These queries capture every allowlist denial, from `models`, `allowed_models` or `quota.per_model`.
 
 Inspect successful routed traffic by tenant and model:
 
@@ -810,7 +807,7 @@ The failed-request metric includes other failure types. Use audit logs when you 
     }
     ```
 
-    An empty allowlist means unrestricted access.
+    An empty allowlist means unrestricted access, unless the router runs with `--require-model-allowlist`, which makes it no access.
 
     Also check whether you edited the correct key and router environment.
   </Accordion>
@@ -843,25 +840,17 @@ The failed-request metric includes other failure types. Use audit logs when you 
   </Accordion>
 
   <Accordion title="Inference returns `403 model_forbidden`">
-    The key uses an explicit allowlist and the requested model is not permitted.
+    The requested model is not in the key's allowlist: `models`, `allowed_models`, or the models of `quota.per_model`.
+
+    For a `quota.per_model` key, add a complete quota entry for the model; both `requests_per_minute_per_replica` and `tokens_per_day` are required, even when unlimited (`0`).
 
     Add the exact model name or use an unrestricted list when that is intentional.
   </Accordion>
 
-  <Accordion title="Inference returns `429` for an unlisted model">
-    The key uses `quota.per_model`.
+  <Accordion title="Inference returns `403` for a model in `quota.per_model`">
+    The key also has an explicit allowlist that does not list the model. A key with both lists may use only the models in both.
 
-    Add a complete quota entry for the model:
-
-    ```yaml
-    quota:
-      per_model:
-        model-name:
-          requests_per_minute_per_replica: 0
-          tokens_per_day: 0
-    ```
-
-    Both fields are required even when they are unlimited.
+    Add the model to the allowlist, or drop one of the two lists.
   </Accordion>
 
   <Accordion title="A model is allowed but the request still fails">
