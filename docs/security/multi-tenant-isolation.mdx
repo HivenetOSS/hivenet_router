@@ -99,7 +99,7 @@ Engines share cached prompt blocks between requests with the same prefix, so a f
   Tenants share the router's capacity. Admission budgets, queues and agent slots are shared per model, so a burst from one tenant can make another wait or get a `429` or `503`. A key's `max_occupancy_share` caps how much of a model one key can hold in flight. A dedicated replica removes the sharing entirely.
 </Warning>
 
-- Prefix-cache isolation covers only what each engine supports: Ollama, custom backends, `/v1/messages` on SGLang, chat completions on SGLang before 0.5.11, and `/v1/messages` on llama.cpp builds before b11795, and `/v1/messages` on vLLM before 0.27.0 are not isolated. An agent that reports no engine version counts as an older one, except on vLLM chat completions, embeddings and rerank (see `hivenet_cache_isolation_gaps`).
+- Prefix-cache isolation covers only what each engine supports: Ollama, custom backends, `/v1/messages` on SGLang, chat completions on SGLang before 0.5.11, `/v1/messages` on llama.cpp builds before b11795, and `/v1/messages` on vLLM before 0.27.0 are not isolated. An agent that reports no engine version counts as an older one, except on vLLM chat completions, embeddings and rerank (see `hivenet_cache_isolation_gaps`).
 - The operator of the router and of the agents can read prompts and completions. These controls separate tenants from each other, not from the operator.
 - A tenant budget spans the routers of one site, not several sites. A key's maximum scope (`scope_max`) is not part of this release.
 
