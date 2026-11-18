@@ -40,7 +40,8 @@ const MaxAnchors = 256
 const MaxBlocks = 4096
 
 // MaxKVBlocks bounds the block hashes of one batch of cache changes an agent
-// sends a router (a snapshot included): 32M tokens of engine cache.
+// sends a router (a snapshot included), stored and removed together: 32M
+// tokens of engine cache.
 const MaxKVBlocks = 1 << 19
 
 // MaxBatchHashes bounds the anchors, ends and blocks of the served entries

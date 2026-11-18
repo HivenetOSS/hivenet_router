@@ -34,7 +34,12 @@ const (
 	maxLearnedDecodeStep  = 2.0    // seconds
 )
 
-// latencyGroup identifies replicas expected to run at the same speed.
+// latencyGroup identifies replicas expected to run at the same speed. The
+// agent fills the GPU from NVML when --gpu-model is unset and its GPUs are
+// all one model. A replica whose GPU is still unknown is pooled with the
+// others of its model and engine (warned once per group): most sites run one
+// GPU model per model, and pooling is what keeps a replica from being judged
+// on its own past.
 type latencyGroup struct{ model, engine, gpu string }
 
 func groupOf(a *domain.Agent) latencyGroup {
@@ -58,6 +63,7 @@ type latencyModel struct {
 	mu      sync.Mutex
 	last    map[latencyGroup]latencyFigures
 	metrics LatencyMetrics
+	warned  map[latencyGroup]bool // groups with no GPU, warned about once
 }
 
 // learn pools the candidates' reports per group, weighted by the prefill
@@ -102,6 +108,13 @@ func (m *latencyModel) learn(candidates []ScoredCandidate) map[latencyGroup]late
 		if a.dw > 0 {
 			f.decodeStep = clamp(a.d/a.dw, minLearnedDecodeStep, maxLearnedDecodeStep)
 			changed = true
+		}
+		if changed && g.gpu == "" && !m.warned[g] {
+			if m.warned == nil {
+				m.warned = map[latencyGroup]bool{}
+			}
+			m.warned[g] = true
+			log.Warnf("prefix-aware: replicas of %s on %s report no GPU model; their learned speeds are pooled. If they run on GPUs of different models, set --gpu-model on their agents", g.model, g.engine)
 		}
 		if changed {
 			m.last[g] = f

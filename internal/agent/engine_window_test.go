@@ -140,3 +140,40 @@ func TestEngineWindow_ShortPromptsGiveNoPrefillSpeed(t *testing.T) {
 		t.Error("~1,500-token prompts gave no prefill speed")
 	}
 }
+
+// Busy without completions is stuck, not idle: the last figures stay, so a
+// gate that excluded the replica keeps excluding it; once idle they go.
+func TestEngineWindow_StuckKeepsLastFigures(t *testing.T) {
+	now := time.Unix(1000, 0)
+	w := &engineWindow{now: func() time.Time { return now }}
+	w.apply(&domain.BackendMetrics{TTFTHistogram: hist(0, 0), ITLHistogram: hist(0, 0)})
+	now = now.Add(10 * time.Second)
+	slow := &domain.BackendMetrics{TTFTHistogram: hist(50, 10), ITLHistogram: hist(10, 100), RunningRequests: fp(8)}
+	w.apply(slow)
+	if !near(slow.AvgTTFTSeconds, 5) {
+		t.Fatalf("avg TTFT %v, want 5", slow.AvgTTFTSeconds)
+	}
+	// 2 minutes with requests running or waiting and no first token.
+	for range 6 {
+		now = now.Add(20 * time.Second)
+		bm := &domain.BackendMetrics{TTFTHistogram: hist(50, 10), ITLHistogram: hist(10, 100), RunningRequests: fp(0), WaitingRequests: fp(30)}
+		w.apply(bm)
+		if !near(bm.AvgTTFTSeconds, 5) || !near(bm.AvgITLSeconds, 0.1) {
+			t.Fatalf("stuck: avg TTFT %v ITL %v, want the last 5 / 0.1 kept", bm.AvgTTFTSeconds, bm.AvgITLSeconds)
+		}
+	}
+	// Idle: nothing running or waiting, so nothing to judge.
+	now = now.Add(20 * time.Second)
+	idle := &domain.BackendMetrics{TTFTHistogram: hist(50, 10), ITLHistogram: hist(10, 100), RunningRequests: fp(0), WaitingRequests: fp(0)}
+	w.apply(idle)
+	if idle.AvgTTFTSeconds != nil || idle.AvgITLSeconds != nil {
+		t.Errorf("idle: figures %v / %v, want none", idle.AvgTTFTSeconds, idle.AvgITLSeconds)
+	}
+	// Busy again after idle, still no completion: the old figures are gone.
+	now = now.Add(20 * time.Second)
+	again := &domain.BackendMetrics{TTFTHistogram: hist(50, 10), ITLHistogram: hist(10, 100), RunningRequests: fp(1)}
+	w.apply(again)
+	if again.AvgTTFTSeconds != nil {
+		t.Errorf("busy after idle: avg TTFT %v, want none (forgotten while idle)", again.AvgTTFTSeconds)
+	}
+}

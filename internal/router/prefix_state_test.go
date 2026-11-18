@@ -106,6 +106,11 @@ func TestPrefixStateAuthenticatesBeforeTheBody(t *testing.T) {
 	if st := r.prefixIndex.Stats(); st.Memo != 0 {
 		t.Errorf("a refused batch was partly applied: %+v", st)
 	}
+	// The cap is on stored and removed together: each under it, the sum over.
+	split := `{"kv":{"epoch":1,"to":1,"stored":[` + strings.Repeat("1,", maxKVBlocks/2) + `1],"removed":[` + strings.Repeat("2,", maxKVBlocks/2) + `2]}}`
+	if c := post("Bearer "+token, split); c != http.StatusRequestEntityTooLarge {
+		t.Errorf("stored + removed over the cap: %d, want 413", c)
+	}
 	for range int(prefixBurst) {
 		post("Bearer "+token, `{}`)
 	}
@@ -126,7 +131,7 @@ func TestPrefixStateLargestBatchFits(t *testing.T) {
 	}
 	body, err := json.Marshal(prefixStatePayload{
 		Served: []prefixServedEntry{{Anchors: hashes(prefixhash.MaxBatchHashes / 2), Blocks: hashes(prefixhash.MaxBatchHashes / 2)}},
-		KV:     &prefixKVPayload{Stored: hashes(prefixhash.MaxKVBlocks)},
+		KV:     &prefixKVPayload{Stored: hashes(prefixhash.MaxKVBlocks / 2), Removed: hashes(prefixhash.MaxKVBlocks / 2)},
 	})
 	if err != nil {
 		t.Fatal(err)

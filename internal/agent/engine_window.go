@@ -23,7 +23,13 @@ type engineWindow struct {
 	mu      sync.Mutex
 	samples []windowSample
 	now     func() time.Time
+	// last are the latency figures of the last window that had any; kept
+	// while the engine is busy without completing anything (see apply).
+	last latencyFigures
 }
+
+// latencyFigures are the windowed average and p90 TTFT and ITL.
+type latencyFigures struct{ avgTTFT, p90TTFT, avgITL, p90ITL *float64 }
 
 type windowSample struct {
 	at               time.Time
@@ -44,7 +50,12 @@ func newEngineWindow() *engineWindow { return &engineWindow{now: time.Now} }
 
 // apply records a scrape and replaces bm's latency figures (average and p90
 // TTFT and ITL) with their values over the window, and sets the prefill
-// speed. A figure with no observation in the window is nil.
+// speed. A figure with no observation in the window is nil when the engine
+// is idle (no request running or waiting): nothing to judge, so a gate on it
+// passes and a replica that recovered gets traffic again. When the engine is
+// busy but nothing reached its first token (or next token) in the window, the
+// replica is stuck, not idle: the last windowed figure is kept, so a gate that
+// excluded it keeps excluding it.
 func (w *engineWindow) apply(bm *domain.BackendMetrics) {
 	if w == nil || bm == nil {
 		return
@@ -74,6 +85,7 @@ func (w *engineWindow) apply(bm *domain.BackendMetrics) {
 	bm.AvgTTFTSeconds, bm.P90TTFTSeconds, _ = windowedHistogram(base.ttft, cur.ttft)
 	var itlN float64
 	bm.AvgITLSeconds, bm.P90ITLSeconds, itlN = windowedHistogram(base.itl, cur.itl)
+	w.keepWhileBusy(bm)
 	// The decode step: decode seconds over decode tokens covers every
 	// request (SGLang records inter-token latencies for streamed ones only);
 	// the average inter-token latency when the engine has no such counters.
@@ -140,4 +152,25 @@ func restarted(prev, cur windowSample) bool {
 	down := func(a, b *domain.HistogramSnapshot) bool { return a != nil && b != nil && b.Count < a.Count }
 	fdown := func(a, b *float64) bool { return a != nil && b != nil && *b < *a }
 	return down(prev.ttft, cur.ttft) || down(prev.itl, cur.itl) || fdown(prev.prefTok, cur.prefTok) || fdown(prev.prefSec, cur.prefSec)
+}
+
+// keepWhileBusy fills the latency figures the window has none for with the
+// last ones while the engine reports requests running or waiting, and
+// forgets them once it is idle. Caller holds w.mu.
+func (w *engineWindow) keepWhileBusy(bm *domain.BackendMetrics) {
+	busy := (bm.RunningRequests != nil && *bm.RunningRequests > 0) || (bm.WaitingRequests != nil && *bm.WaitingRequests > 0)
+	keep := func(cur **float64, last **float64) {
+		switch {
+		case *cur != nil:
+			*last = *cur
+		case busy:
+			*cur = *last
+		default:
+			*last = nil
+		}
+	}
+	keep(&bm.AvgTTFTSeconds, &w.last.avgTTFT)
+	keep(&bm.P90TTFTSeconds, &w.last.p90TTFT)
+	keep(&bm.AvgITLSeconds, &w.last.avgITL)
+	keep(&bm.P90ITLSeconds, &w.last.p90ITL)
 }

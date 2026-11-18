@@ -97,3 +97,13 @@ func TestPrefixAware_LearnedSpeeds(t *testing.T) {
 		t.Errorf("decode pressure %v, want 10 × 15 ms (the group's step, not the agent's 0.5 s)", got)
 	}
 }
+
+// Replicas whose GPU is unknown are pooled with their model and engine.
+func TestLatencyModel_UnknownGPUPooled(t *testing.T) {
+	m := &latencyModel{}
+	a, b := agentGPU("a", ""), agentGPU("b", "")
+	figs := m.learn([]ScoredCandidate{reported(a, 40000, 10, 0.01, 100), reported(b, 10000, 10, 0.03, 100)})
+	if groupOf(a) != groupOf(b) || figs[groupOf(a)].prefillRate != 25000 {
+		t.Errorf("unknown GPUs: %+v, want one pooled group at 25000 tok/s", figs)
+	}
+}

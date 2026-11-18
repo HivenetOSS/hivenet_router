@@ -238,6 +238,7 @@ func (a *Agent) Run() error {
 	}
 	a.cfg.Model = model
 	log.Infof("Model ready: %s", a.cfg.Model)
+	a.detectGPUModel()
 	a.initPrefix()
 
 	var node host.Host
@@ -1567,4 +1568,20 @@ func (a *Agent) holdPrefill(r *http.Request) func() {
 	a.pendingPrefill.Add(n)
 	var once sync.Once
 	return func() { once.Do(func() { a.pendingPrefill.Add(-n) }) }
+}
+
+// detectGPUModel fills an unset --gpu-model from NVML when every GPU the
+// agent uses is the same model. Routers group replicas by model, engine and
+// GPU to learn their prefill speed and decode step; a replica with no GPU
+// model is pooled with every replica of its model and engine.
+func (a *Agent) detectGPUModel() {
+	if a.cfg.GPUModel != "" {
+		return
+	}
+	if name, why := hardware.DetectGPUModel(a.cfg.GPUDevicesFile); name != "" {
+		a.cfg.GPUModel = name
+		log.Infof("GPU model %q detected (--gpu-model overrides it)", name)
+	} else {
+		log.Warnf("GPU model not detected (%s): routers pool this replica's learned speeds with every replica of model %s on %s; on a host with GPUs of several models, set --gpu-model", why, a.cfg.Model, a.engine.Name())
+	}
 }

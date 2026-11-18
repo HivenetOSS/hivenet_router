@@ -520,7 +520,7 @@ Both are measured in seconds.
 hivenet_agent_engine_avg_ttft_seconds
 ```
 
-This is calculated from the change in the backend histogram’s sum and count over the agent's last 60 seconds, not since the engine started, so it follows the replica's current speed. With no request in the last minute the gauge keeps its last value until one arrives. For a longer view use the histogram, `hivenet_agent_engine_ttft_seconds`, with `rate()`.
+This is calculated from the change in the backend histogram’s sum and count over the agent's last 60 seconds, not since the engine started, so it follows the replica's current speed. With no request in the last minute the gauge keeps its last value until one arrives. The value [policy gates](/routing/policy-gates#engine-signals) see differs: with no first token in the last minute it is unavailable when the engine is idle, and the last value while the engine still has requests running or waiting. For a longer view use the histogram, `hivenet_agent_engine_ttft_seconds`, with `rate()`.
 
 ### P90 TTFT
 

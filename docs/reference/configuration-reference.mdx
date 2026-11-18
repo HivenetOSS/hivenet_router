@@ -1022,7 +1022,7 @@ lets the operating system choose a local port. A fixed port is rarely needed and
 | `--organization` | — | `Unknown` | Operator or infrastructure-provider label |
 | `--machine` | — | `Unknown` | Machine label |
 | `--tags` | — | `production` | Comma-separated routing tags |
-| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty | Operator-defined GPU label |
+| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Detected | GPU label; when unset, the model NVML reports if all the agent's GPUs are one model |
 | `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty | Deployment identifier used in tenant metrics |
 | `--replica-id` | `HIVENET_ROUTER_REPLICA_ID` | Empty | Stable replica identifier used with deployment ID by external schedulers |
 | `--hide-llm` | — | `false` | Set the aggregated model’s `hide_llm` metadata flag; this does not currently remove the model from discovery |
@@ -1067,7 +1067,7 @@ The `--version` flag changes registration metadata only. It does not select or i
 
 ### GPU model
 
-`--gpu-model` is not detected automatically through NVML.
+When `--gpu-model` is unset, the agent reports the GPU model NVML names (for example `NVIDIA GeForce RTX 5090`) if all the GPUs it uses are one model, and logs a warning otherwise. `--gpu-model` always overrides the detected name. Prefix-aware routing [learns its speeds](/routing/prefix-aware-routing#learned-speeds) per GPU model, so set it on agents of a host with GPUs of several models.
 
 Set a consistent operator-defined value when routing policies use:
 

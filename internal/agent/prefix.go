@@ -223,7 +223,7 @@ func (a *Agent) runPrefixStatePusher(rs *routerSession, done <-chan struct{}) {
 			var kv *kvPayload
 			if a.kv != nil {
 				p, ok := a.kv.since(kvCursor)
-				if len(p.Stored) > prefixhash.MaxKVBlocks || len(p.Removed) > prefixhash.MaxKVBlocks {
+				if len(p.Stored)+len(p.Removed) > prefixhash.MaxKVBlocks {
 					ok = false // too many changes for one batch: send the state instead
 				}
 				if !ok && !needSnapshot {

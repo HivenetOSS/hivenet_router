@@ -129,7 +129,7 @@ func (r *Router) handlePrefixState(w http.ResponseWriter, req *http.Request) {
 	}
 	// Check the whole batch before applying any of it: a refused batch is
 	// sent again, and its served entries must not be learned twice.
-	if kv := payload.KV; kv != nil && (len(kv.Stored) > maxKVBlocks || len(kv.Removed) > maxKVBlocks) {
+	if kv := payload.KV; kv != nil && len(kv.Stored)+len(kv.Removed) > maxKVBlocks {
 		http.Error(w, "too many blocks", http.StatusRequestEntityTooLarge)
 		return
 	}

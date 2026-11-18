@@ -491,6 +491,15 @@ Unknown fields and rules with zero or several operators are rejected when the po
 | `avg_itl_seconds` | Seconds | Average inter-token latency over the last 60 seconds |
 | `p90_itl_seconds` | Seconds | P90 inter-token latency over the last 60 seconds |
 
+These four are measured over the agent's last 60 seconds, so a replica that was slow once is judged on what it does now, and one excluded by a gate gets traffic again within a minute of recovering. When nothing reached its first token (or next token) in the last 60 seconds:
+
+- **The engine is idle** (no request running or waiting): the value is unavailable and the gate is skipped (see below). There is nothing to judge.
+- **The engine is busy** (requests running or waiting, none completing): the replica is stuck, not idle, so the last measured value is kept, and a gate that excluded it keeps excluding it.
+
+<Note>
+Before the 60-second window, these fields were averages since the engine started. A policy that relied on a replica keeping a high value for hours now sees it recover within a minute.
+</Note>
+
 ### Hardware signals
 
 | Field | Unit | Meaning |
