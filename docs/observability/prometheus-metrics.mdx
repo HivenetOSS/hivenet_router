@@ -320,7 +320,7 @@ min(hivenet_cache_isolation_enabled) == 0
 hivenet_cache_salt_secret_mismatch
 ```
 
-With `--cache-salt` and [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt secret differs from this router's. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
+With [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt setting differs from this router's: another secret, or the salt off where this router has it on (and the reverse). A router without the salt publishes that instead of a fingerprint, and its requests share every tenant's prefix cache and prefix index. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
 
 Alert when any router of the site disagrees:
 

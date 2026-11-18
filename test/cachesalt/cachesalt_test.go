@@ -5,6 +5,8 @@ package cachesalt_test
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -274,5 +276,31 @@ func TestCheckBody(t *testing.T) {
 		if err != nil && !errors.Is(err, cachesalt.ErrExtraParams) {
 			t.Errorf("CheckBody(%s, %s) = %v, want ErrExtraParams", tc.path, tc.body, err)
 		}
+	}
+}
+
+// A sub-key is stable, differs per label and per secret, and is neither a
+// salt nor the fingerprint.
+func TestSubKey(t *testing.T) {
+	s := newSalter(t)
+	a := s.SubKey("prefix-anchor")
+	if len(a) != 32 || !bytes.Equal(a, newSalter(t).SubKey("prefix-anchor")) {
+		t.Fatalf("sub-key %x: want 32 stable bytes", a)
+	}
+	if bytes.Equal(a, s.SubKey("other")) {
+		t.Error("two labels gave the same sub-key")
+	}
+	other, err := cachesalt.New([]byte("fedcba9876543210fedcba9876543210"), cachesalt.DefaultCapabilities())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(a, other.SubKey("prefix-anchor")) {
+		t.Error("two secrets gave the same sub-key")
+	}
+	if base64.RawURLEncoding.EncodeToString(a) == s.Salt("prefix-anchor") {
+		t.Error("the sub-key is the salt of a tenant named like its label")
+	}
+	if hex.EncodeToString(a[:8]) == s.Fingerprint() {
+		t.Error("the sub-key starts with the fingerprint")
 	}
 }

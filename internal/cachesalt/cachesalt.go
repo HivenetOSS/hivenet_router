@@ -249,6 +249,19 @@ func (s *Salter) Fingerprint() string {
 	return hex.EncodeToString(mac.Sum(nil)[:8])
 }
 
+// subKeyDomain separates sub-keys from the salts and the fingerprint.
+const subKeyDomain = "hivenet-router/cache-salt-subkey/v1/"
+
+// SubKey derives a key for another router-only use of the secret, named by
+// label: HMAC-SHA256(secret, domain + label). It reveals neither the secret
+// nor any salt, and differs per label. Every router of a site gets the same
+// sub-key, as it gets the same salts.
+func (s *Salter) SubKey(label string) []byte {
+	mac := hmac.New(sha256.New, s.secret)
+	mac.Write([]byte(subKeyDomain + label))
+	return mac.Sum(nil)
+}
+
 // ErrExtraParams: a body's extra_params is neither absent, null nor an
 // object, so it cannot carry cache_prompt (see CheckBody).
 var ErrExtraParams = errors.New("extra_params must be a JSON object")

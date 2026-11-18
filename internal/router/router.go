@@ -27,7 +27,6 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
-	"hivenet_router/internal/prefixhash"
 	"hivenet_router/internal/prefixindex"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/redirect"
@@ -769,9 +768,8 @@ func (r *Router) Start() error {
 	// Create request processor now that httpHost is ready
 	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
 		WithCacheSalter(r.salter),
-		// Interim key source: the site's agent secret. To move to a sub-key of
-		// the cache-salt secret, with the tenant scope, once that is in place.
-		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))),
+		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
+		WithPrefixScope(prefixScope(r.salter)),
 		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
 			// Wait for the engine's cache events that may have evicted the
 			// blocks before the request reached it (sent in batches every
@@ -808,9 +806,9 @@ func (r *Router) Start() error {
 		for _, c := range r.credits {
 			c.Start(processorCtx)
 		}
-		if r.salter != nil {
-			go r.checkSaltFingerprints(processorCtx)
-		}
+		// With or without the salt: a router without it is reported by
+		// the others (and reports them).
+		go r.checkSaltFingerprints(processorCtx)
 	}
 	go r.publishTenantUsage(processorCtx)
 	// A reservation an exit path forgot to release would hold its budget

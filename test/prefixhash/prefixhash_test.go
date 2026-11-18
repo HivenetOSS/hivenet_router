@@ -169,3 +169,31 @@ func FuzzDecodeAnchors(f *testing.F) {
 		}
 	})
 }
+
+// WithAnchorSecret changes the anchors and nothing else: blocks, which agents
+// compute with the site's agent secret, keep their hashes.
+func TestWithAnchorSecret(t *testing.T) {
+	req := chat(t, `{"messages":[{"role":"system","content":"S"},{"role":"user","content":"Q"}]}`)
+	other := keys.WithAnchorSecret([]byte("another-secret-at-least-32-bytes!!"))
+	a1, _ := keys.Anchors("m", "", req)
+	a2, _ := other.Anchors("m", "", req)
+	for i := range a1 {
+		if a1[i] == a2[i] {
+			t.Errorf("anchor %d unchanged by another anchor secret", i)
+		}
+	}
+	again, _ := keys.WithAnchorSecret([]byte("another-secret-at-least-32-bytes!!")).Anchors("m", "", req)
+	if !slices.Equal(a2, again) {
+		t.Error("same anchor secret, different anchors")
+	}
+	tokens := make([]int, 3*prefixhash.BlockTokens)
+	for i := range tokens {
+		tokens[i] = i
+	}
+	if !slices.Equal(keys.Blocks("m", "salt", tokens), other.Blocks("m", "salt", tokens)) {
+		t.Error("the anchor secret changed the block hashes")
+	}
+	if !other.Valid() {
+		t.Error("keys with an anchor secret are not valid")
+	}
+}

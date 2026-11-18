@@ -38,25 +38,11 @@ func TestSaltFingerprintMismatchReported(t *testing.T) {
 		}})
 		metricsURLs = append(metricsURLs, "http://127.0.0.1"+rcfg.MetricsPort+"/metrics")
 	}
-	mismatch := func(url string) string {
-		resp, err := http.Get(url)
-		if err != nil {
-			return ""
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		for _, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(line, "hivenet_cache_salt_secret_mismatch ") {
-				return strings.TrimPrefix(line, "hivenet_cache_salt_secret_mismatch ")
-			}
-		}
-		return ""
-	}
 	// The two routers with secret a each see one other secret; the one with
 	// secret b sees two.
 	for i, want := range []string{"1", "1", "2"} {
 		waitFor(t, 15*time.Second, fmt.Sprintf("router %d to report %s mismatching router(s)", i, want), func() bool {
-			return mismatch(metricsURLs[i]) == want
+			return saltMismatchMetric(metricsURLs[i]) == want
 		})
 	}
 	// One field per router, holding a 16-hex-character fingerprint (and the
@@ -78,4 +64,47 @@ func TestSaltFingerprintMismatchReported(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSaltOffRouterReported: a router without the cache salt among routers
+// with it is reported by them, and reports them.
+func TestSaltOffRouterReported(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e stack in -short mode")
+	}
+	mr := miniredis.RunT(t)
+	var metricsURLs []string
+	for i, salt := range []bool{true, true, false} {
+		_, rcfg := startRouterWith(t, routerOpts{AuthYAML: isoAuthYAML, AdminKey: isoAdminKey, Mutate: func(c *config.Config) {
+			c.CacheSalt = salt
+			if salt {
+				c.CacheSaltSecret = strings.Repeat("a", 32)
+			}
+			c.SyncStore, c.SyncValkeyAddrs = "valkey", mr.Addr()
+			c.SyncInterval = 50 * time.Millisecond
+			c.RouterID = fmt.Sprintf("router-off-%d", i)
+		}})
+		metricsURLs = append(metricsURLs, "http://127.0.0.1"+rcfg.MetricsPort+"/metrics")
+	}
+	for i, want := range []string{"1", "1", "2"} {
+		waitFor(t, 15*time.Second, fmt.Sprintf("router %d to report %s mismatching router(s)", i, want), func() bool {
+			return saltMismatchMetric(metricsURLs[i]) == want
+		})
+	}
+}
+
+// saltMismatchMetric reads hivenet_cache_salt_secret_mismatch ("" if absent).
+func saltMismatchMetric(url string) string {
+	resp, err := http.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "hivenet_cache_salt_secret_mismatch ") {
+			return strings.TrimPrefix(line, "hivenet_cache_salt_secret_mismatch ")
+		}
+	}
+	return ""
 }
