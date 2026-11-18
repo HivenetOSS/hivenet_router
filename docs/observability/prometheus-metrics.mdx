@@ -1164,6 +1164,8 @@ hivenet_prefix_index_entries
 | `busy` | Every candidate was busy: `least-loaded` chose |
 | `no_anchor` | The request had no prompt text: `least-loaded` chose |
 
+`hivenet_prefix_checks_total{model, result}` counts the checks of the blocks an agent's engine confirmed holding (by KV events) against the prompt tokens it reported serving from cache: `held` (half or more of the blocks it kept came true), `missed`, or `evicted` (the engine evicted the blocks before the request reached it: not judged). It needs KV events and vLLM's `--enable-prompt-tokens-details` or SGLang's `--enable-cache-report`.
+
 `hivenet_prefix_index_entries` is the size of the router's prefix memory, per `kind`: `memo` (message prefixes it can match), `memo_ends` (memo entries indexed by their last block, so the memo forgets with the cache; it follows `memo`, and a gap between them is a leak), `blocks` (cached blocks on its board), `pending` (notes for new text in flight). It has no model, tenant or agent label.
 
 ### Policy reloads

@@ -100,6 +100,34 @@ func TestPrefixAware_TieIsTheSameOnEveryRouter(t *testing.T) {
 	}
 }
 
+// A near-tie goes to the agent that holds more of the prompt, even when the
+// rendezvous hash prefers the other: a conversation stays on the agent that
+// served its earlier turns when both hold the shared system prompt and the
+// load differs a little.
+func TestPrefixAware_TieGoesToTheDeeperHolder(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	a, b := llm("a"), llm("b")
+	if hrw(100, a.ID) < hrw(100, b.ID) {
+		a, b = b, a // a is the agent the hash prefers
+	}
+	e := prefixExecutor(ix, rec, a, b)
+	shared := blocks(10)
+	ix.Learn("m", a.ID, []uint64{100}, []int{10}, shared, time.Minute)
+	ix.Learn("m", b.ID, []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute)
+	// b's 128 extra cached tokens save ~13 ms; 200 queued tokens cost it 20 ms,
+	// so b is ~7 ms slower: within the 5% tie window.
+	e.prefill.add(b.ID, 200)
+	if got := route(t, e, []uint64{100, 101, 102}); got != b {
+		t.Errorf("chose %s, want %s (holds the conversation)", got.ID, b.ID)
+	}
+	// Outside the window the cost wins (a new last message: the first one
+	// left a pending note on b).
+	e.prefill.add(b.ID, 2000)
+	if got := route(t, e, []uint64{100, 101, 103}); got != a {
+		t.Errorf("chose %s, want %s (b's queue is long)", got.ID, a.ID)
+	}
+}
+
 // New text sent to an agent leaves a pending note: a copy that arrives before
 // the agent reports goes to the same agent.
 func TestPrefixAware_PendingKeepsCopiesTogether(t *testing.T) {
@@ -231,5 +259,110 @@ func TestPrefixAware_ReportedPrefill(t *testing.T) {
 	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{128, 100}}}
 	if got := s.Select([]ScoredCandidate{{Agent: a}, {Agent: b}}, req); got != b {
 		t.Errorf("chose %s: a's reported backlog costs more than its cache saves", got.ID)
+	}
+}
+
+// An agent whose predicted hits do not come true counts less: a reliable
+// agent with less in cache wins.
+func TestPrefixAware_Trust(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	ix.Learn("m", honest.ID, []uint64{100}, []int{15}, blocks(15), time.Minute)
+	ix.Learn("m", liar.ID, []uint64{100}, []int{20}, blocks(20), time.Minute) // the memo now knows 20 blocks
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := func() SelectRequest {
+		return SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{1280, 100}}}
+	}
+	cands := []ScoredCandidate{{Agent: liar}, {Agent: honest}}
+	if got := s.Select(cands, req()); got != liar {
+		t.Fatalf("before any check: chose %s, want the agent holding more", got.ID)
+	}
+	for range 10 {
+		ix.Observe(liar.ID, 1280, 0)
+	}
+	if got := s.Select(cands, req()); got != honest {
+		t.Errorf("chose %s: an agent whose predictions never held must count less", got.ID)
+	}
+}
+
+// Only blocks the engine confirmed by cache events are checked: blocks the
+// router predicted (a copy sent before the first prefill ended, a served
+// prompt not yet confirmed) are not the agent's claim and must not cost it
+// trust.
+func TestPrefixAware_ChecksOnlyConfirmedBlocks(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	a := llm("a")
+	e := prefixExecutor(ix, nil, a)
+	ix.SetEventSource(a.ID)
+	ix.Learn("m", a.ID, []uint64{100}, []int{20}, blocks(20), time.Minute)
+	predicted := func() int {
+		s := e.NewSession("m", domain.CapabilityLLM)
+		s.SetPrefix(&PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{1280, 100}})
+		got, err := s.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer got.DecrementLoad()
+		defer s.ReleasePrefill()
+		return s.PredictedCached()
+	}
+	if p := predicted(); p != 0 {
+		t.Errorf("served but not confirmed: predicted %d, want 0 (no check)", p)
+	}
+	ix.ApplyEvents("m", a.ID, blocks(12), nil, false)
+	if p := predicted(); p != 12*64 {
+		t.Errorf("12 blocks confirmed: predicted %d, want %d", p, 12*64)
+	}
+}
+
+// Near-ties are broken on what the agents reported, the same on every
+// router: a guess one router made from its own decision does not change the
+// choice.
+func TestPrefixAware_TieIgnoresThisRoutersGuesses(t *testing.T) {
+	a, b := llm("a"), llm("b")
+	if hrw(100, a.ID) < hrw(100, b.ID) {
+		a, b = b, a // a is the agent the hash prefers
+	}
+	c := peer.ID("c") // reports the memo's deeper entry, not a candidate
+	routers := make([]*Executor, 2)
+	for i := range routers {
+		ix := prefixindex.New(prefixindex.Config{})
+		ix.Learn("m", a.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+		ix.Learn("m", b.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+		ix.Learn("m", c, []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute)
+		routers[i] = prefixExecutor(ix, nil, a, b)
+		routers[i].prefill.add(b.ID, 100) // b ~10 ms busier: a near-tie
+	}
+	// Router 0 guesses b holds the 12 blocks (it sent it this prompt).
+	ix0 := routers[0].prefixIndex
+	ix0.Commit("m", b.ID, []uint64{100, 101}, ix0.Lookup("m", []uint64{100, 101}, []peer.ID{b.ID}), time.Minute, time.Second)
+	for i, r := range routers {
+		if got := route(t, r, []uint64{100, 101, 102}); got != a {
+			t.Errorf("router %d chose %s, want %s (equal reports: the hash)", i, got.ID, a.ID)
+		}
+	}
+}
+
+// An agent whose confirmed claims fail does not win near-ties on them: its
+// reported holdings are weighted by its trust there too.
+func TestPrefixAware_LiarLosesTies(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	if hrw(100, liar.ID) > hrw(100, honest.ID) {
+		liar, honest = honest, liar // the hash prefers the honest agent: only the claim can make the liar win
+	}
+	e := prefixExecutor(ix, nil, liar, honest)
+	ix.SetEventSource(liar.ID)
+	ix.Learn("m", honest.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+	ix.ApplyEvents("m", liar.ID, blocks(12), nil, false)
+	ix.Learn("m", peer.ID("c"), []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute) // memo for the 12 blocks
+	for range 10 {
+		ix.Observe(liar.ID, 768, 0) // trust 0.8^10 ≈ 0.11
+	}
+	// The liar's weighted hit (~82 tokens) vs the honest 640: a queue of 540
+	// on the honest agent makes the costs a near-tie (~2 ms apart).
+	e.prefill.add(honest.ID, 540)
+	if got := route(t, e, []uint64{100, 101, 200}); got != honest {
+		t.Errorf("chose %s: a near-tie must not go to an agent whose claims fail", got.ID)
 	}
 }

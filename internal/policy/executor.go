@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/prefixhash"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -161,6 +162,9 @@ type Executor struct {
 	prefixIndex   PrefixIndex
 	prefixMetrics PrefixMetrics
 	prefill       prefillQueue
+	// latency is the learned prefill speed and decode step per group of
+	// replicas, shared by every prefix-aware step (latency_model.go).
+	latency *latencyModel
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -174,6 +178,7 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 		globalMaxTries:    globalMaxTries,
 		defaultQueueDepth: defaultQueueDepth,
 		queues:            make(map[string]*WaitQueue),
+		latency:           &latencyModel{},
 	}
 	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
@@ -182,6 +187,10 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 // SetPrefixIndex wires the router's prefix memory used by the prefix-aware
 // strategy. Must be called before any requests are processed.
 func (e *Executor) SetPrefixIndex(ix PrefixIndex) { e.prefixIndex = ix }
+
+// SetLatencyMetrics wires an observer of the learned latency figures.
+// Must be called before any requests are processed.
+func (e *Executor) SetLatencyMetrics(lm LatencyMetrics) { e.latency.metrics = lm }
 
 // SetPrefixMetrics wires an observer of prefix-aware selections.
 // Must be called before any requests are processed.
@@ -489,6 +498,26 @@ func (s *Session) SetPrefix(pr *PrefixRequest) { s.prefix = pr }
 // ReleasePrefill tells the session the chosen agent started answering (or
 // gave up): its prompt no longer waits in that agent's prefill queue.
 func (s *Session) ReleasePrefill() { s.prefix.release() }
+
+// PredictedCached is the prompt tokens the chosen agent's engine confirmed
+// holding by cache events at the last Select (0 when the strategy does not
+// predict, or nothing is confirmed): what the trust check judges.
+func (s *Session) PredictedCached() int {
+	if s.prefix == nil {
+		return 0
+	}
+	return len(s.prefix.predicted) * prefixhash.BlockTokens
+}
+
+// PredictedClaim is the leading blocks the chosen agent's engine confirmed
+// holding at the last Select, and when (see prefixindex.CheckClaim); nil
+// when there is nothing to check.
+func (s *Session) PredictedClaim() ([]uint64, int64) {
+	if s.prefix == nil {
+		return nil, 0
+	}
+	return s.prefix.predicted, s.prefix.predictedAt
+}
 
 // PrefillTokens is the prompt tokens the last Select expects the chosen agent
 // to prefill (0 when the strategy does not estimate it).

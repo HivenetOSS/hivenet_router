@@ -39,6 +39,15 @@ const MaxAnchors = 256
 // MaxBlocks caps the blocks of one prompt (256k tokens).
 const MaxBlocks = 4096
 
+// MaxKVBlocks bounds the block hashes of one batch of cache changes an agent
+// sends a router (a snapshot included), stored and removed together: 32M
+// tokens of engine cache.
+const MaxKVBlocks = 1 << 19
+
+// MaxBatchHashes bounds the anchors, ends and blocks of the served entries
+// in one batch, so a batch stays well under the router's body limit.
+const MaxBatchHashes = 1 << 17
+
 // Keys holds the two keys derived from a site secret.
 type Keys struct {
 	anchor []byte

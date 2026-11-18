@@ -95,7 +95,7 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 		return nil, fmt.Errorf("vllm ScrapeMetrics: /metrics returned HTTP %d", resp.StatusCode)
 	}
 
-	scalars, buckets, finishReasons, _ := parsePrometheusTextFull(resp.Body)
+	scalars, buckets, finishReasons, sums := parsePrometheusTextFull(resp.Body)
 
 	m := &domain.BackendMetrics{}
 	m.KVCacheUtilization = metricVal(scalars, "vllm:kv_cache_usage_perc")
@@ -155,6 +155,23 @@ func (e *VLLMEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpClie
 	}
 	if decodeSum != nil {
 		m.DecodeSecondsTotal = decodeSum
+	}
+
+	// Prefill counters for the agent's windowed prefill speed: prompt tokens
+	// computed (cache hits excluded) and seconds requests spent in prefill,
+	// summed over data-parallel engines. Older vLLM without the computed-tokens
+	// histogram: prompt tokens minus cached ones.
+	m.PrefillSecondsTotal = metricSum(sums, "vllm:request_prefill_time_seconds_sum")
+	m.PrefillRequestsTotal = metricSum(sums, "vllm:request_prefill_time_seconds_count")
+	m.PrefillComputedTokensTotal = metricSum(sums, "vllm:request_prefill_kv_computed_tokens_sum")
+	if m.PrefillComputedTokensTotal == nil {
+		if p := metricSum(sums, "vllm:prompt_tokens_total"); p != nil {
+			computed := *p
+			if c := metricSum(sums, "vllm:prompt_tokens_cached_total"); c != nil {
+				computed -= *c
+			}
+			m.PrefillComputedTokensTotal = &computed
+		}
 	}
 
 	// Finish-reason breakdown. parsePrometheusTextFull captures this from
@@ -235,6 +252,13 @@ type bucketPoint struct {
 // exposes a single series per metric the two agree, and sums is what an engine
 // with split variants (SGLang) must read for _sum/_count and counter totals.
 // A 1 MB scanner buffer is used — enough for any /metrics response.
+// labeledSums names the series parsePrometheusTextFull also sums by one
+// label's value (see there).
+var labeledSums = map[string]string{
+	"sglang:per_stage_req_latency_seconds_sum":   "stage",
+	"sglang:per_stage_req_latency_seconds_count": "stage",
+}
+
 func parsePrometheusTextFull(r io.Reader) (
 	scalars map[string]float64,
 	buckets map[string][]bucketPoint,
@@ -325,6 +349,15 @@ func parsePrometheusTextFull(r io.Reader) (
 			scalars[name] = v
 		}
 		sums[name] += v
+		// A few series are read by one label value; sums gets them under
+		// name{label="value"}, from tensor-parallel rank 0 only (every rank
+		// reports the same request's time).
+		if label, ok := labeledSums[name]; ok {
+			lbl := parseLabels(labelSet)
+			if r, has := lbl["tp_rank"]; !has || r == "0" {
+				sums[name+"{"+label+`="`+lbl[label]+`"}`] += v
+			}
+		}
 	}
 
 	if len(kvByEngine) > 0 {

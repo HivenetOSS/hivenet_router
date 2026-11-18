@@ -33,8 +33,9 @@ type PrefixAwareParams struct {
 	// TieEpsilon makes candidates whose estimated cost is within this share of
 	// the best (or 5 ms) a tie, broken the same way on every router.
 	TieEpsilon float64 `yaml:"tie_epsilon" json:"tie_epsilon,omitempty"`
-	// PrefillRate is the prefill speed assumed for every agent, in tokens per
-	// second; it converts tokens to seconds in the cost.
+	// PrefillRate, when set, is the prefill speed in tokens per second used
+	// for every agent; it converts tokens to seconds in the cost. Unset (the
+	// default), the speed is learned from the engines (latency_model.go).
 	PrefillRate float64 `yaml:"prefill_rate" json:"prefill_rate,omitempty"`
 	// PredictedTTL is how long blocks sent to or served by an agent count as
 	// held by it without confirmation from its engine.
@@ -76,6 +77,8 @@ type PrefixMetrics interface {
 type PrefixIndex interface {
 	Lookup(model string, anchors []uint64, candidates []peer.ID) prefixindex.Match
 	Commit(model string, agent peer.ID, anchors []uint64, match prefixindex.Match, blockTTL, pendingTTL time.Duration)
+	// Trust weighs an agent's predicted cache hits (0–1).
+	Trust(agent peer.ID) float64
 }
 
 // PrefixRequest is the prefix information of one request, set by the
@@ -92,6 +95,11 @@ type PrefixRequest struct {
 	// lost slot race selects again; a retry is the same request).
 	outcome string
 	counted bool
+	// predicted is the leading blocks the chosen agent's engine confirmed
+	// holding, at predictedAt (index clock): checked against the engine's
+	// report once it answers.
+	predicted   []uint64
+	predictedAt int64
 	// reserved is the agent whose prefill queue holds reservedToks of this
 	// request; released at the first response byte (Session.ReleasePrefill).
 	reserved     peer.ID
@@ -200,10 +208,31 @@ type prefixAwareStrategy struct {
 	index             PrefixIndex
 	queue             *prefillQueue
 	metrics           PrefixMetrics
+	// latency learns each group's prefill speed and decode step; the
+	// policy's prefill_rate, when set (prefillRateSet), wins over the
+	// learned speed.
+	latency        *latencyModel
+	prefillRateSet bool
 }
 
 func (e *Executor) newPrefixAware(p *PrefixAwareParams) prefixAwareStrategy {
-	return prefixAwareStrategy{PrefixAwareParams: p.resolved(), index: e.prefixIndex, queue: &e.prefill, metrics: e.prefixMetrics}
+	return prefixAwareStrategy{PrefixAwareParams: p.resolved(), index: e.prefixIndex, queue: &e.prefill, metrics: e.prefixMetrics,
+		latency: e.latency, prefillRateSet: p != nil && p.PrefillRate != 0}
+}
+
+// speeds returns the prefill speed (tokens per second) and decode step
+// (seconds) to cost an agent of group g with: the policy's prefill_rate when
+// set, else the learned figure, else the default.
+func (s prefixAwareStrategy) speeds(figs map[latencyGroup]latencyFigures, a *domain.Agent) (rate, step float64) {
+	f := figs[groupOf(a)]
+	rate, step = f.prefillRate, f.decodeStep
+	if s.prefillRateSet || rate == 0 {
+		rate = s.PrefillRate
+	}
+	if step == 0 {
+		step = defaultITLSeconds
+	}
+	return rate, step
 }
 
 // WantsPrefix implements PrefixStrategy.
@@ -232,7 +261,7 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		ok = append(ok, c)
 	}
 	if len(ok) == 0 {
-		pr.match, pr.newToks, pr.selected, pr.outcome = prefixindex.Match{}, sum(pr.Sizes), true, PrefixOutcomeBusy
+		pr.match, pr.newToks, pr.selected, pr.predicted, pr.outcome = prefixindex.Match{}, sum(pr.Sizes), true, nil, PrefixOutcomeBusy
 		return leastLoadedStrategy{}.Select(candidates, req)
 	}
 
@@ -248,11 +277,30 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 	}
 
 	hit := func(id peer.ID) int {
-		h := m.Depth[id] * prefixhash.BlockTokens
+		// An agent whose past predictions did not come true counts less. The
+		// pending note is this router's own note, not the agent's claim, so
+		// trust does not weigh it.
+		h := int(float64(m.Depth[id]*prefixhash.BlockTokens) * s.index.Trust(id))
 		if id == m.Pending {
 			h = max(h, pendingToks)
 		}
 		return h
+	}
+	// reported is what the agent itself reported holding (engine events,
+	// served prompts, text entries), weighted by its trust: every router
+	// receives the same reports and honest agents keep a trust of 1, so
+	// near-ties between them are broken the same way everywhere, while an
+	// agent whose claims fail does not win ties on them.
+	reported := func(id peer.ID) int {
+		h := m.Reported[id] * prefixhash.BlockTokens
+		if id == m.Pending && m.PendingReported {
+			h = max(h, pendingToks)
+		}
+		return int(float64(h) * s.index.Trust(id))
+	}
+	var figs map[latencyGroup]latencyFigures
+	if s.latency != nil {
+		figs = s.latency.learn(candidates)
 	}
 	costs := make([]float64, len(ok))
 	best := math.Inf(1)
@@ -262,25 +310,37 @@ func (s prefixAwareStrategy) Select(candidates []ScoredCandidate, req SelectRequ
 		// agent has not started, or what the agent reports from every
 		// router, whichever is larger.
 		queued := max(s.queue.get(c.Agent.ID), c.Agent.ReportedPrefill())
-		costs[i] = float64(queued+newToks)/s.PrefillRate + decodePressure(c)
+		rate, step := s.speeds(figs, c.Agent)
+		costs[i] = float64(queued+newToks)/rate + decodePressure(c, step)
 		best = min(best, costs[i])
 	}
 	eps := max(s.TieEpsilon*best, 0.005)
 	var chosen *domain.Agent
+	var bestHit int
 	var bestScore uint64
 	for i, c := range ok {
 		if costs[i] > best+eps {
 			continue
 		}
-		// Rendezvous hashing on the first anchor: every router breaks the tie
-		// the same way, so new text arriving on two routers lands together.
-		if score := hrw(pr.Anchors[0], c.Agent.ID); chosen == nil || score > bestScore {
-			chosen, bestScore = c.Agent, score
+		// Among near-ties the agent that reported holding the most of the
+		// prompt wins (usually the one that served the conversation's earlier
+		// turns), so a conversation stays put when the load differences are
+		// small. Equal holdings go to rendezvous hashing on the first anchor:
+		// every router breaks the tie the same way, so new text arriving on
+		// two routers lands together.
+		h, score := reported(c.Agent.ID), hrw(pr.Anchors[0], c.Agent.ID)
+		if chosen == nil || h > bestHit || (h == bestHit && score > bestScore) {
+			chosen, bestHit, bestScore = c.Agent, h, score
 		}
 	}
 
 	h := hit(chosen.ID)
 	pr.match, pr.newToks, pr.selected = m, max(0, prompt-h), true
+	// Only what the engine's cache events confirmed is checked against the
+	// cached tokens it reports: a block this router predicted (a copy sent
+	// before the first prefill ended, a report not yet confirmed) failing to
+	// be cached says nothing about the agent.
+	pr.predicted, pr.predictedAt = m.Blocks[:m.Confirmed[chosen.ID]], m.At
 	switch {
 	case m.Depth[chosen.ID] > 0:
 		pr.outcome = PrefixOutcomeHit
@@ -328,21 +388,18 @@ func (s prefixAwareStrategy) busy(c ScoredCandidate, mean float64) bool {
 }
 
 // decodePressure estimates the seconds an agent's running requests add to a
-// new request's first token, from what its engine reports. An engine that
-// reports nothing adds nothing: the router's own load count still holds
-// requests that just finished (until the agent's next report), and using it
-// would push a conversation away from the agent that holds it; the busy
-// filter guards against hot spots instead.
-func decodePressure(c ScoredCandidate) float64 {
+// new request's first token: one decode step each, the step learned for the
+// agent's group (not the agent's own average: an agent avoided once would
+// keep its old figure). An engine that reports no running count adds
+// nothing: the router's own load count still holds requests that just
+// finished (until the agent's next report), and using it would push a
+// conversation away from the agent that holds it; the busy filter guards
+// against hot spots instead.
+func decodePressure(c ScoredCandidate, step float64) float64 {
 	if c.Snapshot.RunningRequests == nil {
 		return 0
 	}
-	running := *c.Snapshot.RunningRequests
-	itl := defaultITLSeconds
-	if c.Snapshot.AvgITLSeconds != nil && *c.Snapshot.AvgITLSeconds > 0 {
-		itl = *c.Snapshot.AvgITLSeconds
-	}
-	return running * itl
+	return *c.Snapshot.RunningRequests * step
 }
 
 func hrw(anchor uint64, id peer.ID) uint64 {

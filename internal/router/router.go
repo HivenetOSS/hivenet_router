@@ -155,7 +155,9 @@ type Router struct {
 	// pending notes), fed by the agents through /prefix-state.
 	prefixIndex *prefixindex.Index
 	// kvCursors tracks where each agent's cache changes stand.
-	kvCursors      kvCursors
+	kvCursors kvCursors
+	// prefixLimits bounds how often each agent may post /prefix-state.
+	prefixLimits   prefixRateLimits
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -441,6 +443,7 @@ func New(cfg *config.Config) (*Router, error) {
 	prefixIx := prefixindex.New(prefixindex.Config{})
 	executor.SetPrefixIndex(prefixIx)
 	executor.SetPrefixMetrics(routerMetrics)
+	executor.SetLatencyMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so
@@ -768,7 +771,17 @@ func (r *Router) Start() error {
 		WithCacheSalter(r.salter),
 		// Interim key source: the site's agent secret. To move to a sub-key of
 		// the cache-salt secret, with the tenant scope, once that is in place.
-		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))))
+		WithPrefixKeys(prefixhash.DeriveKeys([]byte(r.cfg.JWTSecret))),
+		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
+			// Wait for the engine's cache events that may have evicted the
+			// blocks before the request reached it (sent in batches every
+			// 100 ms, after the engine's next step).
+			time.AfterFunc(prefixCheckDelay, func() {
+				if res := r.prefixIndex.CheckClaim(model, agent, blocks, at, actual); res != "" {
+					r.metrics.PrefixChecked(model, res)
+				}
+			})
+		}))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -2222,6 +2235,7 @@ func (r *Router) healthMonitor() {
 			})
 			r.prefixIndex.RemoveAgent(id)
 			r.kvCursors.forget(id)
+			r.prefixLimits.forget(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)

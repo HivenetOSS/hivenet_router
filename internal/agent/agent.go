@@ -104,6 +104,11 @@ type Agent struct {
 	// Stored in an atomic pointer so sendHeartbeat reads with zero lock contention.
 	// Nil until the first successful scrape or when the engine does not implement MetricsProvider.
 	engineMetrics atomic.Pointer[domain.BackendMetrics]
+	// engineWindow turns the engine's cumulative counters into figures over
+	// the last EngineWindow (see engine_window.go).
+	engineWindow *engineWindow
+	// prefillCheck logs once whether the engine's prefill speed can be measured.
+	prefillCheck sync.Once
 
 	// backendHealthy is the result of the most recent periodic backend health check.
 	// Initialised to true at the start of each session (backend was healthy at registration).
@@ -124,6 +129,9 @@ type Agent struct {
 	// kv mirrors the engine's KV cache from its events; nil without
 	// --kv-events-endpoint.
 	kv *kvMirror
+	// kvWarnMu guards kvWarnedAt, the last unusable-endpoint warning.
+	kvWarnMu   sync.Mutex
+	kvWarnedAt time.Time
 
 	// node is the shared libp2p host (set once in Run); inFlightBy tracks the
 	// requests in flight per router peer, and sessions counts the sessions
@@ -145,10 +153,11 @@ type Agent struct {
 // The hardware collector is auto-detected: NVML when available, NullCollector otherwise.
 func NewAgent(cfg *config.AgentConfig, engine Engine) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		engine:    engine,
-		collector: hardware.NewCollector(cfg.GPUDevicesFile),
-		gater:     p2p.NewRouterGater(),
+		cfg:          cfg,
+		engine:       engine,
+		engineWindow: newEngineWindow(),
+		collector:    hardware.NewCollector(cfg.GPUDevicesFile),
+		gater:        p2p.NewRouterGater(),
 		// All backend traffic goes through this client, so the backend API key
 		// (if configured) applies to health checks and model discovery as well
 		// as inference. The key only goes to the backend and health URL hosts.
@@ -229,6 +238,7 @@ func (a *Agent) Run() error {
 	}
 	a.cfg.Model = model
 	log.Infof("Model ready: %s", a.cfg.Model)
+	a.detectGPUModel()
 	a.initPrefix()
 
 	var node host.Host
@@ -843,6 +853,14 @@ func (a *Agent) scrapeEngineMetrics(provider MetricsProvider) bool {
 		log.Debugf("engine metrics scrape failed: %v", err)
 		return false
 	}
+	a.engineWindow.apply(bm) // latency figures over the last EngineWindow, not since the engine started
+	a.prefillCheck.Do(func() {
+		if bm.PrefillComputedTokensTotal == nil || bm.PrefillSecondsTotal == nil {
+			log.Infof("Engine %s exposes no prefill counters: routers cost this agent with their default prefill speed", a.engine.Name())
+		} else {
+			log.Infof("Engine %s exposes prefill counters: routers learn this replica group's prefill speed", a.engine.Name())
+		}
+	})
 	a.engineMetrics.Store(bm)
 	return true
 }
@@ -1550,4 +1568,20 @@ func (a *Agent) holdPrefill(r *http.Request) func() {
 	a.pendingPrefill.Add(n)
 	var once sync.Once
 	return func() { once.Do(func() { a.pendingPrefill.Add(-n) }) }
+}
+
+// detectGPUModel fills an unset --gpu-model from NVML when every GPU the
+// agent uses is the same model. Routers group replicas by model, engine and
+// GPU to learn their prefill speed and decode step; a replica with no GPU
+// model is pooled with every replica of its model and engine.
+func (a *Agent) detectGPUModel() {
+	if a.cfg.GPUModel != "" {
+		return
+	}
+	if name, why := hardware.DetectGPUModel(a.cfg.GPUDevicesFile); name != "" {
+		a.cfg.GPUModel = name
+		log.Infof("GPU model %q detected (--gpu-model overrides it)", name)
+	} else {
+		log.Warnf("GPU model not detected (%s): routers pool this replica's learned speeds with every replica of model %s on %s; on a host with GPUs of several models, set --gpu-model", why, a.cfg.Model, a.engine.Name())
+	}
 }

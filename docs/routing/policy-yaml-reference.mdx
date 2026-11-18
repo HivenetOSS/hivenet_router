@@ -481,10 +481,12 @@ These gates depend on metrics exposed by the inference backend.
 | `kv_cache_utilization` | `0.0`–`1.0` | KV or token-cache fraction in use |
 | `running_requests` | `0+` | Requests currently being processed |
 | `waiting_requests` | `0+` | Requests waiting in the backend scheduler |
-| `avg_ttft_seconds` | `0+` | Average time to first token |
-| `p90_ttft_seconds` | `0+` | P90 time to first token |
-| `avg_itl_seconds` | `0+` | Average inter-token latency |
-| `p90_itl_seconds` | `0+` | P90 inter-token latency |
+| `avg_ttft_seconds` | `0+` | Average time to first token over the agent's last 60 seconds |
+| `p90_ttft_seconds` | `0+` | P90 time to first token over the last 60 seconds |
+| `avg_itl_seconds` | `0+` | Average inter-token latency over the last 60 seconds |
+| `p90_itl_seconds` | `0+` | P90 inter-token latency over the last 60 seconds |
+
+The four latency figures cover the agent's last 60 seconds, not the time since the engine started: a replica that was slow and recovered passes the gate again within a minute. With no request in the window the figure is missing, and a [missing metric](#missing-metrics) passes the gate.
 
 Backend support differs:
 
@@ -585,7 +587,6 @@ prefix_aware:
   max_waiting: 8
   busy_factor: 2.0
   tie_epsilon: 0.05
-  prefill_rate: 10000
   predicted_ttl: 120s
   pending_ttl: 5s
 ```
@@ -597,8 +598,8 @@ Sends a chat request to the candidate with the lowest estimated time to first to
 | `kv_threshold` | Number | `0.92` | (0, 1] | Exclude a candidate whose engine reports a KV-cache use at or above it |
 | `max_waiting` | Integer | `8` | 0–1000 | Exclude a candidate whose engine reports more waiting requests |
 | `busy_factor` | Number | `2.0` | 1–10 | Exclude a candidate whose requests in flight are above this times the candidates' mean (and above 4) |
-| `tie_epsilon` | Number | `0.05` | 0–1 | Candidates within this share of the best estimate (or 5 ms) are a tie, broken the same way on every router |
-| `prefill_rate` | Number | `10000` | 100–10,000,000 | Assumed prefill speed in tokens per second, used to compare tokens to seconds |
+| `tie_epsilon` | Number | `0.05` | 0–1 | Candidates within this share of the best estimate (or 5 ms) are a tie: the one that reported holding the most of the prompt wins, then a hash; both the same on every router |
+| `prefill_rate` | Number | Learned | 100–10,000,000 | Prefill speed in tokens per second, used to compare tokens to seconds. Unset: [learned from the engines](/routing/prefix-aware-routing#learned-speeds) per model, engine and GPU (10,000 until measured) |
 | `predicted_ttl` | Duration | `120s` | 1s–1h | How long blocks sent to or served by an agent count as held there |
 | `pending_ttl` | Duration | `5s` | 100ms–1m | How long new text keeps going to the agent it was first sent to |
 

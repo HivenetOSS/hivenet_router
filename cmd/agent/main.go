@@ -85,7 +85,7 @@ func main() {
 	jwtSecretFile := flag.String("jwt-secret-file", "", "Path to file containing the HMAC-SHA256 secret (env: HIVENET_ROUTER_JWT_SECRET)")
 	backendAPIKeyFile := flag.String("backend-api-key-file", "", "Path to file containing an API key sent as 'Authorization: Bearer' on every backend request, replacing the client's credentials (env: HIVENET_ROUTER_BACKEND_API_KEY)")
 	gpuDevicesFile := flag.String("gpu-devices-file", "", "Path to a file containing the GPU UUIDs assigned to the engine (NVIDIA_VISIBLE_DEVICES format). When set, hardware metrics are restricted to those GPUs only.")
-	gpuModel := flag.String("gpu-model", os.Getenv("HIVENET_ROUTER_GPU_MODEL"), "Hardware identifier used as routing metadata (e.g. RTX4090, RTX5090). Env: HIVENET_ROUTER_GPU_MODEL")
+	gpuModel := flag.String("gpu-model", os.Getenv("HIVENET_ROUTER_GPU_MODEL"), "Hardware identifier used as routing metadata (e.g. RTX4090, RTX5090). Unset: the GPU model NVML reports when all the agent's GPUs are one model. Env: HIVENET_ROUTER_GPU_MODEL")
 	deploymentID := flag.String("deployment-id", os.Getenv("HIVENET_ROUTER_DEPLOYMENT_ID"), "Identifier of the logical deployment this agent serves. Env: HIVENET_ROUTER_DEPLOYMENT_ID")
 	replicaID := flag.String("replica-id", os.Getenv("HIVENET_ROUTER_REPLICA_ID"), "Identifier of this replica; with --deployment-id it forms a stable join key for external schedulers. Env: HIVENET_ROUTER_REPLICA_ID")
 	capability := flag.String("capability", cfg.Capability, "Inference capability: llm (default), embedding, reranker")

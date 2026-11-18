@@ -236,3 +236,194 @@ func TestLearnSameAnchorDoesNotGrow(t *testing.T) {
 		t.Errorf("after expiry: %+v", s)
 	}
 }
+
+// Trust: unjudged until trustMinSamples checks; drops when predictions do not
+// come true; small predictions are not checked.
+func TestTrust(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	if !ix.Observe(a1, 100, 0) || ix.Trust(a1) != 1 {
+		t.Error("a check below trustMinPredicted must be ignored")
+	}
+	for range trustMinSamples - 1 {
+		ix.Observe(a1, 1000, 0)
+	}
+	if ix.Trust(a1) != 1 {
+		t.Error("judged before trustMinSamples checks")
+	}
+	if ix.Observe(a1, 1000, 0) {
+		t.Error("a prediction with nothing cached reported as held")
+	}
+	if tr := ix.Trust(a1); tr > 0.4 {
+		t.Errorf("trust %.2f after %d missed predictions", tr, trustMinSamples)
+	}
+	for range 20 {
+		ix.Observe(a2, 1000, 950)
+	}
+	if tr := ix.Trust(a2); tr < 0.9 {
+		t.Errorf("trust %.2f for an agent whose predictions hold", tr)
+	}
+	ix.RemoveAgent(a1)
+	if ix.Trust(a1) != 1 {
+		t.Error("a removed agent keeps its trust")
+	}
+}
+
+// An agent's KV capacity caps its board entries below the global cap.
+func TestAgentCap(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 1000})
+	ix.SetAgentCap(a1, 50)
+	blocks := make([]uint64, 200)
+	for i := range blocks {
+		blocks[i] = uint64(i + 1)
+	}
+	ix.ApplyEvents("m", a1, blocks, nil, false)
+	ix.mu.RLock()
+	n := ix.models["m"].agentBlocks[a1]
+	ix.mu.RUnlock()
+	if n > 50 {
+		t.Errorf("agent holds %d blocks, its cap is 50", n)
+	}
+}
+
+// Lookup tells apart this router's guesses (Commit), what the agent reported
+// (Learn) and what its engine confirmed (events), each as a leading depth.
+func TestDepthByOrigin(t *testing.T) {
+	ix, _ := newTestIndex(Config{})
+	anchors := []uint64{100, 101}
+	ix.Learn("m", a1, anchors, []int{2, 4}, blocks4, time.Minute) // a1 reported 4 blocks
+	m := ix.Lookup("m", anchors, []peer.ID{a1, a2})
+	ix.Commit("m", a2, anchors, m, time.Minute, 5*time.Second) // a2: a guess on the same 4
+	ix.ApplyEvents("m", a1, blocks4[:3], nil, false)           // a1's engine confirms 3
+	m = ix.Lookup("m", anchors, []peer.ID{a1, a2})
+	if m.Depth[a1] != 4 || m.Reported[a1] != 4 || m.Confirmed[a1] != 3 {
+		t.Errorf("a1: depth %d reported %d confirmed %d, want 4 4 3", m.Depth[a1], m.Reported[a1], m.Confirmed[a1])
+	}
+	if m.Depth[a2] != 4 || m.Reported[a2] != 0 || m.Confirmed[a2] != 0 {
+		t.Errorf("a2: depth %d reported %d confirmed %d, want 4 0 0 (a guess only)", m.Depth[a2], m.Reported[a2], m.Confirmed[a2])
+	}
+	// A report turns the guess into a reported holding; a gap stops the depth.
+	ix.Learn("m", a2, anchors, []int{2, 4}, blocks4, time.Minute)
+	ix.ApplyEvents("m", a2, []uint64{blocks4[0], blocks4[2]}, nil, false)
+	m = ix.Lookup("m", anchors, []peer.ID{a2})
+	if m.Reported[a2] != 4 || m.Confirmed[a2] != 1 {
+		t.Errorf("a2 after its report: reported %d confirmed %d, want 4 1", m.Reported[a2], m.Confirmed[a2])
+	}
+}
+
+var blocks4 = []uint64{11, 12, 13, 14}
+
+// An agent's text entry is its report; a routing note is this router's.
+// A decision to the same agent keeps the agent's (longer) text entry.
+func TestTextEntryIsReported(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	ix.LearnText("m", a2, []uint64{100}, time.Minute)
+	m := ix.Lookup("m", []uint64{100, 101}, []peer.ID{a1, a2})
+	if m.Pending != a2 || !m.PendingReported {
+		t.Fatalf("text entry: %+v", m)
+	}
+	ix.Commit("m", a2, []uint64{100, 101}, m, time.Minute, 5*time.Second)
+	c.t = c.t.Add(10 * time.Second) // the routing notes expired, the text entry not
+	if m := ix.Lookup("m", []uint64{100}, []peer.ID{a2}); m.Pending != a2 || !m.PendingReported {
+		t.Errorf("the decision replaced the agent's text entry: %+v", m)
+	}
+	ix.Commit("m", a1, []uint64{200}, Match{}, time.Minute, 5*time.Second)
+	if m := ix.Lookup("m", []uint64{200}, []peer.ID{a1}); m.Pending != a1 || m.PendingReported {
+		t.Errorf("routing note: %+v", m)
+	}
+}
+
+// A cap set from a small KV capacity goes back to the global one when the
+// capacity grows past it.
+func TestAgentCapResets(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 1000})
+	ix.SetAgentCap(a1, 50)
+	if ix.AgentCapKnown(a2) {
+		t.Error("an agent never capped has no known capacity")
+	}
+	if !ix.AgentCapKnown(a1) || ix.capOf(a1) != 50 {
+		t.Fatalf("cap %d", ix.capOf(a1))
+	}
+	ix.SetAgentCap(a1, 5000)
+	if !ix.AgentCapKnown(a1) || ix.capOf(a1) != 1000 {
+		t.Errorf("cap %d after the capacity grew, want the global 1000, still known (not read again every batch)", ix.capOf(a1))
+	}
+	ix.RemoveAgent(a1)
+	if ix.AgentCapKnown(a1) {
+		t.Error("a removed agent keeps its capacity")
+	}
+}
+
+// Over its cap, an agent loses this router's guesses before what it reported.
+func TestTrimDropsGuessesFirst(t *testing.T) {
+	ix, _ := newTestIndex(Config{BlocksPerAgent: 100})
+	reported := make([]uint64, 60)
+	guessed := make([]uint64, 60)
+	for i := range 60 {
+		reported[i], guessed[i] = uint64(i+1), uint64(1000+i)
+	}
+	ix.Learn("m", a1, []uint64{1}, []int{60}, reported, time.Minute)
+	ix.Learn("m", a2, []uint64{2}, []int{60}, guessed, time.Minute) // memo for anchor 2
+	m := ix.Lookup("m", []uint64{2}, []peer.ID{a1})
+	ix.Commit("m", a1, []uint64{2}, m, time.Minute, time.Second) // 120 > 100: trim
+	if m := ix.Lookup("m", []uint64{1}, []peer.ID{a1}); m.Reported[a1] != 60 {
+		t.Errorf("a1 kept %d of its 60 reported blocks", m.Reported[a1])
+	}
+}
+
+// A check judges only the blocks the engine kept since the decision: blocks
+// it evicted (or evicted and stored again) are not held against the agent;
+// blocks it still holds and did not serve from cache are.
+func TestCheckClaim(t *testing.T) {
+	ix, c := newTestIndex(Config{})
+	ix.ApplyEvents("m", a1, blocks12, nil, false)
+	at := ix.Lookup("m", []uint64{1}, []peer.ID{a1}).At
+	c.t = c.t.Add(time.Second)
+	// Too small to judge.
+	if r := ix.CheckClaim("m", a1, blocks12[:3], at, 0); r != "" {
+		t.Errorf("3 blocks: %q, want no check", r)
+	}
+	// The engine evicted all but 2 blocks before the request reached it.
+	ix.ApplyEvents("m", a1, nil, blocks12[2:], false)
+	for range 10 {
+		if r := ix.CheckClaim("m", a1, blocks12, at, 128); r != CheckEvicted {
+			t.Fatalf("after evictions: %q, want %q", r, CheckEvicted)
+		}
+	}
+	// It stored them again (the request recomputed them): still not held all along.
+	ix.ApplyEvents("m", a1, blocks12[2:], nil, false)
+	if r := ix.CheckClaim("m", a1, blocks12, at, 128); r != CheckEvicted {
+		t.Errorf("evicted then stored again: %q, want %q", r, CheckEvicted)
+	}
+	if tr := ix.Trust(a1); tr != 1 {
+		t.Errorf("trust %.2f after evictions only, want 1", tr)
+	}
+	// An agent whose engine still holds the blocks but served none of them.
+	ix.ApplyEvents("m", a2, blocks12, nil, false)
+	at = ix.Lookup("m", []uint64{1}, []peer.ID{a2}).At
+	c.t = c.t.Add(time.Second)
+	for range trustMinSamples {
+		if r := ix.CheckClaim("m", a2, blocks12, at, 0); r != CheckMissed {
+			t.Fatalf("held but not served: %q, want %q", r, CheckMissed)
+		}
+	}
+	if tr := ix.Trust(a2); tr > 0.4 {
+		t.Errorf("trust %.2f for an agent whose kept blocks were never cached", tr)
+	}
+	// A repeated store event for blocks it holds changes nothing.
+	ix.ApplyEvents("m", a2, blocks12, nil, false)
+	if r := ix.CheckClaim("m", a2, blocks12, at, 0); r != CheckMissed {
+		t.Errorf("after a repeated store event: %q, want %q", r, CheckMissed)
+	}
+	// Partly evicted, the rest served: judged on what it kept, and held.
+	ix.ApplyEvents("m", a2, nil, blocks12[8:], false)
+	if r := ix.CheckClaim("m", a2, blocks12, at, 8*64); r != CheckHeld {
+		t.Errorf("8 kept and served: %q, want %q", r, CheckHeld)
+	}
+}
+
+var blocks12 = []uint64{201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212}
+
+// holds reports whether agent holds a live entry in hs.
+func holds(hs []holder, agent peer.ID, now int64) bool {
+	return holdsIf(hs, agent, func(h holder) bool { return h.exp == 0 || h.exp > now })
+}

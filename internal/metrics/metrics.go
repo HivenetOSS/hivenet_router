@@ -276,8 +276,16 @@ type RouterMetrics struct {
 	apiKeyPushRejected *prometheus.CounterVec
 	// prefixRoutingTotal counts prefix-aware selections per model and outcome.
 	prefixRoutingTotal *prometheus.CounterVec
+
+	// prefixPrefillRate and prefixDecodeStep are the prefill speed and decode
+	// step the prefix-aware cost learned per model, engine and GPU.
+	prefixPrefillRate *prometheus.GaugeVec
+	prefixDecodeStep  *prometheus.GaugeVec
 	// prefixIndexEntries is the size of the prefix memory, per kind.
 	prefixIndexEntries *prometheus.GaugeVec
+	// prefixChecksTotal counts cache-hit predictions checked against the
+	// engines' reports, per model and result.
+	prefixChecksTotal *prometheus.CounterVec
 
 	// policyReloadTotal counts policy reload attempts.
 	// Labels: trigger (api|sighup), result (success|error).
@@ -927,6 +935,20 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"model"},
 		),
+		prefixPrefillRate: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_prefill_rate_tokens_per_second",
+				Help: "Prefill speed the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
+		prefixDecodeStep: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "hivenet_prefix_decode_step_seconds",
+				Help: "Decode step the prefix-aware cost learned from the engines, pooled over the replicas of a model, engine and GPU (0 = not learned yet).",
+			},
+			[]string{"model", "engine", "gpu"},
+		),
 		prefixRoutingTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_prefix_routing_total",
@@ -940,6 +962,13 @@ func NewRouterMetrics() *RouterMetrics {
 				Help: "Entries in the router's prefix memory, per kind: memo (text prefixes), memo_ends (memo entries indexed by their last block; follows memo), blocks (cached blocks on the board), pending (notes for text in flight).",
 			},
 			[]string{"kind"},
+		),
+		prefixChecksTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_prefix_checks_total",
+				Help: "Prefix-aware checks of the blocks an agent's engine confirmed holding against the cached tokens it reported, per model: held (half or more came true), missed, or evicted (evicted before the request reached the engine: not judged).",
+			},
+			[]string{"model", "result"},
 		),
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -1089,7 +1118,10 @@ func NewRouterMetrics() *RouterMetrics {
 		m.admissionQueueDepth,
 		m.queueWaitSeconds,
 		m.prefixRoutingTotal,
+		m.prefixPrefillRate,
+		m.prefixDecodeStep,
 		m.prefixIndexEntries,
+		m.prefixChecksTotal,
 		// Policy management
 		m.policyReloadTotal,
 		m.apiKeyPushRejected,
@@ -1792,12 +1824,26 @@ func (m *RouterMetrics) PrefixRouted(model, outcome string) {
 	m.prefixRoutingTotal.With(prometheus.Labels{"model": model, "outcome": outcome}).Inc()
 }
 
+// LatencyModel publishes the learned prefill speed and decode step of a
+// group of replicas. Implements policy.LatencyMetrics.
+func (m *RouterMetrics) LatencyModel(model, engine, gpu string, prefillRate, decodeStep float64) {
+	l := prometheus.Labels{"model": model, "engine": engine, "gpu": gpu}
+	m.prefixPrefillRate.With(l).Set(prefillRate)
+	m.prefixDecodeStep.With(l).Set(decodeStep)
+}
+
 // PrefixIndexSize sets the prefix-memory gauges.
 func (m *RouterMetrics) PrefixIndexSize(memo, memoEnds, blocks, pending int) {
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo"}).Set(float64(memo))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo_ends"}).Set(float64(memoEnds))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "blocks"}).Set(float64(blocks))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
+}
+
+// PrefixChecked counts one check of an agent's confirmed cache: result is
+// held, missed or evicted.
+func (m *RouterMetrics) PrefixChecked(model, result string) {
+	m.prefixChecksTotal.With(prometheus.Labels{"model": model, "result": result}).Inc()
 }
 
 // PolicyReload increments the policy reload counter.

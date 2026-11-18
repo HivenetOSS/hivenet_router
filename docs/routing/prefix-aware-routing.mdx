@@ -27,17 +27,41 @@ The router never tokenizes a request and never stores prompt text.
 6. **Choice.** Busy candidates are excluded first. Among the rest, the strategy estimates for each candidate:
 
    ```text
-   (prompt tokens waiting for prefill on it + prompt tokens it does not hold) / prefill_rate
-     + running requests reported by its engine × inter-token latency
+   (prompt tokens waiting for prefill on it + prompt tokens it does not hold) / prefill speed
+     + running requests reported by its engine × decode step
    ```
 
-   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. A request counts until its first response byte; a non-streamed response has none before the whole answer, so its prompt counts until the generation ends and an agent serving long non-streamed answers looks more queued than it is. The lowest estimate wins. Near-ties are broken by a hash of the request's first anchor and the agent, the same way on every router.
+   The prefill speed and the decode step are [learned from the engines](#learned-speeds), never configured.
+
+   Prompt tokens waiting for prefill are the larger of what this router sent and the agent has not started answering, and what the agent reports for all routers. A request counts until its first response byte; a non-streamed response has none before the whole answer, so its prompt counts until the generation ends and an agent serving long non-streamed answers looks more queued than it is. The lowest estimate wins. Among near-ties, the candidate that reported holding the most of the prompt (by its engine's cache events, the prompts it served, or its text entries), weighted by its [trust](#agent-trust), wins, so a conversation stays on the agent that served its earlier turns when the load differs only a little. Every router receives the same reports, so they break the tie the same way; equal holdings go to a hash of the request's first anchor and the agent.
 
 Anchors and block hashes are keyed with a secret derived from the site's agent secret (`HIVENET_ROUTER_JWT_SECRET`), so they cannot be checked against a guessed text without it. Token IDs never leave the agent: they can be turned back into text with the model's public tokenizer, a block hash cannot. Prompts, tokens and hashes are never logged.
 
 <Note>
 Everything the strategy knows is advice. The engine checks its own cache, so a wrong entry only makes a request slower, never wrong.
 </Note>
+
+## Learned speeds
+
+The cost converts tokens into seconds with two numbers that depend on the model, the GPU, the quantization and the engine: the **prefill speed** (prompt tokens per second) and the **decode step** (seconds per generated token). Nothing has to be set: they are measured, per group of replicas of the same model, engine and GPU.
+
+<Note>
+**The GPU of each replica.** An agent finds its GPU model through NVML (for example `NVIDIA GeForce RTX 5090`) when all the GPUs it uses (its `--gpu-devices-file`, or every visible GPU) are one model. Where it cannot (no NVML, as in an agent container without GPU access, or a host with GPUs of several models), it logs a warning, and the replica is pooled with every replica of its model and engine. On such hosts, set `--gpu-model` on the agent; it always overrides the detected name. Use the same value on agents of the same hardware.
+</Note>
+
+1. **Each agent** reads its engine's counters every scrape and computes, over its **last 60 seconds**, the prefill speed (prompt tokens the engine computed, cache hits excluded, divided by the time requests spent in prefill) and the decode step (decode seconds divided by decode tokens, for every request; the average inter-token latency for an engine without these counters). It sends both, with how many requests and tokens they cover, in its heartbeat.
+2. **Each router** pools the reports of the replicas of a **group** — same model, engine and GPU — weighting each by how much it covers: prefill seconds for the prefill speed (total tokens over total seconds, so short prompts, where a fixed per-request cost dominates, do not outweigh long ones), decode tokens for the decode step. Replicas of one model on one kind of GPU are one group; replicas on different GPUs or engines form separate groups.
+3. **The cost** of every replica of the group uses the pooled figures. A group whose replicas reported nothing in the last minute keeps its last figures (they describe the hardware, not a moment); a group never measured uses the defaults: 10,000 tokens per second and 20 ms.
+
+Pooling is deliberate: a replica's cost depends on its group's figures, which every replica of the group feeds, not on its own past figures, which change only when it is used. A replica avoided once is not kept away.
+
+| Engine | Prefill speed from | Decode step from |
+| --- | --- | --- |
+| vLLM | `vllm:request_prefill_kv_computed_tokens` and `vllm:request_prefill_time_seconds` (older versions: `prompt_tokens_total` − `prompt_tokens_cached_total`) | `vllm:request_decode_time_seconds` over the generation tokens |
+| SGLang | `sglang:uncached_prompt_tokens_histogram` and `sglang:per_stage_req_latency_seconds{stage="prefill_forward"}` (rank 0) | e2e latency − TTFT over the generation tokens (its inter-token latency histogram covers streamed requests only) |
+| llama.cpp, Ollama, custom | Not measured: defaults | Not measured: defaults |
+
+Tested with vLLM 0.31 and SGLang 0.5.23. At start-up the agent logs whether its engine exposes the prefill counters. A `prefill_rate` set in the policy replaces the learned prefill speed.
 
 ## Engines
 
@@ -81,6 +105,42 @@ The agent re-chunks the engine's blocks (16 tokens in vLLM, 1 in SGLang) into th
 
 Events only describe new blocks. A prompt that extends a prefix the engine cached before the agent subscribed (for example after an agent restart) is placed once the agent serves that prompt and learns its tokens. When events are lost (a sequence gap, a reconnection), the agent tells the routers to drop its blocks and rebuilds from new events; it logs a warning with the number of such resets, at most once a minute. Frequent resets mean the engine publishes faster than the agent reads. vLLM publishes events with its next scheduling step, so a cache reset reaches the routers with the next request. Without KV events, the board holds what each agent served, for `predicted_ttl`.
 
+## Measured gains
+
+Measured with 4 replicas of a 7B model on 32 GB GPUs, a KV cache under pressure (40,000 tokens per replica) and a mixed workload (multi-turn chat, a long shared system prompt, RAG with the document in the system prompt, parallel sub-requests on one context), compared with `least-loaded`:
+
+| Workload | Median time to first token |
+| --- | --- |
+| Shared system prompt (6k tokens) | 2.2× lower |
+| RAG, 12k-token documents | 4.7× lower |
+| Parallel sub-requests on an 8k context | 4.3× lower |
+| Multi-turn chat | p99 29–48 % lower |
+| Working set that fits the cache, 64k-token prompts | 21× lower |
+
+Gains grow with prompt length. They shrink when the cache cannot hold the working set and when the reuse is inside one message (see [Limits](#limits)).
+
+## Agent trust
+
+When the engine reports how many prompt tokens it served from its cache, the router checks the agent's claim: the leading blocks its engine confirmed by [KV events](#kv-events) against what the engine reused. An agent whose confirmed blocks keep failing counts less (its cached blocks weigh less in the estimate), so a misconfigured agent, or one relaying another engine's events, stops attracting traffic.
+
+Only confirmed blocks are checked. What the router predicted itself (a copy of a prompt sent before the first prefill ended) or what an agent served but its engine has not confirmed yet is not a claim the agent made, so it is not held against it.
+
+Nor are blocks the engine evicted after the routing decision. Under KV-cache pressure an engine evicts confirmed blocks before the request reaches it; its cache events report the eviction, and the router waits half a second after the answer for them before it checks. Only the blocks the engine kept all along are judged (a block evicted and stored again does not count), and when too few are left the check is skipped. An agent relaying another engine's events cannot use this: that engine does not evict the blocks the agent did not serve from cache.
+
+The check needs KV events and an engine that reports cached tokens: vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It runs on non-streamed requests, on streamed chat requests that ask for usage (`"stream_options": {"include_usage": true}`), and on `/v1/messages` responses that carry `cache_read_input_tokens`. Agents without KV events are not judged. `hivenet_prefix_checks_total{result="missed"}` counts the checks that did not hold, `result="evicted"` the checks skipped because the engine evicted the blocks first.
+
+<Note>
+The engine's usage reaches the router through the agent, so trust catches broken and misconfigured agents, not a compromised one: such an agent could report matching cached tokens too. What bounds a compromised agent is the per-agent caps below and that everything is advice; an agent joins a site only with the site's agent secret.
+</Note>
+
+## Security
+
+- The router never stores prompt text: anchors and block hashes are keyed hashes, and no endpoint, log or metric label exposes them.
+- Token IDs never leave the agent: they are stripped from responses and never sent to a router. The KV-event address must stay local ([KV events](#kv-events)).
+- Block hashes include the request's `cache_salt`, so tenants whose engine cache is separated never share blocks. Anchors are not scoped per tenant yet: two tenants sending the same text match the same memo entry, which at worst sends one of them to an agent whose cached blocks it cannot use (a cache miss, no faster answer, so no timing signal).
+- Each agent may post at most 50 cache batches a second (bursts of 100), checked with its session before the batch is read; holds at most what its engine's KV cache can (1.25 × the KV capacity it reports; over it, entries go in this order: expired predictions, the router's own guesses, reported blocks, confirmed blocks, in no particular order within each kind); and loses weight when its confirmed blocks are not cached ([Agent trust](#agent-trust)).
+- Everything is advice: a wrong entry only costs the request a cache miss.
+
 ## Busy agents
 
 A candidate is excluded, whatever it holds, when:
@@ -101,12 +161,15 @@ routing_policy:
     max_waiting: 8
     busy_factor: 2.0
     tie_epsilon: 0.05
-    prefill_rate: 10000
     predicted_ttl: 120s
     pending_ttl: 5s
 ```
 
-See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field.
+See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each field. Guidance:
+
+- `prefill_rate`: leave it unset. The prefill speed is [learned](#learned-speeds) per model, engine and GPU; set it only to pin a value, which then applies to every replica.
+- `kv_threshold`: lower it (e.g. 0.85) when the KV cache is small for the prompts, so new prefixes go to replicas that can keep them.
+- `pending_ttl`: raise it when new prompts take long to prefill (very long prompts), so copies arriving meanwhile go together.
 
 ## Metrics
 
@@ -114,6 +177,9 @@ See the [policy reference](/routing/policy-yaml-reference#prefix-aware) for each
 | --- | --- |
 | `hivenet_prefix_routing_total{model, outcome}` | Selections: `hit` (the chosen agent holds blocks of the prompt), `pending`, `miss`, `busy`, `no_anchor` |
 | `hivenet_prefix_index_entries{kind}` | Size of the router's memory: `memo`, `memo_ends` (memo entries indexed by their last block; follows `memo`), `blocks`, `pending` |
+| `hivenet_prefix_prefill_rate_tokens_per_second{model, engine, gpu}` | Learned prefill speed of a group of replicas |
+| `hivenet_prefix_decode_step_seconds{model, engine, gpu}` | Learned decode step of a group of replicas |
+| `hivenet_prefix_checks_total{model, result}` | Confirmed blocks checked against the engine's cached tokens: `held`, `missed`, or `evicted` (evicted before the request reached the engine: not judged) |
 
 Share of requests sent to an agent that holds part of the prompt:
 
@@ -128,3 +194,4 @@ sum by (model) (rate(hivenet_prefix_routing_total[5m]))
 - Without KV events the board records what agents served, not what their engines still hold: a block the engine evicted counts as held until `predicted_ttl` expires. The engine's own cache check keeps the answer correct.
 - Text shared *inside* one message (for example a document and a different question in the same user message) is not matched: anchors cover whole messages.
 - The router's memory is per process; after a restart the agents send snapshots of their caches, and the memo rebuilds from new traffic.
+- One batch from an agent carries at most 524,288 cached blocks (32M tokens of engine cache). An engine that holds more sends part of its cache in snapshots, and the agent logs a warning. An agent whose batches a router keeps refusing logs a warning once a minute.

@@ -78,6 +78,10 @@ func (e *Evaluator) Snapshot(peerID peer.ID, agent *domain.Agent) AgentSnapshot 
 		snap.P90TTFTSeconds = bm.P90TTFTSeconds
 		snap.AvgITLSeconds = bm.AvgITLSeconds
 		snap.P90ITLSeconds = bm.P90ITLSeconds
+		snap.PrefillTokensPerSecond = bm.PrefillTokensPerSecond
+		snap.PrefillSeconds = bm.PrefillSeconds
+		snap.DecodeStepSeconds = bm.DecodeStepSeconds
+		snap.DecodeSamples = bm.DecodeSamples
 	}
 
 	if hw, err := e.storage.GetHardwareSnapshot(peerID); err == nil && hw != nil {
