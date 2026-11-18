@@ -121,7 +121,7 @@ func (a *Agent) initPrefix() {
 	if ep := a.cfg.KVEventsEndpoint; ep != "" && st.source != sourceText {
 		if !isLocalEndpoint(ep) {
 			if !a.cfg.KVEventsAllowRemote {
-				log.Errorf("kv events: %s is not a loopback address; refusing it (the events carry prompt token IDs and the socket has no authentication). Use 127.0.0.1, or --kv-events-allow-remote for an address only this pod reaches", ep)
+				log.Errorf("kv events: %s is not a loopback address or a Unix socket; refusing it (the events carry prompt token IDs and the socket has no authentication). Use 127.0.0.1 or ipc://, or --kv-events-allow-remote for an address only this pod reaches", ep)
 				return
 			}
 			log.Warnf("kv events: %s is not a loopback address (allowed by --kv-events-allow-remote); it must not be reachable from other hosts", ep)

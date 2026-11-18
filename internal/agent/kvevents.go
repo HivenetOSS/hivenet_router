@@ -88,7 +88,11 @@ type kvDelta struct {
 const (
 	kvDeltaCap = 1024
 	orphanCap  = 256
-	recentCap  = 64
+	// recentCap bounds the openings kept for the orphan guard (at most
+	// orphanMatch tokens each, ~16 KB, so ~4 MB). The guard looks back
+	// orphanTTL or recentCap prompts, whichever is shorter: about 25 prompts
+	// per second per agent before it covers less than orphanTTL.
+	recentCap = 256
 	// kvResetLogEvery throttles the warning for lost events.
 	kvResetLogEvery = time.Minute
 	orphanTTL       = 10 * time.Second
@@ -298,7 +302,10 @@ func (m *kvMirror) remember(tokens []int, scope string, now time.Time) {
 }
 
 // servedElsewhere reports whether a prompt served under another scope in the
-// last orphanTTL opened with prefix. Caller holds m.mu.
+// last orphanTTL opened with prefix. Caller holds m.mu. It sees only the last
+// recentCap prompts: on an agent serving more than recentCap prompts per
+// orphanTTL it looks back less than orphanTTL, and an orphan two tenants could
+// own may then be credited to the one whose prompt arrived later.
 func (m *kvMirror) servedElsewhere(prefix []int, scope string, now time.Time) bool {
 	for _, r := range m.recent {
 		if r.scope == scope || now.Sub(r.at) > orphanTTL || len(r.tokens) < len(prefix) {
@@ -587,11 +594,16 @@ func (a *Agent) consumeKVEvents(endpoint string) {
 	}
 }
 
-// isLocalEndpoint reports whether a ZMQ endpoint is on a loopback address.
+// isLocalEndpoint reports whether a ZMQ endpoint is local: a loopback address,
+// a Unix socket (ipc://) or in-process (inproc://).
 func isLocalEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return false
+	}
+	switch u.Scheme {
+	case "ipc", "inproc":
+		return true // a Unix socket or an in-process queue: not on the network
 	}
 	host := u.Hostname()
 	if host == "localhost" {

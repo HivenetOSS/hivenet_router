@@ -329,13 +329,15 @@ func TestKVMirror_SaltedOrphans(t *testing.T) {
 
 func TestIsLocalEndpoint(t *testing.T) {
 	for ep, want := range map[string]bool{
-		"tcp://127.0.0.1:5557": true,
-		"tcp://localhost:5557": true,
-		"tcp://[::1]:5557":     true,
-		"tcp://10.0.0.5:5557":  false,
-		"tcp://*:5557":         false,
-		"tcp://0.0.0.0:5557":   false,
-		"not a url\x00":        false,
+		"tcp://127.0.0.1:5557":    true,
+		"tcp://localhost:5557":    true,
+		"tcp://[::1]:5557":        true,
+		"tcp://10.0.0.5:5557":     false,
+		"tcp://*:5557":            false,
+		"tcp://0.0.0.0:5557":      false,
+		"not a url\x00":           false,
+		"ipc:///run/vllm/kv.sock": true,
+		"inproc://kv-events":      true,
 	} {
 		if got := isLocalEndpoint(ep); got != want {
 			t.Errorf("isLocalEndpoint(%q) = %v, want %v", ep, got, want)
