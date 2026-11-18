@@ -116,7 +116,7 @@ Measured with 3 routers and 6 replicas of a 7B model (4 vLLM, 2 SGLang) on 32 GB
 | RAG, ~12k-token document in its own message | 1.3× lower | 1.2× lower |
 | Chat p99 | 1.4× lower | 1.2× lower |
 
-Gains grow with prompt length and with how many requests share a beginning. They shrink when the cache cannot hold the working set, and there is none when the reuse is inside one message (see [Limits](#limits)). The setup, the exact workload, the algorithm's design choices and the full results are in the [technical report](/routing/prefix-aware-report).
+Gains grow with prompt length and with how many requests share a beginning. They shrink when the cache cannot hold the working set, and there is none when the reuse is inside one message (see [Limits](#limits)). The setup, the exact workload, the algorithm's design choices and the full results are in the [technical report](/reports/prefix-aware-routing).
 
 ## Agent trust
 

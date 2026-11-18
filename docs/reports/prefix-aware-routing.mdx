@@ -1,7 +1,7 @@
 ---
 title: "Prefix-aware routing: technical report"
 description: "What changes when you replace least-loaded with KV-cache aware routing: the design, why it was chosen, and measurements on real engines."
-sidebarTitle: "Technical report"
+sidebarTitle: "Prefix-aware routing"
 ---
 
 **In short:** on a mixed workload with a KV cache under pressure, switching a model's routing from `least-loaded` to `prefix-aware` cut the median time to first token of multi-turn chat by **3×** (from about 200 ms to about 63 ms), and that of requests sharing a long system prompt by about **2×**. The tail did not get worse. Three routers made the same choice for the same prompt, and with tenant isolation on, no tenant's cache was reused by another. No model, GPU or client change: one line of policy.
