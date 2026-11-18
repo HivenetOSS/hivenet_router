@@ -61,8 +61,11 @@ type Agent struct {
 	// valid once hasReport); sentSinceReport counts what this router forwarded
 	// since that report, which the report could not include yet.
 	reportedInFlight int
-	sentSinceReport  int
-	hasReport        bool
+	// reportedPrefill is the prompt tokens the agent last reported waiting
+	// for prefill, from all routers.
+	reportedPrefill int
+	sentSinceReport int
+	hasReport       bool
 
 	// routers is the agent's last list of the routers it is connected to
 	// (libp2p peer ID → requests in flight for it), reported at routersAt.
@@ -216,6 +219,39 @@ func (a *Agent) loadLocked() int {
 	return max(a.ActiveRequests, a.reportedInFlight+a.sentSinceReport)
 }
 
+// InFlight is the agent's load without the requests this router sent since
+// the agent's last report: the larger of what this router has in flight
+// there and what the agent last reported. Unlike GetLoad it does not count a
+// request that already finished as busy until the next report, so a burst of
+// short requests does not make an idle agent look busy.
+func (a *Agent) InFlight() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
+		return a.ActiveRequests
+	}
+	return max(a.ActiveRequests, a.reportedInFlight)
+}
+
+// SetReportedPrefill records the prompt tokens waiting for prefill on the
+// agent, from all routers, as its last report says.
+func (a *Agent) SetReportedPrefill(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reportedPrefill = max(n, 0)
+}
+
+// ReportedPrefill is the agent's last reported prefill backlog in tokens, 0
+// when its report is too old.
+func (a *Agent) ReportedPrefill() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasReport || time.Since(a.reportedAt) > a.reportMaxAgeLocked() {
+		return 0
+	}
+	return a.reportedPrefill
+}
+
 // UpdateLastSeen updates the last seen timestamp
 func (a *Agent) UpdateLastSeen() {
 	a.mu.Lock()
@@ -362,28 +398,60 @@ type BackendMetrics struct {
 	// Source: vllm:num_preemptions_total. Use rate() in Prometheus to detect cache thrashing.
 	PreemptionsTotal *float64 `json:"preemptions_total,omitempty"`
 
-	// AvgTTFTSeconds is the running average time-to-first-token in seconds,
-	// derived from vllm:time_to_first_token_seconds histogram (sum/count).
-	// Nil when no requests have completed yet (count == 0).
+	// AvgTTFTSeconds is the average time-to-first-token in seconds over the
+	// agent's last EngineWindow (from the engine's TTFT histogram sum/count,
+	// differenced between the window's first and last scrape). Nil when no
+	// request reached its first token in the window: a replica that was slow
+	// once is not judged on it after it recovered.
 	AvgTTFTSeconds *float64 `json:"avg_ttft_seconds,omitempty"`
 
-	// P90TTFTSeconds is the 90th-percentile time-to-first-token in seconds,
-	// estimated via linear interpolation from vllm:time_to_first_token_seconds histogram buckets.
-	// Nil when no requests have completed yet.
+	// P90TTFTSeconds is the 90th-percentile time-to-first-token in seconds
+	// over the same window, interpolated from the window's bucket counts. Nil
+	// when no request reached its first token in the window.
 	//
 	// Kept as a scalar field (rather than deriving from TTFTHistogram at query time)
 	// because the routing policy evaluator reads this value synchronously from the
 	// in-process snapshot at route-decision time.
 	P90TTFTSeconds *float64 `json:"p90_ttft_seconds,omitempty"`
 
-	// AvgITLSeconds is the running average inter-token latency in seconds,
-	// derived from vllm:inter_token_latency_seconds histogram (sum/count).
-	// Nil when no tokens have been generated yet (count == 0).
+	// AvgITLSeconds is the average inter-token latency in seconds over the
+	// agent's last EngineWindow, like AvgTTFTSeconds. Nil when no token was
+	// generated in the window.
 	AvgITLSeconds *float64 `json:"avg_itl_seconds,omitempty"`
 
-	// P90ITLSeconds is the 90th-percentile inter-token latency in seconds.
-	// See P90TTFTSeconds for why this is kept as a scalar alongside the histogram.
+	// P90ITLSeconds is the 90th-percentile inter-token latency in seconds
+	// over the same window.
 	P90ITLSeconds *float64 `json:"p90_itl_seconds,omitempty"`
+
+	// DecodeStepSeconds is the time one decode step took over the agent's
+	// last EngineWindow: decode seconds over decode tokens (every request,
+	// streamed or not), else the windowed average inter-token latency. Nil
+	// when nothing was decoded in the window.
+	DecodeStepSeconds *float64 `json:"decode_step_seconds,omitempty"`
+
+	// DecodeSamples is the number of decode tokens DecodeStepSeconds covers
+	// (its weight when the router pools replicas).
+	DecodeSamples float64 `json:"decode_samples,omitempty"`
+
+	// PrefillTokensPerSecond is the engine's prefill speed over the agent's
+	// last EngineWindow: prompt tokens it computed (cache hits excluded)
+	// divided by the time requests spent in prefill. Nil when the engine does
+	// not expose both counters, or no request was prefilled in the window.
+	PrefillTokensPerSecond *float64 `json:"prefill_tokens_per_second,omitempty"`
+
+	// PrefillSeconds is the prefill time PrefillTokensPerSecond covers: its
+	// weight when the router pools replicas, so a burst of short prompts
+	// (where a fixed per-request cost dominates) does not outweigh the time
+	// spent on long ones.
+	PrefillSeconds float64 `json:"prefill_seconds,omitempty"`
+
+	// PrefillComputedTokensTotal and PrefillSecondsTotal are the engine's
+	// cumulative counters behind PrefillTokensPerSecond (prompt tokens
+	// computed, seconds spent in prefill), read by the agent's window. Not
+	// sent to the router.
+	PrefillComputedTokensTotal *float64 `json:"-"`
+	PrefillSecondsTotal        *float64 `json:"-"`
+	PrefillRequestsTotal       *float64 `json:"-"`
 
 	// PredictedTokensPerSecond is the token generation throughput in tokens/sec,
 	// measured over the last second. Source: llamacpp:predicted_tokens_seconds (llama.cpp only).

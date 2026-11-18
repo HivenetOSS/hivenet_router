@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
+
+package policy
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"hivenet_router/internal/domain"
+	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/prefixindex"
+	"hivenet_router/test/testutil"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+)
+
+type outcomes map[string]int
+
+func (o outcomes) PrefixRouted(_, outcome string) { o[outcome]++ }
+
+type agentList map[string][]*domain.Agent
+
+func (l agentList) ListByModel(model string) []*domain.Agent { return l[model] }
+
+func llm(id string) *domain.Agent {
+	return domain.NewAgent(peer.ID(id), domain.AgentMetadata{Model: "m", Capability: domain.CapabilityLLM}, "")
+}
+
+func prefixExecutor(ix PrefixIndex, rec PrefixMetrics, agents ...*domain.Agent) *Executor {
+	stor := testutil.NoopStorage{}
+	e := NewExecutor(agentList{"m": agents}, NewEvaluator(stor, metrics.NewUniversalCounterStore(stor, nil)),
+		&Policy{RoutingPolicy: PolicyStep{Strategy: "prefix-aware", MaxTries: 3}}, 3, 0)
+	e.SetPrefixIndex(ix)
+	e.SetPrefixMetrics(rec)
+	return e
+}
+
+// route selects for anchors (with sizes ~1k tokens each) and releases the slot.
+func route(t *testing.T, e *Executor, anchors []uint64) *domain.Agent {
+	t.Helper()
+	s := e.NewSession("m", domain.CapabilityLLM)
+	sizes := make([]int, len(anchors))
+	for i := range sizes {
+		sizes[i] = 1000
+	}
+	s.SetPrefix(&PrefixRequest{Anchors: anchors, Sizes: sizes})
+	a, err := s.Select(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ReleasePrefill()
+	a.DecrementLoad()
+	return a
+}
+
+func blocks(n int) []uint64 {
+	out := make([]uint64, n)
+	for i := range out {
+		out[i] = uint64(i + 1)
+	}
+	return out
+}
+
+// The agent that holds the prompt's blocks wins over an idle one.
+func TestPrefixAware_HitWins(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	a, b := llm("a"), llm("b")
+	e := prefixExecutor(ix, rec, a, b)
+	ix.Learn("m", b.ID, []uint64{100, 101}, []int{20, 31}, blocks(31), time.Minute)
+	for range 5 {
+		if got := route(t, e, []uint64{100, 101, 102}); got != b {
+			t.Fatalf("chose %s, want b (holds the prompt)", got.ID)
+		}
+	}
+	if rec[PrefixOutcomeHit] != 5 {
+		t.Errorf("outcomes %v", rec)
+	}
+}
+
+// Without knowledge, two routers (two executors) break ties the same way,
+// and different texts spread over the agents.
+func TestPrefixAware_TieIsTheSameOnEveryRouter(t *testing.T) {
+	agents := []*domain.Agent{llm("a"), llm("b"), llm("c"), llm("d")}
+	r1 := prefixExecutor(prefixindex.New(prefixindex.Config{}), nil, agents...)
+	r2 := prefixExecutor(prefixindex.New(prefixindex.Config{}), nil, agents...)
+	used := map[peer.ID]bool{}
+	for i := range 100 {
+		anchors := []uint64{uint64(1000 + i)}
+		x, y := route(t, r1, anchors), route(t, r2, anchors)
+		if x != y {
+			t.Fatalf("text %d: router 1 chose %s, router 2 %s", i, x.ID, y.ID)
+		}
+		used[x.ID] = true
+	}
+	if len(used) < 3 {
+		t.Errorf("100 new texts reached only %d agents", len(used))
+	}
+}
+
+// A near-tie goes to the agent that holds more of the prompt, even when the
+// rendezvous hash prefers the other: a conversation stays on the agent that
+// served its earlier turns when both hold the shared system prompt and the
+// load differs a little.
+func TestPrefixAware_TieGoesToTheDeeperHolder(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	a, b := llm("a"), llm("b")
+	if hrw(100, a.ID) < hrw(100, b.ID) {
+		a, b = b, a // a is the agent the hash prefers
+	}
+	e := prefixExecutor(ix, rec, a, b)
+	shared := blocks(10)
+	ix.Learn("m", a.ID, []uint64{100}, []int{10}, shared, time.Minute)
+	ix.Learn("m", b.ID, []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute)
+	// b's 128 extra cached tokens save ~13 ms; 200 queued tokens cost it 20 ms,
+	// so b is ~7 ms slower: within the 5% tie window.
+	e.prefill.add(b.ID, 200)
+	if got := route(t, e, []uint64{100, 101, 102}); got != b {
+		t.Errorf("chose %s, want %s (holds the conversation)", got.ID, b.ID)
+	}
+	// Outside the window the cost wins (a new last message: the first one
+	// left a pending note on b).
+	e.prefill.add(b.ID, 2000)
+	if got := route(t, e, []uint64{100, 101, 103}); got != a {
+		t.Errorf("chose %s, want %s (b's queue is long)", got.ID, a.ID)
+	}
+}
+
+// New text sent to an agent leaves a pending note: a copy that arrives before
+// the agent reports goes to the same agent.
+func TestPrefixAware_PendingKeepsCopiesTogether(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	e := prefixExecutor(ix, rec, llm("a"), llm("b"), llm("c"))
+	anchors := []uint64{7, 8}
+	first := route(t, e, anchors)
+	// Load the chosen agent a little: the pending credit must still win.
+	first.TryAcquireSlot()
+	defer first.DecrementLoad()
+	if got := route(t, e, anchors); got != first {
+		t.Errorf("copy went to %s, first to %s", got.ID, first.ID)
+	}
+	if rec[PrefixOutcomePending] != 1 {
+		t.Errorf("outcomes %v", rec)
+	}
+}
+
+// The prefill queue counts: an agent holding a small prefix behind a long
+// queue loses to an idle one.
+func TestPrefixAware_PrefillQueue(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	a, b := llm("a"), llm("b")
+	e := prefixExecutor(ix, nil, a, b)
+	ix.Learn("m", a.ID, []uint64{100}, []int{2}, blocks(2), time.Minute) // 128 tokens cached on a
+	e.prefill.add(a.ID, 50_000)                                          // 5 s of prefill queued on a
+	if got := route(t, e, []uint64{100, 101}); got != b {
+		t.Errorf("chose %s, want b: a's queue costs more than its cache saves", got.ID)
+	}
+}
+
+// Busy agents are excluded whatever they hold; all busy -> least-loaded.
+func TestPrefixAware_Busy(t *testing.T) {
+	ix, rec := prefixindex.New(prefixindex.Config{}), outcomes{}
+	s := (&Executor{prefixIndex: ix, prefixMetrics: rec}).newPrefixAware(nil)
+	a, b := llm("a"), llm("b")
+	ix.Learn("m", a.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+	full, fine := 0.95, 0.1
+	cands := []ScoredCandidate{{Agent: a, Snapshot: AgentSnapshot{KVCacheUtilization: &full}}, {Agent: b, Snapshot: AgentSnapshot{KVCacheUtilization: &fine}}}
+	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100}, Sizes: []int{640}}}
+	pick := func(r SelectRequest) *domain.Agent {
+		got := s.Select(cands, r)
+		s.Select(cands, r) // a lost slot race selects again: counted once
+		s.Commit(r, got)
+		s.Commit(r, got) // a retry of the same request: counted once
+		return got
+	}
+	if got := pick(req); got != b {
+		t.Errorf("chose %s, want b (a's KV cache is full)", got.ID)
+	}
+	cands[1].Snapshot.KVCacheUtilization = &full
+	pick(SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100}, Sizes: []int{640}}})
+	if got := pick(SelectRequest{Model: "m", Prefix: &PrefixRequest{}}); got == nil {
+		t.Fatal("no anchors: want least-loaded")
+	}
+	if rec[PrefixOutcomeMiss] != 1 || rec[PrefixOutcomeBusy] != 1 || rec[PrefixOutcomeNoAnchor] != 1 {
+		t.Errorf("outcomes %v, want one miss, one busy, one no-anchor", rec)
+	}
+}
+
+// The session asks for anchors only when a step routes on them.
+func TestSession_WantsPrefix(t *testing.T) {
+	stor := testutil.NoopStorage{}
+	ev := NewEvaluator(stor, metrics.NewUniversalCounterStore(stor, nil))
+	plain := NewExecutor(agentList{}, ev, &Policy{RoutingPolicy: PolicyStep{Strategy: "least-loaded"}}, 3, 0)
+	if plain.NewSession("m", domain.CapabilityLLM).WantsPrefix() {
+		t.Error("least-loaded policy must not want anchors")
+	}
+	chain := NewExecutor(agentList{}, ev, &Policy{RoutingPolicy: PolicyStep{Strategy: "least-loaded"},
+		FallbackChain: []FallbackStep{{PolicyStep: PolicyStep{Strategy: "prefix-aware"}}}}, 3, 0)
+	if !chain.NewSession("m", domain.CapabilityLLM).WantsPrefix() {
+		t.Error("a prefix-aware fallback step must want anchors")
+	}
+}
+
+func TestPrefixAware_Validation(t *testing.T) {
+	ok := "routing_policy:\n  strategy: prefix-aware\n  prefix_aware:\n    kv_threshold: 0.9\n    max_waiting: 4\n    busy_factor: 3\n    tie_epsilon: 0.1\n    prefill_rate: 20000\n    predicted_ttl: 60s\n    pending_ttl: 2s\n"
+	p, err := LoadBytes([]byte(ok))
+	if err != nil {
+		t.Fatalf("valid policy rejected: %v", err)
+	}
+	if pa := p.RoutingPolicy.PrefixAware; pa == nil || pa.PrefillRate != 20000 || pa.PredictedTTL != time.Minute {
+		t.Errorf("parsed %+v", pa)
+	}
+	for _, tc := range []struct{ yaml, want string }{
+		{"strategy: least-loaded\n  prefix_aware:\n    max_waiting: 2", "only valid with strategy: prefix-aware"},
+		{"strategy: prefix-aware\n  prefix_aware:\n    kv_threshold: 1.5", "kv_threshold"},
+		{"strategy: prefix-aware\n  prefix_aware:\n    busy_factor: 0.5", "busy_factor"},
+		{"strategy: prefix-aware\n  prefix_aware:\n    prefill_rate: 10", "prefill_rate"},
+		{"strategy: prefix-aware\n  prefix_aware:\n    pending_ttl: 5m", "pending_ttl"},
+	} {
+		_, err := LoadBytes([]byte("routing_policy:\n  " + tc.yaml + "\n"))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: error %v, want one about %s", tc.yaml, err, tc.want)
+		}
+	}
+}
+
+// Requests that already finished do not make an agent busy: a burst of short
+// requests raises GetLoad until the agent's next report, not InFlight.
+func TestPrefixAware_FinishedRequestsAreNotBusy(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	home, other := llm("home"), llm("other")
+	home.SetReportedLoad(0)
+	for range 20 {
+		home.TryAcquireSlot()
+		home.DecrementLoad()
+	}
+	if home.GetLoad() <= busyFloor || home.InFlight() != 0 {
+		t.Fatalf("setup: GetLoad %d, InFlight %d", home.GetLoad(), home.InFlight())
+	}
+	ix.Learn("m", home.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{640, 50}}}
+	if got := s.Select([]ScoredCandidate{{Agent: home}, {Agent: other}}, req); got != home {
+		t.Errorf("chose %s: an idle agent that holds the prompt was treated as busy", got.ID)
+	}
+}
+
+// The prefill backlog an agent reports (from every router) counts like the
+// one this router sent itself.
+func TestPrefixAware_ReportedPrefill(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	a, b := llm("a"), llm("b")
+	ix.Learn("m", a.ID, []uint64{100}, []int{2}, blocks(2), time.Minute)
+	a.SetReportedLoad(0)
+	a.SetReportedPrefill(60_000) // other routers queued 6 s of prefill on a
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{128, 100}}}
+	if got := s.Select([]ScoredCandidate{{Agent: a}, {Agent: b}}, req); got != b {
+		t.Errorf("chose %s: a's reported backlog costs more than its cache saves", got.ID)
+	}
+}
+
+// An agent whose predicted hits do not come true counts less: a reliable
+// agent with less in cache wins.
+func TestPrefixAware_Trust(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	ix.Learn("m", honest.ID, []uint64{100}, []int{15}, blocks(15), time.Minute)
+	ix.Learn("m", liar.ID, []uint64{100}, []int{20}, blocks(20), time.Minute) // the memo now knows 20 blocks
+	s := (&Executor{prefixIndex: ix}).newPrefixAware(nil)
+	req := func() SelectRequest {
+		return SelectRequest{Model: "m", Prefix: &PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{1280, 100}}}
+	}
+	cands := []ScoredCandidate{{Agent: liar}, {Agent: honest}}
+	if got := s.Select(cands, req()); got != liar {
+		t.Fatalf("before any check: chose %s, want the agent holding more", got.ID)
+	}
+	for range 10 {
+		ix.Observe(liar.ID, 1280, 0)
+	}
+	if got := s.Select(cands, req()); got != honest {
+		t.Errorf("chose %s: an agent whose predictions never held must count less", got.ID)
+	}
+}
+
+// Only blocks the engine confirmed by cache events are checked: blocks the
+// router predicted (a copy sent before the first prefill ended, a served
+// prompt not yet confirmed) are not the agent's claim and must not cost it
+// trust.
+func TestPrefixAware_ChecksOnlyConfirmedBlocks(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	a := llm("a")
+	e := prefixExecutor(ix, nil, a)
+	ix.SetEventSource(a.ID)
+	ix.Learn("m", a.ID, []uint64{100}, []int{20}, blocks(20), time.Minute)
+	predicted := func() int {
+		s := e.NewSession("m", domain.CapabilityLLM)
+		s.SetPrefix(&PrefixRequest{Anchors: []uint64{100, 101}, Sizes: []int{1280, 100}})
+		got, err := s.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer got.DecrementLoad()
+		defer s.ReleasePrefill()
+		return s.PredictedCached()
+	}
+	if p := predicted(); p != 0 {
+		t.Errorf("served but not confirmed: predicted %d, want 0 (no check)", p)
+	}
+	ix.ApplyEvents("m", a.ID, blocks(12), nil, false)
+	if p := predicted(); p != 12*64 {
+		t.Errorf("12 blocks confirmed: predicted %d, want %d", p, 12*64)
+	}
+}
+
+// Near-ties are broken on what the agents reported, the same on every
+// router: a guess one router made from its own decision does not change the
+// choice.
+func TestPrefixAware_TieIgnoresThisRoutersGuesses(t *testing.T) {
+	a, b := llm("a"), llm("b")
+	if hrw(100, a.ID) < hrw(100, b.ID) {
+		a, b = b, a // a is the agent the hash prefers
+	}
+	c := peer.ID("c") // reports the memo's deeper entry, not a candidate
+	routers := make([]*Executor, 2)
+	for i := range routers {
+		ix := prefixindex.New(prefixindex.Config{})
+		ix.Learn("m", a.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+		ix.Learn("m", b.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+		ix.Learn("m", c, []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute)
+		routers[i] = prefixExecutor(ix, nil, a, b)
+		routers[i].prefill.add(b.ID, 100) // b ~10 ms busier: a near-tie
+	}
+	// Router 0 guesses b holds the 12 blocks (it sent it this prompt).
+	ix0 := routers[0].prefixIndex
+	ix0.Commit("m", b.ID, []uint64{100, 101}, ix0.Lookup("m", []uint64{100, 101}, []peer.ID{b.ID}), time.Minute, time.Second)
+	for i, r := range routers {
+		if got := route(t, r, []uint64{100, 101, 102}); got != a {
+			t.Errorf("router %d chose %s, want %s (equal reports: the hash)", i, got.ID, a.ID)
+		}
+	}
+}
+
+// An agent whose confirmed claims fail does not win near-ties on them: its
+// reported holdings are weighted by its trust there too.
+func TestPrefixAware_LiarLosesTies(t *testing.T) {
+	ix := prefixindex.New(prefixindex.Config{})
+	liar, honest := llm("liar"), llm("honest")
+	if hrw(100, liar.ID) > hrw(100, honest.ID) {
+		liar, honest = honest, liar // the hash prefers the honest agent: only the claim can make the liar win
+	}
+	e := prefixExecutor(ix, nil, liar, honest)
+	ix.SetEventSource(liar.ID)
+	ix.Learn("m", honest.ID, []uint64{100}, []int{10}, blocks(10), time.Minute)
+	ix.ApplyEvents("m", liar.ID, blocks(12), nil, false)
+	ix.Learn("m", peer.ID("c"), []uint64{100, 101}, []int{10, 12}, blocks(12), time.Minute) // memo for the 12 blocks
+	for range 10 {
+		ix.Observe(liar.ID, 768, 0) // trust 0.8^10 ≈ 0.11
+	}
+	// The liar's weighted hit (~82 tokens) vs the honest 640: a queue of 540
+	// on the honest agent makes the costs a near-tie (~2 ms apart).
+	e.prefill.add(honest.ID, 540)
+	if got := route(t, e, []uint64{100, 101, 200}); got != honest {
+		t.Errorf("chose %s: a near-tie must not go to an agent whose claims fail", got.ID)
+	}
+}

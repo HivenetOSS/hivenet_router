@@ -27,6 +27,7 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixindex"
 	"hivenet_router/internal/provider"
 	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/semantic"
@@ -107,6 +108,10 @@ type agentRoutingSignalPayload struct {
 	// ReportEveryMs is how often the agent sends routing signals; absent
 	// from older agents.
 	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
+	// PendingPrefill is the prompt tokens the agent's requests not yet
+	// answered still have to prefill, from all routers; absent from older
+	// agents.
+	PendingPrefill *int `json:"pending_prefill_tokens,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -145,6 +150,13 @@ type Router struct {
 	grpcTLSCert    tls.Certificate
 	agents         *AgentRegistry
 	executor       *policy.Executor
+	// prefixIndex is the prefix memory of prefix-aware routing (memo, board,
+	// pending notes), fed by the agents through /prefix-state.
+	prefixIndex *prefixindex.Index
+	// kvCursors tracks where each agent's cache changes stand.
+	kvCursors kvCursors
+	// prefixLimits bounds how often each agent may post /prefix-state.
+	prefixLimits   prefixRateLimits
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -427,6 +439,10 @@ func New(cfg *config.Config) (*Router, error) {
 	evaluator := policy.NewEvaluator(store, counters)
 	executor := policy.NewExecutor(agents, evaluator, activePolicy, cfg.MaxTriesPerStep, cfg.QueueDepth)
 	executor.SetQueueMetrics(routerMetrics)
+	prefixIx := prefixindex.New(prefixindex.Config{})
+	executor.SetPrefixIndex(prefixIx)
+	executor.SetPrefixMetrics(routerMetrics)
+	executor.SetLatencyMetrics(routerMetrics)
 
 	// Load per-model policies from the policy model directory if configured.
 	// effectiveGlobal / namedPolicies capture the policies actually in force so
@@ -537,6 +553,7 @@ func New(cfg *config.Config) (*Router, error) {
 		grpcTLSCert:          tlsCert,
 		agents:               agents,
 		executor:             executor,
+		prefixIndex:          prefixIx,
 		requestQueue:         requestQueue,
 		metrics:              routerMetrics,
 		counters:             counters,
@@ -712,6 +729,7 @@ func (r *Router) Start() error {
 	mux.HandleFunc("/register", r.handleAgentRegister)
 	mux.HandleFunc("/heartbeat", r.handleAgentHeartbeat)
 	mux.HandleFunc("/routing-signals", r.handleRoutingSignals)
+	mux.HandleFunc("/prefix-state", r.handlePrefixState)
 	r.httpHost.SetHTTPHandler(routerProtocolID, mux)
 
 	go r.httpHost.Serve() //nolint:errcheck
@@ -749,7 +767,19 @@ func (r *Router) Start() error {
 
 	// Create request processor now that httpHost is ready
 	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
-		WithCacheSalter(r.salter))
+		WithCacheSalter(r.salter),
+		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
+		WithPrefixScope(prefixScope(r.salter)),
+		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
+			// Wait for the engine's cache events that may have evicted the
+			// blocks before the request reached it (sent in batches every
+			// 100 ms, after the engine's next step).
+			time.AfterFunc(prefixCheckDelay, func() {
+				if res := r.prefixIndex.CheckClaim(model, agent, blocks, at, actual); res != "" {
+					r.metrics.PrefixChecked(model, res)
+				}
+			})
+		}))
 
 	// Watch for SIGHUP to reload the policy file from disk without restarting.
 	go r.watchPolicyReload()
@@ -776,9 +806,9 @@ func (r *Router) Start() error {
 		for _, c := range r.credits {
 			c.Start(processorCtx)
 		}
-		if r.salter != nil {
-			go r.checkSaltFingerprints(processorCtx)
-		}
+		// With or without the salt: a router without it is reported by
+		// the others (and reports them).
+		go r.checkSaltFingerprints(processorCtx)
 	}
 	go r.publishTenantUsage(processorCtx)
 	// A reservation an exit path forgot to release would hold its budget
@@ -789,6 +819,7 @@ func (r *Router) Start() error {
 	go r.startGRPCServer()
 	go r.healthMonitor()
 	go r.processor.Start(processorCtx)
+	go r.runPrefixIndex(processorCtx)
 	go r.startHTTPServer()
 
 	go func() {
@@ -2085,6 +2116,9 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	if payload.InFlight != nil {
 		a.SetReportedLoad(*payload.InFlight)
 	}
+	if payload.PendingPrefill != nil {
+		a.SetReportedPrefill(*payload.PendingPrefill)
+	}
 	if payload.Routers != nil {
 		a.SetRouterReport(payload.Routers)
 	}
@@ -2197,6 +2231,9 @@ func (r *Router) healthMonitor() {
 				AgentID:      id.String(),
 				Timestamp:    time.Now().UTC(),
 			})
+			r.prefixIndex.RemoveAgent(id)
+			r.kvCursors.forget(id)
+			r.prefixLimits.forget(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)

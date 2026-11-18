@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
 	"hivenet_router/internal/policy"
+	"hivenet_router/internal/prefixhash"
 	"hivenet_router/internal/provider"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -103,6 +105,15 @@ type RequestProcessor struct {
 	lastEvict     map[peer.ID]time.Time
 	// forwardFn performs the actual forward; defaults to forwardToAgent.
 	forwardFn ForwardFunc
+
+	// prefixKeys key the prefix anchors (prefix-aware routing); prefixScope
+	// returns the scope of a tenant's anchors (nil: one scope for everyone).
+	prefixKeys  prefixhash.Keys
+	prefixScope func(tenantID string) string
+	// prefixCheck receives, after an answer, the blocks the agent's engine
+	// confirmed holding at the routing decision and the cached prompt tokens
+	// the engine reported.
+	prefixCheck func(agent peer.ID, model string, blocks []uint64, at int64, actual int)
 }
 
 // NewRequestProcessor creates a new request processor.
@@ -159,6 +170,58 @@ func WithPeerCloser(pc PeerCloser) ProcessorOption {
 // (see cachesalt.Salter.Apply). nil (the default) forwards bodies unchanged.
 func WithCacheSalter(s *cachesalt.Salter) ProcessorOption {
 	return func(p *RequestProcessor) { p.salter = s }
+}
+
+// WithPrefixKeys sets the keys of the prefix anchors computed for requests
+// whose policy routes on prefixes. Without them no anchor is computed.
+func WithPrefixKeys(k prefixhash.Keys) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixKeys = k }
+}
+
+// WithPrefixScope sets the scope of a tenant's prefix anchors. The anchors
+// must follow the engine's prefix cache: when the cache is separated per
+// tenant (cache salt), scope returns the tenant so tenants never share an
+// anchor; when the cache is shared, leave it unset.
+func WithPrefixScope(scope func(tenantID string) string) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixScope = scope }
+}
+
+// WithPrefixCheck sets the function that checks what an agent's engine
+// confirmed holding (blocks, as of at) against the cached tokens it reported
+// (agent trust).
+func WithPrefixCheck(f func(agent peer.ID, model string, blocks []uint64, at int64, actual int)) ProcessorOption {
+	return func(p *RequestProcessor) { p.prefixCheck = f }
+}
+
+// checkPrefix reports a prediction check when the engine reported its cached
+// tokens and a prediction was made.
+func (p *RequestProcessor) checkPrefix(agent *domain.Agent, pending *domain.PendingRequest, actual int, known bool) {
+	if p.prefixCheck == nil || !known || len(pending.PredictedBlocks) == 0 {
+		return
+	}
+	p.prefixCheck(agent.ID, agent.Metadata.Model, pending.PredictedBlocks, pending.PredictedAt, actual)
+}
+
+// countTokensPath is the Anthropic token-counting endpoint: it holds no KV
+// cache, so it gets no prefix anchors.
+const countTokensPath = "/v1/messages/count_tokens"
+
+// setPrefix computes the request's prefix anchors when its policy routes on
+// them, hands them to the session and keeps them for the agent.
+func (p *RequestProcessor) setPrefix(session *policy.Session, pending *domain.PendingRequest, capability string) {
+	if !p.prefixKeys.Valid() || capability != domain.CapabilityLLM || pending.Path == countTokensPath || !session.WantsPrefix() {
+		return
+	}
+	scope := ""
+	if p.prefixScope != nil {
+		scope = p.prefixScope(pending.TenantID)
+	}
+	anchors, sizes := p.prefixKeys.Anchors(pending.Request.Model, scope, pending.Request)
+	if len(anchors) == 0 {
+		return
+	}
+	session.SetPrefix(&policy.PrefixRequest{Anchors: anchors, Sizes: sizes})
+	pending.PrefixAnchors = prefixhash.EncodeAnchors(anchors)
 }
 
 // WithForwardFunc overrides the per-attempt forward function. Intended for tests.
@@ -263,6 +326,8 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		capability = domain.CapabilityLLM
 	}
 	session := p.executor.NewSession(pending.Request.Model, capability)
+	p.setPrefix(session, pending, capability)
+	defer session.ReleasePrefill()
 
 	// Inherit the trace context from the inbound HTTP request so spans
 	// created here become children of the Gin middleware root span.
@@ -384,7 +449,12 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		// forwardToAgent releases the slot and wakes one waiter when the slot is
 		// actually free: on return for errors and non-streaming responses, at
 		// the end of the stream for streaming ones.
+		pending.PrefillTokens = session.PrefillTokens()
+		pending.PredictedBlocks, pending.PredictedAt = session.PredictedClaim()
 		resp, rttMs, fwdErr := p.forwardFn(ctx, agent, pending)
+		// The agent has answered (the first byte, for a stream) or failed:
+		// its prefill no longer waits on this request.
+		session.ReleasePrefill()
 
 		if fwdErr == nil {
 			if stepName == "routing_policy" {
@@ -705,6 +775,16 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	// Each attempt its own backend request ID: see ForwardID.
 	req.Header.Set("X-Request-ID", pending.ForwardID())
 	req.Header.Set(domain.HeaderTimeout, domain.TimeoutHeader(pending.Deadline))
+	if pending.PrefixAnchors != "" {
+		req.Header.Set(domain.HeaderPrefixAnchors, pending.PrefixAnchors)
+	} else {
+		req.Header.Del(domain.HeaderPrefixAnchors) // never trust a client's copy
+	}
+	if pending.PrefillTokens > 0 {
+		req.Header.Set(domain.HeaderPrefillTokens, strconv.Itoa(pending.PrefillTokens))
+	} else {
+		req.Header.Del(domain.HeaderPrefillTokens)
+	}
 
 	// Inject W3C trace context headers so the agent can create child spans.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
@@ -834,6 +914,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 
 	p.metrics.RequestRouted(region, engine, model, pending.TenantID)
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+	p.checkPrefix(agent, pending, chatResp.Usage.CachedTokens, chatResp.Usage.CachedKnown)
 	decrement()
 	p.counters.RecordSuccess(agent, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens, rttMs)
 	chatResp.ProcessedBy = agent.ID.String()
@@ -955,6 +1036,9 @@ func (p *RequestProcessor) drainStream(
 		}
 	}
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, prompt, completion)
+	if cached, known := meter.Cached(); known {
+		p.checkPrefix(agent, pending, cached, true)
+	}
 	// Release the in-flight slot before recording the success, mirroring the
 	// non-streaming path (decrement before RecordSuccess) so the
 	// CapacityUtilization published by RecordSuccess reflects post-completion

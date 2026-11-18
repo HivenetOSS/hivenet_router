@@ -11,6 +11,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"hivenet_router/internal/agent"
@@ -212,5 +213,27 @@ func TestSGLang_DecodeSecondsNeverDecreases(t *testing.T) {
 	body = sglangDecodeText("3", "0.5", "1")
 	if got := scrape(); got != 2.5 {
 		t.Errorf("after a restart = %v, want 2.5", got)
+	}
+}
+
+// SGLang's prefill counters: uncached prompt tokens, and the prefill-forward
+// stage time read from tensor-parallel rank 0 only (each rank reports it).
+func TestSGLang_ScrapeMetrics_PrefillCounters(t *testing.T) {
+	text := `sglang:uncached_prompt_tokens_histogram_sum{engine_type="unified",model_name="m"} 60323
+sglang:per_stage_req_latency_seconds_sum{model_name="m",stage="request_process",tp_rank="0"} 0.5
+sglang:per_stage_req_latency_seconds_sum{model_name="m",stage="prefill_forward",tp_rank="0"} 3
+sglang:per_stage_req_latency_seconds_sum{model_name="m",stage="prefill_forward",tp_rank="1"} 3
+sglang:per_stage_req_latency_seconds_count{model_name="m",stage="prefill_forward",tp_rank="0"} 40
+sglang:per_stage_req_latency_seconds_count{model_name="m",stage="prefill_forward",tp_rank="1"} 40
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, text) })) //nolint:errcheck
+	defer srv.Close()
+	m, err := (&agent.SGLangEngine{}).ScrapeMetrics(context.Background(), srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.PrefillComputedTokensTotal == nil || *m.PrefillComputedTokensTotal != 60323 ||
+		m.PrefillSecondsTotal == nil || *m.PrefillSecondsTotal != 3 {
+		t.Errorf("prefill counters %v / %v, want 60323 / 3 (rank 0 only)", m.PrefillComputedTokensTotal, m.PrefillSecondsTotal)
 	}
 }

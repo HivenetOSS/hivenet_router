@@ -139,12 +139,9 @@ fallback_chain:
 | `exclude_if` | Object | No | Removes agents using live thresholds |
 | `strategy` | String | Yes | Ranks the remaining candidates |
 | `max_tries` | Integer | No | Limits failed forwards within this step |
+| `prefix_aware` | Object | No | Tunes `prefix-aware` in this step |
 
-The only implemented strategy is:
-
-```yaml
-strategy: least-loaded
-```
+Each step can use `least-loaded` or `prefix-aware` ([Ranking strategy](/routing/policy-yaml-reference#ranking-strategy)).
 
 When `name` is omitted, Hivenet Router generates a name from the step’s array position:
 

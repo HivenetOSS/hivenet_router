@@ -1022,7 +1022,7 @@ lets the operating system choose a local port. A fixed port is rarely needed and
 | `--organization` | — | `Unknown` | Operator or infrastructure-provider label |
 | `--machine` | — | `Unknown` | Machine label |
 | `--tags` | — | `production` | Comma-separated routing tags |
-| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Empty | Operator-defined GPU label |
+| `--gpu-model` | `HIVENET_ROUTER_GPU_MODEL` | Detected | GPU label; when unset, the model NVML reports if all the agent's GPUs are one model |
 | `--deployment-id` | `HIVENET_ROUTER_DEPLOYMENT_ID` | Empty | Deployment identifier used in tenant metrics |
 | `--replica-id` | `HIVENET_ROUTER_REPLICA_ID` | Empty | Stable replica identifier used with deployment ID by external schedulers |
 | `--hide-llm` | — | `false` | Set the aggregated model’s `hide_llm` metadata flag; this does not currently remove the model from discovery |
@@ -1067,7 +1067,7 @@ The `--version` flag changes registration metadata only. It does not select or i
 
 ### GPU model
 
-`--gpu-model` is not detected automatically through NVML.
+When `--gpu-model` is unset, the agent reports the GPU model NVML names (for example `NVIDIA GeForce RTX 5090`) if all the GPUs it uses are one model, and logs a warning otherwise. `--gpu-model` always overrides the detected name. Prefix-aware routing [learns its speeds](/routing/prefix-aware-routing#learned-speeds) per GPU model, so set it on agents of a host with GPUs of several models.
 
 Set a consistent operator-defined value when routing policies use:
 
@@ -1113,6 +1113,8 @@ The current catalog implementation still includes that model in `/v1/models`. Do
 | `--hardware-sample-interval` | — | `2s` | GPU, CPU, and system-memory collection interval |
 | `--engine-sample-interval` | — | `500ms` | Supported inference-engine metrics scrape interval |
 | `--routing-signal-interval` | — | `500ms` | Frequency for sending cached hardware and engine data to the router |
+| `--kv-events-endpoint` | `HIVENET_AGENT_KV_EVENTS_ENDPOINT` | Empty | ZMQ address the engine publishes its KV-cache events on (vLLM, SGLang), for [prefix-aware routing](/routing/prefix-aware-routing#kv-events). Loopback addresses or a Unix socket (`ipc://`) only: the events carry prompt token IDs |
+| `--kv-events-allow-remote` | `HIVENET_AGENT_KV_EVENTS_ALLOW_REMOTE` | `false` | Accept a `--kv-events-endpoint` that is not a loopback address or a Unix socket, such as a pod IP no other host reaches. The ZMQ socket has no authentication |
 | `--gpu-devices-file` | — | Empty | File containing assigned NVIDIA GPU UUIDs |
 
 ### Sampling and push intervals
@@ -1176,6 +1178,8 @@ The complete current agent flag set is:
 | `--hardware-sample-interval` | — | `2s` |
 | `--engine-sample-interval` | — | `500ms` |
 | `--routing-signal-interval` | — | `500ms` |
+| `--kv-events-endpoint` | `HIVENET_AGENT_KV_EVENTS_ENDPOINT` | Empty |
+| `--kv-events-allow-remote` | `HIVENET_AGENT_KV_EVENTS_ALLOW_REMOTE` | `false` |
 | `--jwt-secret-file` | `HIVENET_ROUTER_JWT_SECRET` | Required |
 | `--backend-api-key-file` | `HIVENET_ROUTER_BACKEND_API_KEY` | Empty |
 | `--gpu-devices-file` | — | Empty |
