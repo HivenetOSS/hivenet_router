@@ -39,6 +39,13 @@ type ChatRequest struct {
 	// would poison the learned tokens-per-byte ratio.
 	Tools json.RawMessage `json:"tools,omitempty"`
 
+	// Chat-template inputs some engines accept (vLLM, SGLang). Kept raw: the
+	// router never interprets them, but they change the rendered prompt, so
+	// prefix-aware routing keys its anchors on them.
+	ChatTemplate       json.RawMessage `json:"chat_template,omitempty"`
+	ChatTemplateKwargs json.RawMessage `json:"chat_template_kwargs,omitempty"`
+	Documents          json.RawMessage `json:"documents,omitempty"`
+
 	// Sampling & Controls
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"top_p,omitempty"`
