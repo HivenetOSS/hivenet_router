@@ -29,6 +29,7 @@ const (
 	DefaultMemoCap         = 200_000 // anchors per model
 	DefaultBlocksPerAgent  = 65_536  // board entries per agent and model (4M tokens)
 	DefaultPendingCap      = 100_000 // pending notes per model
+	DefaultSpeculativeTTL  = 5 * time.Second
 	maxHoldersPerBlockSoft = 64
 )
 
@@ -38,6 +39,9 @@ type Index struct {
 	models map[string]*model
 	cfg    Config
 	now    func() time.Time
+	// eventAgents report their engine's cache events: predictions on them
+	// only need to bridge the moment until the event confirms them.
+	eventAgents map[peer.ID]bool
 }
 
 // Config bounds the index. Zero fields take the defaults.
@@ -46,6 +50,9 @@ type Config struct {
 	MemoCap        int
 	BlocksPerAgent int
 	PendingCap     int
+	// SpeculativeTTL caps predictions on agents whose engine reports cache
+	// events (the event confirms them within a moment).
+	SpeculativeTTL time.Duration
 }
 
 type model struct {
@@ -54,6 +61,10 @@ type model struct {
 	board       map[uint64][]holder
 	agentBlocks map[peer.ID]int
 	pending     map[uint64]note
+	// memoByEnd is the set of anchors whose memo entry ends at a block, so
+	// the memo forgets them when no agent holds that block any more. Kept in
+	// step with memo by setMemo and dropMemo.
+	memoByEnd map[uint64]map[uint64]struct{}
 }
 
 type memoEntry struct {
@@ -85,7 +96,10 @@ func New(cfg Config) *Index {
 	if cfg.PendingCap <= 0 {
 		cfg.PendingCap = DefaultPendingCap
 	}
-	return &Index{models: map[string]*model{}, cfg: cfg, now: time.Now}
+	if cfg.SpeculativeTTL <= 0 {
+		cfg.SpeculativeTTL = DefaultSpeculativeTTL
+	}
+	return &Index{models: map[string]*model{}, cfg: cfg, now: time.Now, eventAgents: map[peer.ID]bool{}}
 }
 
 func (ix *Index) model(name string, create bool) *model {
@@ -98,7 +112,7 @@ func (ix *Index) model(name string, create bool) *model {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if m = ix.models[name]; m == nil {
-		m = &model{memo: map[uint64]memoEntry{}, board: map[uint64][]holder{}, agentBlocks: map[peer.ID]int{}, pending: map[uint64]note{}}
+		m = &model{memo: map[uint64]memoEntry{}, board: map[uint64][]holder{}, agentBlocks: map[peer.ID]int{}, pending: map[uint64]note{}, memoByEnd: map[uint64]map[uint64]struct{}{}}
 		ix.models[name] = m
 	}
 	return m
@@ -124,10 +138,188 @@ func (ix *Index) Learn(modelName string, agent peer.ID, anchors []uint64, ends [
 		if e <= 0 {
 			continue
 		}
-		m.memo[a] = memoEntry{blocks: memoBlocks(blocks, e), exp: memoExp}
+		m.setMemo(a, memoEntry{blocks: memoBlocks(blocks, e), exp: memoExp})
 	}
 	ix.capMemo(m, now)
-	ix.predict(m, agent, blocks, now.Add(blockTTL).UnixNano(), now)
+	ix.predict(m, agent, blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), now)
+}
+
+// predictionTTL caps ttl for agents whose engine confirms blocks by events.
+func (ix *Index) predictionTTL(agent peer.ID, ttl time.Duration) time.Duration {
+	ix.mu.RLock()
+	ev := ix.eventAgents[agent]
+	ix.mu.RUnlock()
+	if ev {
+		return min(ttl, ix.cfg.SpeculativeTTL)
+	}
+	return ttl
+}
+
+// LearnText records that agent served a request whose text the memo cannot
+// map to blocks (its engine returns no tokens): each anchor points to the
+// agent for ttl, as a pending note does.
+func (ix *Index) LearnText(modelName string, agent peer.ID, anchors []uint64, ttl time.Duration) {
+	if len(anchors) == 0 {
+		return
+	}
+	m := ix.model(modelName, true)
+	exp := ix.now().Add(ttl).UnixNano()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range anchors {
+		m.pending[a] = note{agent: agent, exp: exp}
+	}
+}
+
+// SetEventSource marks agent as reporting its engine's cache events.
+func (ix *Index) SetEventSource(agent peer.ID) {
+	ix.mu.Lock()
+	ix.eventAgents[agent] = true
+	ix.mu.Unlock()
+}
+
+// ApplyEvents applies an agent's engine cache events: stored blocks become
+// confirmed holdings, removed blocks are dropped, and cleared drops
+// everything the agent held in this model first. A block no agent holds any
+// more takes the memo entries that end at it along (the memo forgets what no
+// cache holds).
+func (ix *Index) ApplyEvents(modelName string, agent peer.ID, stored, removed []uint64, cleared bool) {
+	m := ix.model(modelName, true)
+	now := ix.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cleared {
+		m.dropAgent(agent)
+	}
+	for _, b := range removed {
+		m.unhold(b, agent)
+	}
+	ix.confirm(m, agent, stored, now)
+}
+
+// ReplaceConfirmed makes set the agent's confirmed holdings in this model
+// (a snapshot after a gap or a restart); its predictions are kept.
+func (ix *Index) ReplaceConfirmed(modelName string, agent peer.ID, set []uint64) {
+	m := ix.model(modelName, true)
+	now := ix.now()
+	keep := make(map[uint64]bool, len(set))
+	for _, b := range set {
+		keep[b] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for b, hs := range m.board {
+		if keep[b] {
+			continue
+		}
+		for _, h := range hs {
+			if h.agent == agent && h.exp == 0 {
+				m.unhold(b, agent)
+				break
+			}
+		}
+	}
+	ix.confirm(m, agent, set, now)
+}
+
+// confirm marks blocks as held by agent for good (until an event removes
+// them). Caller holds m.mu.
+func (ix *Index) confirm(m *model, agent peer.ID, blocks []uint64, now time.Time) {
+	for _, b := range blocks {
+		hs := m.board[b]
+		found := false
+		for i := range hs {
+			if hs[i].agent == agent {
+				hs[i].exp = 0
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.board[b] = append(hs, holder{agent: agent})
+			m.agentBlocks[agent]++
+		}
+	}
+	if m.agentBlocks[agent] > ix.cfg.BlocksPerAgent {
+		ix.trimAgent(m, agent, now)
+	}
+}
+
+// unhold drops agent's holding of block b; when no agent holds it any more,
+// the block and the memo entries ending at it go. Caller holds m.mu.
+func (m *model) unhold(b uint64, agent peer.ID) {
+	hs := m.board[b]
+	for i, h := range hs {
+		if h.agent == agent {
+			hs = append(hs[:i], hs[i+1:]...)
+			m.agentBlocks[agent]--
+			break
+		}
+	}
+	if len(hs) > 0 {
+		m.board[b] = hs
+		return
+	}
+	delete(m.board, b)
+	m.forgetEndingAt(b)
+}
+
+// forgetEndingAt removes the memo entries whose last block is b. Caller holds m.mu.
+func (m *model) forgetEndingAt(b uint64) {
+	for a := range m.memoByEnd[b] {
+		delete(m.memo, a)
+	}
+	delete(m.memoByEnd, b)
+}
+
+// setMemo sets anchor a's memo entry and indexes it by its last block.
+// Caller holds m.mu.
+func (m *model) setMemo(a uint64, e memoEntry) {
+	m.dropMemo(a)
+	m.memo[a] = e
+	if n := len(e.blocks); n > 0 {
+		end := e.blocks[n-1]
+		set := m.memoByEnd[end]
+		if set == nil {
+			set = map[uint64]struct{}{}
+			m.memoByEnd[end] = set
+		}
+		set[a] = struct{}{}
+	}
+}
+
+// dropMemo removes anchor a's memo entry and its index. Caller holds m.mu.
+func (m *model) dropMemo(a uint64) {
+	e, ok := m.memo[a]
+	if !ok {
+		return
+	}
+	delete(m.memo, a)
+	if n := len(e.blocks); n > 0 {
+		end := e.blocks[n-1]
+		if set := m.memoByEnd[end]; set != nil {
+			delete(set, a)
+			if len(set) == 0 {
+				delete(m.memoByEnd, end)
+			}
+		}
+	}
+}
+
+// dropAgent removes every holding of agent in this model. Caller holds m.mu.
+func (m *model) dropAgent(agent peer.ID) {
+	if m.agentBlocks[agent] == 0 {
+		return
+	}
+	for b, hs := range m.board {
+		for _, h := range hs {
+			if h.agent == agent {
+				m.unhold(b, agent)
+				break
+			}
+		}
+	}
+	delete(m.agentBlocks, agent)
 }
 
 // predict marks blocks as held by agent until exp, unless an engine already
@@ -185,7 +377,7 @@ func (ix *Index) Lookup(modelName string, anchors []uint64, candidates []peer.ID
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k := len(anchors) - 1; k >= 0; k-- {
-		if e, ok := m.memo[anchors[k]]; ok && e.exp > now {
+		if e, ok := m.memo[anchors[k]]; ok && (e.exp > now || (len(e.blocks) > 0 && confirmedAnywhere(m.board[e.blocks[len(e.blocks)-1]]))) {
 			res.Known, res.Blocks = k+1, e.blocks
 			break
 		}
@@ -242,7 +434,7 @@ func (ix *Index) Commit(modelName string, agent peer.ID, anchors []uint64, match
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(match.Blocks) > 0 {
-		ix.predict(m, agent, match.Blocks, now.Add(blockTTL).UnixNano(), now)
+		ix.predict(m, agent, match.Blocks, now.Add(ix.predictionTTL(agent, blockTTL)).UnixNano(), now)
 	}
 	exp := now.Add(pendingTTL).UnixNano()
 	for _, a := range anchors[match.Known:] {
@@ -262,23 +454,16 @@ func (ix *Index) Commit(modelName string, agent peer.ID, anchors []uint64, match
 
 // RemoveAgent forgets everything an agent holds, in every model.
 func (ix *Index) RemoveAgent(agent peer.ID) {
-	ix.mu.RLock()
+	ix.mu.Lock()
+	delete(ix.eventAgents, agent)
 	ms := make([]*model, 0, len(ix.models))
 	for _, m := range ix.models {
 		ms = append(ms, m)
 	}
-	ix.mu.RUnlock()
+	ix.mu.Unlock()
 	for _, m := range ms {
 		m.mu.Lock()
-		if m.agentBlocks[agent] > 0 {
-			for b, hs := range m.board {
-				m.board[b] = dropHolder(hs, agent)
-				if len(m.board[b]) == 0 {
-					delete(m.board, b)
-				}
-			}
-		}
-		delete(m.agentBlocks, agent)
+		m.dropAgent(agent)
 		for a, n := range m.pending {
 			if n.agent == agent {
 				delete(m.pending, a)
@@ -301,11 +486,20 @@ func (ix *Index) Sweep() {
 	for _, m := range ms {
 		m.mu.Lock()
 		n := 0
-		for a, e := range m.memo {
-			if e.exp <= nanos {
-				delete(m.memo, a)
-			}
+		for a := range m.memo {
 			m.pause(&n)
+			e, ok := m.memo[a] // read after the pause: it may have changed
+			if !ok || e.exp > nanos {
+				continue
+			}
+			// An entry whose last block an engine still confirms stays: the
+			// memo forgets with the cache, the time limit is for the rest.
+			if len(e.blocks) > 0 && confirmedAnywhere(m.board[e.blocks[len(e.blocks)-1]]) {
+				e.exp = now.Add(ix.cfg.MemoTTL).UnixNano()
+				m.memo[a] = e // same blocks: the index is unchanged
+				continue
+			}
+			m.dropMemo(a)
 		}
 		for a, p := range m.pending {
 			if p.exp <= nanos {
@@ -326,6 +520,7 @@ func (ix *Index) Sweep() {
 			}
 			if len(kept) == 0 {
 				delete(m.board, b)
+				m.forgetEndingAt(b)
 			} else {
 				m.board[b] = kept
 			}
@@ -361,7 +556,12 @@ func (m *model) pause(n *int) {
 }
 
 // Stats counts the index's entries, per kind, over all models.
-type Stats struct{ Memo, Blocks, Pending int }
+type Stats struct {
+	Memo     int
+	MemoEnds int // memo entries indexed by their last block (follows Memo)
+	Blocks   int
+	Pending  int
+}
 
 // Stats returns the current sizes.
 func (ix *Index) Stats() Stats {
@@ -373,6 +573,9 @@ func (ix *Index) Stats() Stats {
 		s.Memo += len(m.memo)
 		s.Blocks += len(m.board)
 		s.Pending += len(m.pending)
+		for _, set := range m.memoByEnd {
+			s.MemoEnds += len(set)
+		}
 		m.mu.Unlock()
 	}
 	return s
@@ -387,14 +590,14 @@ func (ix *Index) capMemo(m *model, now time.Time) {
 	nanos := now.UnixNano()
 	for a, e := range m.memo {
 		if e.exp <= nanos {
-			delete(m.memo, a)
+			m.dropMemo(a)
 		}
 	}
 	for a := range m.memo {
 		if len(m.memo) <= ix.cfg.MemoCap*9/10 {
 			break
 		}
-		delete(m.memo, a)
+		m.dropMemo(a)
 	}
 }
 
@@ -438,12 +641,11 @@ func (m *model) pruneHolders(hs []holder, now int64) []holder {
 	return kept
 }
 
-func dropHolder(hs []holder, agent peer.ID) []holder {
-	kept := hs[:0]
+func confirmedAnywhere(hs []holder) bool {
 	for _, h := range hs {
-		if h.agent != agent {
-			kept = append(kept, h)
+		if h.exp == 0 {
+			return true
 		}
 	}
-	return kept
+	return false
 }

@@ -937,7 +937,7 @@ func NewRouterMetrics() *RouterMetrics {
 		prefixIndexEntries: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "hivenet_prefix_index_entries",
-				Help: "Entries in the router's prefix memory, per kind: memo (text prefixes), blocks (cached blocks on the board), pending (notes for text in flight).",
+				Help: "Entries in the router's prefix memory, per kind: memo (text prefixes), memo_ends (memo entries indexed by their last block; follows memo), blocks (cached blocks on the board), pending (notes for text in flight).",
 			},
 			[]string{"kind"},
 		),
@@ -1793,8 +1793,9 @@ func (m *RouterMetrics) PrefixRouted(model, outcome string) {
 }
 
 // PrefixIndexSize sets the prefix-memory gauges.
-func (m *RouterMetrics) PrefixIndexSize(memo, blocks, pending int) {
+func (m *RouterMetrics) PrefixIndexSize(memo, memoEnds, blocks, pending int) {
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo"}).Set(float64(memo))
+	m.prefixIndexEntries.With(prometheus.Labels{"kind": "memo_ends"}).Set(float64(memoEnds))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "blocks"}).Set(float64(blocks))
 	m.prefixIndexEntries.With(prometheus.Labels{"kind": "pending"}).Set(float64(pending))
 }

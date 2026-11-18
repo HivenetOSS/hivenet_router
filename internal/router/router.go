@@ -109,6 +109,10 @@ type agentRoutingSignalPayload struct {
 	// ReportEveryMs is how often the agent sends routing signals; absent
 	// from older agents.
 	ReportEveryMs int64 `json:"report_every_ms,omitempty"`
+	// PendingPrefill is the prompt tokens the agent's requests not yet
+	// answered still have to prefill, from all routers; absent from older
+	// agents.
+	PendingPrefill *int `json:"pending_prefill_tokens,omitempty"`
 }
 
 // agentHeartbeatPayload is the JSON body sent by an agent on each heartbeat.
@@ -149,7 +153,9 @@ type Router struct {
 	executor       *policy.Executor
 	// prefixIndex is the prefix memory of prefix-aware routing (memo, board,
 	// pending notes), fed by the agents through /prefix-state.
-	prefixIndex    *prefixindex.Index
+	prefixIndex *prefixindex.Index
+	// kvCursors tracks where each agent's cache changes stand.
+	kvCursors      kvCursors
 	processor      *RequestProcessor
 	metrics        *metrics.RouterMetrics
 	counters       *metrics.UniversalCounterStore
@@ -2099,6 +2105,9 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 	if payload.InFlight != nil {
 		a.SetReportedLoad(*payload.InFlight)
 	}
+	if payload.PendingPrefill != nil {
+		a.SetReportedPrefill(*payload.PendingPrefill)
+	}
 	if payload.Routers != nil {
 		a.SetRouterReport(payload.Routers)
 	}
@@ -2212,6 +2221,7 @@ func (r *Router) healthMonitor() {
 				Timestamp:    time.Now().UTC(),
 			})
 			r.prefixIndex.RemoveAgent(id)
+			r.kvCursors.forget(id)
 			r.agents.Unregister(id)
 			r.storage.UnregisterAgent(id) //nolint:errcheck // best-effort cleanup; in-memory registry is authoritative
 			r.counters.DeleteState(id)
