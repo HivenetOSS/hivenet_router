@@ -331,16 +331,22 @@ func modelHealthy(baseURL string) bool {
 // modelHealthyAs is modelHealthy for any model, presenting the given API key
 // ("" sends none, for the no-auth stack).
 func modelHealthyAs(baseURL, apiKey, model string) bool {
+	return healthyAgentsAs(baseURL, apiKey, model) >= 1
+}
+
+// healthyAgentsAs is the number of healthy agents /v1/models lists for model
+// (0 on any error).
+func healthyAgentsAs(baseURL, apiKey, model string) int {
 	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/models", nil)
 	if err != nil {
-		return false
+		return 0
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false
+		return 0
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -352,14 +358,14 @@ func modelHealthyAs(baseURL, apiKey, model string) bool {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false
+		return 0
 	}
 	for _, m := range out.Data {
-		if m.ID == model && m.Agents.Healthy >= 1 {
-			return true
+		if m.ID == model {
+			return m.Agents.Healthy
 		}
 	}
-	return false
+	return 0
 }
 
 // TestRouterAgentEndToEnd runs one router+agent stack and drives it through

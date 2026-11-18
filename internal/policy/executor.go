@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"hivenet_router/internal/domain"
+	"hivenet_router/internal/prefixhash"
 
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -155,6 +156,15 @@ type Executor struct {
 	queues  map[string]*WaitQueue // keyed by model name
 
 	queueMetrics QueueMetrics // optional; nil in tests
+
+	// Prefix-aware routing: the router's prefix memory, its metrics, and the
+	// prompt tokens each agent has been sent but not started answering.
+	prefixIndex   PrefixIndex
+	prefixMetrics PrefixMetrics
+	prefill       prefillQueue
+	// latency is the learned prefill speed and decode step per group of
+	// replicas, shared by every prefix-aware step (latency_model.go).
+	latency *latencyModel
 }
 
 // NewExecutor creates an Executor with an initial policy.
@@ -168,10 +178,23 @@ func NewExecutor(agents AgentLister, evaluator *Evaluator, initial *Policy, glob
 		globalMaxTries:    globalMaxTries,
 		defaultQueueDepth: defaultQueueDepth,
 		queues:            make(map[string]*WaitQueue),
+		latency:           &latencyModel{},
 	}
 	e.state.Store(newPolicyState(initial, make(map[string]*Policy)))
 	return e
 }
+
+// SetPrefixIndex wires the router's prefix memory used by the prefix-aware
+// strategy. Must be called before any requests are processed.
+func (e *Executor) SetPrefixIndex(ix PrefixIndex) { e.prefixIndex = ix }
+
+// SetLatencyMetrics wires an observer of the learned latency figures.
+// Must be called before any requests are processed.
+func (e *Executor) SetLatencyMetrics(lm LatencyMetrics) { e.latency.metrics = lm }
+
+// SetPrefixMetrics wires an observer of prefix-aware selections.
+// Must be called before any requests are processed.
+func (e *Executor) SetPrefixMetrics(pm PrefixMetrics) { e.prefixMetrics = pm }
 
 // SetQueueMetrics wires an observer that receives queue depth and wait-time events.
 // Must be called before any requests are processed (typically once at startup).
@@ -393,10 +416,14 @@ func (e *Executor) resolve(name string, step PolicyStep) resolvedStep {
 	if maxTries <= 0 {
 		maxTries = e.globalMaxTries
 	}
+	strategy := Get(step.Strategy)
+	if step.Strategy == "prefix-aware" {
+		strategy = e.newPrefixAware(step.PrefixAware)
+	}
 	return resolvedStep{
 		name:       name,
 		PolicyStep: step,
-		strategy:   Get(step.Strategy),
+		strategy:   strategy,
 		maxTries:   maxTries,
 	}
 }
@@ -450,6 +477,55 @@ type Session struct {
 	// lastGates holds the gate funnel from the most recent zero-candidate buildCandidates call.
 	// Consumed by advanceStep("no_candidates") to attach the funnel to the step trace.
 	lastGates []gateDiag
+	// prefix holds the request's prefix anchors (SetPrefix), nil if none.
+	prefix *PrefixRequest
+}
+
+// WantsPrefix reports whether a step of this session routes on the request's
+// prefix anchors, so the caller computes them only then.
+func (s *Session) WantsPrefix() bool {
+	for i := range s.steps {
+		if ps, ok := s.steps[i].strategy.(PrefixStrategy); ok && ps.WantsPrefix() {
+			return true
+		}
+	}
+	return false
+}
+
+// SetPrefix sets the request's prefix anchors; every Select uses them.
+func (s *Session) SetPrefix(pr *PrefixRequest) { s.prefix = pr }
+
+// ReleasePrefill tells the session the chosen agent started answering (or
+// gave up): its prompt no longer waits in that agent's prefill queue.
+func (s *Session) ReleasePrefill() { s.prefix.release() }
+
+// PredictedCached is the prompt tokens the chosen agent's engine confirmed
+// holding by cache events at the last Select (0 when the strategy does not
+// predict, or nothing is confirmed): what the trust check judges.
+func (s *Session) PredictedCached() int {
+	if s.prefix == nil {
+		return 0
+	}
+	return len(s.prefix.predicted) * prefixhash.BlockTokens
+}
+
+// PredictedClaim is the leading blocks the chosen agent's engine confirmed
+// holding at the last Select, and when (see prefixindex.CheckClaim); nil
+// when there is nothing to check.
+func (s *Session) PredictedClaim() ([]uint64, int64) {
+	if s.prefix == nil {
+		return nil, 0
+	}
+	return s.prefix.predicted, s.prefix.predictedAt
+}
+
+// PrefillTokens is the prompt tokens the last Select expects the chosen agent
+// to prefill (0 when the strategy does not estimate it).
+func (s *Session) PrefillTokens() int {
+	if s.prefix == nil {
+		return 0
+	}
+	return s.prefix.reservedToks
 }
 
 // Select picks the next eligible agent, advancing through fallback steps as needed.
@@ -509,7 +585,8 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			continue
 		}
 
-		chosen := step.strategy.Select(candidates)
+		req := SelectRequest{Model: s.model, Prefix: s.prefix}
+		chosen := step.strategy.Select(candidates, req)
 
 		// Atomically claim a slot. If lost to a race, retry selection without counting
 		// a forward try — the agent is not "failed", just momentarily at capacity.
@@ -521,6 +598,9 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 		}
 
 		gotSlot(ctx)
+		if c, ok := step.strategy.(Committer); ok {
+			c.Commit(req, chosen)
+		}
 		return chosen, nil
 	}
 	// Use the reason captured at routing time rather than re-querying agent state,
