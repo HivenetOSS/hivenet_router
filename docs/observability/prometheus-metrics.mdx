@@ -320,7 +320,7 @@ min(hivenet_cache_isolation_enabled) == 0
 hivenet_cache_salt_secret_mismatch
 ```
 
-With `--cache-salt` and [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt secret differs from this router's. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
+With [shared counters](/deploy/multiple-routers), the number of live routers of the site whose cache-salt setting differs from this router's: another secret, or the salt off where this router has it on (and the reverse). A router without the salt publishes that instead of a fingerprint, and its requests share every tenant's prefix cache and prefix index. Each router publishes a fingerprint of its secret in the shared store and compares the fingerprints every 30 sync intervals (`--sync-interval`); the fingerprint reveals neither the secret nor any salt. A tenant's requests through routers with different secrets do not share its prefix cache. The router also logs a warning when the count changes. While the router cannot reach the store it keeps the last count; on a router without shared counters it stays `0`.
 
 Alert when any router of the site disagrees:
 
@@ -1146,6 +1146,27 @@ sum by (model, reason) (
   )
 )
 ```
+
+### Prefix-aware routing
+
+```promql
+hivenet_prefix_routing_total
+hivenet_prefix_index_entries
+```
+
+`hivenet_prefix_routing_total` counts the selections of the [`prefix-aware`](/routing/prefix-aware-routing) strategy, per `model` and `outcome`:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `hit` | The chosen agent holds blocks of the prompt |
+| `pending` | The same new text was just sent to the chosen agent |
+| `miss` | No candidate holds anything of the prompt |
+| `busy` | Every candidate was busy: `least-loaded` chose |
+| `no_anchor` | The request had no prompt text: `least-loaded` chose |
+
+`hivenet_prefix_checks_total{model, result}` counts the checks of the blocks an agent's engine confirmed holding (by KV events) against the prompt tokens it reported serving from cache: `held` (half or more of the blocks it kept came true), `missed`, or `evicted` (the engine evicted the blocks before the request reached it: not judged). It needs KV events and vLLM's `--enable-prompt-tokens-details` or SGLang's `--enable-cache-report`.
+
+`hivenet_prefix_index_entries` is the size of the router's prefix memory, per `kind`: `memo` (message prefixes it can match), `memo_ends` (memo entries indexed by their last block, so the memo forgets with the cache; it follows `memo`, and a gap between them is a leak), `blocks` (cached blocks on its board), `pending` (notes for new text in flight). It has no model, tenant or agent label.
 
 ### Policy reloads
 

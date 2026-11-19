@@ -34,6 +34,18 @@ type PendingRequest struct {
 	// Metadata.Capability matches this value are considered. Defaults to "llm".
 	Capability string
 
+	// PrefixAnchors is HeaderPrefixAnchors for this request, empty when its
+	// policy does not route on prefixes.
+	PrefixAnchors string
+	// PrefillTokens is HeaderPrefillTokens for the current forward attempt.
+	PrefillTokens int
+	// PredictedBlocks is the leading prompt blocks the current attempt's
+	// agent holds in cache by its engine's confirmed cache events
+	// (prefix-aware), as of PredictedAt (unix nanos), to check against the
+	// engine's report.
+	PredictedBlocks []uint64
+	PredictedAt     int64
+
 	// Path is the agent-facing HTTP path the processor forwards this request to
 	// (e.g. "/v1/messages" for the Anthropic passthrough). Empty means the
 	// default "/v1/chat/completions", so existing chat requests are unaffected.
@@ -123,6 +135,18 @@ type Reservation interface {
 // by then, so an engine still running it would hold capacity no one counts.
 // A duration, not a time, so the hosts' clocks do not matter.
 const HeaderTimeout = "X-Hivenet-Timeout-Ms"
+
+// HeaderPrefixAnchors carries, from router to agent, the request's prefix
+// anchors (prefixhash.EncodeAnchors): keyed hashes of its message prefixes,
+// never text. The agent reports which blocks each anchor maps to once the
+// engine has the prompt's tokens, and never forwards the header.
+const HeaderPrefixAnchors = "X-Hivenet-Prefix-Anchors"
+
+// HeaderPrefillTokens carries, from router to agent, the prompt tokens the
+// router expects the engine to prefill for this request (those not already
+// in its cache). The agent sums them over the requests it has not started
+// answering and reports the sum to every router.
+const HeaderPrefillTokens = "X-Hivenet-Prefill-Tokens"
 
 // TimeoutHeader is the value of HeaderTimeout for a request due at deadline.
 func TimeoutHeader(deadline time.Time) string {

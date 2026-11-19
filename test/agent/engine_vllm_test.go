@@ -145,6 +145,36 @@ vllm:time_to_first_token_seconds_count 10
 	}
 }
 
+// The prefill counters behind the agent's windowed prefill speed: computed
+// tokens (cache hits excluded) and prefill seconds; older vLLM without the
+// computed-tokens histogram falls back to prompt minus cached tokens.
+func TestVLLM_ScrapeMetrics_PrefillCounters(t *testing.T) {
+	for name, tc := range map[string]struct {
+		text string
+		want float64
+	}{
+		"computed tokens histogram":       {"vllm:request_prefill_kv_computed_tokens_sum 900\nvllm:prompt_tokens_total 1500\nvllm:prompt_tokens_cached_total 600\n", 900},
+		"older vLLM: prompt minus cached": {"vllm:prompt_tokens_total 1500\nvllm:prompt_tokens_cached_total 400\n", 1100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := tc.text + "vllm:request_prefill_time_seconds_sum 0.25\nvllm:request_prefill_time_seconds_count 3\n"
+			url, cl := vllmBackend(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/metrics" {
+					io.WriteString(w, text)
+				}
+			})
+			m, err := (&agent.VLLMEngine{}).ScrapeMetrics(context.Background(), url, cl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.PrefillComputedTokensTotal == nil || *m.PrefillComputedTokensTotal != tc.want ||
+				m.PrefillSecondsTotal == nil || *m.PrefillSecondsTotal != 0.25 {
+				t.Errorf("prefill counters %v / %v, want %v / 0.25", m.PrefillComputedTokensTotal, m.PrefillSecondsTotal, tc.want)
+			}
+		})
+	}
+}
+
 // TestVLLM_ScrapeMetrics_DecodeTime pins that the agent ships vLLM's
 // per-request decode-time histogram, which the router re-exports as
 // hivenet_agent_engine_request_decode_time_seconds (the output-speed

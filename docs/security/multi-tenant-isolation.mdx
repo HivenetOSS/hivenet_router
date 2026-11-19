@@ -1,6 +1,6 @@
 ---
 title: "Multi-tenant isolation"
-description: "Run Hivenet Router for several customers: per-key limits shared across a site's routers, required model allowlists, per-tenant prefix-cache isolation, protected metrics and admin endpoints, all switched on with --multi-tenant."
+description: "Serve several customers with --multi-tenant: per-key limits across a site's routers, required model allowlists, and per-tenant prefix-cache isolation."
 sidebarTitle: "Multi-tenant isolation"
 ---
 
@@ -29,7 +29,7 @@ hivenet-router \
 
 Shared counters are required however many routers the site runs: a router cannot tell whether it is the only one, and without shared counters each router of a site enforces every key's and tenant's limits on its own, so a key gets its limits once per router. A site with one router runs a Valkey next to it.
 
-Every router of a site must use the same salt secret: every agent serves every router, so a tenant's requests through any router must land in the same cache namespace. Each router checks this through the shared store: every 30 sync intervals (`--sync-interval`, 30 seconds by default) it publishes a fingerprint of its secret, an HMAC of a fixed label that reveals neither the secret nor any salt, and compares it with the other routers'. A router that finds another secret logs a warning and reports how many routers use one in `hivenet_cache_salt_secret_mismatch`. It keeps running, so you can roll out a new secret one router at a time.
+Every router of a site must use the same salt secret: every agent serves every router, so a tenant's requests through any router must land in the same cache namespace. Each router checks this through the shared store: every 30 sync intervals (`--sync-interval`, 30 seconds by default) it publishes a fingerprint of its secret, an HMAC of a fixed label that reveals neither the secret nor any salt, and compares it with the other routers'. A router that finds another secret logs a warning and reports how many routers use one in `hivenet_cache_salt_secret_mismatch`. A router without the cache salt publishes that instead of a fingerprint: the routers with the salt count it, and it counts them, since its requests share every tenant's prefix cache and prefix index. It keeps running, so you can roll out a new secret one router at a time.
 
 `--multi-tenant` turns on these settings:
 
@@ -81,6 +81,8 @@ With an allowlist required, a key can only use the models in its `models` / `all
 
 Engines share cached prompt blocks between requests with the same prefix, so a faster first token can reveal that someone else sent the same prompt. The router sets a per-tenant `cache_salt` on requests to vLLM (every path; `/v1/messages` only from vLLM 0.27.0) and SGLang (chat completions), turns llama.cpp's prompt cache off per request, and removes any `cache_salt` the client sent. Some of these work only from an engine version on, which the agent reports: an LLM agent left with a path it cannot isolate, on its engine and version, is logged and counted in `hivenet_cache_isolation_gaps`. See [Isolate tenants in the prefix cache](/deploy/agents/vllm#isolate-tenants-in-the-prefix-cache).
 
+[Prefix-aware routing](/routing/prefix-aware-routing) follows the same split: with the salt on, it keeps what it learns about cached prompts per tenant, so one tenant's prompts never steer another's requests.
+
 ### Logs and metrics are attributable and protected
 
 - Every authenticated audit record names its `tenant_id` and `key_id`, and, with `--router-id`, the router that wrote it. Records hold metadata only, never prompts, completions or credentials. The audit file is created with mode `0600`. See [Audit logging](/observability/audit-logging).
@@ -97,7 +99,7 @@ Engines share cached prompt blocks between requests with the same prefix, so a f
   Tenants share the router's capacity. Admission budgets, queues and agent slots are shared per model, so a burst from one tenant can make another wait or get a `429` or `503`. A key's `max_occupancy_share` caps how much of a model one key can hold in flight. A dedicated replica removes the sharing entirely.
 </Warning>
 
-- Prefix-cache isolation covers only what each engine supports: Ollama, custom backends, `/v1/messages` on SGLang, chat completions on SGLang before 0.5.11, and `/v1/messages` on llama.cpp builds before b11795, and `/v1/messages` on vLLM before 0.27.0 are not isolated. An agent that reports no engine version counts as an older one, except on vLLM chat completions, embeddings and rerank (see `hivenet_cache_isolation_gaps`).
+- Prefix-cache isolation covers only what each engine supports: Ollama, custom backends, `/v1/messages` on SGLang, chat completions on SGLang before 0.5.11, `/v1/messages` on llama.cpp builds before b11795, and `/v1/messages` on vLLM before 0.27.0 are not isolated. An agent that reports no engine version counts as an older one, except on vLLM chat completions, embeddings and rerank (see `hivenet_cache_isolation_gaps`).
 - The operator of the router and of the agents can read prompts and completions. These controls separate tenants from each other, not from the operator.
 - A tenant budget spans the routers of one site, not several sites. A key's maximum scope (`scope_max`) is not part of this release.
 

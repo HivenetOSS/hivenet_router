@@ -9,7 +9,28 @@ import "hivenet_router/internal/domain"
 // Implementations must not mutate the candidates slice.
 // To add a new strategy: implement this interface and register it in registry below.
 type Strategy interface {
-	Select(candidates []ScoredCandidate) *domain.Agent
+	Select(candidates []ScoredCandidate, req SelectRequest) *domain.Agent
+}
+
+// SelectRequest carries what a strategy may know about the request it routes.
+type SelectRequest struct {
+	// Model is the requested model.
+	Model string
+	// Prefix holds the request's anchors when a step of its policy routes on
+	// them (see PrefixStrategy); nil otherwise.
+	Prefix *PrefixRequest
+}
+
+// PrefixStrategy is implemented by a strategy that routes on the request's
+// prefix anchors: the processor computes them only when it does.
+type PrefixStrategy interface {
+	WantsPrefix() bool
+}
+
+// Committer is implemented by a strategy that records its choice once the
+// executor has acquired a slot on the chosen agent.
+type Committer interface {
+	Commit(req SelectRequest, chosen *domain.Agent)
 }
 
 // registry maps strategy names to their implementations.
@@ -18,7 +39,8 @@ var registry = map[string]Strategy{
 	"least-loaded": leastLoadedStrategy{},
 	// "lowest-srtt":  lowestSRTTStrategy{},   // add when implemented
 	// "round-robin":  roundRobinStrategy{},   // add when implemented
-	// "prefix-aware": prefixAwareStrategy{},  // add when implemented
+	// "prefix-aware" is built per policy step from its prefix_aware block
+	// (Executor.resolve), so it is not a registry entry.
 }
 
 // Get returns the Strategy registered for name, or nil if not found.
@@ -31,7 +53,7 @@ func Get(name string) Strategy {
 // Ties are broken by iteration order (non-deterministic for equal load).
 type leastLoadedStrategy struct{}
 
-func (leastLoadedStrategy) Select(candidates []ScoredCandidate) *domain.Agent {
+func (leastLoadedStrategy) Select(candidates []ScoredCandidate, _ SelectRequest) *domain.Agent {
 	if len(candidates) == 0 {
 		// Contract violation: executor must never call Select with an empty slice.
 		// Panic with a clear message to surface this as a programming error during testing.

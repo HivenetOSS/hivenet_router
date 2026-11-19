@@ -175,6 +175,13 @@ func (e *SGLangEngine) ScrapeMetrics(ctx context.Context, baseURL string, httpCl
 			m.DecodeTokensTotal = &decodeTokens
 		}
 	}
+	// Prefill counters for the agent's windowed prefill speed: prompt tokens
+	// computed (cache hits excluded, one series per request, not per rank)
+	// and seconds requests spent in the prefill forward pass (rank 0).
+	m.PrefillComputedTokensTotal = metricSum(sums, "sglang:uncached_prompt_tokens_histogram_sum")
+	m.PrefillSecondsTotal = metricSum(sums, `sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"}`)
+	m.PrefillRequestsTotal = metricSum(sums, `sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"}`)
+
 	if e2e := metricSum(sums, "sglang:e2e_request_latency_seconds_sum"); e2e != nil {
 		if ttft := metricSum(sums, "sglang:time_to_first_token_seconds_sum"); ttft != nil {
 			m.DecodeSecondsTotal = e.monotonicDecodeSeconds(*e2e-*ttft, metricSum(sums, "sglang:num_requests_total"))
@@ -224,4 +231,17 @@ func (e *SGLangEngine) ForwardChat(ctx context.Context, baseURL string, httpClie
 // more.
 func (e *SGLangEngine) Warm(ctx context.Context, baseURL string, httpClient *http.Client, model string) error {
 	return warmChat(ctx, baseURL, httpClient, model)
+}
+
+// MessageStartToken implements messageStartProber with SGLang's /v1/tokenize
+// (which applies the chat template to messages).
+func (e *SGLangEngine) MessageStartToken(ctx context.Context, baseURL string, httpClient *http.Client, model string) (int, error) {
+	return probeMessageStart(func(msgs []map[string]string) ([]int, error) {
+		return postTokens(ctx, httpClient, baseURL+"/v1/tokenize", map[string]any{"model": model, "messages": msgs})
+	})
+}
+
+// TokenizeChat implements chatTokenizer through SGLang's /v1/tokenize.
+func (e *SGLangEngine) TokenizeChat(ctx context.Context, baseURL string, httpClient *http.Client, model string, body []byte) ([]int, error) {
+	return tokenizeChatBody(ctx, httpClient, baseURL+"/v1/tokenize", model, body)
 }

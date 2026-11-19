@@ -126,6 +126,9 @@ type PolicyStep struct {
 	Strategy  string                   `yaml:"strategy"   json:"strategy"`
 	// MaxTries caps forward attempts for this step. 0 means use the global default.
 	MaxTries int `yaml:"max_tries" json:"max_tries,omitempty"`
+	// PrefixAware tunes the prefix-aware strategy; only valid with it. Nil or
+	// a zero field means the default.
+	PrefixAware *PrefixAwareParams `yaml:"prefix_aware" json:"prefix_aware,omitempty"`
 }
 
 // FallbackStep is a PolicyStep with an optional name used in logs and metrics.
@@ -175,6 +178,14 @@ type AgentSnapshot struct {
 	P90TTFTSeconds     *float64 // seconds
 	AvgITLSeconds      *float64 // seconds
 	P90ITLSeconds      *float64 // seconds
+
+	// Windowed engine figures for the learned latency model (see
+	// latency_model.go): prefill speed and the prefill time it covers, decode
+	// step and the decode tokens it covers.
+	PrefillTokensPerSecond *float64
+	PrefillSeconds         float64
+	DecodeStepSeconds      *float64
+	DecodeSamples          float64
 
 	// Hardware — nil when no hardware snapshot has been received yet.
 	// All fraction fields are normalised to 0.0–1.0 by the evaluator regardless

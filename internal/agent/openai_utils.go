@@ -118,6 +118,14 @@ func forwardStreamingResponse(ctx context.Context, w http.ResponseWriter, baseUR
 	w.WriteHeader(http.StatusOK)
 
 	dst := NewStreamWriter(w, opts.StreamWriteTimeout)
+	if opts.FirstByte != nil {
+		dst = &firstWrite{dst: dst, hook: opts.FirstByte}
+	}
+	if opts.StreamFilter != nil {
+		fw, flush := opts.StreamFilter(dst)
+		dst = fw
+		defer flush()
+	}
 	// Capture the copy error so an abandoned stream (reader gone, or the rolling write
 	// deadline fired) is observable instead of silent. The response headers are already
 	// sent, so we cannot return an error to the client — record it on the span and let
@@ -174,4 +182,20 @@ func (fw *flushingWriter) Write(p []byte) (n int, err error) {
 		fw.flusher.Flush()
 	}
 	return
+}
+
+// firstWrite calls hook before the first write: the engine sent its first
+// bytes of answer (headers come earlier, before the prefill).
+type firstWrite struct {
+	dst  io.Writer
+	hook func()
+	done bool
+}
+
+func (f *firstWrite) Write(p []byte) (int, error) {
+	if !f.done {
+		f.done = true
+		f.hook()
+	}
+	return f.dst.Write(p)
 }
