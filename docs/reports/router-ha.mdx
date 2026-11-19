@@ -85,20 +85,22 @@ A router never switches to "allow all". A router that loses the store keeps the 
 A **replica** is one inference engine (vLLM, SGLang…) on its GPU, with an **agent** next to it. The agent is the router's only contact with the engine: it forwards requests to it and reports on it. The **routers** receive client requests and choose a replica; the **store** only holds the shared counts and credits.
 
 ```mermaid
-flowchart LR
-  C[Clients] --> LB[Load balancer]
-  LB --> R0[Router 0]
-  LB --> R1[Router 1]
-  LB --> R2[Router 2]
-  R0 & R1 & R2 -.counts and credits.- V[(Store)]
-  subgraph Replica1[Replica 1]
+flowchart TB
+  LB[Load balancer]
+  R1[Router 1]
+  R2[Router 2]
+  R3[Router 3]
+  subgraph RA[Replica A]
     A1[Agent] --> E1[Engine on GPU]
   end
-  subgraph Replica2[Replica 2]
+  subgraph RB[Replica B]
     A2[Agent] --> E2[Engine on GPU]
   end
-  A1 --- R0 & R1 & R2
-  A2 --- R0 & R1 & R2
+  subgraph RC[Replica C]
+    A3[Agent] --> E3[Engine on GPU]
+  end
+  LB --> R1 & R2 & R3
+  R1 & R2 & R3 --- A1 & A2 & A3
 ```
 
 - **Every agent connects to every router.** Each router therefore sees every replica, whichever router a client reached.
