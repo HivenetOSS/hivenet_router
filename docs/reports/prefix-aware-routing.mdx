@@ -4,13 +4,13 @@ description: "What changes when you replace least-loaded with KV-cache aware rou
 sidebarTitle: "Prefix-aware routing"
 ---
 
-**In short:** on a mixed workload with a KV cache under pressure, switching a model's routing from `least-loaded` to `prefix-aware` cut the median time to first token of multi-turn chat by **3×** (from about 200 ms to about 63 ms), and that of requests sharing a long system prompt by about **2×**. The tail did not get worse. Three routers made the same choice for the same prompt, and with tenant isolation on, no tenant's cache was reused by another. No model, GPU or client change: one line of policy.
+**In short:** on a mixed workload with a KV cache under pressure, switching a model's routing from `least-loaded` to `prefix-aware` cut the median time to first token of multi-turn chat by **3×** (from about 200 ms to about 63 ms), and that of requests sharing a long system prompt by about **2×**. The tail did not get worse. With no other traffic, three routers made the same choice for every prompt (64 of 64); under load, where each router also weighs the queues it sees, for 57 of 64. With tenant isolation on, no tenant's cache was reused by another. No model, GPU or client change: once the engines publish their KV-cache events to the agent (see [What to configure](#what-to-configure)), it is one line of policy.
 
-This page explains why it works, how the algorithm was chosen, and what was measured, with the workload described precisely enough to run it again.
+This page explains why it works, how the algorithm was chosen, and what was measured. The workload is described in enough detail to reproduce its shape; the load generator is not published, so a re-run will not give exactly the same numbers.
 
-<Frame caption="How many times sooner the first token arrives with prefix-aware than with least-loaded (mean of 3 runs). Setup and workload below.">
-  <img className="block dark:hidden" src="/images/prefix-aware/speedup-light.svg" alt="Speed-up of the median time to first token with prefix-aware over least-loaded, per workload, at concurrency 32 and 64: multi-turn chat 3.3x and 1.7x, shared system prompt 1.9x and 1.5x, chat p99 1.4x and 1.2x, RAG 1.3x and 1.2x, fan-out 1.1x and 1.2x, RAG in one message 1.1x and 0.95x." />
-  <img className="hidden dark:block" src="/images/prefix-aware/speedup-dark.svg" alt="Speed-up of the median time to first token with prefix-aware over least-loaded, per workload, at concurrency 32 and 64: multi-turn chat 3.3x and 1.7x, shared system prompt 1.9x and 1.5x, chat p99 1.4x and 1.2x, RAG 1.3x and 1.2x, fan-out 1.1x and 1.2x, RAG in one message 1.1x and 0.95x." />
+<Frame caption="How many times sooner the first token arrives with prefix-aware than with least-loaded: the median, and the 99th percentile for chat (ratio of the means of 3 runs). Setup and workload below.">
+  <img className="block dark:hidden" src="/images/prefix-aware/speedup-light.svg" alt="Speed-up of the time to first token (median, and p99 for chat) with prefix-aware over least-loaded, per workload, at concurrency 32 and 64: multi-turn chat 3.3x and 1.7x, shared system prompt 1.9x and 1.5x, chat p99 1.4x and 1.2x, RAG 1.3x and 1.2x, fan-out 1.1x and 1.2x, RAG in one message 1.1x and 0.95x." />
+  <img className="hidden dark:block" src="/images/prefix-aware/speedup-dark.svg" alt="Speed-up of the time to first token (median, and p99 for chat) with prefix-aware over least-loaded, per workload, at concurrency 32 and 64: multi-turn chat 3.3x and 1.7x, shared system prompt 1.9x and 1.5x, chat p99 1.4x and 1.2x, RAG 1.3x and 1.2x, fan-out 1.1x and 1.2x, RAG in one message 1.1x and 0.95x." />
 </Frame>
 
 ## Why the replica matters
@@ -84,9 +84,9 @@ flowchart LR
 
 This is a cost, not a rule such as "always the holder": a replica holding half the prompt behind a long queue loses to an idle one.
 
-### Several routers, one decision
+### Several routers, one view
 
-Every agent reports to every router of a site: what it served, what its engine holds, and how much prefill it has queued. The routers therefore share one view without talking to each other, and break ties the same way. A conversation whose turns arrive at different routers still finds its cache.
+Every agent reports to every router of a site: what it served, what its engine holds, and how much prefill it has queued. The routers therefore share one view without talking to each other, and break ties the same way. A conversation whose turns arrive at different routers still finds its cache. With no other traffic the routers make the same choice; under load each router also weighs the queues it sees, so they can differ (measured [below](#results)).
 
 ### Trust and privacy
 
@@ -101,7 +101,7 @@ Every agent reports to every router of a site: what it served, what its engine h
 - **Hardware:** 8 × RTX 5090 32 GB in one server.
 - **Engines:** 4 × vLLM 0.31.0 and 2 × SGLang 0.5.23, each serving Qwen2.5-7B-Instruct (bf16) on one GPU, prefix caching and KV events on. The KV cache is capped at 40,000 tokens per replica (vLLM `--num-gpu-blocks-override 2500`, SGLang `--max-total-tokens 40000`), the room a ~32B 4-bit model leaves on the same card. This puts the cache under pressure, the realistic case. One soak run uses the full cache instead.
 - **Routers:** 3 routers; each of the 6 agents connects to all 3. Every request is sent to one of the three routers in turn (below), so a conversation moves between routers.
-- **Comparison:** the same binaries and the same engines, with the policy set to `least-loaded` or `prefix-aware`. Routers are restarted with an empty index for every run.
+- **Comparison:** the same binaries, built from the prefix-aware routing pull requests (#102–#104 and #122), and the same engines, with the policy set to `least-loaded` or `prefix-aware`. Routers are restarted with an empty index for every run.
 
 ### Workload
 
@@ -121,11 +121,11 @@ Five workloads run at the same time in each run, closed loop, with fresh random 
 
 ### Results
 
-Time to first token in ms, median (p50) and 99th percentile; cache hit in brackets.
+Time to first token in ms: the median (p50), except in the *Chat p99* rows, which give the 99th percentile. Each cell is the range over three runs; cache hit in brackets.
 
 **Concurrency 32**
 
-| Workload | `least-loaded` p50 | `prefix-aware` p50 | Gain |
+| Workload | `least-loaded` | `prefix-aware` | Gain |
 | --- | --- | --- | --- |
 | Chat | 189–228 (63–64 %) | **61–64** (78–81 %) | **3.3×** |
 | Chat p99 | 780–846 | **472–688** | 1.4× |
@@ -136,7 +136,7 @@ Time to first token in ms, median (p50) and 99th percentile; cache hit in bracke
 
 **Concurrency 64** (the engines are saturated)
 
-| Workload | `least-loaded` p50 | `prefix-aware` p50 | Gain |
+| Workload | `least-loaded` | `prefix-aware` | Gain |
 | --- | --- | --- | --- |
 | Chat | 695–1,144 (36–41 %) | **455–577** (48–55 %) | **1.7×** |
 | Chat p99 | 4,929–6,090 | **3,772–5,096** | 1.2× |
@@ -145,7 +145,7 @@ Time to first token in ms, median (p50) and 99th percentile; cache hit in bracke
 | RAG in one message | 2,807–3,022 | 2,808–3,298 | 0.95× (within run-to-run variation) |
 | Fan-out | 3,223–4,485 | **2,856–3,877** | 1.2× |
 
-Gains are ratios of the mean p50 over the three runs. Over all runs: 0 errors and 0 token IDs in any response.
+Each gain is the ratio of the means over the three runs, of the same percentile: p50, or p99 in the *Chat p99* rows. Over all runs: 0 errors and 0 token IDs in any response.
 
 <Frame caption="Multi-turn chat: the median drops, and the tail drops with it (mean of 3 runs).">
   <img className="block dark:hidden" src="/images/prefix-aware/chat-ttft-light.svg" alt="Multi-turn chat time to first token. Concurrency 32: median 205 ms with least-loaded, 63 ms with prefix-aware; p99 823 against 586 ms. Concurrency 64: median 899 against 528 ms; p99 5,377 against 4,453 ms." />
@@ -157,7 +157,7 @@ Gains are ratios of the mean p50 over the three runs. Over all runs: 0 errors an
   <img className="hidden dark:block" src="/images/prefix-aware/cache-hit-dark.svg" alt="Share of prompt tokens served from the engine cache at concurrency 32. Least-loaded against prefix-aware: chat 63 against 80 percent, fan-out 46 against 66, RAG 36 against 43, shared system prompt 22 against 35, RAG in one message 24 against 24." />
 </Frame>
 
-**Same decision on every router.** 64 prompts, each served once, then sent to each of the 3 routers in turn: all 3 chose the same replica for **64 of 64** with no other traffic, and for 57 of 64 under a concurrent load of 16. Under load each router also weighs the queues it sees, so a prompt can move to a less busy holder.
+**The same decision on every router, when idle.** 64 prompts, each served once, then sent to each of the 3 routers in turn: all 3 chose the same replica for **64 of 64** with no other traffic, and for 57 of 64 under a concurrent load of 16. Under load each router also weighs the queues it sees, so a prompt can move to a less busy holder.
 
 **Faults.** With the concurrency-32 workload running, one agent was stopped and restarted, one router restarted, and the caches of one vLLM and one SGLang engine reset: 0 errors in 1,128 requests, chat p50 60 ms.
 
