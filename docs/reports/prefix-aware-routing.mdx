@@ -98,7 +98,7 @@ Every agent reports to every router of a site: what it served, what its engine h
 
 ### Setup
 
-- **Hardware:** 8 × RTX 5090 32 GB in one server.
+- **Hardware:** one server with 8 × RTX 5090 32 GB; the tests use 6 of them, one replica per GPU.
 - **Engines:** 4 × vLLM 0.31.0 and 2 × SGLang 0.5.23, each serving Qwen2.5-7B-Instruct (bf16) on one GPU, prefix caching and KV events on. The KV cache is capped at 40,000 tokens per replica (vLLM `--num-gpu-blocks-override 2500`, SGLang `--max-total-tokens 40000`), the room a ~32B 4-bit model leaves on the same card. This puts the cache under pressure, the realistic case. One soak run uses the full cache instead.
 - **Routers:** 3 routers; each of the 6 agents connects to all 3. Every request is sent to one of the three routers in turn (below), so a conversation moves between routers.
 - **Comparison:** the same binaries, built from the prefix-aware routing pull requests (#102–#104 and #122), and the same engines, with the policy set to `least-loaded` or `prefix-aware`. Routers are restarted with an empty index for every run.
