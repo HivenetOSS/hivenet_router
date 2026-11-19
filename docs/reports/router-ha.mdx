@@ -82,7 +82,28 @@ A router never switches to "allow all". A router that loses the store keeps the 
 
 ### Agents connected to every router
 
-Each agent opens a session with every router of the site and reports its real load and its engine's KV-cache capacity. Every router therefore sees every replica, and admits by what the engine can hold rather than by a request count declared on the agent. When a router goes away, its agents cancel that router's requests on the engine, so the GPU stops working for nobody.
+A **replica** is one inference engine (vLLM, SGLang…) on its GPU, with an **agent** next to it. The agent is the router's only contact with the engine: it forwards requests to it and reports on it. The **routers** receive client requests and choose a replica; the **store** only holds the shared counts and credits.
+
+```mermaid
+flowchart LR
+  C[Clients] --> LB[Load balancer]
+  LB --> R0[Router 0]
+  LB --> R1[Router 1]
+  LB --> R2[Router 2]
+  R0 & R1 & R2 -.counts and credits.- V[(Store)]
+  subgraph Replica1[Replica 1]
+    A1[Agent] --> E1[Engine on GPU]
+  end
+  subgraph Replica2[Replica 2]
+    A2[Agent] --> E2[Engine on GPU]
+  end
+  A1 --- R0 & R1 & R2
+  A2 --- R0 & R1 & R2
+```
+
+- **Every agent connects to every router.** Each router therefore sees every replica, whichever router a client reached.
+- **Agents report what the engine can really hold:** its current load and its KV-cache capacity. Routers admit by that, not by a request count declared on the agent.
+- **When a router goes away, its agents cancel that router's requests on the engine,** so the GPU does not keep working on answers nobody will receive.
 
 ## Measurements
 
