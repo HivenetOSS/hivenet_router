@@ -166,16 +166,21 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			hop, from = info.Hop, info.From
 		}
 		reqScope := requestScope(c)
-		healthy := h.healthyAgentCount(model)
-		if reqScope != "" && h.healthyInScope != nil {
-			healthy = h.healthyInScope(model, reqScope) // agents here the request may use
-		}
-		if hop >= redirect.MaxHops || healthy > 0 {
+		if hop >= redirect.MaxHops || h.healthyForRequest(c, model) > 0 {
 			c.Next()
 			return
 		}
+		// A scope from the client or its key bounds both the sites and, at
+		// the target, the agents. Without one the request may go only to
+		// sites in this site's country (or the first router's, after a
+		// redirect), and the target's agents are not filtered.
 		scope := redirect.Scope(reqScope)
-		if scope == "" {
+		scopeAgents := scope != ""
+		switch {
+		case scope != "":
+		case info != nil:
+			scope = redirect.Scope(info.Scope)
+		default:
 			scope = h.defaultRedirectScope()
 		}
 		now := time.Now()
@@ -194,6 +199,7 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			ClientRequestID: c.GetString(ctxKeyClientRequestID),
 			Model:           model,
 			Scope:           scope,
+			ScopeAgents:     scopeAgents,
 			Strategy:        requestedRoutingStrategy(c),
 			From:            from,
 			Site:            target.ID,

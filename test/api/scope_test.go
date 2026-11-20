@@ -112,8 +112,46 @@ func TestScope_TargetChecksTheKey(t *testing.T) {
 	b := newSite(t, "b", map[string]int{"m": 1}, scopedKeys(t, "country:FR", ""))
 	push(t, fleetDoc(1), b)
 	tok := testSigner(t).Sign(redirect.Claims{KeyID: "key-1", RequestID: "11111111-2222-3333-4444-555555555555",
-		Model: "m", Scope: redirect.ScopeAll, From: "a", Site: "b", Path: chatPath, Hop: 1, BodySHA: redirect.BodySHA(chatBody)}, time.Now())
+		Model: "m", Scope: redirect.ScopeAll, ScopeAgents: true, From: "a", Site: "b", Path: chatPath, Hop: 1, BodySHA: redirect.BodySHA(chatBody)}, time.Now())
 	if w := send(b, chatPath+"?rt="+tok, chatBody, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("status %d, want 403; body %s", w.Code, w.Body)
+	}
+}
+
+// A request whose client asked for no scope (a key without scope fields, no
+// header) is redirected only inside the first site's country, but that
+// default never filters the target's agents: an agent that declares no
+// country still serves it. A scope from the client or the key does.
+func TestScope_DefaultRedirectScopeDoesNotFilterAgents(t *testing.T) {
+	a := newSite(t, "a", nil, scopedKeys(t, "", ""))
+	push(t, fleetDoc(1), a)
+	_, c := locationToken(t, send(a, chatPath, chatBody, map[string]string{"Authorization": "Bearer " + otherKey}))
+	if c.Scope != "country:FR" || c.ScopeAgents {
+		t.Fatalf("token scope %q (agents %v), want country:FR for the sites only", c.Scope, c.ScopeAgents)
+	}
+	_, c = locationToken(t, send(a, chatPath, chatBody, map[string]string{"Authorization": "Bearer " + otherKey, "X-Hivenet-Scope": "EU"}))
+	if c.Scope != "EU" || !c.ScopeAgents {
+		t.Fatalf("token scope %q (agents %v), want EU bounding the agents too", c.Scope, c.ScopeAgents)
+	}
+
+	sign := func(scope redirect.Scope, agents bool) string {
+		return testSigner(t).Sign(redirect.Claims{KeyID: "key-2", RequestID: "11111111-2222-3333-4444-555555555555",
+			Model: "m", Scope: scope, ScopeAgents: agents, From: "a", Site: "b", Path: chatPath, Hop: 1,
+			BodySHA: redirect.BodySHA(chatBody)}, time.Now())
+	}
+	for _, tc := range []struct {
+		name   string
+		agents bool
+		want   domain.Scope
+	}{{"default scope: agents not filtered", false, ""}, {"client scope: agents filtered", true, "country:FR"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newSite(t, "b", map[string]int{"m": 1}, scopedKeys(t, "", ""))
+			push(t, fleetDoc(1), b)
+			done := sendAsync(b, chatPath+"?rt="+sign("country:FR", tc.agents), chatBody, nil)
+			p := serveOne(t, b)
+			if w := <-done; w.Code != http.StatusOK || p.Scope != tc.want {
+				t.Fatalf("status %d scope %q, want 200 and %q", w.Code, p.Scope, tc.want)
+			}
+		})
 	}
 }

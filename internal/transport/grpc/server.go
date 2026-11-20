@@ -148,7 +148,7 @@ func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
 		return fmt.Errorf("organization is required")
 	}
 	if meta.Country != "" && !domain.ValidCountry(meta.Country) {
-		return fmt.Errorf("country %q must be an ISO 3166-1 alpha-2 code such as FR", meta.Country)
+		return fmt.Errorf("country %q must be an upper-case ISO 3166-1 alpha-2 code such as FR", meta.Country)
 	}
 	return nil
 }

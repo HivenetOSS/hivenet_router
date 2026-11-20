@@ -26,7 +26,7 @@ func validateKeyScope(label, scopeMax, homeCountry string) error {
 		return nil
 	}
 	if !domain.ValidCountry(homeCountry) {
-		return fmt.Errorf("auth: %s: home_country %q must be an ISO 3166-1 alpha-2 code such as FR", label, homeCountry)
+		return fmt.Errorf("auth: %s: home_country %q must be an upper-case ISO 3166-1 alpha-2 code such as FR", label, homeCountry)
 	}
 	if !domain.CountryScope(homeCountry).Within(max) {
 		return fmt.Errorf("auth: %s: home_country %q is outside scope_max %q", label, homeCountry, max)

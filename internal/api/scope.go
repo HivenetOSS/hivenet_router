@@ -30,7 +30,10 @@ const (
 //     than "all", else no scope (served by any agent, redirected inside
 //     this site's country, as before keys carried a scope);
 //   - a request repeated at a sibling site after a 307 keeps the scope of its
-//     token, checked again against the key here.
+//     token when that scope came from the client or its key (ScopeAgents),
+//     checked again against the key here; a token whose scope was only the
+//     first router's default country resolves as a request without a header,
+//     so agents that declare no country still serve it.
 //
 // The scope is a hard filter on the agents that may serve the request (by
 // the country they declare) and on the sites it may be redirected to. It
@@ -42,13 +45,14 @@ func (h *Handlers) Scope() gin.HandlerFunc {
 			max = domain.Scope(v) // validated when the key was loaded
 		}
 		var scope domain.Scope
-		if info := redirectInfo(c); info != nil {
-			scope = domain.Scope(info.Scope)
-		} else if v := strings.TrimSpace(c.GetHeader(scopeHeader)); v != "" {
+		info := redirectInfo(c)
+		if info != nil && info.ScopeAgents {
+			scope = domain.Scope(info.Scope) // the client's or its key's scope at the first router
+		} else if v := strings.TrimSpace(c.GetHeader(scopeHeader)); info == nil && v != "" {
 			s, err := domain.ParseScope(v)
 			if err != nil {
 				abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
-					fmt.Sprintf("invalid %s header %q: use country:XX (ISO 3166-1 alpha-2), EU or all", scopeHeader, v), domain.SourceRouter)
+					fmt.Sprintf("invalid %s header %q: use country:XX (XX an upper-case ISO 3166-1 alpha-2 code, such as country:FR), EU or all", scopeHeader, v), domain.SourceRouter)
 				return
 			}
 			scope = s
@@ -74,4 +78,19 @@ func requestScope(c *gin.Context) domain.Scope {
 	v, _ := c.Get(ctxKeyScope)
 	s, _ := v.(domain.Scope)
 	return s
+}
+
+// healthyForRequest counts the healthy agents here that may serve this
+// request's model: inside its scope when it has one, else every healthy
+// agent of the model. The redirect decision and the semantic alias resolver
+// use it, so neither picks a model or a site whose only agents are out of
+// the request's scope.
+func (h *Handlers) healthyForRequest(c *gin.Context, model string) int {
+	if s := requestScope(c); s != "" && h.healthyInScope != nil {
+		return h.healthyInScope(model, s)
+	}
+	if h.healthyAgentCount == nil {
+		return 0
+	}
+	return h.healthyAgentCount(model)
 }

@@ -28,7 +28,7 @@ func ParseScope(s string) (Scope, error) {
 	case strings.HasPrefix(s, "country:") && ValidCountry(strings.TrimPrefix(s, "country:")):
 		return Scope(s), nil
 	}
-	return "", fmt.Errorf("invalid scope %q: use country:XX (ISO 3166-1 alpha-2), EU or all", s)
+	return "", fmt.Errorf("invalid scope %q: use country:XX (XX an upper-case ISO 3166-1 alpha-2 code, such as country:FR), EU or all", s)
 }
 
 // CountryScope is the scope of one country.
