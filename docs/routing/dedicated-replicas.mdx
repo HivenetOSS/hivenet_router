@@ -21,6 +21,23 @@ reservation: "acme"
 | `acme` | `acme` | Yes |
 | `acme` | Empty, or `other` | No |
 
+## When to use it
+
+Use dedicated replicas when one client has paid for capacity of its own on routers that serve every client: guaranteed throughput that other clients' traffic cannot take, no noisy neighbours on its replicas, and a fixed number of replicas that never scale to zero. Every other client keeps using the shared replicas of the same model, which scale with their own demand.
+
+For example, `llama3:70b` runs on four shared replicas that every key uses, and on two replicas reserved for `acme`:
+
+```bash
+# four shared replicas (scaled by the autoscaler)
+hivenet-router-agent --engine vllm --model llama3:70b ...
+# two replicas for acme (fixed)
+hivenet-router-agent --engine vllm --model llama3:70b --reserved-for acme ...
+```
+
+acme's keys carry `reservation: acme` and reach only its two replicas, whatever their load. Every other key reaches only the four shared ones. When acme's replicas are full, acme's requests wait in acme's own queue and are then refused (`429` or `503`); they never spill to the shared replicas, and the shared replicas never take acme's load. Overflow from a reserved pool to the shared one is not supported.
+
+When a model only needs to run on some replicas for every client (a GPU type, a site), use the policy's `match` instead: it applies to all keys alike.
+
 A reservation name is 1 to 64 letters, digits, `.`, `_` or `-`. The agent flag can also be set with `HIVENET_AGENT_RESERVED_FOR`. An invalid name stops the agent, is refused at registration, is a `400` on the admin API, and stops the router in `auth.yaml`.
 
 ## Pools
@@ -40,6 +57,8 @@ A pool is the replicas of a model that serve the same clients: the shared replic
 
 The model's policy (`match`, `exclude_if`, strategy, `fallback_chain`) applies to both pools; the reservation is a filter on top of it, like the [scope](/routing/cross-site-redirect#scope).
 
+Hold at zero concerns the shared pool only: a shared request is held while the model has no healthy shared replica, even when a dedicated replica of the model is up, and only a shared replica that registers releases it. A [semantic alias](/routing/semantic-routing) picks only models with a healthy replica in the request's pool, so a shared key's alias does not choose a model served here only by dedicated replicas, and a reserved key's alias does not choose one it has no replica of.
+
 ## Metrics and autoscaling
 
 Per-pool gauges carry a `pool` label: empty for the shared replicas, the reservation name for dedicated ones.
@@ -48,7 +67,8 @@ Per-pool gauges carry a `pool` label: empty for the shared replicas, the reserva
 | --- | --- |
 | `hivenet_pool_healthy_agents` | `model`, `pool` |
 | `hivenet_queue_depth` | `model`, `pool` |
+| `hivenet_queue_wait_seconds` | `model`, `pool` |
 | `hivenet_admission_queue_depth` | `model`, `pool` |
 | `hivenet_admission_occupancy_tokens`, `hivenet_admission_budget_tokens`, `hivenet_admission_inflight_requests`, `hivenet_admission_max_inflight` | `model`, `pool` |
 
-An autoscaler sizes only the shared pool: filter its queries on `pool=""`. A reserved pool's replica count is fixed by the reservation; its gauges show how full the client keeps its replicas. `hivenet_pending_demand` never counts a dedicated request, since such a request is never held.
+An autoscaler sizes only the shared pool: filter its queries on `pool=""`. Every model's shared pool is reported, `0` when it has no replica (when only dedicated replicas serve it, or when all its agents left), so a scaled-to-zero pool reads `0`, not "no data". A reserved pool's replica count is fixed by the reservation; its gauges show how full the client keeps its replicas. `hivenet_pending_demand` never counts a dedicated request, since such a request is never held.

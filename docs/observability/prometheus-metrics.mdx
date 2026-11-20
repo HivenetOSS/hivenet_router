@@ -1257,7 +1257,7 @@ Registered only when `--semantic-decision-log` is set. Dropped records were not 
 
 Both queue gauges carry `model` and `pool` (empty for the shared replicas, the reservation of [dedicated replicas](/routing/dedicated-replicas) otherwise), and so do the occupancy gauges below; `hivenet_pool_healthy_agents{model, pool}` counts the healthy agents of each pool.
 
-`hivenet_admission_queue_depth` counts the requests waiting in the per-pool wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--admission-queue-depth` (default: `--queue-depth`, normally `30`). `hivenet_queue_depth` and `hivenet_queue_wait_seconds` count the requests waiting for a declared capacity slot (agents with a declared capacity only). These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
+`hivenet_admission_queue_depth` counts the requests waiting in the per-pool wait queue of the [occupancy budget](/routing/admission-control#b2-pool-occupancy) (B2), sized by `--admission-queue-depth` (default: `--queue-depth`, normally `30`). `hivenet_queue_depth` and `hivenet_queue_wait_seconds` (labelled `model` and `pool` too) count the requests waiting for a declared capacity slot (agents with a declared capacity only). These metrics do not describe the router’s global pending-request channel, requests waiting for `--max-concurrent`, or work already forwarded to a backend.
 
 ### Current queue depth
 
@@ -1289,7 +1289,7 @@ histogram_quantile(
   0.95,
   sum by (le, model) (
     rate(
-      hivenet_queue_wait_seconds_bucket[5m]
+      hivenet_queue_wait_seconds_bucket{pool=""}[5m]
     )
   )
 )

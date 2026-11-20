@@ -986,10 +986,10 @@ func NewRouterMetrics() *RouterMetrics {
 		queueWaitSeconds: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "hivenet_queue_wait_seconds",
-				Help:    "Time requests spend waiting in the per-model capacity queue before being dispatched.",
+				Help:    "Time requests spend waiting in the per-pool capacity queue before being dispatched. pool=\"\" is the shared replicas; another value is the reservation of dedicated replicas.",
 				Buckets: prometheus.ExponentialBuckets(0.01, 2, 13), // 10ms to ~40s (0.01 × 2^12 = 40.96s)
 			},
-			[]string{"model"},
+			[]string{"model", "pool"},
 		),
 		tenantRequestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -1479,14 +1479,31 @@ var poolReplicasDesc = prometheus.NewDesc(
 
 type poolReplicasCollector struct {
 	pools func() map[string]int // pool key (domain.PoolKey) → healthy agents
+
+	mu   sync.Mutex
+	seen map[string]struct{} // every pool key reported so far
 }
 
 func (c *poolReplicasCollector) Describe(ch chan<- *prometheus.Desc) { ch <- poolReplicasDesc }
 
+// Collect reports every pool, and 0 for a pool whose agents all left (a
+// gauge that disappears reads as "no data", not as an empty pool); every
+// model's shared pool is reported, 0 when only reserved agents serve it.
 func (c *poolReplicasCollector) Collect(ch chan<- prometheus.Metric) {
-	for key, n := range c.pools() {
+	now := c.pools()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seen == nil {
+		c.seen = make(map[string]struct{})
+	}
+	for key := range now {
+		c.seen[key] = struct{}{}
+		model, _ := domain.SplitPoolKey(key)
+		c.seen[domain.PoolKey(model, domain.SharedPool)] = struct{}{}
+	}
+	for key := range c.seen {
 		model, pool := domain.SplitPoolKey(key)
-		ch <- prometheus.MustNewConstMetric(poolReplicasDesc, prometheus.GaugeValue, float64(n), model, pool)
+		ch <- prometheus.MustNewConstMetric(poolReplicasDesc, prometheus.GaugeValue, float64(now[key]), model, pool)
 	}
 }
 
@@ -1862,10 +1879,12 @@ func (m *RouterMetrics) AdmissionQueueDepthUpdated(key string, depth int) {
 	m.admissionQueueDepth.With(prometheus.Labels{"model": model, "pool": pool}).Set(float64(depth))
 }
 
-// QueueWaitObserved records a successful wait duration in the per-model histogram.
-// Implements policy.QueueMetrics.
-func (m *RouterMetrics) QueueWaitObserved(model string, durationSeconds float64) {
-	m.queueWaitSeconds.With(prometheus.Labels{"model": model}).Observe(durationSeconds)
+// QueueWaitObserved records a successful wait duration in the per-pool
+// histogram; key is the queue's pool key (domain.PoolKey). Implements
+// policy.QueueMetrics.
+func (m *RouterMetrics) QueueWaitObserved(key string, durationSeconds float64) {
+	model, pool := domain.SplitPoolKey(key)
+	m.queueWaitSeconds.With(prometheus.Labels{"model": model, "pool": pool}).Observe(durationSeconds)
 }
 
 // APIKeyPushRejected counts one admin key push refused for an invalid entry;

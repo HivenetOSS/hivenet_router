@@ -29,7 +29,7 @@ import (
 // Implemented by *metrics.RouterMetrics; may be nil (e.g. in unit tests).
 type QueueMetrics interface {
 	QueueDepthUpdated(model string, depth int)
-	QueueWaitObserved(model string, durationSeconds float64)
+	QueueWaitObserved(poolKey string, durationSeconds float64) // poolKey: domain.PoolKey(model, reservation)
 }
 
 var log = logging.Logger("policy")
@@ -599,7 +599,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 				// the metric useless for observing actual dispatch latency.
 				if waitErr == nil {
 					if s.executor.queueMetrics != nil {
-						s.executor.queueMetrics.QueueWaitObserved(s.model, elapsed.Seconds())
+						s.executor.queueMetrics.QueueWaitObserved(domain.PoolKey(s.model, s.reservation), elapsed.Seconds())
 					}
 					queueSpan.SetAttributes(attribute.Float64("queue.wait_ms", float64(elapsed.Milliseconds())))
 				} else {

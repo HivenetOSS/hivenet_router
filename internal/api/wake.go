@@ -60,9 +60,13 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 		return nil
 	}
 	return func(c *gin.Context, model string) int {
-		n := healthy(model)
+		// The request's pool when the router wires per-pool counts (always in
+		// production); healthy, model-wide, only without them.
+		var n int
 		if h.pools.Healthy != nil {
 			n = h.pools.Healthy(model, requestPool(c))
+		} else {
+			n = healthy(model)
 		}
 		if n > 0 || h.wake == nil || h.redirect == nil || requestPool(c) != domain.SharedPool {
 			return n
