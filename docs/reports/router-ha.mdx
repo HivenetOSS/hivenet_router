@@ -84,24 +84,10 @@ A router never switches to "allow all". A router that loses the store keeps the 
 
 A **replica** is one inference engine (vLLM, SGLang…) on its GPU, with an **agent** next to it. The agent is the router's only contact with the engine: it forwards requests to it and reports on it. The **routers** receive client requests and choose a replica; the **store** only holds the shared counts and credits.
 
-```mermaid
-flowchart TB
-  LB[Load balancer]
-  R1[Router 1]
-  R2[Router 2]
-  R3[Router 3]
-  subgraph RA[Replica A]
-    A1[Agent] --> E1[Engine on GPU]
-  end
-  subgraph RB[Replica B]
-    A2[Agent] --> E2[Engine on GPU]
-  end
-  subgraph RC[Replica C]
-    A3[Agent] --> E3[Engine on GPU]
-  end
-  LB --> R1 & R2 & R3
-  R1 & R2 & R3 --- A1 & A2 & A3
-```
+<Frame caption="Every agent connects to every router. A replica is an agent and its engine on a GPU.">
+  <img className="block dark:hidden" src="/images/router-ha/ha-topology-light.svg" alt="Three routers behind a load balancer. Each router is connected to the agent of every replica, A, B and C; each agent forwards requests to its own engine on a GPU." />
+  <img className="hidden dark:block" src="/images/router-ha/ha-topology-dark.svg" alt="Three routers behind a load balancer. Each router is connected to the agent of every replica, A, B and C; each agent forwards requests to its own engine on a GPU." />
+</Frame>
 
 - **Every agent connects to every router.** Each router therefore sees every replica, whichever router a client reached.
 - **Agents report what the engine can really hold:** its current load and its KV-cache capacity. Routers admit by that, not by a request count declared on the agent.
