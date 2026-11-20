@@ -87,6 +87,9 @@ type keyStoreEntry struct {
 	ExpiresAt     *time.Time    `json:"expires_at"` // RFC3339; null = never
 	AllowedModels []string      `json:"allowed_models"`
 	Quota         keyStoreQuota `json:"quota"`
+	// RoutingStrategies is omitted when empty, so a snapshot written before
+	// the field existed reads back the same.
+	RoutingStrategies []string `json:"routing_strategies,omitempty"`
 }
 
 // keyStoreQuota / keyStorePerModel mirror auth.QuotaLimits /
@@ -550,6 +553,8 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 		ExpiresAt:     e.ExpiresAt,
 		AllowedModels: e.AllowedModels,
 		Quota:         wq,
+
+		RoutingStrategies: e.RoutingStrategies,
 	}
 }
 
@@ -579,5 +584,7 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 		ExpiresAt:     w.ExpiresAt,
 		AllowedModels: w.AllowedModels,
 		Quota:         q,
+
+		RoutingStrategies: w.RoutingStrategies,
 	}
 }

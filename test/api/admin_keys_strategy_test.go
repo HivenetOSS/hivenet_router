@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
+
+package api_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+
+	"hivenet_router/internal/policy"
+
+	"github.com/gin-gonic/gin"
+)
+
+// A pushed key's routing_strategies must name implemented strategies, each
+// once: a bad list is a 400 and never reaches the registry, a good one is
+// stored in order — on both the single-key and the replace endpoints.
+func TestAdminKeys_RoutingStrategies(t *testing.T) {
+	keyBody := func(strategies []string) map[string]any {
+		return map[string]any{
+			"key_hash": strings.Repeat("ab", 32), "owner": "acme", "name": "k", "enabled": true,
+			"routing_strategies": strategies,
+		}
+	}
+	upsert := func(t *testing.T, strategies []string) (*httptest.ResponseRecorder, func(string) []string) {
+		h, reg := newAdminKeyHandlers(policy.Default())
+		b := keyBody(strategies)
+		b["version"] = "v1"
+		body, _ := json.Marshal(b)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/admin/api-keys/k1", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "id", Value: "k1"}}
+		h.UpsertAPIKey(c)
+		return w, func(id string) []string { e, _ := reg.GetKey(id); return e.RoutingStrategies }
+	}
+
+	t.Run("valid list is stored in order", func(t *testing.T) {
+		w, stored := upsert(t, []string{"least-loaded", "prefix-aware"})
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200; body %s", w.Code, w.Body)
+		}
+		if got := stored("k1"); !slices.Equal(got, []string{"least-loaded", "prefix-aware"}) {
+			t.Errorf("stored %v, want [least-loaded prefix-aware]", got)
+		}
+	})
+	for _, bad := range [][]string{{"round-robin"}, {"prefix-aware", "prefix-aware"}} {
+		t.Run("rejected: "+strings.Join(bad, ","), func(t *testing.T) {
+			w, stored := upsert(t, bad)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "routing_strategies") {
+				t.Fatalf("status %d body %s, want 400 naming routing_strategies", w.Code, w.Body)
+			}
+			if got := stored("k1"); got != nil {
+				t.Errorf("rejected key reached the registry with %v", got)
+			}
+		})
+	}
+
+	t.Run("replace endpoint validates too", func(t *testing.T) {
+		h, reg := newAdminKeyHandlers(policy.Default())
+		k := keyBody([]string{"round-robin"})
+		k["id"] = "k1"
+		body, _ := json.Marshal(map[string]any{"version": "v1", "keys": []any{k}})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/admin/api-keys/replace", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.ReplaceAPIKeys(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400; body %s", w.Code, w.Body)
+		}
+		if _, ok := reg.GetKey("k1"); ok {
+			t.Error("rejected key reached the registry")
+		}
+	})
+}

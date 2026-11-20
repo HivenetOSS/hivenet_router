@@ -568,14 +568,18 @@ type Claims struct {
 	ClientRequestID string `json:"crid,omitempty"`
 	Model           string `json:"model"` // the concrete model the first router routed on
 	Scope           Scope  `json:"scope"` // the effective scope at the first router
-	From            string `json:"from"`  // the first router's site ID
-	Site            string `json:"site"`  // the only site that accepts this token
-	Path            string `json:"path"`  // the only path the token is valid for
-	Hop             int    `json:"hop"`   // redirects so far, including this one
-	BodySHA         string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
-	IssuedAt        int64  `json:"iat"`   // Unix seconds
-	Exp             int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
-	JTI             string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
+	// Strategy is the routing strategy the client asked for at the first
+	// router with X-Hivenet-Routing-Strategy, or empty when the key's default
+	// (or the model's policy) applies. The target checks it against the key.
+	Strategy string `json:"strat,omitempty"`
+	From     string `json:"from"` // the first router's site ID
+	Site     string `json:"site"` // the only site that accepts this token
+	Path     string `json:"path"` // the only path the token is valid for
+	Hop      int    `json:"hop"`  // redirects so far, including this one
+	BodySHA  string `json:"bh"`   // hex SHA-256 of the request body as the client sent it
+	IssuedAt int64  `json:"iat"`  // Unix seconds
+	Exp      int64  `json:"exp"`  // Unix seconds, IssuedAt + TTL
+	JTI      string `json:"jti"`  // 16 random bytes, base64url: this token's single-use ID, set by Sign
 }
 
 // jtiLen is the length of a token ID, in random bytes.
