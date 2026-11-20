@@ -654,7 +654,7 @@ A refused request is refused before any quota is spent. When a request is [redir
 
 A key listing a strategy that does not exist, or the same strategy twice, is rejected: the admin API answers `400`, and the router does not start (or reload) with such a key in `auth.yaml`.
 
-The metric `hivenet_routing_strategy_requests_total{strategy, source}` counts the requests routed with a strategy chosen by their key, by source: `key` (the key's default) or `header`. It is incremented when a request is dispatched to a replica, so a request refused at admission, or that expires in the queue, is not counted.
+The metric `hivenet_routing_strategy_requests_total{strategy, source}` counts the requests routed with a strategy chosen by their key, by source: `key` (the key's default) or `header`. It is incremented when a request leaves the queue to be dispatched, before a replica is chosen: a request refused at admission, or that expires in the queue, is not counted, but one that then finds no replica (every step exhausted) or times out in flight is.
 
 ## Forward attempts
 
