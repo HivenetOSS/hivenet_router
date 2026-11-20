@@ -328,7 +328,16 @@ type Config struct {
 	// The routing policy (e.g., fallback_provider.engine) selects which provider to use; the order
 	// of this slice does not control fallback behavior. API keys are supplied via env variables
 	// (HIVENET_ROUTER_OPENAI_API_KEY, HIVENET_ROUTER_ANTHROPIC_API_KEY).
+	//
+	// Deprecated: an API key's own provider account (external_fallback, bring
+	// your own key) replaces the operator's; these keys and the policies'
+	// fallback_provider will be removed in a later release.
 	Providers []ProviderConfig
+
+	// ProviderBaseURLs overrides provider API endpoints by provider name, for
+	// the operator's providers and the clients' own (BYOK):
+	// HIVENET_ROUTER_OPENAI_BASE_URL, HIVENET_ROUTER_ANTHROPIC_BASE_URL.
+	ProviderBaseURLs map[string]string
 }
 
 // ProviderConfig holds credentials for one closed-source model provider.
@@ -654,6 +663,14 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("HIVENET_ROUTER_ANTHROPIC_API_KEY"); v != "" {
 		cfg.Providers = append(cfg.Providers, ProviderConfig{Name: "anthropic", APIKey: v})
+	}
+	for name, env := range map[string]string{"openai": "HIVENET_ROUTER_OPENAI_BASE_URL", "anthropic": "HIVENET_ROUTER_ANTHROPIC_BASE_URL"} {
+		if v := strings.TrimRight(strings.TrimSpace(os.Getenv(env)), "/"); v != "" {
+			if cfg.ProviderBaseURLs == nil {
+				cfg.ProviderBaseURLs = map[string]string{}
+			}
+			cfg.ProviderBaseURLs[name] = v
+		}
 	}
 
 	return cfg

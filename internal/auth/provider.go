@@ -210,6 +210,11 @@ type AuthResult struct {
 	// one never uses a reserved agent.
 	Reservation string
 
+	// ExternalFallback, when set, is the client's own provider account (bring
+	// your own key): a request whose local policy steps are all exhausted is
+	// sent there, with the client's credential.
+	ExternalFallback *ExternalFallback
+
 	// QuotaLimits holds this key's rate/token limits, enforced per key by
 	// QuotaMiddleware and the handlers. Zero values mean unlimited.
 	QuotaLimits QuotaLimits

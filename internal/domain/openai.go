@@ -149,8 +149,13 @@ const providerProcessedByPrefix = "provider:"
 // throughput, so the local-resource accounting (OTPM charge, estimator
 // learning) must skip them.
 func (r *ChatResponse) ServedByProvider() bool {
-	return strings.HasPrefix(r.ProcessedBy, providerProcessedByPrefix)
+	return strings.HasPrefix(r.ProcessedBy, providerProcessedByPrefix) || strings.HasPrefix(r.ProcessedBy, BYOKProcessedByPrefix)
 }
+
+// BYOKProcessedByPrefix marks a response served by the client's own provider
+// account (ProcessedBy "byok:openai"): the audit log and billing tell it
+// apart from the operator's provider ("provider:openai").
+const BYOKProcessedByPrefix = "byok:"
 
 // Choice represents a response choice
 type Choice struct {

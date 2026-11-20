@@ -739,6 +739,10 @@ See [Fallback chains](/routing/fallback-chains) for examples and execution behav
 
 `fallback_provider` defines one external API used after every local step is exhausted.
 
+<Warning>
+  Deprecated: it sends every client's requests to the operator's provider account. Give each client an [`external_fallback`](/routing/provider-fallback#bring-your-own-key) on its API key (its own provider key) instead; it takes precedence. A request with a scope narrower than `all` never goes to an external provider.
+</Warning>
+
 ```yaml
 fallback_provider:
   engine: openai

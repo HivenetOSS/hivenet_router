@@ -739,12 +739,12 @@ func (r *Router) Start() error {
 	// Build closed-source provider map from config (keyed by engine name).
 	r.providers = make(map[string]provider.Provider, len(r.cfg.Providers))
 	for _, pc := range r.cfg.Providers {
-		prov, err := provider.New(provider.Config{Name: pc.Name, APIKey: pc.APIKey, Metrics: r.metrics})
+		prov, err := provider.New(provider.Config{Name: pc.Name, APIKey: pc.APIKey, BaseURL: r.cfg.ProviderBaseURLs[pc.Name], Metrics: r.metrics})
 		if err != nil {
 			return fmt.Errorf("provider: %w", err)
 		}
 		r.providers[pc.Name] = prov
-		log.Infof("Provider API key loaded: %s", pc.Name)
+		log.Warnf("Provider API key loaded: %s — deprecated: the operator's provider keys and fallback_provider will be removed; give clients an external_fallback (their own provider key) on their API key instead", pc.Name)
 	}
 
 	// Fail fast: if the global policy declares a fallback_provider, the API key must be present.
@@ -770,6 +770,7 @@ func (r *Router) Start() error {
 		WithCacheSalter(r.salter),
 		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
 		WithPrefixScope(prefixScope(r.salter)),
+		WithProviderBaseURLs(r.cfg.ProviderBaseURLs),
 		WithPrefixCheck(func(agent peer.ID, model string, blocks []uint64, at int64, actual int) {
 			// Wait for the engine's cache events that may have evicted the
 			// blocks before the request reached it (sent in batches every

@@ -41,3 +41,47 @@ func TestStaticKeyReservation(t *testing.T) {
 		t.Error("pushed key with an invalid reservation accepted")
 	}
 }
+
+func TestExternalFallbackValidation(t *testing.T) {
+	ok := &ExternalFallback{Provider: "openai", Model: "gpt", APIKey: NewSecret("sk-0123456789abc")}
+	if err := validateExternalFallback("k", ok, ""); err != nil {
+		t.Errorf("valid: %v", err)
+	}
+	if err := validateExternalFallback("k", ok, "all"); err != nil {
+		t.Errorf("scope all: %v", err)
+	}
+	bad := []struct {
+		fb    *ExternalFallback
+		scope string
+	}{
+		{&ExternalFallback{Provider: "mistral", Model: "m", APIKey: NewSecret("x")}, ""},
+		{&ExternalFallback{Provider: "openai", APIKey: NewSecret("x")}, ""},
+		{&ExternalFallback{Provider: "openai", Model: "m"}, ""},
+		{ok, "EU"},
+		{ok, "country:FR"},
+	}
+	for _, b := range bad {
+		if err := validateExternalFallback("k", b.fb, b.scope); err == nil {
+			t.Errorf("%+v scope %q accepted", b.fb, b.scope)
+		}
+	}
+}
+
+// auth.yaml reads the client's provider key from the environment, never
+// from the file.
+func TestStaticExternalFallback(t *testing.T) {
+	entry := func(env string) []APIKeyEntry {
+		return []APIKeyEntry{{KeyHash: strings.Repeat("ab", 32), Metadata: KeyMetadata{Owner: "o", Name: "n"},
+			ExternalFallback: &StaticExternalFallback{Provider: "openai", Model: "gpt", APIKeyEnv: env}}}
+	}
+	t.Setenv("ACME_OPENAI_KEY", "sk-acme-0123456789")
+	if _, err := NewStaticKeyProvider(entry("ACME_OPENAI_KEY")); err != nil {
+		t.Errorf("valid: %v", err)
+	}
+	if _, err := NewStaticKeyProvider(entry("UNSET_VARIABLE_FOR_TEST")); err == nil {
+		t.Error("unset variable accepted")
+	}
+	if _, err := NewStaticKeyProvider(entry("")); err == nil {
+		t.Error("missing api_key_env accepted")
+	}
+}

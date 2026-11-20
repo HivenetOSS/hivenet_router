@@ -48,6 +48,10 @@ type PendingRequest struct {
 	// SharedPool ("") for the agents reserved for no one.
 	Pool string
 
+	// ExternalFallback is the key's own provider account (BYOK), used when
+	// every local policy step is exhausted; nil = none.
+	ExternalFallback *ExternalFallback
+
 	// Capability is the inference type required by this request: "llm", "embedding",
 	// or "reranker". The policy executor uses it to filter agents — only agents whose
 	// Metadata.Capability matches this value are considered. Defaults to "llm".

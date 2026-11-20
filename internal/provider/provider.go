@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"hivenet_router/internal/domain"
@@ -38,8 +39,14 @@ type Config struct {
 	// canonical public URL. No trailing slash.
 	BaseURL string
 
-	// Timeout for individual HTTP calls. 0 means 120 seconds.
+	// Timeout for individual HTTP calls. 0 means 120 seconds. Ignored with
+	// HTTPClient.
 	Timeout time.Duration
+
+	// HTTPClient, when set, makes the calls instead of a client of the
+	// provider's own: providers built per call (one per BYOK credential)
+	// then share its connections. Nil means a new client.
+	HTTPClient *http.Client
 
 	// Metrics records outbound HTTP client durations. May be nil.
 	Metrics *metrics.RouterMetrics
@@ -60,4 +67,12 @@ func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Provide
 // client only.
 func (e *HTTPError) ClientMessage() string {
 	return fmt.Sprintf("%s: HTTP %d: %s", e.Provider, e.Status, e.Body)
+}
+
+// clientFor returns cfg.HTTPClient, or a new client with timeout.
+func clientFor(cfg Config, timeout time.Duration) *http.Client {
+	if cfg.HTTPClient != nil {
+		return cfg.HTTPClient
+	}
+	return &http.Client{Timeout: timeout}
 }

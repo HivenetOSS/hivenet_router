@@ -236,6 +236,10 @@ type apiKeyEntryRequest struct {
 	// it (see auth.AuthResult); validated by the registry.
 	Reservation string `json:"reservation"`
 
+	// ExternalFallback is the client's own provider account (bring your own
+	// key). api_key is write-only: reads show only its preview.
+	ExternalFallback *apiKeyFallback `json:"external_fallback"`
+
 	// MaxOccupancyShare is the key-level serverless occupancy share, matching
 	// the static auth.yaml field of the same name (it sits outside quota there
 	// too, because it is a fraction of the replica pool's admit budget rather
@@ -247,20 +251,36 @@ type apiKeyEntryRequest struct {
 // Wraps a key entry plus the registry version. The :id URL parameter is the
 // source of truth for the entry ID; any id field in the body is ignored.
 type upsertAPIKeyRequest struct {
-	Version           string      `json:"version"`
-	KeyHash           string      `json:"key_hash"`
-	KeyPreview        string      `json:"key_preview"`
-	Owner             string      `json:"owner"`
-	Name              string      `json:"name"`
-	Enabled           bool        `json:"enabled"`
-	ExpiresAt         string      `json:"expires_at"`
-	AllowedModels     []string    `json:"allowed_models"`
-	Quota             apiKeyQuota `json:"quota"`
-	MaxOccupancyShare float64     `json:"max_occupancy_share"` // see apiKeyEntryRequest
-	RoutingStrategies []string    `json:"routing_strategies"`  // see apiKeyEntryRequest
-	ScopeMax          string      `json:"scope_max"`           // see apiKeyEntryRequest
-	HomeCountry       string      `json:"home_country"`        // see apiKeyEntryRequest
-	Reservation       string      `json:"reservation"`         // see apiKeyEntryRequest
+	Version           string          `json:"version"`
+	KeyHash           string          `json:"key_hash"`
+	KeyPreview        string          `json:"key_preview"`
+	Owner             string          `json:"owner"`
+	Name              string          `json:"name"`
+	Enabled           bool            `json:"enabled"`
+	ExpiresAt         string          `json:"expires_at"`
+	AllowedModels     []string        `json:"allowed_models"`
+	Quota             apiKeyQuota     `json:"quota"`
+	MaxOccupancyShare float64         `json:"max_occupancy_share"` // see apiKeyEntryRequest
+	RoutingStrategies []string        `json:"routing_strategies"`  // see apiKeyEntryRequest
+	ScopeMax          string          `json:"scope_max"`           // see apiKeyEntryRequest
+	HomeCountry       string          `json:"home_country"`        // see apiKeyEntryRequest
+	Reservation       string          `json:"reservation"`         // see apiKeyEntryRequest
+	ExternalFallback  *apiKeyFallback `json:"external_fallback"`   // see apiKeyEntryRequest
+}
+
+// apiKeyFallback is the wire form of a key's external fallback.
+type apiKeyFallback struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key"`
+}
+
+// toAuth converts the wire form; nil stays nil.
+func (f *apiKeyFallback) toAuth() *auth.ExternalFallback {
+	if f == nil {
+		return nil
+	}
+	return &auth.ExternalFallback{Provider: f.Provider, Model: f.Model, APIKey: auth.NewSecret(f.APIKey)}
 }
 
 // replaceAPIKeysRequest is the JSON body for POST /admin/api-keys/replace.
@@ -303,6 +323,7 @@ func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 		ScopeMax:          k.ScopeMax,
 		HomeCountry:       k.HomeCountry,
 		Reservation:       k.Reservation,
+		ExternalFallback:  k.ExternalFallback.toAuth(),
 	}, nil
 }
 
@@ -424,8 +445,10 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		ScopeMax:          req.ScopeMax,
 		HomeCountry:       req.HomeCountry,
 		Reservation:       req.Reservation,
+		ExternalFallback:  req.ExternalFallback,
 	}.toEntry()
 	if err == nil {
+		h.keyRegistry.KeepStoredCredential(&entry)
 		err = h.checkPushedEntry(entry)
 	}
 	if err != nil {
@@ -488,6 +511,7 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	for i, k := range req.Keys {
 		entry, err := k.toEntry()
 		if err == nil {
+			h.keyRegistry.KeepStoredCredential(&entry)
 			err = h.checkPushedEntry(entry)
 		}
 		if err != nil {

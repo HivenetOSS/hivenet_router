@@ -617,8 +617,10 @@ These settings do not have equivalent router command-line flags.
 | `HIVENET_ROUTER_AUTH_MODE` | `none` when no file is configured | API auth mode when `auth.yaml` is absent |
 | `HIVENET_ROUTER_ADMIN_API_KEYS` | Empty | Comma-separated raw administrator keys |
 | `HIVENET_ROUTER_QUOTA_BACKEND` | `memory` | `memory` or `badger` |
-| `HIVENET_ROUTER_OPENAI_API_KEY` | Empty | OpenAI credential for provider fallback |
-| `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Empty | Anthropic credential for provider fallback |
+| `HIVENET_ROUTER_OPENAI_API_KEY` | Empty | **Deprecated.** OpenAI credential for the policy's `fallback_provider`; give clients an [`external_fallback`](/routing/provider-fallback#bring-your-own-key) on their key instead |
+| `HIVENET_ROUTER_ANTHROPIC_API_KEY` | Empty | **Deprecated.** Anthropic credential for the policy's `fallback_provider`; give clients an [`external_fallback`](/routing/provider-fallback#bring-your-own-key) on their key instead |
+| `HIVENET_ROUTER_OPENAI_BASE_URL` | Empty | Override of the OpenAI API endpoint (an OpenAI-compatible gateway), for the operator's and the clients' (BYOK) accounts |
+| `HIVENET_ROUTER_ANTHROPIC_BASE_URL` | Empty | Override of the Anthropic API endpoint |
 | `HIVENET_ROUTER_AUDIT_LOG_PATH` | `/var/log/hivenet-router/audit.jsonl` | Structured audit-log path |
 | `HIVENET_ROUTER_MAX_REQUEST_BYTES` | `10485760` | Maximum request body size for `/v1/*` endpoints in bytes; `0` disables the limit |
 | `HIVENET_ROUTER_ADMIT_FRACTION` | `0.90` | Fraction of the occupancy budget (`admit_budget_tokens`, or the engines' reported KV capacity when unset) available for admission; valid range `(0, 1]` |
