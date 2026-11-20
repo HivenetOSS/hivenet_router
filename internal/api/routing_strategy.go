@@ -20,12 +20,12 @@ const RoutingStrategyHeader = "X-Hivenet-Routing-Strategy"
 
 // Context keys set by RoutingStrategy.
 const (
-	ctxKeyRoutingStrategies      = "routing_strategies" // the key's list, set by AuthMiddleware
-	ctxKeyRoutingStrategy        = "routing_strategy"
-	ctxKeyRoutingStrategySource  = "routing_strategy_source"
-	routingStrategySourceHeader  = "header"
-	routingStrategySourceKey     = "key"
-	routingStrategyNoneAllowedTx = "none"
+	ctxKeyRoutingStrategies     = "routing_strategies" // the key's list, set by AuthMiddleware
+	ctxKeyRoutingStrategy       = "routing_strategy"
+	ctxKeyRoutingStrategySource = "routing_strategy_source"
+	routingStrategySourceHeader = "header"
+	routingStrategySourceKey    = "key"
+	noStrategiesListed          = "none"
 )
 
 // RoutingStrategy resolves the ranking strategy of an inference request from
@@ -55,7 +55,7 @@ func (h *Handlers) RoutingStrategy() gin.HandlerFunc {
 		switch {
 		case requested != "":
 			if !slices.Contains(allowed, requested) {
-				list := routingStrategyNoneAllowedTx
+				list := noStrategiesListed
 				if len(allowed) > 0 {
 					list = strings.Join(allowed, ", ")
 				}

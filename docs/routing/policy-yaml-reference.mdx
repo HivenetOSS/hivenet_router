@@ -644,13 +644,17 @@ curl https://router.example.com/v1/chat/completions \
 | Empty or absent | None | The model's policy decides |
 | Empty or absent | Any value | None: `403` `routing_strategy_forbidden` |
 
+The header value is matched exactly, after trimming spaces: strategy names are lower case, so `Least-Loaded` is refused with `403`.
+
 The chosen strategy replaces the `strategy` of every step of the model's policy, the primary step and each `fallback_chain` step. Nothing else of the policy changes: the steps' `match`, `exclude_if` and `max_tries`, the `prefix_aware` tuning, and the admission fields (`mode`, `max_input_tokens`, `admit_budget_tokens`, `max_inflight`, `shed_if`) stay the policy's. A key therefore changes how a replica is ranked, never which replicas are eligible or how many requests are admitted.
+
+Because the key's strategy replaces every step's, a key cannot express "`prefix-aware` first, `least-loaded` in the fallback steps": a policy that ranks its steps differently loses that difference for keys with `routing_strategies`. Leave the list empty on keys that should keep the policy's per-step strategies.
 
 A refused request is refused before any quota is spent. When a request is [redirected](/routing/cross-site-redirect) to another site, the strategy the client asked for with the header travels in the signed redirect token, and the other site checks it again against the key.
 
 A key listing a strategy that does not exist, or the same strategy twice, is rejected: the admin API answers `400`, and the router does not start (or reload) with such a key in `auth.yaml`.
 
-The metric `hivenet_routing_strategy_requests_total{strategy, source}` counts the requests routed with a strategy chosen by their key, by source: `key` (the key's default) or `header`.
+The metric `hivenet_routing_strategy_requests_total{strategy, source}` counts the requests routed with a strategy chosen by their key, by source: `key` (the key's default) or `header`. It is incremented when a request is dispatched to a replica, so a request refused at admission, or that expires in the queue, is not counted.
 
 ## Forward attempts
 
