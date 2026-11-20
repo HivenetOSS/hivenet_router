@@ -6,6 +6,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -149,5 +150,27 @@ func TestAdminKeys_ExternalFallback(t *testing.T) {
 	h2, _ := newAdminKeyHandlers(policy.Default())
 	if w := put(h2, map[string]any{"scope_max": "EU"}); w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "0123456789") {
 		t.Errorf("scoped key with external fallback: %d %s, want 400 without the credential", w.Code, w.Body)
+	}
+
+	// A read-modify-write keeps the stored credential: api_key sent back as
+	// the preview a read returned, or left out.
+	for i, fb := range []map[string]any{
+		{"provider": "openai", "model": "gpt-4o", "api_key": "sk-...def"},
+		{"provider": "openai", "model": "gpt-4o"},
+	} {
+		if w := put(h, map[string]any{"version": fmt.Sprintf("v%d", i+2), "external_fallback": fb}); w.Code != http.StatusOK {
+			t.Fatalf("write-back %d: %d %s", i, w.Code, w.Body)
+		}
+		if e, _ := reg.GetKey("k1"); e.ExternalFallback.APIKey.Reveal() != cred || e.ExternalFallback.Model != "gpt-4o" {
+			t.Errorf("write-back %d stored %q / %s, want the credential kept and the new model", i, e.ExternalFallback.APIKey.Preview(), e.ExternalFallback.Model)
+		}
+	}
+	// A preview with nothing stored to keep (or for another provider) is refused.
+	h3, _ := newAdminKeyHandlers(policy.Default())
+	if w := put(h3, map[string]any{"external_fallback": map[string]any{"provider": "openai", "model": "m", "api_key": "sk-...def"}}); w.Code != http.StatusBadRequest {
+		t.Errorf("preview as a new credential: %d %s, want 400", w.Code, w.Body)
+	}
+	if w := put(h, map[string]any{"version": "v9", "external_fallback": map[string]any{"provider": "anthropic", "model": "m", "api_key": "sk-...def"}}); w.Code != http.StatusBadRequest {
+		t.Errorf("preview for another provider: %d %s, want 400", w.Code, w.Body)
 	}
 }

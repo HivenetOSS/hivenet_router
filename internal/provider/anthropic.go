@@ -42,7 +42,7 @@ func newAnthropic(cfg Config) *anthropicProvider {
 	return &anthropicProvider{
 		apiKey:  cfg.APIKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: timeout},
+		client:  clientFor(cfg, timeout),
 		metrics: cfg.Metrics,
 	}
 }

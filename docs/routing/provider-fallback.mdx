@@ -35,9 +35,12 @@ When every local step of the model's policy is exhausted, a request on that key 
 Rules:
 
 - **Off by default.** A key without `external_fallback` gets no BYOK fallback.
+- **Non-streaming chat completions only.** Only a `POST /v1/chat/completions` request without `"stream": true` is sent to a provider, BYOK or the deprecated policy fallback. Any other endpoint (`/v1/messages`, `/v1/messages/count_tokens`, embeddings, reranking) fails with the local error instead of being answered as a chat completion. A streaming request fails with the local error too, which then says that the external fallback answers only non-streaming requests.
 - **Sovereignty.** The provider runs outside the operator's sites. A key whose `scope_max` is narrower than `all` cannot have an `external_fallback` (`400` on push, the router does not start on `auth.yaml`), and a request with a [scope](/routing/cross-site-redirect#scope) narrower than `all` is never sent to any external provider, BYOK or not.
 - **Redirect first.** A [cross-site redirect](/routing/cross-site-redirect) to a site serving the model wins over any external fallback.
-- **The credential is write-only.** Reads through the admin API show only a preview (`sk-...KJ4`); the router never writes it in a log, an error or a trace. In the persistent key store it is encrypted with AES-256-GCM, with a key derived from the key-store secret (`HIVENET_ROUTER_KEY_STORE_SECRET`), bound to its key ID. A new push replaces it.
+- **The credential is write-only.** Reads through the admin API show only a preview (`sk-...KJ4`); the router never writes it in a log, an error or a trace. In the persistent key store it is encrypted with AES-256-GCM, with a key derived from the key-store secret (`HIVENET_ROUTER_KEY_STORE_SECRET`), bound to its key ID. A push with a new `api_key` replaces it. A push for the same provider that leaves `api_key` out, or sends back the preview a read returned, keeps the stored credential, so a read-modify-write of the key does not lose it; a preview with no stored credential to keep is refused with `400`. A push is a full replace: one without `external_fallback` removes it.
+- **Errors.** When the provider refuses the request (a wrong credential, an unknown model, an exhausted quota), the client gets the provider's own explanation in the error message, with source `backend`. Logs get only the provider's status.
+- **Downgrade.** A router older than this release does not know `external_fallback`: started on a key store written by this release, it ignores the field, and those keys lose their BYOK fallback until they are pushed again to a router that knows it.
 - **Billing.** The client pays its provider directly: the response's audit `agent_id` is `byok:<provider>` (the operator's provider shows `provider:<provider>`), and like any provider response it charges no local output rate.
 - **Endpoints.** `HIVENET_ROUTER_OPENAI_BASE_URL` and `HIVENET_ROUTER_ANTHROPIC_BASE_URL` override a provider's API endpoint (an OpenAI-compatible gateway, a regional endpoint) for the operator's and the clients' accounts alike.
 
@@ -270,18 +273,12 @@ POST /v1/chat/completions
 ```
 
 <Warning>
-  Do not rely on provider fallback for:
-
-  - `POST /v1/messages/count_tokens`
-  - complete passthrough of every Anthropic-native field
-  - streaming responses
+  Provider fallback serves only non-streaming `POST /v1/chat/completions` requests. A request to any other endpoint (`/v1/messages`, `/v1/messages/count_tokens`, embeddings, reranking), or with `"stream": true`, is never sent to a provider and fails with the local error.
 
   The provider adapters reconstruct a supported chat request rather than forwarding the original raw body unchanged.
 </Warning>
 
-Requests sent to `/v1/messages` may lose fields that are outside the subset understood by Hivenet Router’s fallback adapters.
-
-For predictable behavior, use `/v1/chat/completions` with a non-streaming text request.
+For predictable behavior, send simple text messages: fields outside the subset the fallback adapters understand are dropped.
 
 ## Model substitution
 
@@ -518,7 +515,7 @@ A successful response contains:
 
 ## Streaming limitations
 
-Provider fallback is not implemented as a streaming adapter.
+Provider fallback is not implemented as a streaming adapter: a streaming request is never sent to a provider, and fails with the local error.
 
 Use:
 
@@ -538,9 +535,7 @@ For OpenAI, a request with:
 }
 ```
 
-may cause the provider to return server-sent events, while Hivenet Router’s provider adapter expects one JSON response. The fallback then fails.
-
-Anthropic fallback also returns one completed OpenAI-compatible response rather than an SSE stream.
+is not sent to the provider; the error says that the external fallback answers only non-streaming requests.
 
 ## Timeout behavior
 
@@ -934,7 +929,7 @@ After rotating a provider key:
     - the credential belongs to the expected provider account or project
   </Accordion>
 
-  <Accordion title="OpenAI fallback fails only for streaming requests">
+  <Accordion title="Provider fallback is skipped for streaming requests">
     Set:
 
     ```json
@@ -943,7 +938,7 @@ After rotating a provider key:
     }
     ```
 
-    The current provider adapter expects one JSON response and cannot decode an SSE stream.
+    The provider adapters return one JSON response, never an SSE stream, so a streaming request is not sent to a provider.
   </Accordion>
 
   <Accordion title="Anthropic fallback loses system or content data">

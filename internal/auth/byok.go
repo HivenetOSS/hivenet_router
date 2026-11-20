@@ -39,8 +39,38 @@ func validateExternalFallback(label string, fb *ExternalFallback, scopeMax strin
 	if fb.APIKey.Empty() {
 		return fmt.Errorf("auth: %s: external_fallback.api_key is required (the client's own provider key)", label)
 	}
+	if looksLikePreview(fb.APIKey.Reveal()) {
+		return fmt.Errorf("auth: %s: external_fallback.api_key is a preview as reads return it (\"abc...xyz\"), not a key: send the full key, or omit api_key to keep the stored one", label)
+	}
 	if scopeMax != "" && domain.Scope(scopeMax) != domain.ScopeAll {
 		return fmt.Errorf("auth: %s: external_fallback sends requests outside the operator's sites; not allowed with scope_max %q", label, scopeMax)
 	}
 	return nil
+}
+
+// looksLikePreview reports whether v has the shape of Secret.Preview ("abc...xyz"
+// or "***"): no provider key has it, and a client that read a key and wrote
+// it back unchanged would otherwise store the preview as its credential.
+func looksLikePreview(v string) bool {
+	return v == "***" || (len(v) == 9 && v[3:6] == "...")
+}
+
+// keepStoredCredential gives e the credential stored for its key when e's
+// external fallback names the same provider and leaves api_key out, or sends
+// back the preview a read returned: a read-modify-write of a key keeps its
+// provider credential, which reads never show.
+func keepStoredCredential(e *DynamicKeyEntry, stored *DynamicKeyEntry) {
+	fb := e.ExternalFallback
+	if fb == nil || stored == nil || stored.ExternalFallback == nil {
+		return
+	}
+	old := stored.ExternalFallback
+	if old.Provider != fb.Provider || old.APIKey.Empty() {
+		return
+	}
+	if v := fb.APIKey.Reveal(); v == "" || v == old.APIKey.Preview() {
+		kept := *fb
+		kept.APIKey = old.APIKey
+		e.ExternalFallback = &kept
+	}
 }

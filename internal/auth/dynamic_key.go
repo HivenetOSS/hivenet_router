@@ -310,6 +310,7 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 // With a key store wired, a failed write returns an error wrapping
 // ErrNotDurable; the change is nevertheless in effect in memory.
 func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
+	r.KeepStoredCredential(&e)
 	if err := normalizeAndValidateKeyEntry(&e); err != nil {
 		return err
 	}
@@ -438,6 +439,9 @@ func checkDuplicates(entries []DynamicKeyEntry) error {
 // the upstream key-sync service. With a key store wired, a failed write
 // returns an error wrapping ErrNotDurable (the replace is still in effect).
 func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntry) error {
+	for i := range entries {
+		r.KeepStoredCredential(&entries[i])
+	}
 	for i := range entries {
 		if err := normalizeAndValidateKeyEntry(&entries[i]); err != nil {
 			return fmt.Errorf("auth: key[%d]: %w", i, err)
@@ -573,4 +577,16 @@ func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 		out[tenant] = tenantCeilings(keys)
 	}
 	return out
+}
+
+// KeepStoredCredential gives e the provider credential stored for its key ID
+// when e's external fallback names the same provider and leaves api_key out,
+// or sends back the preview a read returned: a read-modify-write of a key
+// keeps the credential reads never show. Upsert and ReplaceAll apply it; the
+// admin API applies it before its own validation.
+func (r *DynamicKeyProvider) KeepStoredCredential(e *DynamicKeyEntry) {
+	r.mu.RLock()
+	stored := r.byID[e.ID]
+	r.mu.RUnlock()
+	keepStoredCredential(e, stored)
 }

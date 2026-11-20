@@ -170,9 +170,6 @@ func LoadModelDocBytes(data []byte) (*Policy, error) {
 	return &p, nil
 }
 
-// warnCapacityGate warns when a policy gates on capacity_utilization: agents
-// registered over the network declare no capacity, so for them the gate has
-// no value and always passes.
 // warnFallbackProvider warns that fallback_provider is deprecated.
 func warnFallbackProvider(p *Policy) {
 	if p.FallbackProvider != nil {
@@ -180,6 +177,9 @@ func warnFallbackProvider(p *Policy) {
 	}
 }
 
+// warnCapacityGate warns when a policy gates on capacity_utilization: agents
+// registered over the network declare no capacity, so for them the gate has
+// no value and always passes.
 func warnCapacityGate(p *Policy) {
 	steps := []PolicyStep{p.RoutingPolicy}
 	for _, f := range p.FallbackChain {

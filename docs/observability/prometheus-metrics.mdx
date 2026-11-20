@@ -1067,7 +1067,7 @@ hivenet_policy_provider_fallback_total
 hivenet_policy_exhausted_total
 ```
 
-All use the `model` label.
+All use the `model` label. `hivenet_policy_provider_fallback_total` counts the requests served by the operator's provider (the deprecated policy `fallback_provider`); a request served by the client's own provider account ([bring your own key](/routing/provider-fallback#bring-your-own-key)) is not counted there, and shows in `hivenet_routing_requests_routed_total` with `region="byok"` and the provider as `engine`.
 
 Local fallback rate by model:
 

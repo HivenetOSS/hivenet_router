@@ -448,6 +448,7 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		ExternalFallback:  req.ExternalFallback,
 	}.toEntry()
 	if err == nil {
+		h.keyRegistry.KeepStoredCredential(&entry)
 		err = h.checkPushedEntry(entry)
 	}
 	if err != nil {
@@ -510,6 +511,7 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	for i, k := range req.Keys {
 		entry, err := k.toEntry()
 		if err == nil {
+			h.keyRegistry.KeepStoredCredential(&entry)
 			err = h.checkPushedEntry(entry)
 		}
 		if err != nil {
