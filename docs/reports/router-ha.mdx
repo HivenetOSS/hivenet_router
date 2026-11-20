@@ -49,7 +49,7 @@ Requests per minute, tokens per minute and tokens per day are decided by each ro
 
 The GPU budget (tokens in flight on the replicas) cannot work like the rate limits. In one second each router can fill the whole budget before seeing the others: measured **3×** the budget. Asking the store on every request is exact, but a script in Valkey runs on its main thread and tops out around 74,000 calls per second. Under overload, parked requests re-checking made **543,488 calls per second**.
 
-The router uses **credits** instead, the pattern of large-scale admission control systems such as DynamoDB's global admission control and Google's Doorman:
+The router uses **credits** instead, the pattern of large-scale admission control systems such as DynamoDB's global admission control [[1]](#references) and the open-source Doorman [[2]](#references):
 
 - the store holds the site's budget;
 - each router holds a wallet of credits in memory and admits against it;
@@ -170,3 +170,8 @@ These are the design's known edges. In every one of them the site gets less budg
 - While the store is down, a request larger than a router's share is admitted alone on that router, so it is never starved. The engine may then see up to the budget once per router until the store is back; its own KV admission is the last stop.
 
 See [Run several routers](/deploy/multiple-routers) for the full guide.
+
+## References
+
+1. M. Elhemali et al. "Amazon DynamoDB: A Scalable, Predictably Performant, and Fully Managed NoSQL Database Service," §4.2 Global admission control. USENIX ATC 2022. [usenix.org](https://www.usenix.org/conference/atc22/presentation/elhemali)
+2. Doorman: global distributed client-side rate limiting with capacity leases. [github.com/youtube/doorman](https://github.com/youtube/doorman)
