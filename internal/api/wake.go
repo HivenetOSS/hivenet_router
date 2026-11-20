@@ -60,8 +60,15 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 		return nil
 	}
 	return func(c *gin.Context, model string) int {
-		n := healthy(model)
-		if n > 0 || h.wake == nil || h.redirect == nil {
+		// The request's pool when the router wires per-pool counts (always in
+		// production); healthy, model-wide, only without them.
+		var n int
+		if h.pools.Healthy != nil {
+			n = h.pools.Healthy(model, requestPool(c))
+		} else {
+			n = healthy(model)
+		}
+		if n > 0 || h.wake == nil || h.redirect == nil || requestPool(c) != domain.SharedPool {
 			return n
 		}
 		if kind := holdKind(c); kind != "" {
@@ -100,12 +107,14 @@ func (h *Handlers) QuotaReplicas(healthy func(model string) int) func(c *gin.Con
 func (h *Handlers) WakeHold() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := holdKind(c)
-		if h.wake == nil || h.redirect == nil || h.healthyAgentCount == nil || kind == "" {
+		// Dedicated replicas never scale to zero: a request for a reserved
+		// pool is never held for a wake.
+		if h.wake == nil || h.redirect == nil || h.healthyAgentCount == nil || kind == "" || requestPool(c) != domain.SharedPool {
 			c.Next()
 			return
 		}
 		model := peekModel(c)
-		if model == "" || !h.modelAllowed(c, model) || h.healthyAgentCount(model) > 0 {
+		if model == "" || !h.modelAllowed(c, model) || h.poolHealthy(c, model) > 0 {
 			c.Next()
 			return
 		}

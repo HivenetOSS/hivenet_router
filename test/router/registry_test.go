@@ -125,3 +125,31 @@ func TestRegistry_ReregisterUpdatesModelIndex(t *testing.T) {
 		t.Error("agent missing from new model bucket")
 	}
 }
+
+// Healthy-agent counts per pool: a reserved agent counts only for its
+// reservation, never for the shared pool (or a redirect decision).
+func TestRegistry_Pools(t *testing.T) {
+	reg := router.NewAgentRegistry()
+	add := func(id, reserved, country string, healthy bool) {
+		a := domain.NewAgent(peer.ID(id), domain.AgentMetadata{Model: "m", ReservedFor: reserved, Country: country}, "")
+		a.SetHealthy(healthy)
+		reg.Register(a)
+	}
+	add("s1", "", "FR", true)
+	add("s2", "", "DE", true)
+	add("r1", "acme", "FR", true)
+	add("r2", "acme", "FR", false)
+	if n := reg.CountHealthyInPool("m", domain.SharedPool); n != 2 {
+		t.Errorf("shared pool: %d healthy, want 2", n)
+	}
+	if n := reg.CountHealthyInPool("m", "acme"); n != 1 {
+		t.Errorf("acme pool: %d healthy, want 1", n)
+	}
+	if n := reg.CountHealthyByModelInScope("m", "country:FR"); n != 1 {
+		t.Errorf("shared agents in FR: %d, want 1 (the reserved FR agent does not count)", n)
+	}
+	got := reg.HealthyByPool()
+	if got["m"] != 2 || got[domain.PoolKey("m", "acme")] != 1 || len(got) != 2 {
+		t.Errorf("HealthyByPool = %v", got)
+	}
+}

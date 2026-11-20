@@ -205,6 +205,11 @@ type AuthResult struct {
 	ScopeMax    string
 	HomeCountry string
 
+	// Reservation, when set, sends the key's requests only to the agents
+	// reserved for it (dedicated replicas, agent reserved_for); a key without
+	// one never uses a reserved agent.
+	Reservation string
+
 	// QuotaLimits holds this key's rate/token limits, enforced per key by
 	// QuotaMiddleware and the handlers. Zero values mean unlimited.
 	QuotaLimits QuotaLimits

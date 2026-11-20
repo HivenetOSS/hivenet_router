@@ -962,6 +962,14 @@ func (r *Router) startHTTPServer() {
 		tokenizer.NewEstimator(),
 	)
 	handlers.SetHealthyInScope(r.agents.CountHealthyByModelInScope)
+	// Admission, wake and quota are sized per pool: a reserved pool's
+	// replicas never count for the shared pool, and the reverse.
+	r.metrics.RegisterPoolReplicas(r.agents.HealthyByPool)
+	handlers.SetPoolSignals(api.PoolSignals{
+		Healthy:    r.agents.CountHealthyInPool,
+		KVCapacity: r.EngineKVCapacityForPool,
+		Pressure:   r.EnginePressureForPool,
+	})
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
 	handlers.SetKeyPushRejectedObserver(r.metrics.APIKeyPushRejected)
@@ -1343,7 +1351,11 @@ func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentReg
 		return nil
 	}
 	limits := wake.Limits{PerModel: cfg.WakeHoldMax, PerCaller: cfg.WakeHoldMaxPerKey, Total: cfg.WakeHoldMaxTotal}
-	holder := wake.NewHolder(limits, agents.CountHealthyByModel, func(model string, outcome wake.Outcome, held time.Duration) {
+	// Only requests for the shared pool are held (dedicated replicas never
+	// scale to zero), so only shared agents release them: a reserved agent
+	// up for the model must not count as the shared pool waking.
+	sharedHealthy := func(model string) int { return agents.CountHealthyInPool(model, domain.SharedPool) }
+	holder := wake.NewHolder(limits, sharedHealthy, func(model string, outcome wake.Outcome, held time.Duration) {
 		m.WakeHoldDone(model, string(outcome), held)
 		switch outcome {
 		case wake.Woken:
@@ -1564,27 +1576,51 @@ func (r *Router) SubscribeRegistration() (<-chan domain.RegistrationEvent, func(
 // replica is handled by routing's per-agent exclude_if, so shedding new
 // admissions is warranted only when the pool as a whole is under pressure.
 func (r *Router) EnginePressureForModel(model string) (kvUtil, waiting *float64) {
+	return MeanEnginePressure(r.healthyEngineMetrics(model, func(*domain.Agent) bool { return true }))
+}
+
+// EnginePressureForPool is EnginePressureForModel over the healthy agents of
+// one pool of the model (see domain.PoolKey).
+func (r *Router) EnginePressureForPool(model, pool string) (kvUtil, waiting *float64) {
+	return MeanEnginePressure(r.healthyEngineMetrics(model, inPool(pool)))
+}
+
+// EngineKVCapacityForPool is EngineKVCapacityForModel over the healthy agents
+// of one pool of the model.
+func (r *Router) EngineKVCapacityForPool(model, pool string) int {
+	return sumKVCapacity(r.healthyEngineMetrics(model, inPool(pool)))
+}
+
+// EngineKVCapacityForModel sums the KV-cache size, in tokens, that the healthy
+// agents serving model report (0 when none reports it).
+func (r *Router) EngineKVCapacityForModel(model string) int {
+	return sumKVCapacity(r.healthyEngineMetrics(model, func(*domain.Agent) bool { return true }))
+}
+
+func inPool(pool string) func(*domain.Agent) bool {
+	return func(a *domain.Agent) bool { return a.Metadata.ReservedFor == pool }
+}
+
+// healthyEngineMetrics returns the latest engine snapshot of every healthy
+// agent serving model that keep accepts. The model-wide and per-pool engine
+// signals share it, so they cannot drift apart.
+func (r *Router) healthyEngineMetrics(model string, keep func(*domain.Agent) bool) []*domain.BackendMetrics {
 	var metrics []*domain.BackendMetrics
 	for _, agent := range r.agents.ListByModel(model) {
-		if !agent.IsHealthy() {
+		if !agent.IsHealthy() || !keep(agent) {
 			continue
 		}
 		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil {
 			metrics = append(metrics, ep)
 		}
 	}
-	return MeanEnginePressure(metrics)
+	return metrics
 }
 
-// EngineKVCapacityForModel sums the KV-cache size, in tokens, that the healthy
-// agents serving model report (0 when none reports it).
-func (r *Router) EngineKVCapacityForModel(model string) int {
+func sumKVCapacity(metrics []*domain.BackendMetrics) int {
 	total := 0.0
-	for _, agent := range r.agents.ListByModel(model) {
-		if !agent.IsHealthy() {
-			continue
-		}
-		if ep, err := r.storage.GetEnginePunctual(agent.ID); err == nil && ep != nil && ep.KVCapacityTokens != nil {
+	for _, ep := range metrics {
+		if ep.KVCapacityTokens != nil {
 			total += *ep.KVCapacityTokens
 		}
 	}
@@ -1793,6 +1829,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		Version:       session.Metadata.Version,
 		Region:        session.Metadata.Region,
 		Country:       session.Metadata.Country,
+		ReservedFor:   session.Metadata.ReservedFor,
 		Tags:          session.Metadata.Tags,
 		Engine:        session.Metadata.Engine,
 		Organization:  session.Metadata.Organization,
@@ -1839,9 +1876,9 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 	// held while the model was scaled to zero. An agent without a connection
 	// cannot serve them, so it wakes nothing.
 	if connected {
-		r.executor.BroadcastCapacity(metadata.Model)
-		if r.wake != nil {
-			r.wake.Wake(metadata.Model)
+		r.executor.BroadcastCapacity(domain.PoolKey(metadata.Model, metadata.ReservedFor))
+		if r.wake != nil && metadata.ReservedFor == domain.SharedPool {
+			r.wake.Wake(metadata.Model) // held requests are the shared pool's only
 		}
 	}
 
@@ -1940,9 +1977,9 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
 			r.agentJoined()
-			r.executor.BroadcastCapacity(model)
-			if r.wake != nil {
-				r.wake.Wake(model)
+			r.executor.BroadcastCapacity(domain.PoolKey(model, session.Metadata.ReservedFor))
+			if r.wake != nil && session.Metadata.ReservedFor == domain.SharedPool {
+				r.wake.Wake(model) // held requests are the shared pool's only
 			}
 		}
 	} else if prevBackendHealthy {

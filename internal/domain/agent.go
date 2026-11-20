@@ -25,9 +25,13 @@ type AgentMetadata struct {
 	Region   string `json:"region,omitempty"`
 	// Country is the ISO 3166-1 alpha-2 country the agent declared it runs
 	// in; empty when it declared none (served only to scope "all").
-	Country string   `json:"country,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
-	Engine  string   `json:"engine,omitempty"`
+	Country string `json:"country,omitempty"`
+	// ReservedFor is the reservation this agent serves exclusively (a
+	// dedicated replica): only keys with that reservation use it. Empty for
+	// a shared replica.
+	ReservedFor string   `json:"reserved_for,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Engine      string   `json:"engine,omitempty"`
 	// EngineVersion is the version (or build) of the engine as the agent
 	// read it from the backend at startup: vLLM's version, SGLang's version,
 	// llama.cpp's build_info (b<build>-<commit>). Empty when unknown.

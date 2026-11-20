@@ -33,3 +33,11 @@ func validateKeyScope(label, scopeMax, homeCountry string) error {
 	}
 	return nil
 }
+
+// validateReservation checks a key's reservation ("" = shared replicas only).
+func validateReservation(label, reservation string) error {
+	if reservation != "" && !domain.ValidReservation(reservation) {
+		return fmt.Errorf("auth: %s: reservation %q must be 1-64 letters, digits, '.', '_' or '-'", label, reservation)
+	}
+	return nil
+}
