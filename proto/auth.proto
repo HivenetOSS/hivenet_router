@@ -26,6 +26,7 @@ message AgentMetadata {
     string llm_info = 11;          // short description (e.g. "A small model useful for FC")
     string capability = 12;        // "llm" (default), "embedding", or "reranker"
     string gpu_model  = 13;        // hardware identifier set by operator (e.g. "RTX4090", "RTX5090")
+    string country    = 14;        // ISO 3166-1 alpha-2 country the agent runs in (e.g. "FR"); empty = undeclared, served only to scope "all"
 }
 
 message AuthResponse {

@@ -80,3 +80,32 @@ func TestAdminKeys_RoutingStrategies(t *testing.T) {
 		}
 	})
 }
+
+// scope_max and home_country are validated on push: an invalid scope, an
+// invalid country, or a home outside scope_max is a 400.
+func TestAdminKeys_Scope(t *testing.T) {
+	cases := []struct {
+		max, home string
+		ok        bool
+	}{
+		{"", "", true}, {"EU", "FR", true}, {"country:FR", "FR", true}, {"all", "US", true},
+		{"europe", "", false}, {"EU", "fr", false}, {"EU", "US", false}, {"country:FR", "DE", false},
+	}
+	for _, tc := range cases {
+		h, reg := newAdminKeyHandlers(policy.Default())
+		body, _ := json.Marshal(map[string]any{"version": "v1", "key_hash": strings.Repeat("ab", 32), "owner": "o", "name": "k",
+			"enabled": true, "scope_max": tc.max, "home_country": tc.home})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/admin/api-keys/k1", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Params = gin.Params{{Key: "id", Value: "k1"}}
+		h.UpsertAPIKey(c)
+		if (w.Code == http.StatusOK) != tc.ok {
+			t.Errorf("scope_max %q home %q: status %d (%s), want ok=%v", tc.max, tc.home, w.Code, w.Body, tc.ok)
+		}
+		if e, found := reg.GetKey("k1"); tc.ok && (!found || e.ScopeMax != tc.max || e.HomeCountry != tc.home) {
+			t.Errorf("scope_max %q home %q: stored %+v", tc.max, tc.home, e)
+		}
+	}
+}

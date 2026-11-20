@@ -114,8 +114,8 @@ func (t *tokenAuth) Authenticate(req *http.Request) (*auth.AuthResult, error) {
 				Hop: c.Hop, BodySHA: c.BodySHA, RequestID: c.RequestID,
 				ClientRequestID: c.ClientRequestID,
 				Model:           c.Model, Scope: string(c.Scope), From: c.From,
-				Strategy: c.Strategy,
-				TokenID:  c.JTI, Exp: c.Exp,
+				Strategy: c.Strategy, ScopeAgents: c.ScopeAgents,
+				TokenID: c.JTI, Exp: c.Exp,
 			}
 			return res, nil
 		}

@@ -37,17 +37,34 @@ Send `X-Session-ID` with a stable value per conversation to spread one key’s c
 
 ### Scope
 
-The scope bounds where a request may be redirected. A client asks for one with the `X-Hivenet-Scope` request header:
+The scope bounds where a request may be served: which agents of this site may answer it, and which sites it may be redirected to. A client asks for one with the `X-Hivenet-Scope` request header:
 
-| Value | Candidates |
+| Value | Agents and sites |
 | --- | --- |
-| `country:XX` | Sites in country `XX`, an uppercase ISO 3166-1 alpha-2 code such as `country:FR` |
-| `EU` | Sites in the EU |
-| `all` | Every site in the map |
+| `country:XX` | In country `XX`, an uppercase ISO 3166-1 alpha-2 code such as `country:FR` |
+| `EU` | In a member state of the EU |
+| `all` | Anywhere |
 
-Without the header, the scope is this site’s country: by default a request is only redirected within the country it landed in, and leaving it takes an explicit `EU` or `all`. Any other header value is refused with `400 request_invalid`; it is never widened. When this site is missing from the map, a request without the header is not redirected.
+An agent is in the country it declares with `--country` (`HIVENET_AGENT_COUNTRY`); an agent that declares none serves only scope `all`. A site is in the country of its sibling-map entry.
 
-The scope travels in the redirect token, and the target serves the request only if it lies inside it. A second redirect keeps the scope of the first.
+An API key bounds the scope with two fields, set in [`auth.yaml`](/security/auth-yaml-reference#scope_max-and-home_country) or with the [admin API](/use-the-api/admin-endpoints):
+
+- `scope_max`: the widest scope the key's requests may use (`all` when unset). A request may narrow it, never widen it: a header wider than `scope_max` is refused with `403 scope_forbidden`, before any quota is spent.
+- `home_country`: the scope of a request that sends no header. It must lie inside `scope_max`.
+
+| Key | Header | Scope |
+| --- | --- | --- |
+| `scope_max: EU`, `home_country: FR` | None | `country:FR` |
+| `scope_max: EU`, `home_country: FR` | `country:DE` | `country:DE` |
+| `scope_max: EU`, `home_country: FR` | `all` or `country:US` | None: `403 scope_forbidden` |
+| `scope_max: EU`, no `home_country` | None | `EU` |
+| Neither field | None | No bound on the agents, here or at the target; redirected only within this site's country |
+
+Any other header value is refused with `400 request_invalid`. A request with a scope is served here only by agents inside it: the policy cannot widen it, its fallback chain included. When no healthy agent here is inside the scope, the request is redirected to a site inside it, or else answered `503 no_agents_available`. When this site is missing from the map, a request without a scope is not redirected.
+
+The scope travels in the redirect token. The target serves the request only if the site lies inside it, checks it again against the key (`403 scope_forbidden` when wider than the key's `scope_max` there), and picks only agents inside it. A second redirect keeps the scope of the first. A request without a scope (neither key field, no header) is redirected only inside the first site's country, but that default does not bound the target's agents: an agent that declares no country still serves it, as before agents declared one.
+
+The scope is a filter on the agents that serve the request and on the sites it is redirected to. Per-replica quota and the KV-occupancy admission count every healthy replica of the model, inside the scope or not, so a request whose model has replicas here only outside its scope passes them and is answered `503 no_agents_available` at dispatch (or redirected, when a site inside the scope serves the model). A [semantic alias](/routing/semantic-routing) picks only models with a healthy agent inside the request's scope.
 
 ### The redirect token
 

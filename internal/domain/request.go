@@ -38,6 +38,11 @@ type PendingRequest struct {
 	// "key", or "" when the model's policy decides.
 	RoutingStrategySource string
 
+	// Scope bounds the agents that may serve this request by the country
+	// they declare ("all", "EU" or "country:XX"); empty means no bound. Set
+	// from X-Hivenet-Scope, the key's home_country or its scope_max.
+	Scope Scope
+
 	// Capability is the inference type required by this request: "llm", "embedding",
 	// or "reranker". The policy executor uses it to filter agents — only agents whose
 	// Metadata.Capability matches this value are considered. Defaults to "llm".

@@ -88,6 +88,7 @@ type AgentMetadata struct {
 	LlmInfo       string                 `protobuf:"bytes,11,opt,name=llm_info,json=llmInfo,proto3" json:"llm_info,omitempty"`                     // short description (e.g. "A small model useful for FC")
 	Capability    string                 `protobuf:"bytes,12,opt,name=capability,proto3" json:"capability,omitempty"`                              // "llm" (default), "embedding", or "reranker"
 	GpuModel      string                 `protobuf:"bytes,13,opt,name=gpu_model,json=gpuModel,proto3" json:"gpu_model,omitempty"`                  // hardware identifier set by operator (e.g. "RTX4090", "RTX5090")
+	Country       string                 `protobuf:"bytes,14,opt,name=country,proto3" json:"country,omitempty"`                                    // ISO 3166-1 alpha-2 country the agent runs in (e.g. "FR"); empty = undeclared, served only to scope "all"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -209,6 +210,13 @@ func (x *AgentMetadata) GetCapability() string {
 func (x *AgentMetadata) GetGpuModel() string {
 	if x != nil {
 		return x.GpuModel
+	}
+	return ""
+}
+
+func (x *AgentMetadata) GetCountry() string {
+	if x != nil {
+		return x.Country
 	}
 	return ""
 }
@@ -575,7 +583,7 @@ const file_proto_auth_proto_rawDesc = "" +
 	"\x10proto/auth.proto\x12\x0ehivenet_router\"j\n" +
 	"\vAuthRequest\x12 \n" +
 	"\vcredentials\x18\x01 \x01(\tR\vcredentials\x129\n" +
-	"\bmetadata\x18\x02 \x01(\v2\x1d.hivenet_router.AgentMetadataR\bmetadata\"\xf8\x02\n" +
+	"\bmetadata\x18\x02 \x01(\v2\x1d.hivenet_router.AgentMetadataR\bmetadata\"\x92\x03\n" +
 	"\rAgentMetadata\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x18\n" +
@@ -592,7 +600,8 @@ const file_proto_auth_proto_rawDesc = "" +
 	"\n" +
 	"capability\x18\f \x01(\tR\n" +
 	"capability\x12\x1b\n" +
-	"\tgpu_model\x18\r \x01(\tR\bgpuModel\"\x99\x02\n" +
+	"\tgpu_model\x18\r \x01(\tR\bgpuModel\x12\x18\n" +
+	"\acountry\x18\x0e \x01(\tR\acountry\"\x99\x02\n" +
 	"\fAuthResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +

@@ -121,6 +121,7 @@ Clients should therefore handle:
 | `input_too_long` | `400` | `router` | Policy input-token or image cap exceeded |
 | `unauthorized` | `401` | `router` | Client or administrator credentials are missing or invalid |
 | `model_forbidden` | `403` | `router` | The client key’s allowlist (`models`, `allowed_models` or `quota.per_model`) does not permit the model |
+| `scope_forbidden` | `403` | `router` | `X-Hivenet-Scope` (or a redirect token's scope) is wider than the client key's `scope_max` |
 | `routing_strategy_forbidden` | `403` | `router` | `X-Hivenet-Routing-Strategy` names a strategy the client key does not allow |
 | `model_not_found` | `404` | `router` | The model is not registered or is deliberately hidden from the caller |
 | `model_redirected` | `307` | `router` | Another site serves the model: repeat the request at the `Location` URL ([Cross-site redirect](/routing/cross-site-redirect)) |
@@ -310,6 +311,26 @@ The requested model is not in the key's allowlist: its `models` / `allowed_model
 Do not retry the same key and model combination.
 
 Use an allowed model or update the key’s access configuration.
+
+### `scope_forbidden`
+
+```text
+HTTP 403
+```
+
+The request’s `X-Hivenet-Scope` header, or the scope of the redirect token it carries, is wider than the key’s `scope_max`: a request may narrow where it is served, never widen it.
+
+```json
+{
+  "error": {
+    "code": "scope_forbidden",
+    "message": "scope \"all\" is wider than this API key allows (scope_max: EU)",
+    "source": "router"
+  }
+}
+```
+
+Do not retry with the same header. Remove it to use the key’s default, or ask for a scope inside `scope_max`. See [Scope](/routing/cross-site-redirect#scope).
 
 ### `routing_strategy_forbidden`
 
