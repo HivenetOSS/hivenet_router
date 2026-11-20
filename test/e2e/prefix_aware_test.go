@@ -162,12 +162,15 @@ func TestPrefixAwareRoutesByWhatAgentsServed(t *testing.T) {
 	}
 	waitFor(t, 20*time.Second, "3 agents registered", func() bool { return healthyAgents(r.baseURL) == len(backends) })
 
-	// 4 applications (system prompts) x 3 conversations each.
-	systems := make([]string, 4)
+	// 8 applications (system prompts) x 2 conversations each. With no
+	// knowledge yet, an application's first request goes to the HRW winner
+	// over the agents' random IDs: with 4 applications all of them landed on
+	// one agent in ~1 run out of 27 (3 x (1/3)^4); with 8 it is ~1 in 2,000.
+	systems := make([]string, 8)
 	for i := range systems {
 		systems[i] = fmt.Sprintf("App %d. ", i) + strings.Repeat("You are a careful assistant. ", 20)
 	}
-	convs := make([]string, 12)
+	convs := make([]string, 16)
 	for i := range convs {
 		convs[i] = fmt.Sprintf("conversation %d: %s", i, strings.Repeat("details ", 20))
 	}
