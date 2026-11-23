@@ -75,7 +75,7 @@ Tested with vLLM 0.31 and SGLang 0.5.23. At start-up the agent logs whether its 
 
 Tokenization after the request runs at most two at a time per agent; more are skipped (they are hints). For vLLM, SGLang and llama.cpp the agent finds the token that opens each message in the model's chat template at start-up, so the router learns each message prefix; a template without such a token reports whole prompts only.
 
-/v1/messages requests use what was learned (the top-level `system` counts as a first system message) but do not add to it. If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
+`/v1/messages` requests use what was learned (the top-level `system` counts as a first system message) but do not add to it. If a client sets `return_token_ids` itself, it still gets the token IDs; with `"return_token_ids": false` the agent does not ask for them and reports nothing for that request.
 
 At start-up a vLLM agent sends the engine one short request with `return_token_ids`. If the engine rejects it or answers without the prompt's token IDs (an older vLLM), the agent logs a warning, stops adding the field to requests and tokenizes prompts in the background instead, as for SGLang. Tested with vLLM 0.30 and 0.31, SGLang 0.5.23.
 

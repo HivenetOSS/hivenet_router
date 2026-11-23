@@ -56,9 +56,10 @@ func gatherPolicies(global *policy.Policy, named map[string]*policy.Policy) []*p
 	return policies
 }
 
-// ValidateAdmissionInvariants enforces the admission-control invariants that
-// span the policy and auth configs — the ones neither loader can check alone
-// because each holds only half of the pair. Today that is the input-bucket rule:
+// ValidateAdmissionInvariants enforces the invariants that span the policy and
+// auth configs — the ones neither loader can check alone because each holds
+// only half of the pair. A key's routing_strategies must name implemented
+// strategies. Then the input-bucket rule:
 // on a serverless replica a key's input token bucket must be able to hold one
 // maximum-size prompt, or it silently caps the usable context. A violation is
 // returned so startup fails loudly rather than silently throttling full-context
@@ -67,6 +68,13 @@ func gatherPolicies(global *policy.Policy, named map[string]*policy.Policy) []*p
 // keys is the raw API-key list from auth.yaml; policies is every policy whose
 // replicas a key could reach (the effective global policy plus every named one).
 func ValidateAdmissionInvariants(policies []*policy.Policy, keys []auth.APIKeyEntry) error {
+	// A key's routing strategies must be ones the policy engine implements:
+	// the same check the admin API applies on pushes.
+	for i, k := range keys {
+		if err := policy.ValidateKeyStrategies(k.RoutingStrategies); err != nil {
+			return fmt.Errorf("key entry %d (%q): %w", i, k.KeyPreview, err)
+		}
+	}
 	for _, p := range policies {
 		if p == nil || !p.IsServerless() || p.MaxInputTokens <= 0 {
 			// Nothing to check: reserved replicas have no per-key caps, and a
@@ -94,9 +102,9 @@ func keyReachesPolicy(k auth.APIKeyEntry, p *policy.Policy) bool {
 }
 
 // dynamicKeysAsEntries converts the dynamic registry's current keys into the
-// config-shaped entries ValidateAdmissionInvariants consumes, carrying the one
-// field the cross-config check reads (the flat ITPM bucket) plus the model
-// list and a label. Nil registry (static/no-auth mode) yields nil.
+// config-shaped entries ValidateAdmissionInvariants consumes, carrying the
+// fields the cross-config check reads (the flat ITPM bucket and the routing
+// strategies) plus the model list and a label. Nil registry (static/no-auth mode) yields nil.
 func dynamicKeysAsEntries(reg *auth.DynamicKeyProvider) []auth.APIKeyEntry {
 	if reg == nil {
 		return nil
@@ -117,5 +125,7 @@ func dynamicEntryAsAPIKey(e auth.DynamicKeyEntry) auth.APIKeyEntry {
 		KeyPreview: e.ID,
 		Models:     e.AllowedModels,
 		Quota:      auth.QuotaConfig{InputTokensPerMinute: e.Quota.InputTokensPerMinute},
+
+		RoutingStrategies: e.RoutingStrategies,
 	}
 }

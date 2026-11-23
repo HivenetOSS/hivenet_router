@@ -38,3 +38,36 @@ func TestRecoverUnaryTurnsPanicIntoError(t *testing.T) {
 		t.Fatalf("got %v, want codes.Internal", err)
 	}
 }
+
+// An agent's country must be an ISO 3166-1 alpha-2 code; empty is allowed
+// (served only to scope "all").
+func TestValidateMetadataCountry(t *testing.T) {
+	s := NewAuthServer(nil, nil, nil, nil)
+	meta := func(cc string) *pb.AgentMetadata {
+		return &pb.AgentMetadata{Model: "m", Version: "v", Engine: "vllm", Region: "r", Organization: "o", Country: cc}
+	}
+	for _, ok := range []string{"", "FR", "US"} {
+		if err := s.validateMetadata(meta(ok)); err != nil {
+			t.Errorf("country %q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"fr", "FRA", "F1"} {
+		if err := s.validateMetadata(meta(bad)); err == nil {
+			t.Errorf("country %q: accepted", bad)
+		}
+	}
+}
+
+// An agent's reserved_for must be a usable reservation name.
+func TestValidateMetadataReservedFor(t *testing.T) {
+	s := NewAuthServer(nil, nil, nil, nil)
+	meta := func(r string) *pb.AgentMetadata {
+		return &pb.AgentMetadata{Model: "m", Version: "v", Engine: "vllm", Region: "r", Organization: "o", ReservedFor: r}
+	}
+	if err := s.validateMetadata(meta("acme")); err != nil {
+		t.Errorf("acme: %v", err)
+	}
+	if err := s.validateMetadata(meta("a b")); err == nil {
+		t.Error("invalid reserved_for accepted")
+	}
+}

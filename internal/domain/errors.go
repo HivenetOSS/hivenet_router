@@ -33,6 +33,12 @@ const (
 	// it did not wake within the hold budget, or too many requests already
 	// wait for it. RouterError.RetryAfter says when to retry.
 	ErrCodeModelWaking ErrorCode = "model_waking"
+	// ErrCodeRoutingStrategyForbidden: the request asked for a routing
+	// strategy (X-Hivenet-Routing-Strategy) its API key does not allow.
+	ErrCodeRoutingStrategyForbidden ErrorCode = "routing_strategy_forbidden"
+	// ErrCodeScopeForbidden: the request asked for a scope (X-Hivenet-Scope)
+	// wider than its API key's scope_max.
+	ErrCodeScopeForbidden ErrorCode = "scope_forbidden"
 )
 
 // ErrorSource identifies which layer produced the error.
@@ -101,7 +107,7 @@ func HTTPStatusFor(code ErrorCode) int {
 		return http.StatusTemporaryRedirect
 	case ErrCodeUnauthorized:
 		return http.StatusUnauthorized
-	case ErrCodeModelForbidden:
+	case ErrCodeModelForbidden, ErrCodeRoutingStrategyForbidden, ErrCodeScopeForbidden:
 		return http.StatusForbidden
 	case ErrCodeRequestInvalid, ErrCodeContextLengthExceeded, ErrCodeInvalidParameter,
 		ErrCodeInputTooLong:

@@ -181,6 +181,32 @@ type APIKeyEntry struct {
 	// An empty list (the default) grants access to all registered models.
 	Models []string `yaml:"models,omitempty"`
 
+	// RoutingStrategies lists the ranking strategies this key may route with
+	// (least-loaded, prefix-aware); the first is its default, and a request
+	// may pick another one from the list with the X-Hivenet-Routing-Strategy
+	// header. Empty (the default) leaves routing to the models' policies.
+	RoutingStrategies []string `yaml:"routing_strategies,omitempty"`
+
+	// ScopeMax is the widest scope this key's requests may be served in:
+	// "all" (the default), "EU" or "country:XX". A request may narrow it with
+	// the X-Hivenet-Scope header, never widen it.
+	ScopeMax string `yaml:"scope_max,omitempty"`
+
+	// HomeCountry (ISO 3166-1 alpha-2, inside scope_max) is the scope of a
+	// request that sends no X-Hivenet-Scope header.
+	HomeCountry string `yaml:"home_country,omitempty"`
+
+	// Reservation sends this key's requests only to the agents started with
+	// the same --reserved-for (dedicated replicas). Empty (the default): the
+	// shared replicas only.
+	Reservation string `yaml:"reservation,omitempty"`
+
+	// ExternalFallback is the client's own provider account (bring your own
+	// key), used when every local policy step is exhausted. The credential is
+	// read from the environment variable named by api_key_env, never written
+	// in this file.
+	ExternalFallback *StaticExternalFallback `yaml:"external_fallback,omitempty"`
+
 	// Quota defines per-tenant rate and token limits. Zero means unlimited.
 	Quota QuotaConfig `yaml:"quota,omitempty"`
 
@@ -411,4 +437,12 @@ func splitTrimmed(s, sep string) []string {
 		}
 	}
 	return out
+}
+
+// StaticExternalFallback is ExternalFallback as auth.yaml declares it: the
+// credential comes from an environment variable.
+type StaticExternalFallback struct {
+	Provider  string `yaml:"provider"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }

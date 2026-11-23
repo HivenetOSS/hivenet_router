@@ -5,7 +5,7 @@ package api_test
 
 // Cross-site redirect (contract 3 v3) through the real middleware chain, in
 // production order: AuthMiddleware over redirect.Wrap, then body limit,
-// RedirectTarget, AliasMiddleware, RedirectDecision and QuotaMiddleware, then
+// RedirectTarget, RoutingStrategy, AliasMiddleware, RedirectDecision and QuotaMiddleware, then
 // the handlers. Each "site" is a gin engine with its own healthy-agent
 // counts and request queue; a stub processor answers what a site queues.
 
@@ -117,7 +117,7 @@ func inferenceEngine(h *api.Handlers, provider auth.Provider, lim *countingLimit
 	e := gin.New()
 	e.Use(api.RequestIDMiddleware())
 	inference := e.Group("/v1", api.AuthMiddleware(provider)).
-		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.AliasMiddleware(), h.ModelACL(),
+		Group("", api.BodyLimitMiddleware(1<<20), api.JSONObjectBody(), h.RedirectTarget(), h.RoutingStrategy(), h.Scope(), h.AliasMiddleware(), h.ModelACL(),
 			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), healthy))
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)

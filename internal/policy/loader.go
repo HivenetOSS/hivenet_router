@@ -61,6 +61,40 @@ var knownStrategies = map[string]struct{}{
 	// "round-robin":  {},
 }
 
+// KnownStrategy reports whether name is an implemented ranking strategy.
+func KnownStrategy(name string) bool {
+	_, ok := knownStrategies[name]
+	return ok
+}
+
+// KnownStrategyNames returns the implemented ranking strategies, sorted.
+func KnownStrategyNames() []string {
+	names := make([]string, 0, len(knownStrategies))
+	for n := range knownStrategies {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ValidateKeyStrategies checks an API key's routing_strategies list: every
+// entry must be an implemented strategy, listed once. An empty list is valid
+// (the key follows its models' policies).
+func ValidateKeyStrategies(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if !KnownStrategy(n) {
+			return fmt.Errorf("routing_strategies: unknown strategy %q — supported strategies: %s",
+				n, strings.Join(KnownStrategyNames(), ", "))
+		}
+		if _, dup := seen[n]; dup {
+			return fmt.Errorf("routing_strategies: strategy %q is listed twice", n)
+		}
+		seen[n] = struct{}{}
+	}
+	return nil
+}
+
 // engineSpecificStrategies require engine: vllm in the match block.
 // They may be recognised in the future but are not yet implemented.
 var engineSpecificStrategies = map[string]struct{}{
@@ -106,6 +140,7 @@ func LoadBytes(data []byte) (*Policy, error) {
 		return nil, err
 	}
 	warnCapacityGate(&p)
+	warnFallbackProvider(&p)
 	return &p, nil
 }
 
@@ -131,7 +166,15 @@ func LoadModelDocBytes(data []byte) (*Policy, error) {
 		return nil, err
 	}
 	warnCapacityGate(&p)
+	warnFallbackProvider(&p)
 	return &p, nil
+}
+
+// warnFallbackProvider warns that fallback_provider is deprecated.
+func warnFallbackProvider(p *Policy) {
+	if p.FallbackProvider != nil {
+		log.Warnf("policy: fallback_provider is deprecated and will be removed: it sends any client's requests to the operator's provider account; give clients an external_fallback (their own provider key) on their API key instead")
+	}
 }
 
 // warnCapacityGate warns when a policy gates on capacity_utilization: agents

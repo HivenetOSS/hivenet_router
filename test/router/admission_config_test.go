@@ -87,3 +87,20 @@ func TestValidateAdmissionInvariants_Reachability(t *testing.T) {
 		})
 	}
 }
+
+// An auth.yaml key may only list implemented routing strategies, each once:
+// the router refuses to start (or reload) otherwise.
+func TestValidateAdmissionInvariants_RoutingStrategies(t *testing.T) {
+	key := func(strategies ...string) []auth.APIKeyEntry {
+		return []auth.APIKeyEntry{{KeyPreview: "sk-...X", RoutingStrategies: strategies}}
+	}
+	if err := router.ValidateAdmissionInvariants(nil, key("prefix-aware", "least-loaded")); err != nil {
+		t.Errorf("valid list: unexpected error %v", err)
+	}
+	if err := router.ValidateAdmissionInvariants(nil, key("round-robin")); err == nil {
+		t.Error("unknown strategy: expected an error")
+	}
+	if err := router.ValidateAdmissionInvariants(nil, key("least-loaded", "least-loaded")); err == nil {
+		t.Error("repeated strategy: expected an error")
+	}
+}
