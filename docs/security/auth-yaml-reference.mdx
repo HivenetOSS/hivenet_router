@@ -185,6 +185,39 @@ api:
 | `models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
 | `max_occupancy_share` | No | Serverless key-level share of the replica-scaled KV occupancy capacity; `0` is unset, otherwise valid through `1` |
+| `routing_strategies` | No | Ranking strategies the key may use, the first its default; empty leaves routing to the models' policies |
+| `scope_max` | No | Widest scope the key's requests may be served in: `all` (default), `EU` or `country:XX` |
+| `home_country` | No | ISO 3166-1 alpha-2 country used as the scope of a request without `X-Hivenet-Scope`; inside `scope_max` |
+| `external_fallback` | No | The client's own provider account (bring your own key): `provider`, `model`, `api_key_env` |
+| `reservation` | No | Sends the key's requests only to the agents started with the same `--reserved-for` ([dedicated replicas](/routing/dedicated-replicas)); empty: the shared agents only |
+
+### `routing_strategies`
+
+```yaml
+routing_strategies: ["prefix-aware", "least-loaded"]
+```
+
+The ranking strategies this key's requests may use. The first one is the default; a request may pick another one from the list with the `X-Hivenet-Routing-Strategy` header. Each entry must be an implemented strategy (`least-loaded`, `prefix-aware`), listed once, or the router does not start. See [Strategy chosen by the API key](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key).
+
+### `external_fallback`
+
+```yaml
+external_fallback:
+  provider: "openai"            # or anthropic
+  model: "gpt-4o-mini"
+  api_key_env: "ACME_OPENAI_KEY" # environment variable holding the client's key
+```
+
+The client's own provider account, used when every local policy step is exhausted. The credential is read from the environment variable `api_key_env` names, never written in this file; an unset variable stops the router. Not allowed with a `scope_max` narrower than `all`. See [Bring your own key](/routing/provider-fallback#bring-your-own-key).
+
+### `scope_max` and `home_country`
+
+```yaml
+scope_max: "EU"
+home_country: "FR"
+```
+
+Where this key's requests may be served (sovereignty). `scope_max` is the widest scope: a request may narrow it with the `X-Hivenet-Scope` header, never widen it. `home_country` is the scope of a request that sends no header; without it, such a request uses `scope_max`. An invalid scope, an invalid country, or a `home_country` outside `scope_max` stops the router. See [Scope](/routing/cross-site-redirect#scope).
 
 ### `key_hash`
 

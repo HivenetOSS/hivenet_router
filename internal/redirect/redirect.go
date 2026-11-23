@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"hivenet_router/internal/domain"
 )
 
 const (
@@ -528,33 +530,29 @@ func Location(siteURL string, req *url.URL, token string) string {
 // Scope bounds where a request may be served: "all", "EU" or "country:XX".
 type Scope string
 
-// ScopeAll is the widest scope. Until scope_max lands on keys (W5.5), every
-// request's effective scope is ScopeAll.
+// ScopeAll is the widest scope.
 const ScopeAll Scope = "all"
 
-// ParseScope validates a scope string.
+// ParseScope validates a scope string (the same rules as domain.ParseScope,
+// which the router uses for the request's scope).
 func ParseScope(s string) (Scope, error) {
-	switch {
-	case s == string(ScopeAll), s == "EU":
-		return Scope(s), nil
-	case strings.HasPrefix(s, "country:") && countryCode.MatchString(strings.TrimPrefix(s, "country:")):
-		return Scope(s), nil
+	d, err := domain.ParseScope(s)
+	if err != nil {
+		return "", fmt.Errorf("redirect: %w", err)
 	}
-	return "", fmt.Errorf("redirect: invalid scope %q", s)
+	return Scope(d), nil
 }
 
-// Contains reports whether site p is inside the scope. An unknown scope
-// contains nothing (fail-closed).
+// Contains reports whether site p is inside the scope, with the same rules
+// as an agent's country (domain.Scope.AllowsCountry), except for EU: a site
+// is in the EU when its map entry says so (eu is required in the map; it is
+// the operator's statement and is not inferred from the country). An unknown
+// scope contains nothing (fail-closed).
 func (s Scope) Contains(p Site) bool {
-	switch {
-	case s == ScopeAll:
-		return true
-	case s == "EU":
+	if domain.Scope(s) == domain.ScopeEU {
 		return p.EU != nil && *p.EU
-	case strings.HasPrefix(string(s), "country:"):
-		return p.Country == strings.TrimPrefix(string(s), "country:")
 	}
-	return false
+	return domain.Scope(s).AllowsCountry(p.Country)
 }
 
 // ---- token ------------------------------------------------------------------
@@ -568,14 +566,24 @@ type Claims struct {
 	ClientRequestID string `json:"crid,omitempty"`
 	Model           string `json:"model"` // the concrete model the first router routed on
 	Scope           Scope  `json:"scope"` // the effective scope at the first router
-	From            string `json:"from"`  // the first router's site ID
-	Site            string `json:"site"`  // the only site that accepts this token
-	Path            string `json:"path"`  // the only path the token is valid for
-	Hop             int    `json:"hop"`   // redirects so far, including this one
-	BodySHA         string `json:"bh"`    // hex SHA-256 of the request body as the client sent it
-	IssuedAt        int64  `json:"iat"`   // Unix seconds
-	Exp             int64  `json:"exp"`   // Unix seconds, IssuedAt + TTL
-	JTI             string `json:"jti"`   // 16 random bytes, base64url: this token's single-use ID, set by Sign
+	// ScopeAgents is true when Scope came from the client or its key and so
+	// also bounds the agents the target may pick. When false, Scope is only
+	// this router's default (its own country) and bounds the sites a request
+	// may be redirected to, never the agents: agents that declare no country
+	// still serve a request whose client asked for no scope.
+	ScopeAgents bool `json:"sa,omitempty"`
+	// Strategy is the routing strategy the client asked for at the first
+	// router with X-Hivenet-Routing-Strategy, or empty when the key's default
+	// (or the model's policy) applies. The target checks it against the key.
+	Strategy string `json:"strat,omitempty"`
+	From     string `json:"from"` // the first router's site ID
+	Site     string `json:"site"` // the only site that accepts this token
+	Path     string `json:"path"` // the only path the token is valid for
+	Hop      int    `json:"hop"`  // redirects so far, including this one
+	BodySHA  string `json:"bh"`   // hex SHA-256 of the request body as the client sent it
+	IssuedAt int64  `json:"iat"`  // Unix seconds
+	Exp      int64  `json:"exp"`  // Unix seconds, IssuedAt + TTL
+	JTI      string `json:"jti"`  // 16 random bytes, base64url: this token's single-use ID, set by Sign
 }
 
 // jtiLen is the length of a token ID, in random bytes.

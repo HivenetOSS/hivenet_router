@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"time"
 
 	"hivenet_router/internal/auth"
@@ -137,11 +136,11 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 // charges no quota. It covers every inference endpoint, by the placement kind
 // that matches the path.
 //
-// The scope of a first hop comes from the X-Hivenet-Scope header
-// ("country:XX", "EU" or "all"; an invalid value is a 400, never widened).
-// Without the header it is this site's country, so by default a request
-// stays in the country it landed in. A redirected request keeps the scope of
-// its token.
+// The scope comes from the Scope middleware (X-Hivenet-Scope, bounded by the
+// key's scope_max, or the key's home_country / scope_max). Without one it is
+// this site's country, so by default a request stays in the country it
+// landed in. A redirected request keeps the scope of its token. A request
+// with a scope is served here only if a healthy agent here is inside it.
 //
 // A request is served here as before when: redirect is disabled, the key may
 // not use the model (the handler answers 403), a healthy agent here serves
@@ -152,7 +151,8 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		kind := endpointKinds[c.Request.URL.Path]
-		if h.redirect == nil || h.healthyAgentCount == nil || kind == "" {
+		// A dedicated request stays on its reserved replicas: never redirected.
+		if h.redirect == nil || h.healthyAgentCount == nil || kind == "" || requestPool(c) != domain.SharedPool {
 			c.Next()
 			return
 		}
@@ -166,18 +166,23 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 		if info != nil {
 			hop, from = info.Hop, info.From
 		}
-		if hop >= redirect.MaxHops || h.healthyAgentCount(model) > 0 {
+		reqScope := requestScope(c)
+		if hop >= redirect.MaxHops || h.healthyForRequest(c, model) > 0 {
 			c.Next()
 			return
 		}
-		var scope redirect.Scope
-		if info != nil {
+		// A scope from the client or its key bounds both the sites and, at
+		// the target, the agents. Without one the request may go only to
+		// sites in this site's country (or the first router's, after a
+		// redirect), and the target's agents are not filtered.
+		scope := redirect.Scope(reqScope)
+		scopeAgents := scope != ""
+		switch {
+		case scope != "":
+		case info != nil:
 			scope = redirect.Scope(info.Scope)
-		} else {
-			var ok bool
-			if scope, ok = h.requestedScope(c); !ok {
-				return // 400 written
-			}
+		default:
+			scope = h.defaultRedirectScope()
 		}
 		now := time.Now()
 		keyID := c.GetString("key_id")
@@ -195,6 +200,8 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			ClientRequestID: c.GetString(ctxKeyClientRequestID),
 			Model:           model,
 			Scope:           scope,
+			ScopeAgents:     scopeAgents,
+			Strategy:        requestedRoutingStrategy(c),
 			From:            from,
 			Site:            target.ID,
 			Path:            c.Request.URL.Path,
@@ -214,27 +221,15 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 	}
 }
 
-// requestedScope returns the scope a first hop may be redirected within:
-// min(requested, key scope_max), where scope_max is "all" until keys carry
-// it (W5.5). The request asks with X-Hivenet-Scope; without it the scope is
-// this site's country (the caller's home country until keys carry one),
+// defaultRedirectScope is the redirect scope of a request that has none
+// (no X-Hivenet-Scope, and a key without scope_max or home_country): this
+// site's country, so by default a request stays in the country it landed in,
 // or empty — matching no sites — while this site is not in the map.
-// On an invalid header it writes 400 and returns false.
-func (h *Handlers) requestedScope(c *gin.Context) (redirect.Scope, bool) {
-	v := strings.TrimSpace(c.GetHeader(scopeHeader))
-	if v == "" {
-		if self, ok := h.redirect.Map.Site(h.redirect.Self); ok {
-			return redirect.Scope("country:" + self.Country), true
-		}
-		return "", true
+func (h *Handlers) defaultRedirectScope() redirect.Scope {
+	if self, ok := h.redirect.Map.Site(h.redirect.Self); ok {
+		return redirect.Scope("country:" + self.Country)
 	}
-	scope, err := redirect.ParseScope(v)
-	if err != nil {
-		abortWithRouterError(c, http.StatusBadRequest, domain.ErrCodeRequestInvalid,
-			fmt.Sprintf("invalid %s header %q: use country:XX (ISO 3166-1 alpha-2), EU or all", scopeHeader, v), domain.SourceRouter)
-		return "", false
-	}
-	return scope, true
+	return ""
 }
 
 // scopeHeader is the request header that asks for a redirect scope.

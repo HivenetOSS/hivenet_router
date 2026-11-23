@@ -229,6 +229,14 @@ type Handlers struct {
 	// legacy flat path.
 	healthyAgentCount func(model string) int
 
+	// healthyInScope counts the healthy agents serving a model whose declared
+	// country is inside a scope (SetHealthyInScope); nil = healthyAgentCount.
+	healthyInScope func(model string, scope domain.Scope) int
+
+	// pools sizes the admission gates per pool (SetPoolSignals); zero
+	// value = per model, as before pools existed.
+	pools PoolSignals
+
 	// registrationFeed is the live agent-registration change feed the SSE
 	// handler on /admin/registration-stream consumes. Nil-safe: the handler
 	// returns 501 when no feed is wired (e.g. tests).
@@ -516,6 +524,10 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.TenantTokensPerDay = m.tenantTPD
 	pending.QuotaModel = m.quotaModel
 	pending.Capability = domain.CapabilityLLM
+	setRoutingStrategy(c, pending)
+	pending.Scope = requestScope(c)
+	pending.Pool = requestPool(c)
+	pending.ExternalFallback = requestExternalFallback(c)
 	pending.Path = path                          // forward to the backend's native endpoint at this path
 	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
 	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
@@ -698,23 +710,30 @@ func (h *Handlers) enforceRequestCaps(c *gin.Context, req *domain.ChatRequest, i
 // limits apply as-is, and with zero healthy replicas a bare multiply would zero
 // the budget, which the controller reads as "no budget limit" (gate off) at the
 // exact moment the pool is most fragile.
-func (h *Handlers) healthyReplicas(model string) int {
-	if h.healthyAgentCount == nil {
-		return 1
-	}
-	if n := h.healthyAgentCount(model); n > 1 {
+func (h *Handlers) healthyReplicas(c *gin.Context, model string) int {
+	if n := h.poolHealthy(c, model); n > 1 {
 		return n
 	}
 	return 1
 }
 
-// agentReplicas is the number of healthy agents serving model, 0 when none
-// (a model served only by a provider, or scaled to zero).
-func (h *Handlers) agentReplicas(model string) int {
+// poolHealthy is the number of healthy agents serving model in the request's
+// pool (the shared agents, or the ones reserved for its key), or of every
+// agent of the model when no per-pool count is wired; 0 when no count is.
+func (h *Handlers) poolHealthy(c *gin.Context, model string) int {
+	if h.pools.Healthy != nil {
+		return h.pools.Healthy(model, requestPool(c))
+	}
 	if h.healthyAgentCount == nil {
 		return 0
 	}
 	return h.healthyAgentCount(model)
+}
+
+// agentReplicas is the number of healthy agents serving model, 0 when none
+// (a model served only by a provider, or scaled to zero).
+func (h *Handlers) agentReplicas(c *gin.Context, model string) int {
+	return h.poolHealthy(c, model)
 }
 
 // enforceOccupancyBudget applies the KV-occupancy admit budget: the request is
@@ -765,18 +784,20 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// so the budget tracks replicas joining/leaving; a shrink only affects new
 	// admissions (existing reservations release their recorded weight unchanged).
 	pool := func() (int, int) {
-		replicas := h.healthyReplicas(req.Model)
+		replicas := h.healthyReplicas(c, req.Model)
 		budget := pol.AdmitBudgetTokens * replicas
 		// Without admit_budget_tokens the budget is the KV capacity the
 		// engines report for the healthy replicas.
-		if budget == 0 && h.engineKVCapacity != nil {
+		if budget == 0 && h.pools.KVCapacity != nil {
+			budget = h.pools.KVCapacity(req.Model, requestPool(c))
+		} else if budget == 0 && h.engineKVCapacity != nil {
 			budget = h.engineKVCapacity(req.Model)
 		}
 		inflight := pol.MaxInflight * replicas
 		// Nothing bounds this model (no policy budget, no KV size reported,
 		// e.g. Ollama or llama.cpp): fall back to a per-replica request cap.
 		// Only agents count: a model served by a provider alone is not held.
-		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 && h.agentReplicas(req.Model) > 0 {
+		if budget == 0 && inflight == 0 && h.defaultMaxInflight > 0 && h.agentReplicas(c, req.Model) > 0 {
 			inflight = h.defaultMaxInflight * replicas
 		}
 		return budget, inflight
@@ -785,7 +806,9 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 
 	// Global occupancy budget (all replicas).
 	if h.admission != nil && (poolBudget > 0 || poolInflight > 0) {
-		res := admitOccupancy(c, h.admission, req.Model, footprint, grows, pool)
+		// Each pool has its own budget: a reserved pool's load never fills the
+		// shared one, and the reverse.
+		res := admitOccupancy(c, h.admission, domain.PoolKey(req.Model, requestPool(c)), footprint, grows, pool)
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
 			if !rejectReleased(c, req.Model) {
@@ -806,7 +829,7 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	// "this fraction of what the pool can hold" as replicas come and go. This is
 	// anti-abuse fairness, not box safety (the global budget above is), so the
 	// shares are intentionally oversubscribed and no admit fraction is applied.
-	if pol.IsServerless() && poolBudget > 0 && h.keyAdmission != nil {
+	if pol.IsServerless() && requestPool(c) == domain.SharedPool && poolBudget > 0 && h.keyAdmission != nil {
 		if share := quotaLimitsFromContext(c).MaxOccupancyShare; share > 0 {
 			_, keyID, _ := callerIDs(c)
 			budget := int(share * float64(poolBudget))
@@ -853,7 +876,9 @@ func (h *Handlers) enforcePerKeyRates(c *gin.Context, req *domain.ChatRequest, m
 		return true
 	}
 	pol := h.executor.EffectivePolicy(req.Model)
-	if pol == nil || !pol.IsServerless() {
+	// Dedicated replicas are reserved: no per-key caps (the reservation is
+	// the entitlement).
+	if pol == nil || !pol.IsServerless() || requestPool(c) != domain.SharedPool {
 		return true
 	}
 	limits := quotaLimitsFromContext(c)
@@ -881,7 +906,7 @@ func (h *Handlers) chargeOutputRate(c *gin.Context, req *domain.ChatRequest, m r
 		return
 	}
 	pol := h.executor.EffectivePolicy(req.Model)
-	if pol == nil || !pol.IsServerless() {
+	if pol == nil || !pol.IsServerless() || requestPool(c) != domain.SharedPool {
 		return
 	}
 	if otpm := quotaLimitsFromContext(c).OutputTokensPerMinute; otpm > 0 {
@@ -937,6 +962,9 @@ func (h *Handlers) enforceShedPressure(c *gin.Context, model string) bool {
 		return true // no shed thresholds declared — gate inert
 	}
 	kvUtil, waiting := h.enginePressure(model)
+	if h.pools.Pressure != nil {
+		kvUtil, waiting = h.pools.Pressure(model, requestPool(c))
+	}
 	if kvUtil == nil && waiting == nil {
 		return true // no live engine signal — fail open
 	}
@@ -1625,6 +1653,10 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	pending.KeyID = keyID
 	pending.DeploymentID = deploymentID
 	pending.Capability = capability
+	setRoutingStrategy(c, pending)
+	pending.Scope = requestScope(c)
+	pending.Pool = requestPool(c)
+	pending.ExternalFallback = requestExternalFallback(c)
 
 	select {
 	case h.requestQueue <- pending:
@@ -1803,3 +1835,39 @@ func (h *Handlers) SetEngineKVCapacity(fn func(model string) int) { h.engineKVCa
 // SetDefaultMaxInflight sets the requests in flight allowed per healthy
 // replica of a model nothing else bounds; 0 leaves such models unbounded.
 func (h *Handlers) SetDefaultMaxInflight(n int) { h.defaultMaxInflight = n }
+
+// SetHealthyInScope wires the count of healthy agents serving a model inside
+// a scope, used by the redirect decision for requests that carry a scope.
+// Must be called before the server starts.
+func (h *Handlers) SetHealthyInScope(f func(model string, scope domain.Scope) int) {
+	h.healthyInScope = f
+}
+
+// PoolSignals are the per-pool counts the admission gates size themselves on:
+// a pool is the shared replicas of a model, or the replicas reserved for one
+// reservation (see domain.PoolKey). Each function takes the model and the
+// pool (domain.SharedPool for the shared replicas).
+type PoolSignals struct {
+	// Healthy counts the healthy agents of the pool.
+	Healthy func(model, pool string) int
+	// KVCapacity sums the KV-cache size, in tokens, the pool's healthy
+	// agents report.
+	KVCapacity func(model, pool string) int
+	// Pressure is the pool's mean KV-cache use and waiting requests.
+	Pressure func(model, pool string) (kvUtil, waiting *float64)
+}
+
+// SetPoolSignals wires the per-pool counts. Must be called before the server
+// starts.
+func (h *Handlers) SetPoolSignals(p PoolSignals) { h.pools = p }
+
+// requestPool is the request's pool: its key's reservation, or
+// domain.SharedPool.
+func requestPool(c *gin.Context) string { return c.GetString(ctxKeyReservation) }
+
+// requestExternalFallback is the key's own provider account (BYOK), or nil.
+func requestExternalFallback(c *gin.Context) *domain.ExternalFallback {
+	v, _ := c.Get(ctxKeyExternalFallback)
+	fb, _ := v.(*domain.ExternalFallback)
+	return fb
+}
