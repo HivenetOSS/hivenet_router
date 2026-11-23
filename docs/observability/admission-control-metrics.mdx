@@ -8,13 +8,15 @@ The admission-control metrics show why requests are rejected and how close each 
 
 ## Metrics
 
+The four gauges carry a `pool` label: empty for the shared replicas, the reservation name for [dedicated replicas](/routing/dedicated-replicas).
+
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `hivenet_admission_rejections_total` | Counter | `reason`, `model` | Requests rejected by an admission gate |
-| `hivenet_admission_occupancy_tokens` | Gauge | `model` | This router's current weighted in-flight token sum |
-| `hivenet_admission_budget_tokens` | Gauge | `model` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas`, or × the engines' summed KV capacity when `admit_budget_tokens` is unset. With `--sync-store=valkey` this is the site-wide budget, shared through credits |
-| `hivenet_admission_inflight_requests` | Gauge | `model` | This router's current in-flight request count |
-| `hivenet_admission_max_inflight` | Gauge | `model` | Full-pool request backstop after healthy-replica scaling, including the default backstop when applicable; `0` means no count backstop |
+| `hivenet_admission_occupancy_tokens` | Gauge | `model`, `pool` | This router's current weighted in-flight token sum |
+| `hivenet_admission_budget_tokens` | Gauge | `model`, `pool` | Effective global budget: `HIVENET_ROUTER_ADMIT_FRACTION × admit_budget_tokens × healthy_replicas`, or × the engines' summed KV capacity when `admit_budget_tokens` is unset. With `--sync-store=valkey` this is the site-wide budget, shared through credits |
+| `hivenet_admission_inflight_requests` | Gauge | `model`, `pool` | This router's current in-flight request count |
+| `hivenet_admission_max_inflight` | Gauge | `model`, `pool` | Full-pool request backstop after healthy-replica scaling, including the default backstop when applicable; `0` means no count backstop |
 
 The global occupancy controller updates all four gauges when a request is admitted, released, adjusted to exact input usage, or grown by streamed output. The healthy-replica count is recomputed for each admission and floored at `1`, so the budget and backstop gauges follow the live serving pool.
 

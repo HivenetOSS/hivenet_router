@@ -67,13 +67,13 @@ fallback_chain[0]
 fallback_chain[1]
   │ exhausted
   ▼
-fallback_provider
+external_fallback (API key) or fallback_provider (policy)
   │ unavailable or failed
   ▼
 Error
 ```
 
-`fallback_provider` is separate from the local chain. It is a top-level policy field rather than an item inside `fallback_chain`.
+The external step is separate from the local chain. It uses the API key's [`external_fallback`](/routing/provider-fallback#bring-your-own-key) when the key has one, and otherwise the policy's `fallback_provider`. `fallback_provider` is a top-level policy field rather than an item inside `fallback_chain`, and it is deprecated: give each client an `external_fallback` on its API key instead.
 
 ## When Hivenet Router advances
 
@@ -326,7 +326,7 @@ But each backend must expose the same registered model name.
 
 A fallback chain cannot replace the requested model with another local model.
 
-Use an external `fallback_provider` when you deliberately want a final provider-specific model substitution for supported chat requests.
+Use an external fallback (the API key's `external_fallback`, or the deprecated policy `fallback_provider`) when you deliberately want a final provider-specific model substitution for supported chat requests.
 
 ## Graduated relaxation
 
@@ -591,7 +591,9 @@ export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
 ```
 
 <Warning>
-  Provider fallback is intended for non-streaming Chat Completions requests. It is not used for embeddings or reranking, and it is not a transparent fallback for Anthropic token counting or every Messages field.
+  `fallback_provider` and these router credentials are deprecated, and the router logs a warning when it loads them. Give each client an [`external_fallback`](/routing/provider-fallback#bring-your-own-key) on its API key instead; it takes precedence over the policy's `fallback_provider`.
+
+  Provider fallback serves only non-streaming `POST /v1/chat/completions` requests. A request to any other endpoint (`/v1/messages`, `/v1/messages/count_tokens`, embeddings, reranking), or with `"stream": true`, is never sent to a provider and fails with the local error.
 </Warning>
 
 See [Provider fallback](/routing/provider-fallback) for supported fields, request translation, streaming limitations, and failure behavior.
@@ -616,7 +618,7 @@ rate(
 )
 ```
 
-Requests served by the external provider fallback:
+Requests served by the operator's provider through the policy's `fallback_provider` (requests served by a key's `external_fallback` are not counted here):
 
 ```promql
 rate(
@@ -882,10 +884,11 @@ Fallback is a continuity mechanism. It should not quietly become the normal rout
 
     - all local steps are exhausted
     - the request has not already exceeded its deadline
-    - the request uses the `llm` capability
-    - `fallback_provider` is at the top level
+    - the request is a non-streaming `POST /v1/chat/completions` request
+    - the request's scope is `all`
+    - the API key has an `external_fallback`, or `fallback_provider` is at the top level
     - the provider engine and model are configured
-    - the corresponding API key environment variable is set
+    - for `fallback_provider`, the corresponding API key environment variable is set
   </Accordion>
 
   <Accordion title="The exhausted metric increases despite provider fallback">

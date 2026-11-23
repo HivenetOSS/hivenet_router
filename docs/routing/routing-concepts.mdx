@@ -568,7 +568,13 @@ See [Cross-site redirect](/routing/cross-site-redirect) for the sibling map, the
 
 ## Provider fallback
 
-A policy can define one final external provider after every local step has been exhausted.
+After every local step has been exhausted, a request can go to an external provider: the client's own provider account set on its API key, or the policy's `fallback_provider`.
+
+<Warning>
+  The policy's `fallback_provider` is deprecated. It sends every client's requests to the operator's provider account, and the router logs a warning when it loads a policy that sets it. Give each client an [`external_fallback`](/routing/provider-fallback#bring-your-own-key) on its API key instead. A key's `external_fallback` takes precedence over the policy's `fallback_provider`.
+</Warning>
+
+A policy can define one final external provider:
 
 ```yaml
 fallback_provider:
@@ -593,10 +599,12 @@ or:
 export HIVENET_ROUTER_ANTHROPIC_API_KEY="<anthropic-api-key>"
 ```
 
+These two router credentials are deprecated along with `fallback_provider`.
+
 `fallback_provider` is a top-level policy field. It is not an entry inside `fallback_chain`.
 
 <Warning>
-  Provider fallback is intended for non-streaming Chat Completions requests. It is not used for embeddings or reranking, and it is not a transparent fallback for Anthropic token counting or every Messages field.
+  Provider fallback serves only non-streaming `POST /v1/chat/completions` requests. A request to any other endpoint (`/v1/messages`, `/v1/messages/count_tokens`, embeddings, reranking), or with `"stream": true`, is never sent to a provider and fails with the local error. A request with a [scope](/routing/cross-site-redirect#scope) narrower than `all` is never sent to an external provider.
 </Warning>
 
 The configured provider model replaces the model from the original client request.
@@ -771,10 +779,11 @@ export GOLOG_LOG_LEVEL="policy=debug,router=debug"
     Check that:
 
     - every local policy step was exhausted
-    - the request is a language-model chat request
-    - `fallback_provider` is at the policy’s top level
+    - the request is a non-streaming `POST /v1/chat/completions` request
+    - the request's scope is `all`
+    - the API key has an `external_fallback`, or `fallback_provider` is at the policy’s top level
     - the engine is `openai` or `anthropic`
-    - the corresponding environment variable is configured
+    - for `fallback_provider`, the corresponding environment variable is configured
     - the provider model is not empty
   </Accordion>
 </AccordionGroup>
