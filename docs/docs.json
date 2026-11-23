@@ -118,6 +118,13 @@
         ]
       },
       {
+        "group": "Technical reports",
+        "icon": "flask",
+        "pages": [
+          "reports/prefix-aware-routing"
+        ]
+      },
+      {
         "group": "Reference",
         "icon": "book",
         "pages": [
