@@ -675,6 +675,7 @@ See [Admin endpoints](/use-the-api/admin-endpoints) for individual add, update, 
 | `expires_at` | No | RFC 3339 expiry timestamp |
 | `allowed_models` | No | Exact model allowlist |
 | `quota` | No | Flat or per-model quota configuration |
+| `routing_strategies` | No | Ranking strategies the key may use, the first its default ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 
 `id` and `owner` follow the same character rules as a static owner: valid UTF-8, no space at either end, and no control, invisible or line-separator characters or whitespace other than a plain space. The owners `admin`, `default` and `anonymous`, the ID `anonymous`, and IDs starting with `static-` or `admin-` are reserved, in any letter case (compared as Unicode case folding does, so a long `ſ` counts as `s`): the router uses them for its own callers and for the IDs it derives.
 

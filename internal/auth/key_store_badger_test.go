@@ -300,3 +300,29 @@ func FuzzBadgerKeyStoreLoad(f *testing.F) {
 		}
 	})
 }
+
+// A key's routing strategies survive a restart, in order (the first is the
+// key's default).
+func TestBadgerKeyStore_RoutingStrategiesRoundTrip(t *testing.T) {
+	ks := openTestStore(t, t.TempDir())
+	e := ksEntry("a")
+	e.RoutingStrategies = []string{"prefix-aware", "least-loaded"}
+	now := time.Now()
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{e, ksEntry("b")}, now, now); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	snap, err := ks.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := map[string][]string{}
+	for _, k := range snap.Keys {
+		got[k.ID] = k.Entry.RoutingStrategies
+	}
+	if s := got["a"]; len(s) != 2 || s[0] != "prefix-aware" || s[1] != "least-loaded" {
+		t.Errorf("key a strategies %v, want [prefix-aware least-loaded]", s)
+	}
+	if s := got["b"]; len(s) != 0 {
+		t.Errorf("key b strategies %v, want none", s)
+	}
+}
