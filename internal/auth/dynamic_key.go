@@ -46,6 +46,9 @@ type DynamicKeyEntry struct {
 	HomeCountry string
 	// Reservation names the dedicated replicas the key uses; see AuthResult.
 	Reservation string
+	// ExternalFallback is the client's own provider account (BYOK); nil =
+	// no external fallback. See AuthResult.
+	ExternalFallback *ExternalFallback
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -233,6 +236,7 @@ func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, 
 		ScopeMax:          entry.ScopeMax,
 		HomeCountry:       entry.HomeCountry,
 		Reservation:       entry.Reservation,
+		ExternalFallback:  entry.ExternalFallback,
 		QuotaLimits:       quota,
 	}, nil
 }
@@ -284,6 +288,9 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	if err := validateReservation(fmt.Sprintf("key entry %q", e.ID), e.Reservation); err != nil {
 		return err
 	}
+	if err := validateExternalFallback(fmt.Sprintf("key entry %q", e.ID), e.ExternalFallback, e.ScopeMax); err != nil {
+		return err
+	}
 	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
 		return fmt.Errorf("auth: key entry %q: input_tokens_per_minute and output_tokens_per_minute must be >= 0", e.ID)
 	}
@@ -303,6 +310,7 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 // With a key store wired, a failed write returns an error wrapping
 // ErrNotDurable; the change is nevertheless in effect in memory.
 func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
+	r.KeepStoredCredential(&e)
 	if err := normalizeAndValidateKeyEntry(&e); err != nil {
 		return err
 	}
@@ -339,6 +347,7 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		ScopeMax:          e.ScopeMax,
 		HomeCountry:       e.HomeCountry,
 		Reservation:       e.Reservation,
+		ExternalFallback:  e.ExternalFallback,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -431,6 +440,9 @@ func checkDuplicates(entries []DynamicKeyEntry) error {
 // returns an error wrapping ErrNotDurable (the replace is still in effect).
 func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntry) error {
 	for i := range entries {
+		r.KeepStoredCredential(&entries[i])
+	}
+	for i := range entries {
 		if err := normalizeAndValidateKeyEntry(&entries[i]); err != nil {
 			return fmt.Errorf("auth: key[%d]: %w", i, err)
 		}
@@ -456,6 +468,7 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			ScopeMax:          entries[i].ScopeMax,
 			HomeCountry:       entries[i].HomeCountry,
 			Reservation:       entries[i].Reservation,
+			ExternalFallback:  entries[i].ExternalFallback,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry
@@ -564,4 +577,16 @@ func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 		out[tenant] = tenantCeilings(keys)
 	}
 	return out
+}
+
+// KeepStoredCredential gives e the provider credential stored for its key ID
+// when e's external fallback names the same provider and leaves api_key out,
+// or sends back the preview a read returned: a read-modify-write of a key
+// keeps the credential reads never show. Upsert and ReplaceAll apply it; the
+// admin API applies it before its own validation.
+func (r *DynamicKeyProvider) KeepStoredCredential(e *DynamicKeyEntry) {
+	r.mu.RLock()
+	stored := r.byID[e.ID]
+	r.mu.RUnlock()
+	keepStoredCredential(e, stored)
 }

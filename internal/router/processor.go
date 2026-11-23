@@ -90,6 +90,10 @@ type RequestProcessor struct {
 	// providers maps provider engine name ("openai", "anthropic") to its implementation.
 	// Populated at startup from config; only configured providers are present (missing key means not configured).
 	providers map[string]provider.Provider
+
+	// providerBaseURLs overrides provider endpoints by name (see
+	// WithProviderBaseURLs); nil = the providers' public APIs.
+	providerBaseURLs map[string]string
 	// limiter enforces the per-key daily token budget on the output side.
 	// AllowOutputTokens is called after the agent returns the completion token count.
 	limiter auth.RateLimiter
@@ -370,51 +374,23 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 
 		agent, err := session.Select(ctx)
 		if err != nil {
-			// All local policy steps exhausted — try the provider fallback if configured.
-			// Provider fallback calls ForwardChat and only makes sense for LLM requests.
-			if fp := session.FallbackProvider(); fp != nil && pending.Capability == domain.CapabilityLLM {
-				if pending.IsExpired() {
-					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-					pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out before provider fallback could be attempted", domain.SourceRouter)
-					return
-				}
-				// The provider serves this request off-box on the operator's cloud
-				// account: it consumes no local KV cache, so free the occupancy
-				// reservation now rather than holding phantom load against the local
-				// budget for the provider call's duration — fallback fires exactly
-				// when the local pool is degraded and admission headroom matters
-				// most. Release is idempotent, so the handler's own deferred release
-				// stays safe.
-				if pending.Reservation != nil {
-					pending.Reservation.Release()
-				}
-				if resp, provErr := p.tryProviderFallback(pending, fp.Engine, fp.Model); provErr == nil {
-					p.metrics.RequestRouted("cloud", fp.Engine, fp.Model, pending.TenantID)
-					p.metrics.PolicyProviderFallbackRouted(pending.Request.Model)
-					p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-					pending.Response <- resp
-					return
-				} else {
-					log.Warnf("Provider fallback (%s/%s) failed for request %s: %v", fp.Engine, fp.Model, pending.ID, provErr)
-					// Record failure under the provider's own labels so the empty-label
-					// time series is not polluted and provider failure rates are observable.
-					p.metrics.RequestFailed("cloud", fp.Engine, fp.Model, pending.TenantID)
-					p.metrics.PolicyExhausted(pending.Request.Model)
-					p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-					msg := provErr.Error()
-					var he *provider.HTTPError
-					if errors.As(provErr, &he) {
-						msg = fmt.Sprintf("provider %s: %s", fp.Engine, he.ClientMessage())
-					}
-					pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
-					return
-				}
+			// All local policy steps exhausted — try the external fallback: the
+			// key's own provider account (BYOK) first, else the policy's
+			// fallback_provider (deprecated).
+			target, streamRefused := p.externalTarget(pending, session)
+			if target != nil {
+				p.serveExternally(pending, target)
+				return
 			}
 			session.EmitExhaustionLogs(pending.ID, pending.TenantID)
 			p.metrics.RequestFailed("", "", pending.Request.Model, pending.TenantID)
 			p.metrics.PolicyExhausted(pending.Request.Model)
 			p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
-			pending.Error <- mapSelectorError(err)
+			selErr := mapSelectorError(err)
+			if streamRefused {
+				selErr.Message += " (the external fallback answers only non-streaming requests)"
+			}
+			pending.Error <- selErr
 			return
 		}
 
@@ -1178,6 +1154,149 @@ func (rc *errCaptureReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// externalTarget is where a request goes when no local agent can serve it.
+type externalTarget struct {
+	kind     string // "byok" (the key's own account) or "cloud" (the operator's, deprecated)
+	provider string
+	model    string
+	call     func() (*domain.ChatResponse, error)
+}
+
+// externalTarget returns the external fallback for a request no local agent
+// could serve, or nil: the key's own provider account (BYOK) first, else the
+// policy's fallback_provider. Only a non-streaming chat completion qualifies,
+// the one shape the providers' clients send and decode: an Anthropic
+// /v1/messages body, a token count or an embedding would be answered as a
+// chat completion. And never a request bound to a scope: the provider runs
+// outside the operator's sites. streamRefused reports a streaming request
+// that a fallback would otherwise have taken.
+func (p *RequestProcessor) externalTarget(pending *domain.PendingRequest, session *policy.Session) (t *externalTarget, streamRefused bool) {
+	if pending.Capability != domain.CapabilityLLM || (pending.Path != "" && pending.Path != chatCompletionsPath) || !externalAllowed(pending) {
+		return nil, false
+	}
+	switch fb, fp := pending.ExternalFallback, session.FallbackProvider(); {
+	case fb != nil:
+		t = &externalTarget{kind: "byok", provider: fb.Provider, model: fb.Model,
+			call: func() (*domain.ChatResponse, error) { return p.tryBYOK(pending, fb) }}
+	case fp != nil:
+		t = &externalTarget{kind: "cloud", provider: fp.Engine, model: fp.Model,
+			call: func() (*domain.ChatResponse, error) { return p.tryProviderFallback(pending, fp.Engine, fp.Model) }}
+	default:
+		return nil, false
+	}
+	if pending.Request != nil && pending.Request.Stream {
+		return nil, true
+	}
+	return t, false
+}
+
+// chatCompletionsPath is the only path the external fallback serves.
+const chatCompletionsPath = "/v1/chat/completions"
+
+// serveExternally answers pending from t, the external fallback. The
+// provider serves it off-box, so the occupancy reservation is released
+// first: no local KV is held, and the fallback fires exactly when the local
+// pool is degraded and admission headroom matters most (Release is
+// idempotent; the handler's deferred release stays safe). A provider's error
+// reaches the client with the provider's own explanation (a bad key, an
+// unknown model, an exhausted quota are the client's to fix with BYOK); logs
+// get only its status.
+func (p *RequestProcessor) serveExternally(pending *domain.PendingRequest, t *externalTarget) {
+	if pending.IsExpired() {
+		p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+		pending.Error <- domain.NewRouterError(domain.ErrCodeRequestTimeout, "Request timed out before the external fallback could be attempted", domain.SourceRouter)
+		return
+	}
+	if pending.Reservation != nil {
+		pending.Reservation.Release()
+	}
+	resp, err := t.call()
+	if err == nil {
+		p.metrics.RequestRouted(t.kind, t.provider, t.model, pending.TenantID)
+		if t.kind == "cloud" {
+			// The operator's fallback only: BYOK is counted under kind "byok".
+			p.metrics.PolicyProviderFallbackRouted(pending.Request.Model)
+		}
+		p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		pending.Response <- resp
+		return
+	}
+	// err never holds the provider's body (HTTPError.Error) nor the
+	// credential (sent only as a header).
+	log.Warnf("External fallback (%s %s/%s) failed for request %s: %v", t.kind, t.provider, t.model, pending.ID, err)
+	p.metrics.RequestFailed(t.kind, t.provider, t.model, pending.TenantID)
+	p.metrics.PolicyExhausted(pending.Request.Model)
+	p.metrics.TenantRequestFailed(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model)
+	msg := err.Error()
+	var he *provider.HTTPError
+	if errors.As(err, &he) {
+		msg = fmt.Sprintf("provider %s: %s", t.provider, he.ClientMessage())
+	}
+	pending.Error <- domain.NewRouterError(domain.ErrCodeBackendError, msg, domain.SourceBackend)
+}
+
+// externalAllowed reports whether a request may be sent to an external
+// provider: not when it is bound to a scope narrower than "all".
+func externalAllowed(pending *domain.PendingRequest) bool {
+	return pending.Scope == "" || pending.Scope == domain.ScopeAll
+}
+
+// WithProviderBaseURLs overrides the providers' API endpoints by provider
+// name ("openai", "anthropic"), for the operator's providers and the clients'
+// own (BYOK) alike: an OpenAI-compatible gateway, a regional endpoint.
+func WithProviderBaseURLs(urls map[string]string) ProcessorOption {
+	return func(p *RequestProcessor) { p.providerBaseURLs = urls }
+}
+
+// byokClient is shared by every BYOK call: each call builds a provider for
+// its key's credential, but keeps the connections (and TLS sessions) to the
+// provider, which a new client per request would set up again at the moment
+// the local pool is already exhausted.
+var byokClient = &http.Client{Timeout: 120 * time.Second}
+
+// tryBYOK sends the request to the key's own provider account. The client's
+// credential is revealed only into the provider's auth header.
+func (p *RequestProcessor) tryBYOK(pending *domain.PendingRequest, fb *domain.ExternalFallback) (*domain.ChatResponse, error) {
+	prov, err := provider.New(provider.Config{
+		Name: fb.Provider, APIKey: fb.APIKey.Reveal(), BaseURL: p.providerBaseURLs[fb.Provider], Metrics: p.metrics,
+		HTTPClient: byokClient, // one connection pool for every key's calls
+	})
+	if err != nil {
+		return nil, fmt.Errorf("external fallback: %w", err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), pending.Deadline)
+	defer cancel()
+	log.Infof("Forwarding request %s to the key's own provider account %s (model: %s)", pending.ID, fb.Provider, fb.Model)
+	resp, err := prov.Complete(ctx, pending.Request, fb.Model)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: %w", fb.Provider, err)
+	}
+	// Billing and the audit log tell it apart from the operator's provider:
+	// the client pays the provider directly.
+	resp.ProcessedBy = domain.BYOKProcessedByPrefix + fb.Provider
+	if err := withRawBody(resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// withRawBody gives a provider's decoded answer the OpenAI JSON body the
+// handlers write (they write RawBytes; a provider decodes the answer into
+// fields). Who served it stays out of the body: it is in the audit log.
+func withRawBody(resp *domain.ChatResponse) error {
+	if resp.Body != nil || len(resp.RawBytes) > 0 {
+		return nil
+	}
+	out := *resp
+	out.ProcessedBy = ""
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return fmt.Errorf("provider response: encode: %w", err)
+	}
+	resp.RawBytes = raw
+	return nil
+}
+
 // tryProviderFallback forwards pending to the named closed-source provider using the
 // specified model. It is called only after all local policy steps are exhausted.
 // Returns the ChatResponse on success, or an error if the provider is not configured
@@ -1198,6 +1317,9 @@ func (p *RequestProcessor) tryProviderFallback(pending *domain.PendingRequest, e
 		return nil, fmt.Errorf("provider %s: %w", engine, err)
 	}
 	log.Infof("Provider fallback %s succeeded for request %s (%.0fms)", engine, pending.ID, float64(time.Since(start).Milliseconds()))
+	if err := withRawBody(resp); err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 

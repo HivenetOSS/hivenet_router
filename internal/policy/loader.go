@@ -140,6 +140,7 @@ func LoadBytes(data []byte) (*Policy, error) {
 		return nil, err
 	}
 	warnCapacityGate(&p)
+	warnFallbackProvider(&p)
 	return &p, nil
 }
 
@@ -165,7 +166,15 @@ func LoadModelDocBytes(data []byte) (*Policy, error) {
 		return nil, err
 	}
 	warnCapacityGate(&p)
+	warnFallbackProvider(&p)
 	return &p, nil
+}
+
+// warnFallbackProvider warns that fallback_provider is deprecated.
+func warnFallbackProvider(p *Policy) {
+	if p.FallbackProvider != nil {
+		log.Warnf("policy: fallback_provider is deprecated and will be removed: it sends any client's requests to the operator's provider account; give clients an external_fallback (their own provider key) on their API key instead")
+	}
 }
 
 // warnCapacityGate warns when a policy gates on capacity_utilization: agents
