@@ -198,6 +198,13 @@ type AuthResult struct {
 	// policies decide and the header is refused.
 	RoutingStrategies []string
 
+	// ScopeMax is the widest scope the key's requests may be served in: "all"
+	// (or empty), "EU" or "country:XX". A request may narrow it with
+	// X-Hivenet-Scope, never widen it. HomeCountry ("" or ISO 3166-1 alpha-2)
+	// is the scope of a request that asks for none.
+	ScopeMax    string
+	HomeCountry string
+
 	// QuotaLimits holds this key's rate/token limits, enforced per key by
 	// QuotaMiddleware and the handlers. Zero values mean unlimited.
 	QuotaLimits QuotaLimits
@@ -218,6 +225,10 @@ type RedirectInfo struct {
 	ClientRequestID string
 	Model           string // the concrete model the first router routed on, used as is
 	Scope           string // the effective scope at the first router
+	// ScopeAgents is true when Scope came from the client or its key, and so
+	// bounds the agents here too; false when it is the first router's default
+	// and bounds only further redirects.
+	ScopeAgents bool
 	// Strategy is the routing strategy the client asked for at the first
 	// router (X-Hivenet-Routing-Strategy), or empty; checked again against
 	// the key here.

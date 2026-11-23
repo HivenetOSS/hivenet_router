@@ -1019,6 +1019,7 @@ lets the operating system choose a local port. A fixed port is rarely needed and
 | --- | --- | --- | --- |
 | `--version` | — | Build version; `dev` in an unversioned local build | Version recorded in agent metadata |
 | `--region` | — | `UE-France` | Operator-defined location label |
+| `--country` | `HIVENET_AGENT_COUNTRY` | Empty | ISO 3166-1 alpha-2 country the agent runs in (e.g. `FR`); requests with a [scope](/routing/cross-site-redirect#scope) are served only by agents inside it. Empty: served only to scope `all` |
 | `--organization` | — | `Unknown` | Operator or infrastructure-provider label |
 | `--machine` | — | `Unknown` | Machine label |
 | `--tags` | — | `production` | Comma-separated routing tags |

@@ -125,6 +125,20 @@ func (r *AgentRegistry) CountHealthyByModel(model string) int {
 	return n
 }
 
+// CountHealthyByModelInScope is CountHealthyByModel limited to agents whose
+// declared country is inside scope.
+func (r *AgentRegistry) CountHealthyByModelInScope(model string, scope domain.Scope) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, agent := range r.byModel[model] {
+		if agent.IsHealthy() && scope.AllowsCountry(agent.Metadata.Country) {
+			n++
+		}
+	}
+	return n
+}
+
 // ForEach executes a function for each agent across all models.
 func (r *AgentRegistry) ForEach(fn func(peer.ID, *domain.Agent)) {
 	r.mu.RLock()

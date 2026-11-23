@@ -961,6 +961,7 @@ func (r *Router) startHTTPServer() {
 		r.metrics.AdmissionRejected,
 		tokenizer.NewEstimator(),
 	)
+	handlers.SetHealthyInScope(r.agents.CountHealthyByModelInScope)
 	handlers.SetResolver(semantic.NewResolver(semantic.NewPinStore(r.cfg.SemanticPinMax, r.cfg.SemanticPinMaxPerKey)))
 	handlers.SetSemanticObserver(r.metrics.SemanticDecision)
 	handlers.SetKeyPushRejectedObserver(r.metrics.APIKeyPushRejected)
@@ -1791,6 +1792,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		Capacity:      0,
 		Version:       session.Metadata.Version,
 		Region:        session.Metadata.Region,
+		Country:       session.Metadata.Country,
 		Tags:          session.Metadata.Tags,
 		Engine:        session.Metadata.Engine,
 		Organization:  session.Metadata.Organization,

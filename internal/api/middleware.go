@@ -399,6 +399,8 @@ func AuthMiddleware(provider auth.Provider) gin.HandlerFunc {
 		c.Set("key_preview", result.KeyPreview)
 		c.Set("allowed_models", result.AllowedModels)
 		c.Set(ctxKeyRoutingStrategies, result.RoutingStrategies)
+		c.Set(ctxKeyScopeMax, result.ScopeMax)
+		c.Set(ctxKeyHomeCountry, result.HomeCountry)
 		c.Set("quota_limits", result.QuotaLimits)
 		if result.Redirect != nil {
 			// Accepted once RedirectTarget has checked the body.

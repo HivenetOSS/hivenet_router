@@ -495,7 +495,16 @@ type Session struct {
 	lastGates []gateDiag
 	// prefix holds the request's prefix anchors (SetPrefix), nil if none.
 	prefix *PrefixRequest
+
+	// scope bounds the candidates by the country they declare (SetScope);
+	// empty means no bound.
+	scope domain.Scope
 }
+
+// SetScope bounds the session's candidates to agents whose declared country
+// is inside scope, on every step: a hard filter no policy step can widen. An
+// empty scope sets no bound.
+func (s *Session) SetScope(scope domain.Scope) { s.scope = scope }
 
 // WantsPrefix reports whether a step of this session routes on the request's
 // prefix anchors, so the caller computes them only then.
@@ -774,6 +783,12 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 		// Capability filter: only route to agents that serve the requested type.
 		if s.capability != "" && agent.Metadata.Capability != s.capability {
 			filterMiss["capability"]++
+			continue
+		}
+		// Scope (sovereignty): only agents in a country the request may be
+		// served in. Applied before the policy, so no step can widen it.
+		if s.scope != "" && !s.scope.AllowsCountry(agent.Metadata.Country) {
+			filterMiss["scope"]++
 			continue
 		}
 		// Layer 1: static match filter.

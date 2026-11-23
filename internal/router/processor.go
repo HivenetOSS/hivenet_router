@@ -329,6 +329,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 	if pending.RoutingStrategy != "" {
 		p.metrics.RoutingStrategy(pending.RoutingStrategy, pending.RoutingStrategySource)
 	}
+	session.SetScope(pending.Scope)
 	p.setPrefix(session, pending, capability)
 	defer session.ReleasePrefill()
 

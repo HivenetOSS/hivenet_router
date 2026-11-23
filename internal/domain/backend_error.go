@@ -18,7 +18,7 @@ var knownErrorCodes = map[ErrorCode]bool{
 	ErrCodeBackendUnavailable: true, ErrCodeBackendError: true, ErrCodeQueueFull: true,
 	ErrCodeRequestTimeout: true, ErrCodeRateLimitExceeded: true, ErrCodeTokenLimitExceeded: true,
 	ErrCodeInputTooLong: true, ErrCodeConcurrencyLimit: true, ErrCodeModelRedirected: true,
-	ErrCodeModelWaking: true, ErrCodeRoutingStrategyForbidden: true,
+	ErrCodeModelWaking: true, ErrCodeRoutingStrategyForbidden: true, ErrCodeScopeForbidden: true,
 }
 
 // KnownErrorCode reports whether code is one the router or an agent
