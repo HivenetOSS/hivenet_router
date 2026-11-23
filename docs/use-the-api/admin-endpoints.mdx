@@ -409,6 +409,8 @@ event: snapshot
 data: {"ts":"2026-11-23T12:00:00Z","models":[{"model":"llama-3-70b","pending":0,"active":0,"ts":"2026-11-23T12:00:00Z"}]}
 
 data: {"model":"llama-3-70b","pending":1,"active":0,"ts":"2026-11-23T12:00:04Z"}
+
+data: {"model":"llama-3-70b","pending":0,"active":1,"last_routed":"2026-11-23T12:02:31Z","ts":"2026-11-23T12:02:31Z"}
 ```
 
 | Field | Description |
@@ -416,10 +418,11 @@ data: {"model":"llama-3-70b","pending":1,"active":0,"ts":"2026-11-23T12:00:04Z"}
 | `model` | Model name |
 | `pending` | Distinct requests waiting for the model: the same count as `hivenet_pending_demand{model}` |
 | `active` | Healthy agents of the shared pool that serve the model on this router |
+| `last_routed` | When the router last sent a request for the model to an agent, at most once every 30 seconds; absent before the first. An autoscaler uses it to keep a woken model up while it serves traffic |
 | `removed` | `true` on the last event of a model the sibling map no longer places here with `scale_from_zero: true`; its counts are `0` |
 | `ts` | Time of the change, RFC 3339 |
 
-A change is sent as soon as a request enters or leaves the demand, or an agent for the model registers. Other changes, such as an agent turning unhealthy, are sent within one second. The server sends an SSE comment every 25 seconds to keep idle connections alive.
+A change is sent as soon as a request enters or leaves the demand, or an agent for the model registers. While the model serves traffic, `last_routed` moves, and an event is sent, at most once every 30 seconds. Other changes, such as an agent turning unhealthy, are sent within one second. The server sends an SSE comment every 25 seconds to keep idle connections alive.
 
 The endpoint answers `501` when hold at zero is disabled (no `--site-id`).
 

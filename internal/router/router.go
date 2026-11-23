@@ -771,6 +771,11 @@ func (r *Router) Start() error {
 	// Create request processor now that httpHost is ready
 	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
 		WithCacheSalter(r.salter),
+		WithOnAgentRouted(func(model string) {
+			if r.demandFeed != nil {
+				r.demandFeed.MarkRouted(model)
+			}
+		}),
 		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
 		WithPrefixScope(prefixScope(r.salter)),
 		WithProviderBaseURLs(r.cfg.ProviderBaseURLs),

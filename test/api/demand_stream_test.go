@@ -47,7 +47,7 @@ func TestDemandStream_SnapshotThenChange(t *testing.T) {
 	ts := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	feed := &fakeDemandFeed{
 		snapshot: []wake.DemandEntry{{Model: "qwen", Pending: 0, Active: 0, TS: ts}},
-		changes:  make(chan wake.DemandEntry, 1),
+		changes:  make(chan wake.DemandEntry, 2),
 	}
 	h := newDemandHandlers()
 	h.SetDemandFeed(feed)
@@ -96,6 +96,10 @@ func TestDemandStream_SnapshotThenChange(t *testing.T) {
 	feed.changes <- wake.DemandEntry{Model: "qwen", Pending: 1, Active: 0, TS: ts}
 	second := frame()
 	require.Equal(t, `data: {"model":"qwen","pending":1,"active":0,"ts":"2026-11-23T12:00:00Z"}`, second)
+
+	feed.changes <- wake.DemandEntry{Model: "qwen", Pending: 0, Active: 1, LastRouted: ts, TS: ts}
+	third := frame()
+	require.Equal(t, `data: {"model":"qwen","pending":0,"active":1,"last_routed":"2026-11-23T12:00:00Z","ts":"2026-11-23T12:00:00Z"}`, third)
 
 	close(feed.changes) // the feed dropped this subscriber: the stream ends
 	select {

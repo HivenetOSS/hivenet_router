@@ -109,6 +109,9 @@ type RequestProcessor struct {
 	lastEvict     map[peer.ID]time.Time
 	// forwardFn performs the actual forward; defaults to forwardToAgent.
 	forwardFn ForwardFunc
+	// onAgentRouted, when set, is called with the model each time a request
+	// is sent to an agent (not to an external provider) (WithOnAgentRouted).
+	onAgentRouted func(model string)
 
 	// prefixKeys key the prefix anchors (prefix-aware routing); prefixScope
 	// returns the scope of a tenant's anchors (nil: one scope for everyone).
@@ -172,6 +175,18 @@ func WithPeerCloser(pc PeerCloser) ProcessorOption {
 
 // WithCacheSalter makes every forward attempt salt the body for the tenant
 // (see cachesalt.Salter.Apply). nil (the default) forwards bodies unchanged.
+// WithOnAgentRouted sets fn to be called with the model each time a request
+// is sent to an agent. It must be cheap: it runs on every request.
+func WithOnAgentRouted(fn func(model string)) ProcessorOption {
+	return func(p *RequestProcessor) { p.onAgentRouted = fn }
+}
+
+func (p *RequestProcessor) agentRouted(model string) {
+	if p.onAgentRouted != nil {
+		p.onAgentRouted(model)
+	}
+}
+
 func WithCacheSalter(s *cachesalt.Salter) ProcessorOption {
 	return func(p *RequestProcessor) { p.salter = s }
 }
@@ -731,6 +746,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}
 
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
+		p.agentRouted(model)
 		p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, 0, 0)
 		decrement()
 		p.counters.RecordSuccess(agent, 0, 0, rttMs)
@@ -832,6 +848,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		// instead of treating every streaming request as instantly idle.
 		releaseOnReturn = false
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
+		p.agentRouted(model)
 		go p.drainStream(agent, pending, pw, resp, cancel, meter, region, engine, model, rttMs, decrement)
 		chatResp.Body = pr
 		chatResp.ProcessedBy = agent.ID.String()
@@ -894,6 +911,7 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 	}
 
 	p.metrics.RequestRouted(region, engine, model, pending.TenantID)
+	p.agentRouted(model)
 	p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
 	p.checkPrefix(agent, pending, chatResp.Usage.CachedTokens, chatResp.Usage.CachedKnown)
 	decrement()

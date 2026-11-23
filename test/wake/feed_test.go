@@ -248,3 +248,29 @@ func TestHold_OnChangeFollowsDemand(t *testing.T) {
 		}
 	}
 }
+
+// TestFeed_MarkRoutedThrottled checks the traffic signal: the first routed
+// request of a model sends an event with last_routed, and more requests
+// within RoutedGranularity send nothing, so a busy model does not flood the
+// stream.
+func TestFeed_MarkRoutedThrottled(t *testing.T) {
+	src := &demandSource{m: map[string]wake.DemandEntry{}}
+	src.set("a", 0, 1)
+	f := startFeed(t, src)
+	_, ch, cancel := f.Subscribe()
+	defer cancel()
+
+	before := time.Now().UTC()
+	f.MarkRouted("a")
+	e := next(t, ch)
+	if e.Model != "a" || e.LastRouted.Before(before.Add(-time.Second)) {
+		t.Fatalf("event = %+v, want a with last_routed set", e)
+	}
+	for range 100 {
+		f.MarkRouted("a")
+	}
+	quiet(t, ch)
+
+	f.MarkRouted("not-wakeable") // a model the feed does not report
+	quiet(t, ch)
+}

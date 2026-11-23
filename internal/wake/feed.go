@@ -19,13 +19,23 @@ type DemandEntry struct {
 	Active  int    `json:"active"`
 	// Removed is set on the last event of a model this router no longer
 	// holds requests for (it left the sibling map). Its counts are 0.
-	Removed bool      `json:"removed,omitempty"`
-	TS      time.Time `json:"ts"`
+	Removed bool `json:"removed,omitempty"`
+	// LastRouted is when the router last sent a request for the model to an
+	// agent, to the nearest RoutedGranularity: it moves at most once per
+	// RoutedGranularity, so a busy model sends at most one event per
+	// interval. Zero when no request was routed since the router started.
+	LastRouted time.Time `json:"last_routed,omitzero"`
+	TS         time.Time `json:"ts"`
 }
 
 func (e DemandEntry) same(o DemandEntry) bool {
-	return e.Pending == o.Pending && e.Active == o.Active
+	return e.Pending == o.Pending && e.Active == o.Active && e.LastRouted.Equal(o.LastRouted)
 }
+
+// RoutedGranularity is how often LastRouted may move: an autoscaler that
+// keeps a model up while it serves traffic needs to know it is used, not
+// every request.
+const RoutedGranularity = 30 * time.Second
 
 // subscriberBuffer is how many events a subscriber may lag behind. A
 // subscriber that falls further behind is dropped: its channel closes, and it
@@ -49,6 +59,9 @@ type Feed struct {
 	mu   sync.Mutex
 	last map[string]DemandEntry
 	subs map[chan DemandEntry]struct{}
+
+	routedMu sync.Mutex
+	routed   map[string]time.Time
 }
 
 // NewFeed returns a Feed that reads the current demand from source: every
@@ -62,7 +75,32 @@ func NewFeed(source func() map[string]DemandEntry, interval time.Duration) *Feed
 		signal:   make(chan struct{}, 1),
 		last:     make(map[string]DemandEntry),
 		subs:     make(map[chan DemandEntry]struct{}),
+		routed:   make(map[string]time.Time),
 	}
+}
+
+// MarkRouted records that a request for model was sent to an agent. Called
+// on every routed request, so it only takes a lock and compares a time; the
+// recorded time moves (and an event is sent) at most once per
+// RoutedGranularity.
+func (f *Feed) MarkRouted(model string) {
+	now := f.now().UTC()
+	f.routedMu.Lock()
+	prev, ok := f.routed[model]
+	moved := !ok || now.Sub(prev) >= RoutedGranularity
+	if moved {
+		f.routed[model] = now
+	}
+	f.routedMu.Unlock()
+	if moved {
+		f.Notify()
+	}
+}
+
+func (f *Feed) lastRouted(model string) time.Time {
+	f.routedMu.Lock()
+	defer f.routedMu.Unlock()
+	return f.routed[model]
 }
 
 // Notify asks the feed to recheck the demand now. It never blocks.
@@ -123,6 +161,7 @@ func (f *Feed) publish() {
 	var changes []DemandEntry
 	for model, e := range cur {
 		e.Model, e.TS = model, now
+		e.LastRouted = f.lastRouted(model)
 		if old, ok := f.last[model]; ok && old.same(e) {
 			continue
 		}
