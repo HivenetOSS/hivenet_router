@@ -330,6 +330,7 @@ func (p *RequestProcessor) dispatchWithPolicy(pending *domain.PendingRequest) {
 		p.metrics.RoutingStrategy(pending.RoutingStrategy, pending.RoutingStrategySource)
 	}
 	session.SetScope(pending.Scope)
+	session.SetReservation(pending.Pool)
 	p.setPrefix(session, pending, capability)
 	defer session.ReleasePrefill()
 
@@ -584,7 +585,7 @@ func (p *RequestProcessor) slotRelease(agent *domain.Agent) func() {
 		once.Do(func() {
 			agent.DecrementLoad()
 			if p.executor != nil {
-				p.executor.SignalCapacity(agent.Metadata.Model)
+				p.executor.SignalCapacity(domain.PoolKey(agent.Metadata.Model, agent.Metadata.ReservedFor))
 			}
 		})
 	}

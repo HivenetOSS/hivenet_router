@@ -23,3 +23,21 @@ func TestStaticKeyScope(t *testing.T) {
 		}
 	}
 }
+
+// A key's reservation must be a usable name, in auth.yaml as on push.
+func TestStaticKeyReservation(t *testing.T) {
+	entry := func(r string) []APIKeyEntry {
+		return []APIKeyEntry{{KeyHash: strings.Repeat("ab", 32), Metadata: KeyMetadata{Owner: "o", Name: "n"}, Reservation: r}}
+	}
+	if _, err := NewStaticKeyProvider(entry("tenant-42")); err != nil {
+		t.Errorf("valid: %v", err)
+	}
+	if _, err := NewStaticKeyProvider(entry("has space")); err == nil {
+		t.Error("invalid reservation accepted")
+	}
+	reg := NewDynamicKeyProvider()
+	bad := DynamicKeyEntry{ID: "k", KeyHash: strings.Repeat("ab", 32), Owner: "o", Name: "n", Enabled: true, Reservation: "a/b"}
+	if err := reg.Upsert("1", bad); err == nil {
+		t.Error("pushed key with an invalid reservation accepted")
+	}
+}

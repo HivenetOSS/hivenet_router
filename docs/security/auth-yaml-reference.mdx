@@ -188,6 +188,7 @@ api:
 | `routing_strategies` | No | Ranking strategies the key may use, the first its default; empty leaves routing to the models' policies |
 | `scope_max` | No | Widest scope the key's requests may be served in: `all` (default), `EU` or `country:XX` |
 | `home_country` | No | ISO 3166-1 alpha-2 country used as the scope of a request without `X-Hivenet-Scope`; inside `scope_max` |
+| `reservation` | No | Sends the key's requests only to the agents started with the same `--reserved-for` ([dedicated replicas](/routing/dedicated-replicas)); empty: the shared agents only |
 
 ### `routing_strategies`
 

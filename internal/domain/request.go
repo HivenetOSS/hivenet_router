@@ -43,6 +43,11 @@ type PendingRequest struct {
 	// from X-Hivenet-Scope, the key's home_country or its scope_max.
 	Scope Scope
 
+	// Pool is the pool this request may use: its key's reservation, served
+	// only by the agents reserved for it (dedicated replicas), or
+	// SharedPool ("") for the agents reserved for no one.
+	Pool string
+
 	// Capability is the inference type required by this request: "llm", "embedding",
 	// or "reranker". The policy executor uses it to filter agents — only agents whose
 	// Metadata.Capability matches this value are considered. Defaults to "llm".

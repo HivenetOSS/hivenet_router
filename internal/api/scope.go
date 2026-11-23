@@ -18,6 +18,7 @@ const (
 	ctxKeyScopeMax    = "scope_max"
 	ctxKeyHomeCountry = "home_country"
 	ctxKeyScope       = "scope"
+	ctxKeyReservation = "reservation"
 )
 
 // Scope resolves where an inference request may be served, from its API key
@@ -82,15 +83,16 @@ func requestScope(c *gin.Context) domain.Scope {
 
 // healthyForRequest counts the healthy agents here that may serve this
 // request's model: inside its scope when it has one, else every healthy
-// agent of the model. The redirect decision and the semantic alias resolver
+// agent of the model's pool. The redirect decision and the semantic alias resolver
 // use it, so neither picks a model or a site whose only agents are out of
 // the request's scope.
+//
+// It counts the request's pool: a key with a reservation counts only the
+// agents reserved for it (whose country its operator placed), a key without
+// one only the shared agents, inside the scope when it has one.
 func (h *Handlers) healthyForRequest(c *gin.Context, model string) int {
-	if s := requestScope(c); s != "" && h.healthyInScope != nil {
-		return h.healthyInScope(model, s)
+	if s := requestScope(c); s != "" && h.healthyInScope != nil && requestPool(c) == "" {
+		return h.healthyInScope(model, s) // shared agents inside the scope
 	}
-	if h.healthyAgentCount == nil {
-		return 0
-	}
-	return h.healthyAgentCount(model)
+	return h.poolHealthy(c, model)
 }

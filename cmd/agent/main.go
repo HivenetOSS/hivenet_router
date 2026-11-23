@@ -68,6 +68,7 @@ func main() {
 	capacity := flag.Int("capacity", cfg.Capacity, "Deprecated: routers ignore it and admit by the engine's KV capacity and live load. Still sent so older routers accept the agent")
 	version := flag.String("version", cfg.Version, "Agent version")
 	region := flag.String("region", cfg.Region, "Deployment region")
+	reservedFor := flag.String("reserved-for", os.Getenv("HIVENET_AGENT_RESERVED_FOR"), "Dedicated replica: serve only API keys whose reservation is this name (letters, digits, . _ -; up to 64). Empty (default): a shared replica, which keys with a reservation never use (env: HIVENET_AGENT_RESERVED_FOR)")
 	country := flag.String("country", os.Getenv("HIVENET_AGENT_COUNTRY"), "ISO 3166-1 alpha-2 country this agent runs in (e.g. FR). Requests with a scope (X-Hivenet-Scope, or the API key's scope_max / home_country) are served only by agents whose country is inside it; an agent without a country serves only scope \"all\" (env: HIVENET_AGENT_COUNTRY)")
 	organization := flag.String("organization", cfg.Organization, "Cloud/compute provider hosting this agent (e.g. AWS, OVH, Hivenet Compute)")
 	machine := flag.String("machine", cfg.Machine, "Machine name within the organization")
@@ -107,6 +108,10 @@ func main() {
 	cfg.Country = strings.ToUpper(strings.TrimSpace(*country))
 	if cfg.Country != "" && !domain.ValidCountry(cfg.Country) {
 		log.Fatalf("--country %q: want an ISO 3166-1 alpha-2 code such as FR", *country)
+	}
+	cfg.ReservedFor = strings.TrimSpace(*reservedFor)
+	if cfg.ReservedFor != "" && !domain.ValidReservation(cfg.ReservedFor) {
+		log.Fatalf("--reserved-for %q: use 1-64 letters, digits, '.', '_' or '-'", *reservedFor)
 	}
 	cfg.Organization = *organization
 	cfg.Machine = *machine
