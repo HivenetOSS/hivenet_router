@@ -241,6 +241,9 @@ type Handlers struct {
 	// handler on /admin/registration-stream consumes. Nil-safe: the handler
 	// returns 501 when no feed is wired (e.g. tests).
 	registrationFeed RegistrationFeed
+	// demandFeed serves GET /admin/demand-stream; nil when hold at zero is
+	// disabled (the handler answers 501).
+	demandFeed DemandFeed
 
 	// admission enforces the per-model KV-occupancy admit budget before a request
 	// is queued. Nil disables the gate (e.g. tests, or when no policy declares a

@@ -20,6 +20,7 @@ Use these endpoints to inspect agents, models, storage, and routing state; updat
 | `GET` | `/admin/health` | Router and agent health summary |
 | `GET` | `/admin/routing-table` | Complete live agent state |
 | `GET` | `/admin/registration-stream` | Server-sent event feed of agent registration changes |
+| `GET` | `/admin/demand-stream` | Server-sent event feed of the pending demand per model (hold at zero only) |
 | `GET` | `/admin/models` | Unfiltered operator model catalog |
 | `GET` | `/admin/models/{model}` | Unfiltered model and agent detail |
 | `GET` | `/admin/storage` | BadgerDB counts, size, and garbage collection |
@@ -385,6 +386,45 @@ The `(deployment_id, replica_id)` pair is the external scheduler join key. The s
 
 <Note>
   This endpoint is a change feed, not a complete snapshot. Each subscriber has a bounded buffer, and a slow subscriber can miss events rather than block agent registration. Read `/admin/routing-table` when connecting and whenever you need to resynchronize authoritative state.
+</Note>
+
+## Demand stream
+
+```text
+GET /admin/demand-stream
+```
+
+This long-lived Server-Sent Events response publishes the [pending demand](/routing/hold-at-zero#pending-demand-and-the-autoscaler) of every model that may be held on this router while it wakes from zero. An autoscaler can follow it to wake a model as soon as a request is held for it, instead of at its next poll of `hivenet_pending_demand`. The router only reports numbers; it never starts or stops a model.
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $HIVENET_ROUTER_ADMIN_API_KEY" \
+  http://localhost:8080/admin/demand-stream
+```
+
+The first frame is a snapshot of every model; each later frame is one model's change:
+
+```text
+event: snapshot
+data: {"ts":"2026-11-23T12:00:00Z","models":[{"model":"llama-3-70b","pending":0,"active":0,"ts":"2026-11-23T12:00:00Z"}]}
+
+data: {"model":"llama-3-70b","pending":1,"active":0,"ts":"2026-11-23T12:00:04Z"}
+```
+
+| Field | Description |
+| --- | --- |
+| `model` | Model name |
+| `pending` | Distinct requests waiting for the model: the same count as `hivenet_pending_demand{model}` |
+| `active` | Healthy agents of the shared pool that serve the model on this router |
+| `removed` | `true` on the last event of a model the sibling map no longer places here with `scale_from_zero: true`; its counts are `0` |
+| `ts` | Time of the change, RFC 3339 |
+
+A change is sent as soon as a request enters or leaves the demand, or an agent for the model registers. Other changes, such as an agent turning unhealthy, are sent within one second. The server sends an SSE comment every 25 seconds to keep idle connections alive.
+
+The endpoint answers `501` when hold at zero is disabled (no `--site-id`).
+
+<Note>
+  A subscriber that falls more than 256 events behind is disconnected rather than slowing the router. Reconnect: the first frame is always a fresh snapshot, so nothing needs to be replayed.
 </Note>
 
 ## Operator model catalog

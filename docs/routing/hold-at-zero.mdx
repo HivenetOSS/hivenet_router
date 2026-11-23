@@ -178,6 +178,10 @@ spec:
 
 Use `increase`, not `rate`: a per-second rate of a lightly used model stays below any useful threshold. Give the backend container a readiness probe on its health endpoint, so Kubernetes does not report the pod ready before the model can serve.
 
+### Push instead of polling
+
+A metric is read when the autoscaler polls, so a wake waits for the next poll and the next scrape: up to about 10 s at a 5 s poll. To hear a wake at once, subscribe to [`GET /admin/demand-stream`](/use-the-api/admin-endpoints#demand-stream): it sends an event as soon as a request is held for a model, or leaves its demand. A small service of your own can follow the stream of every router of the site, sum the demand per model, and pass it on to the autoscaler (KEDA's `external-push` scaler, for example). Keep the metric query as a slower fallback, so a model still wakes if that service is down.
+
 ## Configuration
 
 The flags are listed in the [configuration reference](/reference/configuration-reference#hold-at-zero): `--wake-hold-budget`, the three hold limits in [Hold limits](#hold-limits), and `--wake-keepalive` (default `15s`, `0` disables keepalives). The router refuses to start when a value is invalid: a budget or limit that is not greater than `0`, or a negative keepalive.
