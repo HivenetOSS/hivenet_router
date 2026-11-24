@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10" fill="none" stroke="#8a8a8a" stroke-width="1.6"/></marker></defs>
+<rect x="50" y="370" width="280" height="260" rx="14" fill="none" stroke="#c4c4c4" stroke-width="1.2" stroke-dasharray="6 5"/>
+<text x="190" y="610" text-anchor="middle" font-size="18" fill="#666666">Replica A</text>
+<rect x="360" y="370" width="280" height="260" rx="14" fill="none" stroke="#c4c4c4" stroke-width="1.2" stroke-dasharray="6 5"/>
+<text x="500" y="610" text-anchor="middle" font-size="18" fill="#666666">Replica B</text>
+<rect x="670" y="370" width="280" height="260" rx="14" fill="none" stroke="#c4c4c4" stroke-width="1.2" stroke-dasharray="6 5"/>
+<text x="810" y="610" text-anchor="middle" font-size="18" fill="#666666">Replica C</text>
+<line x1="500" y1="90" x2="190" y2="144" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="500" y1="90" x2="500" y2="144" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="500" y1="90" x2="810" y2="144" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="130" y1="210" x2="130" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="190" y1="210" x2="440" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="250" y1="210" x2="750" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="440" y1="210" x2="190" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="500" y1="210" x2="500" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="560" y1="210" x2="810" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="750" y1="210" x2="250" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="810" y1="210" x2="560" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="870" y1="210" x2="870" y2="394" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="190" y1="460" x2="190" y2="499" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="500" y1="460" x2="500" y2="499" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="810" y1="460" x2="810" y2="499" stroke="#8a8a8a" stroke-width="1.6" marker-end="url(#ah)"/>
+<rect x="390.0" y="30" width="220" height="60" rx="10" fill="#f7f7f7" stroke="#d4d4d4" stroke-width="1.2"/><text x="500" y="60.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#1a1a1a">Load balancer</text>
+<rect x="90.0" y="150" width="200" height="60" rx="10" fill="#eeedfd" stroke="#5b4fc7" stroke-width="1.2"/><text x="190" y="180.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#3b2f97">Router 1</text>
+<rect x="90.0" y="400" width="200" height="60" rx="10" fill="#e2f4ee" stroke="#2f8a63" stroke-width="1.2"/><text x="190" y="430.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#0f5a3c">Agent</text>
+<rect x="75.0" y="505" width="230" height="60" rx="10" fill="#f7f7f7" stroke="#d4d4d4" stroke-width="1.2"/><text x="190" y="535.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="400" fill="#1a1a1a">Engine on GPU</text>
+<rect x="400.0" y="150" width="200" height="60" rx="10" fill="#eeedfd" stroke="#5b4fc7" stroke-width="1.2"/><text x="500" y="180.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#3b2f97">Router 2</text>
+<rect x="400.0" y="400" width="200" height="60" rx="10" fill="#e2f4ee" stroke="#2f8a63" stroke-width="1.2"/><text x="500" y="430.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#0f5a3c">Agent</text>
+<rect x="385.0" y="505" width="230" height="60" rx="10" fill="#f7f7f7" stroke="#d4d4d4" stroke-width="1.2"/><text x="500" y="535.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="400" fill="#1a1a1a">Engine on GPU</text>
+<rect x="710.0" y="150" width="200" height="60" rx="10" fill="#eeedfd" stroke="#5b4fc7" stroke-width="1.2"/><text x="810" y="180.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#3b2f97">Router 3</text>
+<rect x="710.0" y="400" width="200" height="60" rx="10" fill="#e2f4ee" stroke="#2f8a63" stroke-width="1.2"/><text x="810" y="430.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="600" fill="#0f5a3c">Agent</text>
+<rect x="695.0" y="505" width="230" height="60" rx="10" fill="#f7f7f7" stroke="#d4d4d4" stroke-width="1.2"/><text x="810" y="535.0" dy="0.35em" text-anchor="middle" font-size="20" font-weight="400" fill="#1a1a1a">Engine on GPU</text>
+</svg>
