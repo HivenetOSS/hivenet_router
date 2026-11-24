@@ -92,7 +92,7 @@ vllm serve MODEL --enable-prefix-caching \
 python -m sglang.launch_server --model-path MODEL \
   --kv-events-config '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557"}'
 
-hivenet-router-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
+hivenet-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
 ```
 
 Both engines connect to any endpoint that is not a wildcard; with a wildcard (`tcp://*:5557`) they listen instead, and the agent connects to them. The agent tries to listen first and connects when the address is taken, so both setups work. With the engine in a container, run the agent in the same network namespace (the same pod), or publish the engine's port on `127.0.0.1` only.

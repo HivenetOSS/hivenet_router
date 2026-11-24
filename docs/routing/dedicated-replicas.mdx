@@ -6,7 +6,7 @@ description: "Reserve replicas of a model for one client: its keys use only them
 A dedicated replica serves one client only. The agent is started with a reservation name, and the client's API keys carry the same name: those keys are served only by the agents reserved for them, and every other key is served only by the shared agents. The two never mix, on any policy step, fallback chain included.
 
 ```bash
-hivenet-router-agent --engine vllm --model llama3:70b --reserved-for acme ...
+hivenet-agent --engine vllm --model llama3:70b --reserved-for acme ...
 ```
 
 ```yaml
@@ -29,9 +29,9 @@ For example, `llama3:70b` runs on four shared replicas that every key uses, and 
 
 ```bash
 # four shared replicas (scaled by the autoscaler)
-hivenet-router-agent --engine vllm --model llama3:70b ...
+hivenet-agent --engine vllm --model llama3:70b ...
 # two replicas for acme (fixed)
-hivenet-router-agent --engine vllm --model llama3:70b --reserved-for acme ...
+hivenet-agent --engine vllm --model llama3:70b --reserved-for acme ...
 ```
 
 acme's keys carry `reservation: acme` and reach only its two replicas, whatever their load. Every other key reaches only the four shared ones. When acme's replicas are full, acme's requests wait in acme's own queue and are then refused (`429` or `503`); they never spill to the shared replicas, and the shared replicas never take acme's load. Overflow from a reserved pool to the shared one is not supported.

@@ -322,6 +322,8 @@ HIVENET_ROUTER_ANTHROPIC_API_KEY
 
 A policy reload does not reload these credentials.
 
+These router-wide credentials serve the policy's `fallback_provider`, which is deprecated. A client's own provider credential ([`external_fallback`](/routing/provider-fallback#bring-your-own-key)) belongs to its API key instead. To rotate it, push the key again with the new `api_key` through the [admin API](/use-the-api/admin-endpoints). For a key in `auth.yaml`, update the environment variable named by `api_key_env` and restart the router.
+
 The router uses one credential for each provider at a time. Any overlap is created in the provider account: keep the old provider key valid while the router switches to and verifies the new one.
 
 For a planned provider rotation:
