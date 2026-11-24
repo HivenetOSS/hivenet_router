@@ -92,7 +92,7 @@ vllm serve MODEL --enable-prefix-caching \
 python -m sglang.launch_server --model-path MODEL \
   --kv-events-config '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557"}'
 
-hivenet-router-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
+hivenet-agent --engine vllm --kv-events-endpoint tcp://127.0.0.1:5557 ...
 ```
 
 Both engines connect to any endpoint that is not a wildcard; with a wildcard (`tcp://*:5557`) they listen instead, and the agent connects to them. The agent tries to listen first and connects when the address is taken, so both setups work. With the engine in a container, run the agent in the same network namespace (the same pod), or publish the engine's port on `127.0.0.1` only.
@@ -107,17 +107,16 @@ Events only describe new blocks. A prompt that extends a prefix the engine cache
 
 ## Measured gains
 
-Measured with 4 replicas of a 7B model on 32 GB GPUs, a KV cache under pressure (40,000 tokens per replica) and a mixed workload (multi-turn chat, a long shared system prompt, RAG with the document in the system prompt, parallel sub-requests on one context), compared with `least-loaded`:
+Measured with 3 routers and 6 replicas of a 7B model (4 vLLM, 2 SGLang) on 32 GB GPUs, a KV cache under pressure (40,000 tokens per replica) and a mixed workload, compared with `least-loaded` (median time to first token, mean of 3 runs):
 
-| Workload | Median time to first token |
-| --- | --- |
-| Shared system prompt (6k tokens) | 2.2× lower |
-| RAG, 12k-token documents | 4.7× lower |
-| Parallel sub-requests on an 8k context | 4.3× lower |
-| Multi-turn chat | p99 29–48 % lower |
-| Working set that fits the cache, 64k-token prompts | 21× lower |
+| Workload | Concurrency 32 | Concurrency 64 (saturated) |
+| --- | --- | --- |
+| Multi-turn chat | 3.3× lower (205 → 63 ms) | 1.7× lower |
+| Shared system prompt (~6k tokens) | 1.9× lower | 1.5× lower |
+| RAG, ~12k-token document in its own message | 1.3× lower | 1.2× lower |
+| Chat p99 | 1.4× lower | 1.2× lower |
 
-Gains grow with prompt length. They shrink when the cache cannot hold the working set and when the reuse is inside one message (see [Limits](#limits)).
+Gains grow with prompt length and with how many requests share a beginning. They shrink when the cache cannot hold the working set, and there is none when the reuse is inside one message (see [Limits](#limits)). The setup, the exact workload, the algorithm's design choices and the full results are in the [technical report](/reports/prefix-aware-routing).
 
 ## Agent trust
 
