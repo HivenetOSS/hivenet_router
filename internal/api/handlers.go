@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1681,7 +1682,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// spends the budget is refused. A pooling model generates nothing, so
 	// nothing is reserved for output.
 	input := domain.ParsePoolingInput(capability, rawBytes)
-	estimate := h.estimatePoolingTokens(req.Model, input)
+	estimate := h.estimatePoolingTokens(req.Model, capability, input)
 	if !h.enforcePerKeyRates(c, chatReq, m, estimate) {
 		return
 	}
@@ -1749,20 +1750,38 @@ func poolingKind(capability string) string {
 	return kindEmbedding
 }
 
-// poolingSegmentTokens is the special tokens a pooling model adds to every
-// sequence it reads (an embedding input, a rerank query-document pair: CLS,
-// SEP and the like), counted in the estimate on top of the text.
-const poolingSegmentTokens = 3
+// poolingBytesPerToken is the bytes per token of a pooling model's input
+// before the estimator has learned the model: embedding and rerank models
+// (BERT and XLM-RoBERTa tokenizers) read natural-language text at 4 to 5 bytes
+// per token in English, where the chat cold start assumes code-dense 3.2. The
+// lower end keeps the estimate on the side of more tokens.
+const poolingBytesPerToken = 4
+
+// The special tokens a pooling model adds to every sequence it reads: [CLS]
+// and [SEP] around an embedding input; up to four around a rerank's
+// query-document pair (XLM-RoBERTa: <s> query </s></s> document </s>).
+const (
+	embeddingSpecialTokens = 2
+	rerankSpecialTokens    = 4
+)
 
 // estimatePoolingTokens estimates the input tokens of an embedding or rerank
-// request: token IDs as given, the text with the model's learned
-// tokens-per-byte ratio, and poolingSegmentTokens per sequence.
-func (h *Handlers) estimatePoolingTokens(model string, in domain.PoolingInput) int {
-	text := in.TextBytes / 4
+// request: token IDs as given; the text at the model's learned
+// tokens-per-byte ratio, else at poolingBytesPerToken; and the special tokens
+// of every sequence. It is what Infinity, whose usage counts characters, is
+// charged.
+func (h *Handlers) estimatePoolingTokens(model, capability string, in domain.PoolingInput) int {
+	text := (in.TextBytes + poolingBytesPerToken - 1) / poolingBytesPerToken
 	if h.estimator != nil {
-		text = h.estimator.Estimate(model, in.TextBytes, 0)
+		if ratio, ok := h.estimator.Learned(model); ok {
+			text = int(math.Ceil(float64(in.TextBytes) * ratio))
+		}
 	}
-	return in.TokenIDs + text + in.Segments*poolingSegmentTokens
+	special := embeddingSpecialTokens
+	if capability == domain.CapabilityReranker {
+		special = rerankSpecialTokens
+	}
+	return in.TokenIDs + text + in.Segments*special
 }
 
 // passthroughAllowlist is the set of HTTP paths the router forwards to a backend

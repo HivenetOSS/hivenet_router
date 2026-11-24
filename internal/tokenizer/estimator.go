@@ -125,3 +125,12 @@ func (e *Estimator) Observe(model string, textBytes, promptTokens int) {
 // RatioFor exposes the current tokens-per-byte ratio for a model, for tests and
 // diagnostics.
 func (e *Estimator) RatioFor(model string) float64 { return e.ratioFor(model) }
+
+// Learned returns the model's learned tokens-per-byte ratio, and false when it
+// has no sample yet (the cold-start ratio is not returned).
+func (e *Estimator) Learned(model string) (ratio float64, ok bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	ratio, ok = e.ratio[model]
+	return ratio, ok
+}

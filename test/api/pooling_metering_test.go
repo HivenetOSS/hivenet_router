@@ -57,12 +57,12 @@ func TestPooling_ChecksEstimateBeforeSending(t *testing.T) {
 		name, path, body string
 		want             int
 	}{
-		// 23 bytes ≈ 5 tokens at 4 bytes per token, plus 3 special tokens.
-		{"embedding text", "/v1/embeddings", `{"model":"e","input":"twenty-three bytes long"}`, 23/4 + 3},
-		// 5 token IDs plus 3 special tokens for each of the 2 inputs.
-		{"embedding token IDs", "/v1/embeddings", `{"model":"e","input":[[1,2,3],[4,5]]}`, 5 + 2*3},
-		// (8+8) + (8+8) bytes for 2 pairs ≈ 8 tokens, plus 3 per pair.
-		{"rerank", "/v1/rerank", `{"model":"r","query":"12345678","documents":["abcdefgh","ijklmnop"]}`, 32/4 + 2*3},
+		// 23 bytes at 4 bytes per token, rounded up, plus [CLS] and [SEP].
+		{"embedding text", "/v1/embeddings", `{"model":"e","input":"twenty-three bytes long"}`, 6 + 2},
+		// 5 token IDs plus 2 special tokens for each of the 2 inputs.
+		{"embedding token IDs", "/v1/embeddings", `{"model":"e","input":[[1,2,3],[4,5]]}`, 5 + 2*2},
+		// (8+8) + (8+8) bytes for 2 pairs at 4 bytes per token, plus 4 special tokens per pair.
+		{"rerank", "/v1/rerank", `{"model":"r","query":"12345678","documents":["abcdefgh","ijklmnop"]}`, 32/4 + 2*4},
 	} {
 		lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true}
 		var pending *domain.PendingRequest
