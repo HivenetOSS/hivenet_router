@@ -326,6 +326,7 @@ The additional room covers reconnect overlap during restarts and fleet rollouts.
 | `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` | Decision records queued before new ones are dropped |
 | `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` | Maximum semantic task pins held in memory; least recently used pins are evicted beyond it |
 | `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` | Maximum semantic task pins per API key |
+| `--image-tokens-default` | `HIVENET_ROUTER_IMAGE_TOKENS_DEFAULT` | `1024` | Token estimate for one image of a model whose cost per image is not learned yet; see [Images](/routing/admission-control#images) |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` | Default forward attempts for policy steps without `max_tries` |
 | `--queue-size` | `HIVENET_ROUTER_QUEUE_SIZE` | `100` | Capacity of the router’s global pending-request channel |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` | Requests per model that wait for a capacity slot (agents with a declared capacity), and, unless `--admission-queue-depth` is set, for room in the occupancy budget; `0` disables the queue |
@@ -813,6 +814,7 @@ The complete current router flag set is:
 | `--semantic-decision-log-buffer` | `HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER` | `4096` |
 | `--semantic-pin-max` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX` | `100000` |
 | `--semantic-pin-max-per-key` | `HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY` | `10000` |
+| `--image-tokens-default` | `HIVENET_ROUTER_IMAGE_TOKENS_DEFAULT` | `1024` |
 | `--max-tries-per-step` | `HIVENET_ROUTER_MAX_TRIES_PER_STEP` | `3` |
 | `--queue-depth` | `HIVENET_ROUTER_QUEUE_DEPTH` | `30` |
 | `--admission-queue-depth` | `HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH` | `-1` |

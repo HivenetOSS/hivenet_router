@@ -705,9 +705,7 @@ For streaming responses, accounting happens after the stream finishes. The clien
 
 Post-response usage from a compatible backend can include image and audio token costs accurately.
 
-The pre-request estimate is primarily text based. Image and audio content may therefore be underestimated at admission.
-
-Treat token budgets as approximate admission control for multimodal requests until model-aware preflight estimation is implemented.
+Before the request is sent, images are estimated from a per-model cost the router learns from that usage (see [Images](/routing/admission-control#images)); audio is not estimated. The first requests with images to a model use a default per image, so treat the admission check for multimodal requests as approximate until the router has seen a few answered.
 
 ## `admin` section
 
