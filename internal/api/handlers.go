@@ -519,14 +519,23 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// count_tokens is also exempt from the daily token budget: it generates
 	// nothing, and a count-then-send client would otherwise pay for every
 	// prompt twice (once counted, once sent).
-	chargedInput := 0
+	var hold domain.TokenHold
+	heldInput := 0
 	if !countOnly {
-		ok, charged := h.reserveInputBudget(c, &req, m, inputEstimate)
+		ok, held, n := h.reserveInputBudget(c, &req, m, inputEstimate)
 		if !ok {
 			return
 		}
-		chargedInput = charged
+		hold, heldInput = held, n
 	}
+	// The processor settles the hold with the tokens used; every other way
+	// out (an error, a timeout, a client that left) frees it. After a settle
+	// the release does nothing.
+	defer func() {
+		if hold != nil {
+			hold.Release()
+		}
+	}()
 	if !captureRawBody(c, &req, m.requestID) {
 		return
 	}
@@ -549,7 +558,8 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.EstimatedInputTokens = inputEstimate  // same value ITPM was charged, for its true-up
 	pending.ReservedInputTokens = reserveEstimate // what the occupancy reservation was charged, for its true-up
 	pending.EstimatedImageTokens = imagePoint
-	pending.ChargedInputTokens = chargedInput // the daily budgets' prompt charge, trued up after the response
+	pending.DailyHold = hold // the daily budgets' hold, settled after the response
+	pending.HeldInputTokens = heldInput
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -1145,14 +1155,15 @@ const perMessageTokenOverhead = 4
 // remaining budget WITHOUT charging and rejects the request up front (clean
 // 429) if its worst case — estimated prompt tokens plus the requested max
 // output — cannot fit, so a rejected request consumes no budget. Only when the
-// request is admitted is the prompt estimate charged; the processor deducts
-// the actual completion tokens after the response (max_tokens is never
-// deducted, only used to size the admission check). A request with no daily
-// budget is still charged, so it counts in its tenant's usage today. Returns
-// false (after writing 429) when the request cannot be admitted.
-func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta, promptTokens int) (ok bool, charged int) {
+// request is admitted is that worst case held; the processor settles the
+// hold with the prompt and completion tokens actually used after the response
+// (max_tokens is never charged, only used to size the admission check). A
+// request with no daily budget is still counted at the settle, so it counts
+// in its tenant's usage today. Returns false (after writing 429) when the
+// request cannot be admitted, and the hold with what it holds otherwise.
+func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta, promptTokens int) (ok bool, hold domain.TokenHold, held int) {
 	if h.limiter == nil {
-		return true, 0
+		return true, nil, 0
 	}
 	// Worst-case output. max_completion_tokens is the 2026 field; fall back to
 	// max_tokens (also the Anthropic field name).
@@ -1164,17 +1175,19 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	// per-message overhead, so a textless request is still charged) plus its
 	// images' point estimate.
 	if promptTokens == 0 {
-		return true, 0 // genuinely empty body — nothing to budget
+		return true, nil, 0 // genuinely empty body — nothing to budget
 	}
 	if !h.admitDailyTokens(c, m, req.Model, promptTokens, reservedOutput) {
-		return false, 0
+		return false, nil, 0
 	}
 
-	// Admitted — charge the prompt estimate now (the processor charges the actual
-	// completion after the response). A concurrent request may have consumed the
-	// budget between the peek and here, so honour a late deduction failure.
+	// Admitted — hold the worst case, the prompt estimate and the requested
+	// maximum output, so the requests in flight together never promise more
+	// than the budget has (the processor settles it with the tokens actually
+	// used after the response). A concurrent request may have taken the
+	// budget between the peek and here, so honour a late refusal.
 	budget := m.budget()
-	allowed, remainingAfter, err := h.limiter.AllowInputTokens(budget, promptTokens)
+	dh, allowed, remainingAfter, err := h.limiter.HoldTokens(budget, promptTokens+reservedOutput)
 	if err != nil {
 		log.Warnf("Input token check error for request %s: %v (fail-open)", m.requestID, err)
 	}
@@ -1182,12 +1195,15 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 		h.fireTokenLimited(m, req.Model)
 		c.Header(headerRateLimitRemainingTokens, "0")
 		h.refuseBudget(c, budget, promptTokens, "daily token budget exceeded")
-		return false, 0
+		return false, nil, 0
 	}
 	if remainingAfter >= 0 {
 		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remainingAfter))
 	}
-	return true, promptTokens
+	if dh == nil {
+		return true, nil, 0
+	}
+	return true, dh, promptTokens
 }
 
 // admitDailyTokens is the daily budgets' admission check, a peek that charges

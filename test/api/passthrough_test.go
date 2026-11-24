@@ -37,8 +37,45 @@ type fakeLimiter struct {
 	inAllowed    bool
 	inRemaining  int
 	mu           sync.Mutex
-	inputCalls   int // number of AllowInputTokens (deducting) calls
-	chargedInput int // last token count passed to AllowInputTokens
+	inputCalls   int   // number of AllowInputTokens / HoldTokens (admission) calls
+	chargedInput int   // last token count passed to AllowInputTokens / HoldTokens
+	settled      []int // what each hold was settled with
+	released     int   // holds released without a settle
+}
+
+// fakeHold records how a hold ends in its limiter.
+type fakeHold struct {
+	f    *fakeLimiter
+	done bool
+}
+
+func (h *fakeHold) Settle(actual int) (bool, int, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	if !h.done {
+		h.done = true
+		h.f.settled = append(h.f.settled, actual)
+	}
+	return true, -1, nil
+}
+
+func (h *fakeHold) Release() {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	if !h.done {
+		h.done = true
+		h.f.released++
+	}
+}
+
+// HoldTokens admits like AllowInputTokens and returns a hold that records
+// its settle or release.
+func (f *fakeLimiter) HoldTokens(b auth.DailyBudget, count int) (auth.DailyHold, bool, int, error) {
+	allowed, rem, err := f.AllowInputTokens(b, count)
+	if !allowed {
+		return nil, false, rem, err
+	}
+	return &fakeHold{f: f}, true, rem, err
 }
 
 func (f *fakeLimiter) AllowRequest(string, string, string, int) (bool, int, error) {
@@ -185,9 +222,10 @@ func TestPassthrough_ChargesMultimodalFloor(t *testing.T) {
 
 	select {
 	case pending := <-q:
-		// 1 message × per-message floor (4) = 4 charged for the textless prompt.
-		if lim.chargedInput != 4 {
-			t.Errorf("expected floored charge of 4 tokens for a 1-message image prompt, got %d", lim.chargedInput)
+		// 1 message × per-message floor (4) = 4 for the textless prompt,
+		// held with the requested max_tokens (10).
+		if lim.chargedInput != 4+10 || pending.HeldInputTokens != 4 {
+			t.Errorf("held %d with a prompt estimate of %d, want 14 and the floored 4", lim.chargedInput, pending.HeldInputTokens)
 		}
 		pending.Response <- &domain.ChatResponse{RawBytes: []byte(`{"ok":true}`)}
 	case <-time.After(time.Second):
@@ -310,5 +348,28 @@ func TestPassthrough_AllowsCountTokens(t *testing.T) {
 	<-done
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// TestPassthrough_DailyHoldReleasedUnlessSettled: the prompt estimate is held
+// at admission and handed to the processor; when the request ends without the
+// processor settling it (here the response carries no settle), the handler
+// releases it, so a request that used nothing costs nothing.
+func TestPassthrough_DailyHoldReleasedUnlessSettled(t *testing.T) {
+	q := make(chan *domain.PendingRequest, 1)
+	lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 1_000_000}
+	h := newTestHandlers(q, lim)
+	c, _ := newCtx("/v1/chat/completions", []byte(`{"model":"m","messages":[{"role":"user","content":"hello there"}]}`))
+	c.Set("quota_limits", auth.QuotaLimits{TokensPerDay: 1_000_000})
+	done := make(chan struct{})
+	go func() { h.Passthrough(c); close(done) }()
+	pending := <-q
+	if pending.DailyHold == nil || pending.HeldInputTokens != lim.chargedInput {
+		t.Fatalf("pending hold %v of %d, want the held estimate %d", pending.DailyHold, pending.HeldInputTokens, lim.chargedInput)
+	}
+	pending.Error <- domain.NewRouterError(domain.ErrCodeNoAgentsAvailable, "none", domain.SourceRouter)
+	<-done
+	if lim.released != 1 || len(lim.settled) != 0 {
+		t.Errorf("released %d settled %v, want released once", lim.released, lim.settled)
 	}
 }

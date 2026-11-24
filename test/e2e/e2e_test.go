@@ -123,6 +123,24 @@ func startStubBackend(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// startUsageStubBackend serves non-streaming chat completions reporting
+// prompt + completion tokens of usage, for tests of the daily budgets, which
+// count what the backend reports.
+func startUsageStubBackend(t *testing.T, prompt, completion int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w,
+			`{"id":"chatcmpl-stub","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			stubModel, prompt, completion, prompt+completion)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // routerOpts customises startRouterWith. The zero value is the default
 // no-auth stack (insecure admin allowed) every older test uses.
 type routerOpts struct {

@@ -131,13 +131,6 @@ type PendingRequest struct {
 	// the backend reports the exact prompt_tokens.
 	EstimatedInputTokens int
 
-	// ChargedInputTokens is what the daily budgets were charged for the prompt
-	// at admission (0 when nothing was, as for count_tokens). Once the backend
-	// reports its prompt_tokens, the processor charges what they exceed this by
-	// together with the completion (InputShortfall): the daily budgets count
-	// the prompt the backend processed, not only the router's estimate of it.
-	ChargedInputTokens int
-
 	// ReservedInputTokens is the input estimate the occupancy reservation was
 	// charged: EstimatedInputTokens with the images' upper bound instead of
 	// their point estimate. 0 means EstimatedInputTokens.
@@ -147,6 +140,22 @@ type PendingRequest struct {
 	// EstimatedInputTokens, compared after the response with what the backend
 	// counted for them.
 	EstimatedImageTokens int
+
+	// DailyHold is the daily budgets' hold on HeldInputTokens, the prompt
+	// estimate, set at admission; nil when nothing was held (no budgets, or
+	// count_tokens). Once the response's usage is known the processor settles
+	// it with the tokens actually used (SettleDaily): the daily budgets count
+	// what the backend processed, never the router's estimate of it. The
+	// handler releases it on every other path.
+	DailyHold       TokenHold
+	HeldInputTokens int
+}
+
+// TokenHold is tokens held on a request's daily budgets until it is known
+// how many it used (auth.DailyHold).
+type TokenHold interface {
+	Settle(actual int) (allowed bool, remaining int, err error)
+	Release()
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.
@@ -247,13 +256,25 @@ func (p *PendingRequest) ForwardID() string {
 	return p.ID + "-" + strconv.Itoa(int(n))
 }
 
-// InputShortfall is how many prompt tokens the backend reported beyond what
-// the daily budgets were charged at admission: 0 when none were charged,
-// when the backend reported none, or when the estimate was not below them.
-// An estimate above the backend's count is not refunded.
-func (p *PendingRequest) InputShortfall(promptTokens int) int {
-	if p.ChargedInputTokens <= 0 || promptTokens <= p.ChargedInputTokens {
-		return 0
+// SettleDaily settles the request's daily hold with the tokens it used:
+// prompt (the backend's count; the held estimate when it reported none) plus
+// completion. ok is false when no hold was set, so the caller charges the
+// budgets itself.
+func (p *PendingRequest) SettleDaily(prompt, completion int) (ok, allowed bool, remaining int, err error) {
+	if p.DailyHold == nil {
+		return false, true, -1, nil
 	}
-	return promptTokens - p.ChargedInputTokens
+	if prompt <= 0 {
+		prompt = p.HeldInputTokens
+	}
+	allowed, remaining, err = p.DailyHold.Settle(prompt + completion)
+	return true, allowed, remaining, err
+}
+
+// ReleaseDaily frees the request's daily hold, if any, without charging:
+// after SettleDaily it does nothing.
+func (p *PendingRequest) ReleaseDaily() {
+	if p.DailyHold != nil {
+		p.DailyHold.Release()
+	}
 }

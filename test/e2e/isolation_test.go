@@ -227,14 +227,14 @@ func TestIsolation_TwoTenantsQuotaE2E(t *testing.T) {
 		testKey{Token: rpmA1, Owner: "tenant-a", Name: "a1", RPM: 2},
 		testKey{Token: rpmA2, Owner: "tenant-a", Name: "a2", RPM: 2},
 		testKey{Token: rpmB1, Owner: "tenant-b", Name: "b1", RPM: 2},
-		// 170 tokens/day: one request reserving 150 output tokens on a ~14
-		// token prompt fits; after it is charged (prompt + 1 output token)
-		// the next identical request no longer does.
+		// 170 tokens/day: the first request fits; the backend reports it
+		// used 160 (110 prompt + 50 output), which leaves too little for
+		// the next one.
 		testKey{Token: tpdA, Owner: "tenant-a", Name: "a-tpd", TPD: 170},
 		testKey{Token: tpdB, Owner: "tenant-b", Name: "b-tpd", TPD: 170},
 	)
 	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey})
-	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	startAgentWith(t, rcfg, startUsageStubBackend(t, 110, 50).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
 	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
 		return modelHealthyAs(base, rpmB1, stubModel)
 	})
@@ -258,7 +258,7 @@ func TestIsolation_TwoTenantsQuotaE2E(t *testing.T) {
 	})
 
 	t.Run("tokens per day", func(t *testing.T) {
-		big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":150}`,
+		big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":10}`,
 			stubModel, strings.Repeat("x", 40))
 		if code, body := postAs(t, base, tpdA, big); code != http.StatusOK {
 			t.Fatalf("a-tpd first request: %d %s", code, body)
@@ -287,18 +287,18 @@ func TestIsolation_TenantCapE2E(t *testing.T) {
 	const keyA1, keyA2, keyB1 = "sk-cap-a1", "sk-cap-a2", "sk-cap-b1"
 	auth := writeAuthYAML(
 		// The lowest value applies: 170 tokens a day for all of tenant-a.
-		// One request reserving 150 output tokens on a ~14 token prompt
-		// fits; once it is charged, the next one does not, on either key.
+		// The first request fits; the backend reports it used 160, which
+		// leaves too little for the next one, on either key.
 		testKey{Token: keyA1, Owner: "tenant-a", Name: "a1", TenantTPD: 1000},
 		testKey{Token: keyA2, Owner: "tenant-a", Name: "a2", TenantTPD: 170},
 		testKey{Token: keyB1, Owner: "tenant-b", Name: "b1", TenantTPD: 170},
 	)
 	base, rcfg := startRouterWith(t, routerOpts{AuthYAML: auth, AdminKey: isoAdminKey})
-	startAgentWith(t, rcfg, startStubBackend(t).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
+	startAgentWith(t, rcfg, startUsageStubBackend(t, 110, 50).URL, filepath.Join(t.TempDir(), "agent.key"), nil)
 	waitFor(t, 30*time.Second, "agent registered and healthy", func() bool {
 		return modelHealthyAs(base, keyB1, stubModel)
 	})
-	big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":150}`,
+	big := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"max_tokens":10}`,
 		stubModel, strings.Repeat("x", 40))
 
 	if code, body := postAs(t, base, keyA1, big); code != http.StatusOK {

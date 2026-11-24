@@ -691,11 +691,11 @@ The worst-case total must fit inside the remaining daily budget.
 
 This first check does not deduct the requested maximum output. It only verifies that the request could fit.
 
-After admission, Hivenet Router charges the estimated input tokens.
+After admission, Hivenet Router holds the worst case (the estimated input tokens and the requested maximum output): requests admitted while it is held see it as spent.
 
 ### After the response
 
-Hivenet Router charges the actual completion tokens after the backend responds.
+After the backend responds, Hivenet Router frees the hold and charges the tokens it reports: prompt and completion. The budget counts what was used, never the estimate; a request that fails before it runs costs nothing.
 
 For non-streaming responses, it uses backend usage data when available and estimates missing values when needed.
 

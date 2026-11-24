@@ -56,7 +56,7 @@ go test ./test/... -run 'TestIsolation|TestChecklist' -count=1
 | 2.11 | Capacity is shared per model (B2/B3 budgets, queue, wait queue), so one customer's burst can slow another (noisy neighbour, vLLM ④). | out of scope | none: accepted residual; `max_occupancy_share` caps one key's share, and a dedicated replica (Tier 1, Epic N) removes it |
 | 2.12 | A model outside the key's allowlist is refused with 403 before any quota is charged, any model is woken or any redirect is issued, on every inference endpoint. | done | `TestIsolation_ForbiddenModelCostsNothing` |
 | 2.13 | A key with both `allowed_models` and `quota.per_model` may use only the models in both. | done | `TestAllowlist_IntersectsAllowedModelsAndPerModel` |
-| 2.14 | Daily budgets (the key's and the tenant's) and the per-minute input rate count the prompt the backend reports, not only the router's estimate of it: the difference is charged after the response, and a non-streaming answer it does not fit is refused. | done | `TestIsolation_InputChargedFromBackendCount`, `TestB4_ITPMChargesBackendPromptTokens`, `TestInputShortfall`, `TestMinute_ChargeInputTokens` |
+| 2.14 | Daily budgets (the key's and the tenant's) and the per-minute input rate count the prompt the backend reports, not the router's estimate of it: the daily budgets hold the estimate at admission and settle the tokens used after the response (an estimate above them is given back), and a non-streaming answer they do not fit is refused. | done | `TestIsolation_InputChargedFromBackendCount`, `TestB4_ITPMChargesBackendPromptTokens`, `TestDailyHold_SettlesExactUsage`, `TestMinute_ChargeInputTokens` |
 
 ## 3. Per-customer prefix-cache salt (vLLM ①, CVE-2025-46570)
 

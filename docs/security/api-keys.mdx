@@ -442,11 +442,11 @@ At admission, Hivenet Router:
 1. estimates prompt tokens
 2. reads `max_completion_tokens`, or falls back to `max_tokens`
 3. checks whether the estimated prompt and requested maximum output fit in the remaining budget
-4. charges the prompt estimate when the request is admitted
+4. holds the worst case, the prompt estimate and the requested maximum output, when the request is admitted, so requests admitted at the same time never promise more than the budget has
 
-After the backend response, Hivenet Router charges the actual completion-token count, together with any prompt tokens the backend reports beyond the estimate charged at admission, so the budget counts the prompt the backend processed. An estimate above the backend's count is not refunded. The per-minute input rate (`input_tokens_per_minute`) is trued up the same way.
+After the backend response, Hivenet Router frees the hold and charges what the backend reports: the prompt tokens it processed and the completion tokens. The budget counts the tokens actually used, whether the estimate was above or below them; when the backend reports no prompt count, the estimate is charged. A request that fails or is refused before it runs frees its hold and costs nothing. The per-minute input rate (`input_tokens_per_minute`) charges the estimate and is trued up when the backend reports more.
 
-If the completion and that difference no longer fit in the remaining budget, Hivenet Router discards a non-streaming response and returns HTTP `429`. The previously charged prompt estimate remains counted. A streaming response, already delivered, is still charged.
+If the tokens used no longer fit in the remaining budget, the budget is charged what it has left, and Hivenet Router discards a non-streaming response and returns HTTP `429`. A streaming response, already delivered, is still charged.
 
 For streaming responses, the bytes may already have reached the client before the final completion-token total is known. Hivenet Router records the output usage after the stream finishes, but it cannot retract an already delivered stream.
 
