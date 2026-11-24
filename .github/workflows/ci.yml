@@ -2,6 +2,8 @@ name: CI
 
 # Runs on every PR and on pushes to main. The `test` job is the required
 # status check enforced by branch protection (see scripts/setup-branch-protection.sh).
+# A PR that changes only files under docs/ skips the Go jobs: a skipped job
+# counts as passed for a required check, so the PR can still merge.
 on:
   pull_request:
   push:
@@ -20,8 +22,39 @@ env:
   CGO_ENABLED: "1"
 
 jobs:
+  changes:
+    # code=false only for a PR whose files are all under docs/. Pushes to main
+    # always run everything. Top-level and test/ Markdown stays "code": tests
+    # read test/isolation/CHECKLIST.md.
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          code=true
+          if [ "$EVENT" = "pull_request" ]; then
+            files="$(git diff --name-only "$BASE...$HEAD")"
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qv '^docs/'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code=$code"
+
   test:
     name: test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -46,6 +79,8 @@ jobs:
     # the router's HTTP API. Complements the in-process test/e2e suite by
     # exercising the cmd/ flag surface and startup wiring the test bypasses.
     name: e2e smoke
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -60,6 +95,8 @@ jobs:
 
   lint:
     name: lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -88,6 +125,8 @@ jobs:
 
   govulncheck:
     name: govulncheck
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -104,6 +143,8 @@ jobs:
 
   license-check:
     name: license-check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
