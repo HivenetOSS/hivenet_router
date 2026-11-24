@@ -11,6 +11,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"hivenet_router/internal/admission"
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
@@ -49,7 +51,8 @@ type testSite struct {
 	engine  *gin.Engine
 	rd      *redirect.Redirector
 	queue   chan *domain.PendingRequest
-	redirs  []string // "model→site@hop" per 307 written
+	redirs  []string // "model→site@hop" per 307 written (suffix "/overload" for a spill)
+	skipped []string // "model/reason" per full model the spill did not redirect
 	rejects []string
 	charges *int // per-minute quota charges (QuotaMiddleware → AllowRequest)
 }
@@ -88,13 +91,26 @@ func newSite(t *testing.T, id string, healthy map[string]int, keys *auth.Dynamic
 // newSiteWith is newSite with tenant-isolation switches.
 func newSiteWith(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider, iso api.Isolation) *testSite {
 	t.Helper()
+	return newSiteAdmission(t, id, healthy, keys, iso, nil)
+}
+
+// newSiteAdmission is newSiteWith with an occupancy admission controller
+// (nil = none), the state the overload spill reads.
+func newSiteAdmission(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider, iso api.Isolation, ctrl *admission.Controller) *testSite {
+	t.Helper()
 	s := &testSite{queue: make(chan *domain.PendingRequest, 4)}
 	s.rd = &redirect.Redirector{
 		Self: id, Map: redirect.NewMap(testDomains), Signer: testSigner(t), Replay: redirect.NewReplayGuard(),
-		OnRedirect: func(model, site string, hop int) {
-			s.redirs = append(s.redirs, fmt.Sprintf("%s→%s@%d", model, site, hop))
+		Spill: true,
+		OnRedirect: func(model, site string, hop int, reason string) {
+			r := fmt.Sprintf("%s→%s@%d", model, site, hop)
+			if reason != redirect.ReasonMiss {
+				r += "/" + reason
+			}
+			s.redirs = append(s.redirs, r)
 		},
-		OnReject: func(reason string) { s.rejects = append(s.rejects, reason) },
+		OnReject:       func(reason string) { s.rejects = append(s.rejects, reason) },
+		OnSpillSkipped: func(model, reason string) { s.skipped = append(s.skipped, model+"/"+reason) },
 	}
 	lim := newCountingLimiter()
 	s.charges = &lim.charges
@@ -104,7 +120,7 @@ func newSiteWith(t *testing.T, id string, healthy map[string]int, keys *auth.Dyn
 		nil, nil, nil, lim,
 		nil, nil, nil, nil, keys, nil,
 		healthyCount,
-		nil, nil, nil, nil, nil, nil, nil,
+		nil, ctrl, nil, nil, nil, nil, nil,
 	)
 	h.SetRedirect(s.rd)
 	h.SetIsolation(iso)
@@ -342,6 +358,104 @@ func TestRedirect_ServedHereOrUnchanged(t *testing.T) {
 		push(t, fleetDoc(1), s)
 		if w := send(s, chatPath, chatBody, bearer()); w.Code != http.StatusForbidden || w.Header().Get("Location") != "" {
 			t.Fatalf("status %d Location %q, want 403 and no redirect", w.Code, w.Header().Get("Location"))
+		}
+	})
+}
+
+// spillDoc is fleetDoc with fresh hints: m also placed on a (the entry), b
+// with hint hb.
+func spillDoc(hb *redirect.Hint, expire time.Time) redirect.MapDoc {
+	d := fleetDoc(1, placement("m", redirect.KindChat, "a"))
+	for i := range d.Placements {
+		if d.Placements[i].Model == "m" && d.Placements[i].Site == "b" {
+			d.Placements[i].Hint = hb
+		}
+	}
+	d.HintsExpireAt = expire.UTC().Format(time.RFC3339)
+	return d
+}
+
+// saturate fills model m's shared-pool budget on ctrl.
+func saturate(t *testing.T, ctrl *admission.Controller) {
+	t.Helper()
+	if ctrl.Admit(context.Background(), "m", 10, false, 10, 0) == nil || !ctrl.Saturated("m") {
+		t.Fatal("could not saturate m")
+	}
+}
+
+// TestRedirect_OverloadSpill: m is served here (a healthy agent) but full:
+// the request goes to the sibling with room, before any quota is charged.
+// With no such sibling, the spill off, or m not full, it is handled here.
+func TestRedirect_OverloadSpill(t *testing.T) {
+	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	full := &redirect.Hint{Load: redirect.LoadFull}
+
+	t.Run("full here, sibling has room: 307", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+		push(t, spillDoc(nil, fresh), a)
+		saturate(t, ctrl)
+
+		w := send(a, chatPath, chatBody, bearer())
+		loc, c := locationToken(t, w)
+		if loc.Host != "b.example.com" || c.Site != "b" || c.From != "a" || c.Hop != 1 || c.Scope != "country:FR" {
+			t.Fatalf("Location %s claims %+v: want b (the FR sibling), hop 1, from a", loc, c)
+		}
+		var resp domain.RouterErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Error.Code != domain.ErrCodeModelRedirected || !strings.Contains(resp.Error.Message, "at capacity") {
+			t.Errorf("body %s", w.Body)
+		}
+		if *a.charges != 0 || len(a.queue) != 0 {
+			t.Errorf("charged %d, queued %d: the spilling site must do neither", *a.charges, len(a.queue))
+		}
+		if len(a.redirs) != 1 || a.redirs[0] != "m→b@1/overload" {
+			t.Errorf("redirect metric %v", a.redirs)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		hint     *redirect.Hint
+		expire   time.Time
+		saturate bool
+		spill    bool
+		skipped  []string
+	}{
+		{"not full here", nil, fresh, false, true, nil},
+		{"sibling full", full, fresh, true, true, []string{"m/all_full"}},
+		{"hints expired", nil, stale, true, true, []string{"m/hints_expired"}},
+		{"spill off", nil, fresh, true, false, nil},
+	} {
+		t.Run(tc.name+": served here", func(t *testing.T) {
+			ctrl := admission.NewController(1, 0)
+			a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+			a.rd.Spill = tc.spill
+			push(t, spillDoc(tc.hint, tc.expire), a)
+			if tc.saturate {
+				saturate(t, ctrl)
+			}
+			done := sendAsync(a, chatPath, chatBody, bearer())
+			serveOne(t, a)
+			if w := <-done; w.Code != http.StatusOK || w.Header().Get("Location") != "" {
+				t.Fatalf("status %d Location %q, want 200 and no redirect", w.Code, w.Header().Get("Location"))
+			}
+			if len(a.redirs) != 0 || !reflect.DeepEqual(a.skipped, tc.skipped) {
+				t.Errorf("redirects %v, skipped %v; want none and %v", a.redirs, a.skipped, tc.skipped)
+			}
+		})
+	}
+
+	t.Run("scope EU: the less loaded of the two homes", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+		push(t, spillDoc(&redirect.Hint{Load: redirect.LoadBusy}, fresh), a) // b busy, c ok
+		saturate(t, ctrl)
+		for i := 0; i < 20; i++ {
+			h := scoped("EU")
+			h["X-Session-ID"] = fmt.Sprint(i)
+			if loc, _ := locationToken(t, send(a, chatPath, chatBody, h)); loc.Host != "c.example.com" {
+				t.Fatalf("session %d: Location %s, want c (ok) over b (busy)", i, loc)
+			}
 		}
 	})
 }

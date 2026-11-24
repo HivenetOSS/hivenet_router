@@ -1,10 +1,10 @@
 ---
 title: "Cross-site redirect"
-description: "Answer HTTP 307 to a sibling site when no local agent serves the requested model, so clients that use one hostname still reach every model."
+description: "Answer HTTP 307 to a sibling site when no local agent serves the requested model, or when the model is full here and a sibling has room, so clients that use one hostname still reach every model."
 sidebarTitle: "Cross-site redirect"
 ---
 
-Cross-site redirect lets several Hivenet Router deployments share one public hostname even when each runs different models. Each deployment is a **site**. When a request arrives at a site that has no healthy agent for the requested model, the router answers `307 Temporary Redirect` to a sibling site that serves it. The client repeats the request there.
+Cross-site redirect lets several Hivenet Router deployments share one public hostname even when each runs different models. Each deployment is a **site**. When a request arrives at a site that has no healthy agent for the requested model, the router answers `307 Temporary Redirect` to a sibling site that serves it. The client repeats the request there. When the model runs here but is full, the router can also send the request to a sibling that runs it and has room (the [overload spill](#overload-spill)).
 
 Cross-site redirect is off by default. With no site ID configured, the router behaves exactly as without the feature.
 
@@ -16,8 +16,8 @@ Cross-site redirect is off by default. With no site ID configured, the router be
 
 Every inference endpoint can redirect: `POST /v1/chat/completions`, `POST /v1/messages` and `POST /v1/messages/count_tokens` by the map’s `chat` placements, `POST /v1/embeddings` by its `embedding` placements and `POST /v1/rerank` by its `rerank` placements. After the API key is authenticated, the model alias is resolved and the model is checked against the key’s allowlist:
 
-1. If any healthy agent on this site serves the model, the request is served here. A redirect never replaces a working local agent.
-2. If the request has already been redirected twice, it is served here as before.
+1. If the request has already been redirected twice, it is served here as before.
+2. If any healthy agent on this site serves the model, the request is served here, unless the model is full here and a sibling has room: then the [overload spill](#overload-spill) redirects it.
 3. Otherwise, if the sibling map lists another site inside the request’s scope that serves the model with the endpoint’s kind, the router answers `307` to it. Nothing is admitted, queued or charged to the key’s quota on this site.
 4. Otherwise, the request is handled here. When the map places the model on this site with `scale_from_zero: true`, it is held until the model wakes (see [Hold at zero](/routing/hold-at-zero)); otherwise it normally ends in `model_not_found`.
 
@@ -34,6 +34,22 @@ Every router computes the same choice from the map, in this order:
 5. **Hints.** While the map’s hints are fresh, a target whose hint says `load: full`, or that is cold and cannot scale from zero, is skipped, and a warm target is preferred over a cold one. When every target would be skipped, the first one is used anyway. After `hints_expire_at`, hints are ignored and the session order alone decides.
 
 Send `X-Session-ID` with a stable value per conversation to spread one key’s conversations over its two home sites. Without it, every request of a key for one model goes to the same site.
+
+### Overload spill
+
+When healthy agents here serve the model but the model is full here, a new request would only wait in the admission queue or get `429`. The overload spill sends it instead to a sibling that runs the model and has room. It moves requests to capacity that already exists; it never starts replicas. Scaling stays with whatever drives your replica counts.
+
+The model is full here when a request for it already waits for room in the [admission queue](/routing/admission-control), or when its in-flight requests have reached the occupancy budget or the in-flight limit. Only the shared pool counts: a request for [dedicated replicas](/routing/dedicated-replicas) is never redirected.
+
+The target is chosen from the same candidates and home set as a redirect for a missing model (steps 1 to 3 above), then:
+
+- only while the map's hints are fresh. Without fresh hints the router cannot know who has room, so the request stays here;
+- only a site whose hint is warm and not `load: full`;
+- the less loaded of the two home sites: `ok` before `busy`. Between two equal sites, the session order decides, so a session keeps going to the same site.
+
+When no site qualifies, the request is handled here as before, and `hivenet_overload_spill_skipped_total` counts it. The target serves the redirected request like any other; if it is full too, it may spill once more, never back to the site where the request first arrived.
+
+The overload spill is on whenever cross-site redirect is on. It does nothing until the map places the same model on another site in scope. Turn it off with `--redirect-overload-spill=false`.
 
 ### Scope
 
@@ -117,6 +133,7 @@ The hop count travels inside the token. A request that has already been redirect
 | `--redirect-secret-file` | `HIVENET_ROUTER_REDIRECT_SECRETS` | Required when `--site-id` is set | Token signing secrets as `id:secret`: one per line in the file, comma-separated in the environment. The first signs new tokens; every one verifies. IDs are 1 to 16 letters, digits, `_` or `-`; secrets are at least 32 bytes |
 | `--redirect-token-ttl` | `HIVENET_ROUTER_REDIRECT_TOKEN_TTL` | `60s` | How long a redirect token stays valid |
 | `--redirect-allowed-domains` | `HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS` | Required when `--site-id` is set | Comma-separated host suffixes, such as `.inference.hivecompute.ai`. Each starts with `.`, so it matches whole DNS labels only. A map with any site URL whose host does not end with one of them is refused with `400` |
+| `--redirect-overload-spill` | `HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL` | `true` | Redirect a request for a model that is full here to a sibling with room (see [Overload spill](#overload-spill)) |
 
 When both `--redirect-secret-file` and `HIVENET_ROUTER_REDIRECT_SECRETS` are set, the file wins. The router refuses to start when any of these settings is invalid, or when secrets are set without a site ID.
 
@@ -177,7 +194,8 @@ Read the current map with `GET /admin/sibling-map`. Both endpoints return `501` 
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `hivenet_redirects_total` | `model`, `site`, `hop` | `307` responses written. `hop="2"` means a site in the map no longer served the model |
+| `hivenet_redirects_total` | `model`, `site`, `hop`, `reason` | `307` responses written. `hop="2"` means a site in the map no longer served the model, or the model was full there too. `reason` is `miss` (no healthy agent here serves the model) or `overload` (the [overload spill](#overload-spill)) |
+| `hivenet_overload_spill_skipped_total` | `model`, `reason` | Requests for a model full here that the overload spill did not redirect: `hints_expired`, `no_candidate` (no sibling serves the model in scope) or `all_full` (every sibling is full or cold) |
 | `hivenet_redirect_rejections_total` | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key` or `body` |
 | `hivenet_sibling_map_version` | None | Version of the map this router holds, `0` before the first push |
 | `hivenet_sibling_map_hints_expired` | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
@@ -186,7 +204,7 @@ A rising `reason="expired"` count means clients take longer than the token lifet
 
 ## Limitations
 
-- A redirect happens only when no healthy agent on this site serves the model. Requests are not redirected when local agents are busy.
+- The overload spill acts on this router's own view: the first request that finds the model full waits here; the next ones are redirected. It relies on the map's hints to know which sibling has room, so its choices are as fresh as the last push.
 - A token works once on each router, not once per site: each router remembers used token IDs in its own memory.
 - A client that repeats an already served request at the same redirect URL without its API key is refused with `401`, because that token was used. Repeating the request at the original URL gets a new token, and a client that also sends its API key is served on it as a new request.
 - API keys have no home country or maximum scope yet: the default scope is the country of the site the request landed in, and any request may ask for `EU` or `all`.

@@ -131,9 +131,10 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 
 // RedirectDecision answers 307 to a sibling site when no healthy agent
 // here serves the model and the sibling map lists one that does (contract 3
-// v3 §3). It runs after AliasMiddleware (so it routes on the concrete model)
-// and before QuotaMiddleware: the redirecting router does no inference and
-// charges no quota. It covers every inference endpoint, by the placement kind
+// v3 §3), or when the model is full here and a sibling has room (the
+// overload spill). It runs after AliasMiddleware (so it routes on the
+// concrete model) and before QuotaMiddleware: the redirecting router does no
+// inference and charges no quota. It covers every inference endpoint, by the placement kind
 // that matches the path.
 //
 // The scope comes from the Scope middleware (X-Hivenet-Scope, bounded by the
@@ -142,11 +143,19 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 // landed in. A redirected request keeps the scope of its token. A request
 // with a scope is served here only if a healthy agent here is inside it.
 //
+// Overload spill: when a healthy agent here serves the model but the model is
+// full here (admission.Controller.Saturated on the shared pool), the request
+// goes to a sibling the map's fresh hints show warm and not full
+// (redirect.Map.SpillTarget), so it runs on capacity that already exists
+// instead of waiting here. Scaling stays the fleet controller's: with no
+// such sibling the request is handled here as before (queue, then 429).
+//
 // A request is served here as before when: redirect is disabled, the key may
 // not use the model (the handler answers 403), a healthy agent here serves
-// it, it has already been redirected redirect.MaxHops times, or the map
-// gives no target (none inside the scope, or every one cold while the model
-// is placed here); the normal handling then applies (hold-at-zero or 404).
+// it and it is not full here (or the spill is off or finds no sibling), it
+// has already been redirected redirect.MaxHops times, or the map gives no
+// target (none inside the scope, or every one cold while the model is
+// placed here); the normal handling then applies (hold-at-zero or 404).
 // A redirect takes precedence over a policy's fallback_provider.
 func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -167,9 +176,19 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			hop, from = info.Hop, info.From
 		}
 		reqScope := requestScope(c)
-		if hop >= redirect.MaxHops || h.healthyForRequest(c, model) > 0 {
+		if hop >= redirect.MaxHops {
 			c.Next()
 			return
+		}
+		// Served here: redirected only by the overload spill, when the model
+		// is full here and a sibling has room.
+		reason := redirect.ReasonMiss
+		if h.healthyForRequest(c, model) > 0 {
+			if !h.redirect.Spill || h.admission == nil || !h.admission.Saturated(domain.PoolKey(model, domain.SharedPool)) {
+				c.Next()
+				return
+			}
+			reason = redirect.ReasonOverload
 		}
 		// A scope from the client or its key bounds both the sites and, at
 		// the target, the agents. Without one the request may go only to
@@ -186,10 +205,20 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 		}
 		now := time.Now()
 		keyID := c.GetString("key_id")
-		target, ok := h.redirect.Map.Target(redirect.TargetRequest{
+		treq := redirect.TargetRequest{
 			Model: model, Kind: kind, Self: h.redirect.Self, From: from,
 			KeyID: keyID, Session: c.GetHeader("X-Session-ID"), Scope: scope, Now: now,
-		})
+		}
+		var target redirect.Site
+		var ok bool
+		if reason == redirect.ReasonOverload {
+			var skipped string
+			if target, skipped, ok = h.redirect.Map.SpillTarget(treq); !ok {
+				h.redirect.SpillSkipped(model, skipped)
+			}
+		} else {
+			target, ok = h.redirect.Map.Target(treq)
+		}
 		if !ok {
 			c.Next()
 			return
@@ -213,11 +242,13 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 		// Not abortWithRouterError: a redirect is normal routing, not a failure
 		// for the audit log or the trace. The body explains it to clients that
 		// do not follow redirects (for example plain httpx).
+		msg := fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID)
+		if reason == redirect.ReasonOverload {
+			msg = fmt.Sprintf("model %s is at capacity on site %s and has room on site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, h.redirect.Self, target.ID)
+		}
 		c.AbortWithStatusJSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
-			domain.ErrCodeModelRedirected,
-			fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID),
-			domain.SourceRouter)})
-		h.redirect.Redirected(model, target.ID, hop+1)
+			domain.ErrCodeModelRedirected, msg, domain.SourceRouter)})
+		h.redirect.Redirected(model, target.ID, hop+1, reason)
 	}
 }
 

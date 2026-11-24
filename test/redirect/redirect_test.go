@@ -337,6 +337,107 @@ func TestTarget_Hints(t *testing.T) {
 	}
 }
 
+// TestSpillTarget: the overload spill only goes to a warm sibling that is
+// not full, by fresh hints; ok before busy; ties in session order; never
+// without fresh hints; the reason says why there is no target.
+func TestSpillTarget(t *testing.T) {
+	key, session := "key-1", "s"
+	order := expected(key, session, "m", []string{"a", "b"})
+	first, second := order[0], order[1]
+	build := func(hFirst, hSecond *redirect.Hint, expire time.Time) *redirect.Map {
+		d := redirect.MapDoc{
+			Schema: 3, Version: u64(1), Region: "eu",
+			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
+			Placements: []redirect.Placement{
+				place("m", redirect.KindChat, "self", yes, nil),
+				place("m", redirect.KindChat, first, yes, hFirst),
+				place("m", redirect.KindChat, second, yes, hSecond),
+			},
+			HintsExpireAt: expire.UTC().Format(time.RFC3339),
+		}
+		m := redirect.NewMap(domains)
+		if err := m.Replace(d); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	busy, full, cold := &redirect.Hint{Load: redirect.LoadBusy}, &redirect.Hint{Load: redirect.LoadFull}, &redirect.Hint{Warm: no}
+	cases := []struct {
+		name            string
+		hFirst, hSecond *redirect.Hint
+		expire          time.Time
+		want, reason    string
+	}{
+		{"both ok: session order", nil, nil, fresh, first, ""},
+		{"both busy: session order", busy, busy, fresh, first, ""},
+		{"first busy, second ok: the less loaded", busy, nil, fresh, second, ""},
+		{"first ok, second busy", nil, busy, fresh, first, ""},
+		{"first full: second", full, busy, fresh, second, ""},
+		{"first cold: never spill to a cold site", cold, nil, fresh, second, ""},
+		{"all full", full, full, fresh, "", redirect.SpillAllFull},
+		{"full and cold", full, cold, fresh, "", redirect.SpillAllFull},
+		{"hints expired: no spill", nil, nil, stale, "", redirect.SpillHintsExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := build(tc.hFirst, tc.hSecond, tc.expire)
+			site, reason, ok := m.SpillTarget(redirect.TargetRequest{
+				Model: "m", Kind: redirect.KindChat, Self: "self", From: "self",
+				KeyID: key, Session: session, Scope: redirect.ScopeAll, Now: time.Now(),
+			})
+			if site.ID != tc.want || reason != tc.reason || ok != (tc.want != "") {
+				t.Fatalf("got (%q, %q, %v), want (%q, %q)", site.ID, reason, ok, tc.want, tc.reason)
+			}
+		})
+	}
+
+	t.Run("scope, origin and kind filter like the miss", func(t *testing.T) {
+		m := redirect.NewMap(domains)
+		d := doc(1)
+		d.HintsExpireAt = fresh.UTC().Format(time.RFC3339)
+		if err := m.Replace(d); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			req    redirect.TargetRequest
+			want   string
+			reason string
+		}{
+			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:FR"}, "fr-2", ""},
+			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-2", Scope: "country:FR"}, "", redirect.SpillNoCandidate},
+			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:IT"}, "", redirect.SpillNoCandidate},
+			{redirect.TargetRequest{Model: "m", Kind: redirect.KindEmbedding, Self: "fr-1", From: "fr-1", Scope: redirect.ScopeAll}, "", redirect.SpillNoCandidate},
+		} {
+			tc.req.Now = time.Now()
+			site, reason, _ := m.SpillTarget(tc.req)
+			if site.ID != tc.want || reason != tc.reason {
+				t.Errorf("%+v: got (%q, %q), want (%q, %q)", tc.req, site.ID, reason, tc.want, tc.reason)
+			}
+		}
+	})
+
+	t.Run("home set is two, as for the miss", func(t *testing.T) {
+		m := redirect.NewMap(domains)
+		d := doc(1)
+		d.HintsExpireAt = fresh.UTC().Format(time.RFC3339)
+		if err := m.Replace(d); err != nil {
+			t.Fatal(err)
+		}
+		used := map[string]bool{}
+		for s := 0; s < 500; s++ {
+			site, _, ok := m.SpillTarget(redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", KeyID: "key-1", Session: fmt.Sprint(s), Scope: redirect.ScopeAll, Now: time.Now()})
+			if !ok {
+				t.Fatal("no target")
+			}
+			used[site.ID] = true
+		}
+		if len(used) != 2 {
+			t.Fatalf("one key reached %d sites (%v), want 2", len(used), used)
+		}
+	})
+}
+
 // TestTarget_WakeHereBeforeColdSibling: while the hints are fresh, no
 // redirect when every candidate is cold and the model may be woken here (it
 // is held and woken here instead); otherwise the cold sibling is still used.

@@ -274,6 +274,22 @@ func TestLoadFromEnv_Redirect(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnv_OverloadSpill: on by default; false turns it off; a bad
+// value refuses startup via EnvErrors and keeps the default.
+func TestLoadFromEnv_OverloadSpill(t *testing.T) {
+	if c := config.LoadFromEnv(); !c.RedirectOverloadSpill {
+		t.Fatal("overload spill must be on by default")
+	}
+	t.Setenv("HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL", "false")
+	if c := config.LoadFromEnv(); c.RedirectOverloadSpill || len(c.EnvErrors) != 0 {
+		t.Fatalf("spill %v errors %v, want off", c.RedirectOverloadSpill, c.EnvErrors)
+	}
+	t.Setenv("HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL", "maybe")
+	if c := config.LoadFromEnv(); !c.RedirectOverloadSpill || len(c.EnvErrors) != 1 {
+		t.Fatalf("spill %v errors %v, want the default and one EnvError", c.RedirectOverloadSpill, c.EnvErrors)
+	}
+}
+
 // Shared-counter settings come from the environment; a malformed interval or
 // TLS flag is collected as an error instead of being silently ignored.
 func TestSyncSettingsFromEnv(t *testing.T) {

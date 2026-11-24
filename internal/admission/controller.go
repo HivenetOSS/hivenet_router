@@ -104,6 +104,7 @@ type modelState struct {
 	waiting     atomic.Int32              // requests in the wait queue
 	queueMu     sync.Mutex                // orders the changes of waiting and their reports
 	bigWaiting  atomic.Int32              // parked requests larger than the whole budget
+	parked      atomic.Int32              // requests waiting for room (parked or queued), for Saturated
 	lastPoll    atomic.Int64              // unix ns of the last re-check of the pool (see takePoll)
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
@@ -230,6 +231,8 @@ func (c *Controller) admit(ctx context.Context, model string, footprint int, gro
 	if park <= 0 {
 		return nil
 	}
+	s.parked.Add(1)
+	defer s.parked.Add(-1)
 	if big {
 		s.bigWaiting.Add(1)
 		defer func() {
@@ -331,6 +334,28 @@ func (c *Controller) Occupancy(model string) (sumW int64, count int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sumW, s.count
+}
+
+// Saturated reports whether model is full on this router: a request is
+// already waiting for room, or the in-flight sum or count has reached the
+// last budget or in-flight limit an admission saw. A new request would have
+// to wait, so the router may send it to a sibling site that still has room
+// (the overload spill, contract 3 §3). With a site-wide pool the local sums
+// are only this router's share, so there the waiting requests are the signal.
+// A model never seen is not saturated. It never creates state.
+func (c *Controller) Saturated(model string) bool {
+	c.mu.Lock()
+	s := c.models[model]
+	c.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	if s.parked.Load() > 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return (s.budget > 0 && s.sumW >= s.budget) || (s.maxInflight > 0 && s.count >= s.maxInflight)
 }
 
 // tryReserve adds weight if it fits both the budget and the in-flight backstop,

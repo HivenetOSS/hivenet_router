@@ -83,6 +83,14 @@ type Config struct {
 	RedirectTokenTTL       time.Duration
 	RedirectAllowedDomains string
 
+	// RedirectOverloadSpill turns on the overload spill: a request for a
+	// model served here but full is redirected to a sibling site the map's
+	// fresh hints show warm and not full. Only acts with SiteID set and a
+	// sibling map that places the model on another site in scope.
+	// Env: HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL (default true)
+	// Flag: --redirect-overload-spill
+	RedirectOverloadSpill bool
+
 	// Hold-at-zero (internal/wake): a request for a model the sibling map
 	// places on this site with scale_from_zero, while no healthy agent
 	// serves it, is held until the model wakes. Needs SiteID. WakeHoldBudget
@@ -386,6 +394,7 @@ func DefaultConfig() *Config {
 		DefaultMaxInflightPerReplica: 8,
 		SyncInterval:                 time.Second,
 		RedirectTokenTTL:             60 * time.Second,
+		RedirectOverloadSpill:        true,
 		WakeHoldBudget:               5 * time.Minute,
 		WakeHoldMax:                  100,
 		WakeHoldMaxPerKey:            20,
@@ -528,6 +537,14 @@ func LoadFromEnv() *Config {
 	}
 	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS")); v != "" {
 		cfg.RedirectAllowedDomains = v
+	}
+	if v := strings.TrimSpace(os.Getenv("HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.EnvErrors = append(cfg.EnvErrors, fmt.Errorf("HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL=%q: %w", v, err))
+		} else {
+			cfg.RedirectOverloadSpill = b
+		}
 	}
 	// Hold-at-zero values are validated strictly too.
 	for env, dst := range map[string]struct {

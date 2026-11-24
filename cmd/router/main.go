@@ -96,6 +96,7 @@ func main() {
 	redirectSecretFile := flag.String("redirect-secret-file", "", "Path to file of redirect-token signing secrets, one id:secret per line; the first signs, every line verifies (env: HIVENET_ROUTER_REDIRECT_SECRETS, comma-separated)")
 	redirectTokenTTL := flag.Duration("redirect-token-ttl", cfg.RedirectTokenTTL, "How long a redirect token stays valid (env: HIVENET_ROUTER_REDIRECT_TOKEN_TTL)")
 	redirectAllowedDomains := flag.String("redirect-allowed-domains", cfg.RedirectAllowedDomains, "Comma-separated host suffixes, such as .inference.hivecompute.ai, that every sibling-map URL must end with; required with --site-id (env: HIVENET_ROUTER_REDIRECT_ALLOWED_DOMAINS)")
+	redirectOverloadSpill := flag.Bool("redirect-overload-spill", cfg.RedirectOverloadSpill, "Redirect a request for a model that is full here to a sibling site the sibling map shows warm and not full (env: HIVENET_ROUTER_REDIRECT_OVERLOAD_SPILL)")
 	wakeHoldBudget := flag.Duration("wake-hold-budget", cfg.WakeHoldBudget, "Longest a request is held while a model scaled to zero wakes, when its sibling-map placement has no hold_budget (env: HIVENET_ROUTER_WAKE_HOLD_BUDGET)")
 	wakeHoldMax := flag.Int("wake-hold-max", cfg.WakeHoldMax, "Most requests held per model while it wakes; more get 503 model_waking (env: HIVENET_ROUTER_WAKE_HOLD_MAX)")
 	wakeHoldMaxPerKey := flag.Int("wake-hold-max-per-key", cfg.WakeHoldMaxPerKey, "Most requests held per API key and model while it wakes (env: HIVENET_ROUTER_WAKE_HOLD_MAX_PER_KEY)")
@@ -233,6 +234,7 @@ func main() {
 	}
 	cfg.RedirectTokenTTL = *redirectTokenTTL
 	cfg.RedirectAllowedDomains = strings.TrimSpace(*redirectAllowedDomains)
+	cfg.RedirectOverloadSpill = *redirectOverloadSpill
 	switch {
 	case *wakeHoldBudget <= 0:
 		log.Fatalf("--wake-hold-budget must be > 0, got %v", *wakeHoldBudget)
@@ -412,6 +414,7 @@ func main() {
 	if cfg.SiteID != "" {
 		log.Infof("  Site ID:             %s (token TTL %v; sibling map via POST /admin/sibling-map)", cfg.SiteID, cfg.RedirectTokenTTL)
 		log.Infof("  Allowed domains:     %s", cfg.RedirectAllowedDomains)
+		log.Infof("  Overload spill:      %v", cfg.RedirectOverloadSpill)
 		log.Infof("  Hold at zero:        budget %v, at most %d per model / %d per key and model / %d in total, keepalive %v",
 			cfg.WakeHoldBudget, cfg.WakeHoldMax, cfg.WakeHoldMaxPerKey, cfg.WakeHoldMaxTotal, cfg.WakeKeepAlive)
 	} else {

@@ -27,8 +27,18 @@ type Redirector struct {
 	Signer *Signer
 	Replay Replayer
 
-	// OnRedirect, if set, is called for every 307 written.
-	OnRedirect func(model, site string, hop int)
+	// Spill turns on the overload spill: a request for a model served here
+	// but full is redirected to a sibling site the map's hints show warm and
+	// not full (Map.SpillTarget). On by default when redirect is enabled.
+	Spill bool
+
+	// OnRedirect, if set, is called for every 307 written, with reason
+	// ReasonMiss or ReasonOverload.
+	OnRedirect func(model, site string, hop int, reason string)
+	// OnSpillSkipped, if set, is called when a model is full here but the
+	// overload spill finds no sibling to send the request to, with reason
+	// SpillHintsExpired, SpillNoCandidate or SpillAllFull.
+	OnSpillSkipped func(model, reason string)
 	// OnReject, if set, is called when a redirect token is refused, with
 	// reason ∈ {malformed, signature, expired, clock, site, path, scope,
 	// replay, key, body}.
@@ -50,10 +60,23 @@ func (r *Redirector) Reject(reason string) {
 	}
 }
 
-// Redirected reports a 307 written.
-func (r *Redirector) Redirected(model, site string, hop int) {
+// Why a 307 was written.
+const (
+	ReasonMiss     = "miss"     // no healthy agent here serves the model
+	ReasonOverload = "overload" // the model is served here but full (the overload spill)
+)
+
+// Redirected reports a 307 written, with reason ReasonMiss or ReasonOverload.
+func (r *Redirector) Redirected(model, site string, hop int, reason string) {
 	if r.OnRedirect != nil {
-		r.OnRedirect(model, site, hop)
+		r.OnRedirect(model, site, hop, reason)
+	}
+}
+
+// SpillSkipped reports a full model the overload spill could not redirect.
+func (r *Redirector) SpillSkipped(model, reason string) {
+	if r.OnSpillSkipped != nil {
+		r.OnSpillSkipped(model, reason)
 	}
 }
 

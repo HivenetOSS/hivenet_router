@@ -198,8 +198,12 @@ type RouterMetrics struct {
 
 	// redirects counts 307s written to a sibling site. hop is the redirect
 	// count after this one; hop="2" means the sibling map was stale.
-	// Labels: model, site, hop.
+	// Labels: model, site, hop, reason (miss, overload).
 	redirects *prometheus.CounterVec
+
+	// overloadSpillSkipped counts requests for a model full on this router
+	// that the overload spill did not redirect. Labels: model, reason.
+	overloadSpillSkipped *prometheus.CounterVec
 
 	// routingStrategies counts requests routed with a strategy their API key
 	// chose, by strategy and source (key = the key's default, header =
@@ -577,9 +581,16 @@ func NewRouterMetrics() *RouterMetrics {
 		redirects: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "hivenet_redirects_total",
-				Help: "307 redirects to a sibling site, by model, target site and hop count (2 = the sibling map was stale).",
+				Help: "307 redirects to a sibling site, by model, target site, hop count (2 = the sibling map was stale) and reason (miss = no healthy agent here serves the model, overload = it is served here but full).",
 			},
-			[]string{"model", "site", "hop"},
+			[]string{"model", "site", "hop", "reason"},
+		),
+		overloadSpillSkipped: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hivenet_overload_spill_skipped_total",
+				Help: "Requests for a model full on this router that the overload spill did not redirect, by model and reason (hints_expired, no_candidate, all_full).",
+			},
+			[]string{"model", "reason"},
 		),
 		redirectRejections: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -1071,6 +1082,7 @@ func NewRouterMetrics() *RouterMetrics {
 		m.quotaBackendErrors,
 		m.admissionRejections,
 		m.redirects,
+		m.overloadSpillSkipped,
 		m.routingStrategies,
 		m.redirectRejections,
 		m.wakeHolds,
@@ -1381,9 +1393,15 @@ func (m *RouterMetrics) RoutingStrategy(strategy, source string) {
 	m.routingStrategies.With(prometheus.Labels{"strategy": strategy, "source": source}).Inc()
 }
 
-// Redirect counts a 307 to a sibling site.
-func (m *RouterMetrics) Redirect(model, site string, hop int) {
-	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop)}).Inc()
+// Redirect counts a 307 to a sibling site; reason is miss or overload.
+func (m *RouterMetrics) Redirect(model, site string, hop int, reason string) {
+	m.redirects.With(prometheus.Labels{"model": model, "site": site, "hop": strconv.Itoa(hop), "reason": reason}).Inc()
+}
+
+// OverloadSpillSkipped counts a request for a full model that the overload
+// spill did not redirect, by reason.
+func (m *RouterMetrics) OverloadSpillSkipped(model, reason string) {
+	m.overloadSpillSkipped.With(prometheus.Labels{"model": model, "reason": reason}).Inc()
 }
 
 // RedirectRejected counts a refused redirect token, by reason.

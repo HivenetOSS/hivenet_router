@@ -751,3 +751,64 @@ func TestParkedRequestsPollPoolOncePerModel(t *testing.T) {
 		t.Fatalf("%d pool checks for %d parked requests over 300 ms", n, waiters)
 	}
 }
+
+// TestSaturated: a model is saturated while a request waits for room, or
+// while the in-flight sum or count is at the budget or limit; not before,
+// and not once released. A model never seen is not saturated.
+func TestSaturated(t *testing.T) {
+	ctx := context.Background()
+	if admission.NewController(1.0, 0).Saturated(model) {
+		t.Fatal("a model never seen must not be saturated")
+	}
+
+	t.Run("budget", func(t *testing.T) {
+		c := admission.NewController(1.0, 0)
+		r1 := c.Admit(ctx, model, 600, false, 1000, 0)
+		if r1 == nil || c.Saturated(model) {
+			t.Fatal("600 of 1000: admitted, not saturated")
+		}
+		r2 := c.Admit(ctx, model, 400, false, 1000, 0)
+		if r2 == nil || !c.Saturated(model) {
+			t.Fatal("1000 of 1000: admitted, saturated")
+		}
+		r2.Release()
+		if c.Saturated(model) {
+			t.Fatal("released: not saturated")
+		}
+		r1.Release()
+	})
+
+	t.Run("max inflight", func(t *testing.T) {
+		c := admission.NewController(1.0, 0)
+		r1 := c.Admit(ctx, model, 1, false, 0, 2)
+		if c.Saturated(model) {
+			t.Fatal("1 of 2 in flight: not saturated")
+		}
+		r2 := c.Admit(ctx, model, 1, false, 0, 2)
+		if !c.Saturated(model) {
+			t.Fatal("2 of 2 in flight: saturated")
+		}
+		r1.Release()
+		r2.Release()
+	})
+
+	t.Run("a request waits", func(t *testing.T) {
+		c := admission.NewController(1.0, 2*time.Second)
+		r1 := c.Admit(ctx, model, 600, false, 1000, 0)
+		done := make(chan *admission.Reservation)
+		go func() { done <- c.Admit(ctx, model, 600, false, 1000, 0) }() // parks: 1200 > 1000
+		deadline := time.Now().Add(time.Second)
+		for !c.Saturated(model) {
+			if time.Now().After(deadline) {
+				t.Fatal("a parked request must make the model saturated")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		r1.Release()
+		r2 := <-done
+		if r2 == nil || c.Saturated(model) {
+			t.Fatal("the parked request is admitted and nothing waits: not saturated")
+		}
+		r2.Release()
+	})
+}
