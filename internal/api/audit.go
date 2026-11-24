@@ -41,7 +41,30 @@ const (
 	// statusToErrorCode(), which cannot distinguish multiple domain codes that share
 	// the same HTTP status (e.g. five distinct codes all map to 503).
 	auditKeyErrorCode = "audit_error_code"
+	// auditKeyKind is the kind of inference a request asked for (kindChat,
+	// kindEmbedding, kindRerank): the billing unit differs by kind, and
+	// rating happens downstream.
+	auditKeyKind = "audit_kind"
+	// auditKeyUsageSource says where input_tokens and output_tokens come
+	// from: "exact" (the backend's usage) or "estimated" (the router's
+	// estimate, when the backend reported none).
+	auditKeyUsageSource = "audit_usage_source"
 )
+
+// The kinds of inference in the audit line's "kind" field.
+const (
+	kindChat      = "chat"
+	kindEmbedding = "embedding"
+	kindRerank    = "rerank"
+)
+
+// usageSource is the audit line's "usage_source" value.
+func usageSource(exact bool) string {
+	if exact {
+		return "exact"
+	}
+	return "estimated"
+}
 
 // auditLog writes flat JSON audit lines to a dedicated file
 // (HIVENET_ROUTER_AUDIT_LOG_PATH, default /var/log/hivenet-router/audit.jsonl).
@@ -226,6 +249,14 @@ func AuditMiddleware() gin.HandlerFunc {
 			}
 			if auditRouterID != "" {
 				fields = append(fields, zap.String("router_id", auditRouterID))
+			}
+			// Inference requests only: what was asked for, and whether the
+			// token counts are the backend's or the router's estimate.
+			if kind, ok := c.Get(auditKeyKind); ok {
+				fields = append(fields, zap.String("kind", strDefault(kind, "")))
+			}
+			if src, ok := c.Get(auditKeyUsageSource); ok {
+				fields = append(fields, zap.String("usage_source", strDefault(src, "")))
 			}
 			// Semantic alias requests: model above is the resolved model; record
 			// the alias the client asked for and the route that chose it.

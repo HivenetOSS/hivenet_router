@@ -136,6 +136,10 @@ type ChatResponse struct {
 	HttpHeaders http.Header   `json:"-"`
 	RawBytes    []byte        `json:"-"`
 	Body        io.ReadCloser `json:"-"` // non-nil for streaming responses; handler must Close
+	// UsageEstimated reports that Usage of an embedding or rerank response is
+	// the router's estimate: the backend reported no usage, or one not in
+	// tokens.
+	UsageEstimated bool `json:"-"`
 }
 
 // providerProcessedByPrefix marks a response served by a cloud provider

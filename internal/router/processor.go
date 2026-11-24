@@ -683,7 +683,8 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		}
 	}()
 
-	// Embedding and reranking: simple synchronous forward — no streaming, no token accounting.
+	// Embedding and reranking: simple synchronous forward, no streaming. The
+	// input tokens come from the backend's usage after the response.
 	if pending.Capability == domain.CapabilityEmbedding || pending.Capability == domain.CapabilityReranker {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, forwardPath, bytes.NewReader(body))
 		if err != nil {
@@ -730,16 +731,21 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 			return nil, rttMs, domain.DecodeAgentError(resp.StatusCode, rawBytes)
 		}
 
+		tokens, estimated := poolingTokens(engine, rawBytes, pending)
+		p.chargePoolingTokens(pending, tokens)
+
 		p.metrics.RequestRouted(region, engine, model, pending.TenantID)
-		p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, 0, 0)
+		p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, model, tokens, 0)
 		decrement()
-		p.counters.RecordSuccess(agent, 0, 0, rttMs)
+		p.counters.RecordSuccess(agent, tokens, 0, rttMs)
 		headers := resp.Header.Clone()
 		headers.Del("Content-Length")
 		return &domain.ChatResponse{
-			RawBytes:    rawBytes,
-			HttpHeaders: headers,
-			ProcessedBy: agent.ID.String(),
+			RawBytes:       rawBytes,
+			HttpHeaders:    headers,
+			ProcessedBy:    agent.ID.String(),
+			Usage:          domain.Usage{PromptTokens: tokens, TotalTokens: tokens},
+			UsageEstimated: estimated,
 		}, rttMs, nil
 	}
 
@@ -1049,6 +1055,44 @@ func NotSent(err error) error { return &unsentError{err: err} }
 func dailyBudget(p *domain.PendingRequest) auth.DailyBudget {
 	return auth.DailyBudget{TenantID: p.TenantID, KeyID: p.KeyID, Model: p.QuotaModel,
 		KeyTokensPerDay: p.TokensPerDay, TenantTokensPerDay: p.TenantTokensPerDay}
+}
+
+// engineUsageInCharacters lists the engines whose embedding and rerank usage
+// counts characters, not tokens: Infinity reports the characters it read in
+// usage.prompt_tokens.
+var engineUsageInCharacters = map[string]bool{"infinity": true}
+
+// poolingTokens is the input tokens of an embedding or rerank response: the
+// backend's usage when it reports one in tokens, else the estimate the handler
+// charged at admission (estimated true).
+func poolingTokens(engine string, body []byte, pending *domain.PendingRequest) (tokens int, estimated bool) {
+	if !engineUsageInCharacters[engine] {
+		if n, ok := domain.ParsePoolingUsage(body); ok {
+			return n, false
+		}
+	}
+	return pending.EstimatedInputTokens, true
+}
+
+// chargePoolingTokens charges the daily budgets the input tokens of an
+// embedding or rerank response. Admission only checked the estimate against
+// them, so the budgets count exactly what the backend read. The answer is
+// computed, so it is returned even when this charge runs a budget out (the
+// charge takes what is left, and the next request is refused at admission);
+// RemainingTokens then reads 0.
+func (p *RequestProcessor) chargePoolingTokens(pending *domain.PendingRequest, tokens int) {
+	if p.limiter == nil || tokens <= 0 {
+		return
+	}
+	allowed, remaining, err := p.limiter.AllowOutputTokens(dailyBudget(pending), tokens)
+	switch {
+	case err != nil:
+		log.Warnf("Input token charge error for request %s: %v (fail-open)", pending.ID, err)
+	case !allowed:
+		pending.RemainingTokens = 0
+	default:
+		pending.RemainingTokens = remaining
+	}
 }
 
 // truncationFrame returns the terminal SSE error frame drainStream injects into
