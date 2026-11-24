@@ -78,7 +78,7 @@ The timestamp and values above are examples.
 | `model` | Top-level request model when the handler could read it |
 | `status_code` | Final HTTP response status |
 | `latency_ms` | Time from request entry until the response completes |
-| `input_tokens` | Input-token count available to the request handler |
+| `input_tokens` | Input-token count available to the request handler. For embeddings and reranking, the tokens the model read: a rerank counts the query once with every document |
 | `output_tokens` | Output-token count available to the request handler |
 | `agent_id` | Selected agent peer ID or provider marker; empty when no dispatch occurred |
 | `error_code` | Hivenet Router domain error code; empty for successful responses |
@@ -86,6 +86,8 @@ The timestamp and values above are examples.
 | `alias` | Present only on [semantic alias](/routing/semantic-routing) requests: the alias the client named. `model` holds the resolved model, or the alias when resolution failed |
 | `semantic_route` | Present only on semantic alias requests: the route that chose the model; empty when resolution failed |
 | `ts` | Request start time in the `Europe/Rome` time zone, including the active UTC offset |
+| `kind` | Present on inference requests: `chat` (chat completions and `/v1/messages`), `embedding` or `rerank`. `/v1/messages/count_tokens` has none |
+| `usage_source` | Present on answered inference requests: `exact` when the token counts are the backend's usage, `estimated` when they are the router's estimate (the backend reported none, or, like Infinity, counts characters) |
 | `router_id` | Present when the router runs with `--router-id`: the router that wrote the line. Several routers of a site can write to one log; a retried or redirected request appears on more than one |
 
 ### Request IDs
@@ -967,7 +969,6 @@ as part of the complete data-flow assessment.
     - pre-routing rejection: empty agent ID
     - no tracing: empty trace ID
     - static key: empty key ID
-    - embedding or reranking: zero token counts
   </Accordion>
 
   <Accordion title="The request ID was replaced">

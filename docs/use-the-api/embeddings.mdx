@@ -262,20 +262,27 @@ When authentication is disabled, no authorization header is required.
 
 ## Quotas
 
-Embedding requests participate in request-rate quota enforcement.
+Embedding requests count against the key's quotas:
 
-When a finite request quota is configured, responses may include:
+- the request-rate quota (`requests_per_minute`)
+- the daily token budget (`tokens_per_day` and `tenant_tokens_per_day`), the same budget as chat
+- on a serverless model, the per-minute input-token cap (`input_tokens_per_minute`)
+
+An embedding is charged **input tokens only**: the `usage.prompt_tokens` the backend reports, after the response. Before sending the request, Hivenet Router estimates its tokens from the body. When the estimate does not fit what is left of the daily budget, it returns HTTP `429` `token_limit_exceeded` and charges nothing. A response is never discarded for its tokens: the request that spends the budget is answered, and the next one is refused.
+
+When the backend reports no token count, Hivenet Router charges its estimate instead. Infinity reports characters, not tokens, in `usage`, so a model served by Infinity is always charged the estimate. The [audit log](/observability/audit-logging) marks such a request `"usage_source": "estimated"`. Inputs given as token IDs are counted exactly.
+
+When a finite quota is configured, responses may include:
 
 ```text
 X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
 ```
 
-When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
+When a quota is exhausted, Hivenet Router returns HTTP `429`.
 
 <Note>
-  The current embedding path does not charge input or output tokens against the daily token quota. It records successful embedding requests with zero input and output tokens for quota accounting.
-
-  Embedding requests are also exempt from the [LLM admission gates](/routing/admission-control), including per-request token caps, KV-occupancy budgets, and serverless token rates. These gates model KV-cache-bound generation, which prefill-only embedding work does not perform. Request-rate, body-size, and agent-concurrency limits still protect this path.
+  Embedding requests are exempt from the other [LLM admission gates](/routing/admission-control): per-request token caps and KV-occupancy budgets. These gates model KV-cache-bound generation, which prefill-only embedding work does not perform. Request-rate, body-size, and agent-concurrency limits still protect this path.
 </Note>
 
 ## Routing policies

@@ -687,7 +687,7 @@ quota:
       tokens_per_day: 0
 ```
 
-Hivenet Router currently applies request-rate quotas to embedding requests but does not charge their input against the chat token-per-day budget.
+Embedding requests charge their input tokens against the key's daily token budget. With `tokens_per_day: 0` the model above has no daily token limit; set a value to cap the tokens Open WebUI's document indexing can spend.
 
 ### Test embeddings directly
 

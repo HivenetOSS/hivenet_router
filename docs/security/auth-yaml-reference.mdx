@@ -472,7 +472,7 @@ The daily budget:
 
 A value of `0` disables the token budget.
 
-Embedding and reranking requests currently participate in request-rate limits but do not charge input against `tokens_per_day`.
+Embedding and reranking requests charge their input tokens against `tokens_per_day`, the same budget as chat: the input tokens the backend reports, after the response. See [Embeddings quotas](/use-the-api/embeddings#quotas).
 
 ### Tenant daily budget
 

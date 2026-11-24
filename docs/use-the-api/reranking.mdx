@@ -319,20 +319,23 @@ When authentication is disabled, no authorization header is required.
 
 ## Quotas
 
-Reranking requests participate in request-rate quota enforcement.
+Reranking requests count against the same quotas as [embeddings](/use-the-api/embeddings#quotas): the request-rate quota, the daily token budget shared with chat, and on a serverless model the per-minute input-token cap.
 
-When a finite request quota is configured, responses may include:
+A rerank is charged **input tokens only**: the tokens the model read, as the backend reports them, after the response. A reranker reads the query once with every document, so a request costs about the query's tokens times the number of documents, plus the documents' tokens. vLLM and llama.cpp report this in `usage`; SGLang reports it per result, and Hivenet Router adds the results up.
+
+Before sending the request, Hivenet Router estimates its tokens the same way from the body. When the estimate does not fit what is left of the daily budget, it returns HTTP `429` `token_limit_exceeded` and charges nothing. A response is never discarded for its tokens. When the backend reports no token count, or counts characters as Infinity does, Hivenet Router charges its estimate, marked `"usage_source": "estimated"` in the [audit log](/observability/audit-logging).
+
+When a finite quota is configured, responses may include:
 
 ```text
 X-RateLimit-Remaining-Requests
+X-RateLimit-Remaining-Tokens
 ```
 
-When the request-rate quota is exhausted, Hivenet Router returns HTTP `429`.
+When a quota is exhausted, Hivenet Router returns HTTP `429`.
 
 <Note>
-  The current reranking path does not charge query or document tokens against the daily token quota. Successful reranking requests are recorded with zero input and output tokens for quota accounting.
-
-  Reranking requests are also exempt from the [LLM admission gates](/routing/admission-control), including per-request token caps, KV-occupancy budgets, and serverless token rates. These gates model KV-cache-bound generation. Request-rate, body-size, and agent-concurrency limits still protect this path.
+  Reranking requests are exempt from the other [LLM admission gates](/routing/admission-control): per-request token caps and KV-occupancy budgets. These gates model KV-cache-bound generation. Request-rate, body-size, and agent-concurrency limits still protect this path.
 </Note>
 
 ## Routing policies
