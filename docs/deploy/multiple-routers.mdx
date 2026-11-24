@@ -8,6 +8,8 @@ You can run several routers behind one load balancer, so the site keeps serving 
 
 With `--sync-store=valkey` the routers of one site share their usage through a [Valkey](https://valkey.io) store and enforce each limit together.
 
+The design choices behind this, and measurements under load and under faults, are in the [technical report](/reports/router-ha).
+
 ## What is shared
 
 | Limit | Shared | How it holds |
