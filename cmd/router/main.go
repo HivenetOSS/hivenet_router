@@ -86,6 +86,7 @@ func main() {
 	semanticDecisionLog := flag.String("semantic-decision-log", cfg.SemanticDecisionLog, "Path of a JSONL file recording every semantic alias decision (optional; env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG)")
 	semanticDecisionLogBuffer := flag.Int("semantic-decision-log-buffer", cfg.SemanticDecisionLogBuffer, "Decision records queued before new ones are dropped (env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER)")
 	semanticPinMaxPerKey := flag.Int("semantic-pin-max-per-key", cfg.SemanticPinMaxPerKey, "Max semantic task pins per API key; LRU-evicted beyond (env: HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY)")
+	imageTokensDefault := flag.Int("image-tokens-default", cfg.ImageTokensDefault, "Token estimate for one image of a model not yet seen answer a request with images; then learned from usage (env: HIVENET_ROUTER_IMAGE_TOKENS_DEFAULT)")
 	maxTriesPerStep := flag.Int("max-tries-per-step", cfg.MaxTriesPerStep, "Default maximum forward attempts per policy step (used when a step does not set max_tries)")
 	defaultQueueDepth := flag.Int("queue-depth", cfg.QueueDepth, "Max concurrent waiters per model in the capacity wait queue; 0 disables the queue")
 	admissionQueueDepth := flag.Int("admission-queue-depth", cfg.AdmissionQueueDepth, "Max requests per model waiting for room in the occupancy budget; 0 disables the queue, -1 uses --queue-depth (env: HIVENET_ROUTER_ADMISSION_QUEUE_DEPTH)")
@@ -157,6 +158,7 @@ func main() {
 	}
 	cfg.SemanticPinMax = *semanticPinMax
 	cfg.SemanticPinMaxPerKey = *semanticPinMaxPerKey
+	cfg.ImageTokensDefault = *imageTokensDefault
 	if *semanticDecisionLogBuffer < 1 {
 		log.Fatalf("--semantic-decision-log-buffer must be >= 1")
 	}

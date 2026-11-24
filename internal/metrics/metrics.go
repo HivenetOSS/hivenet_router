@@ -306,6 +306,9 @@ type RouterMetrics struct {
 	// semanticDecisionSeconds is the time an alias adds to a request (parse,
 	// resolve, body rewrite). Label: alias.
 	semanticDecisionSeconds *prometheus.HistogramVec
+	// imageTokenEstimateRatio is, per answered request with images, the
+	// backend's image tokens divided by the router's estimate, by model.
+	imageTokenEstimateRatio *prometheus.HistogramVec
 
 	// --- HTTP server RED metrics (Layer 1) ---
 
@@ -1043,6 +1046,14 @@ func NewRouterMetrics() *RouterMetrics {
 			},
 			[]string{"alias"},
 		),
+		imageTokenEstimateRatio: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "hivenet_image_token_estimate_ratio",
+				Help:    "Per answered request with images: the image tokens the backend counted divided by the router's estimate before sending, by model. 1 is exact; above 1 the estimate was low.",
+				Buckets: []float64{0.25, 0.5, 0.67, 0.8, 0.9, 1.1, 1.25, 1.5, 2, 4},
+			},
+			[]string{"model"},
+		),
 	}
 
 	m.registry.MustRegister(
@@ -1142,6 +1153,7 @@ func NewRouterMetrics() *RouterMetrics {
 		// Semantic alias routing
 		m.semanticDecisions,
 		m.semanticDecisionSeconds,
+		m.imageTokenEstimateRatio,
 	)
 
 	// Go runtime metrics: goroutine count, memory, GC, scheduler latency.
@@ -1933,6 +1945,12 @@ func (m *RouterMetrics) PolicyReload(trigger, result string) {
 func (m *RouterMetrics) SemanticDecision(alias, route, source, outcome string, seconds float64) {
 	m.semanticDecisions.With(prometheus.Labels{"alias": alias, "route": route, "source": source, "outcome": outcome}).Inc()
 	m.semanticDecisionSeconds.With(prometheus.Labels{"alias": alias}).Observe(seconds)
+}
+
+// ImageTokenEstimate records how the image tokens the backend counted compare
+// with the router's estimate before sending: ratio = counted / estimated.
+func (m *RouterMetrics) ImageTokenEstimate(model string, ratio float64) {
+	m.imageTokenEstimateRatio.With(prometheus.Labels{"model": model}).Observe(ratio)
 }
 
 // RegisterSemanticDecisionLog exports the decision log's drop and write-error

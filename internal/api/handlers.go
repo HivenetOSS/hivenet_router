@@ -280,6 +280,11 @@ type Handlers struct {
 	// admission gates, and learns from each backend usage report. Nil falls back
 	// to the legacy len/4 estimate (tests).
 	estimator *tokenizer.Estimator
+	// imageEstimator estimates the prompt tokens of a request's images, learned
+	// per model; nil counts images as nothing. onImageEstimate is told the
+	// ratio of the backend's image tokens to the estimate (SetImageEstimator).
+	imageEstimator  *tokenizer.ImageEstimator
+	onImageEstimate func(model string, ratio float64)
 
 	// resolver turns a semantic alias (e.g. "auto") into a concrete model; see
 	// AliasMiddleware. Always non-nil; inert unless a policy document declares
@@ -446,10 +451,18 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	if !h.authorizeModel(c, req.Model) {
 		return
 	}
-	// Compute the input estimate once, so B1, the occupancy reservation, the
-	// per-key ITPM charge, and the later true-up all see the same value — the
-	// shared estimator can shift between calls as other requests complete.
-	inputEstimate := h.estimatePromptTokens(&req)
+	// Compute the input estimates once, so B1, the occupancy reservation, the
+	// per-key ITPM charge, and the later true-up all see the same values — the
+	// shared estimators can shift between calls as other requests complete.
+	// Three of them: the text alone for B1, which rejects and so must not
+	// count the images' estimate (the engine decides on those); text plus the
+	// images' point estimate for the token quotas; text plus the images' upper
+	// bound for the occupancy budget, which must not oversubscribe the KV.
+	textEstimate := h.estimatePromptTokens(&req)
+	_, keyID, _ := callerIDs(c)
+	imagePoint, imageUpper := h.estimateImageTokens(&req, keyID)
+	inputEstimate := textEstimate + imagePoint
+	reserveEstimate := textEstimate + imageUpper
 	// /v1/messages/count_tokens is a stateless tokenizer lookup: it holds no KV
 	// cache and generates nothing, so charging it against the occupancy budget,
 	// the per-key token buckets, or the daily token budget would double-bill
@@ -467,7 +480,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// admitted.
 	deadlineFrom := m.start
 	if !countOnly {
-		if !h.enforceRequestCaps(c, &req, inputEstimate) {
+		if !h.enforceRequestCaps(c, &req, textEstimate) {
 			return
 		}
 		if !h.enforceShedPressure(c, req.Model) {
@@ -477,7 +490,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 		// below via this single defer — success, error, timeout, disconnect, and
 		// the daily-budget reject that may follow — so a slot is never leaked.
 		var admitted bool
-		reservation, admitted = h.enforceOccupancyBudget(c, &req, inputEstimate)
+		reservation, admitted = h.enforceOccupancyBudget(c, &req, reserveEstimate)
 		if !admitted {
 			return
 		}
@@ -508,7 +521,7 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// prompt twice (once counted, once sent).
 	chargedInput := 0
 	if !countOnly {
-		ok, charged := h.reserveInputBudget(c, &req, m)
+		ok, charged := h.reserveInputBudget(c, &req, m, inputEstimate)
 		if !ok {
 			return
 		}
@@ -532,9 +545,11 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	pending.Scope = requestScope(c)
 	pending.Pool = requestPool(c)
 	pending.ExternalFallback = requestExternalFallback(c)
-	pending.Path = path                          // forward to the backend's native endpoint at this path
-	pending.EstimatedInputTokens = inputEstimate // same value the reservation was charged, for the true-up
-	pending.ChargedInputTokens = chargedInput    // the daily budgets' prompt charge, trued up after the response
+	pending.Path = path                           // forward to the backend's native endpoint at this path
+	pending.EstimatedInputTokens = inputEstimate  // same value ITPM was charged, for its true-up
+	pending.ReservedInputTokens = reserveEstimate // what the occupancy reservation was charged, for its true-up
+	pending.EstimatedImageTokens = imagePoint
+	pending.ChargedInputTokens = chargedInput // the daily budgets' prompt charge, trued up after the response
 	if len(reservation) > 0 {
 		pending.Reservation = reservation // processor grows it as undeclared output streams
 	}
@@ -1001,6 +1016,27 @@ func (h *Handlers) estimatePromptTokens(req *domain.ChatRequest) int {
 	return promptTokens
 }
 
+// estimateImageTokens returns the estimated prompt tokens of the request's
+// images, sent with API key keyID: point for the token quotas, upper for the
+// occupancy budget. Images are sized from inline data only; an image URL is
+// never fetched. Without an
+// image estimator, images count nothing (the text estimate's per-message floor
+// still applies).
+func (h *Handlers) estimateImageTokens(req *domain.ChatRequest, keyID string) (point, upper int) {
+	if h.imageEstimator == nil {
+		return 0, 0
+	}
+	return h.imageEstimator.Estimate(req.Model, keyID, req.ImageInfos())
+}
+
+// SetImageEstimator enables the image token estimate: e learns each model's
+// cost per image from answered requests; observe, if set, is told the ratio
+// of the backend's image tokens to the estimate after each answered request
+// with images, per model. Call once during wiring, before the server starts.
+func (h *Handlers) SetImageEstimator(e *tokenizer.ImageEstimator, observe func(model string, ratio float64)) {
+	h.imageEstimator, h.onImageEstimate = e, observe
+}
+
 // allowedModels returns the set of models the calling API key may use:
 //
 //  1. quota.per_model (strict per-model quotas): the map's keys. A caller with
@@ -1114,7 +1150,7 @@ const perMessageTokenOverhead = 4
 // deducted, only used to size the admission check). A request with no daily
 // budget is still charged, so it counts in its tenant's usage today. Returns
 // false (after writing 429) when the request cannot be admitted.
-func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta) (ok bool, charged int) {
+func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m reqMeta, promptTokens int) (ok bool, charged int) {
 	if h.limiter == nil {
 		return true, 0
 	}
@@ -1124,10 +1160,9 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	if reservedOutput == 0 {
 		reservedOutput = req.MaxTokens
 	}
-	// EstimateTokens only sees text content; estimatePromptTokens floors a
-	// multimodal or tool-only message at a per-message overhead so it is charged
-	// (and passes through this gate) rather than bypassing it with a 0 estimate.
-	promptTokens := h.estimatePromptTokens(req)
+	// promptTokens is the request's input estimate: the text (floored at a
+	// per-message overhead, so a textless request is still charged) plus its
+	// images' point estimate.
 	if promptTokens == 0 {
 		return true, 0 // genuinely empty body — nothing to budget
 	}
@@ -1355,25 +1390,47 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 
 // learnInputTokens reconciles a completed request against the backend's exact
 // prompt_tokens: it trues up the reservation by the estimate error and folds the
-// count into the per-model estimator so future estimates self-calibrate.
+// count into the per-model estimators so future estimates self-calibrate: the
+// text ratio from a text-only request, the image estimator from a request with
+// images (what the backend counted beyond the text's estimate).
 //
 // exact reports whether promptTokens came from a real backend usage object; a
 // fallback estimate is never fed back, or the estimator would just relearn its
-// own heuristic. The estimator is a text tokens-per-byte model, so a request
-// carrying images is skipped for learning — its prompt_tokens include image
-// tokens that would inflate the text ratio — but the true-up still applies,
-// since it corrects the reservation to the real footprint (images included).
+// own heuristic. The text estimator is a tokens-per-byte model, so a request
+// carrying images never teaches it — its prompt_tokens include image tokens
+// that would inflate the text ratio — but the true-up still applies, since it
+// corrects the reservation to the real footprint (images included).
 func (h *Handlers) learnInputTokens(req *domain.ChatRequest, pending *domain.PendingRequest, promptTokens int, exact bool) {
 	if !exact || promptTokens <= 0 {
 		return
 	}
-	if pending.Reservation != nil && pending.EstimatedInputTokens > 0 {
-		pending.Reservation.Adjust(promptTokens - pending.EstimatedInputTokens)
+	reserved := pending.ReservedInputTokens
+	if reserved == 0 {
+		reserved = pending.EstimatedInputTokens
 	}
-	if h.estimator != nil && domain.CountImages(req.Messages) == 0 {
-		textBytes, _ := domain.PromptTextBytes(req)
-		h.estimator.Observe(req.Model, textBytes, promptTokens)
+	if pending.Reservation != nil && reserved > 0 {
+		pending.Reservation.Adjust(promptTokens - reserved)
 	}
+	images := req.ImageInfos()
+	if len(images) == 0 {
+		if h.estimator != nil {
+			textBytes, _ := domain.PromptTextBytes(req)
+			h.estimator.Observe(req.Model, textBytes, promptTokens)
+		}
+		return
+	}
+	// The images cost what the backend counted beyond the text's estimate.
+	if h.imageEstimator == nil {
+		return
+	}
+	imageTokens := promptTokens - h.estimatePromptTokens(req)
+	if imageTokens <= 0 {
+		return
+	}
+	if h.onImageEstimate != nil && pending.EstimatedImageTokens > 0 {
+		h.onImageEstimate(req.Model, float64(imageTokens)/float64(pending.EstimatedImageTokens))
+	}
+	h.imageEstimator.Observe(req.Model, pending.KeyID, images, imageTokens)
 }
 
 // writeErrorResponse writes a worker error, carrying real usage/agent into the
