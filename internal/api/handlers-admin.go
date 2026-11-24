@@ -222,6 +222,24 @@ type apiKeyEntryRequest struct {
 	AllowedModels []string    `json:"allowed_models"`
 	Quota         apiKeyQuota `json:"quota"`
 
+	// RoutingStrategies lists the ranking strategies the key may use, the
+	// first its default (see auth.AuthResult). Unknown or repeated names are
+	// rejected with 400.
+	RoutingStrategies []string `json:"routing_strategies"`
+
+	// ScopeMax and HomeCountry bound where the key's requests may be served
+	// (see auth.AuthResult); validated by the registry.
+	ScopeMax    string `json:"scope_max"`
+	HomeCountry string `json:"home_country"`
+
+	// Reservation sends the key's requests only to the agents reserved for
+	// it (see auth.AuthResult); validated by the registry.
+	Reservation string `json:"reservation"`
+
+	// ExternalFallback is the client's own provider account (bring your own
+	// key). api_key is write-only: reads show only its preview.
+	ExternalFallback *apiKeyFallback `json:"external_fallback"`
+
 	// MaxOccupancyShare is the key-level serverless occupancy share, matching
 	// the static auth.yaml field of the same name (it sits outside quota there
 	// too, because it is a fraction of the replica pool's admit budget rather
@@ -233,16 +251,36 @@ type apiKeyEntryRequest struct {
 // Wraps a key entry plus the registry version. The :id URL parameter is the
 // source of truth for the entry ID; any id field in the body is ignored.
 type upsertAPIKeyRequest struct {
-	Version           string      `json:"version"`
-	KeyHash           string      `json:"key_hash"`
-	KeyPreview        string      `json:"key_preview"`
-	Owner             string      `json:"owner"`
-	Name              string      `json:"name"`
-	Enabled           bool        `json:"enabled"`
-	ExpiresAt         string      `json:"expires_at"`
-	AllowedModels     []string    `json:"allowed_models"`
-	Quota             apiKeyQuota `json:"quota"`
-	MaxOccupancyShare float64     `json:"max_occupancy_share"` // see apiKeyEntryRequest
+	Version           string          `json:"version"`
+	KeyHash           string          `json:"key_hash"`
+	KeyPreview        string          `json:"key_preview"`
+	Owner             string          `json:"owner"`
+	Name              string          `json:"name"`
+	Enabled           bool            `json:"enabled"`
+	ExpiresAt         string          `json:"expires_at"`
+	AllowedModels     []string        `json:"allowed_models"`
+	Quota             apiKeyQuota     `json:"quota"`
+	MaxOccupancyShare float64         `json:"max_occupancy_share"` // see apiKeyEntryRequest
+	RoutingStrategies []string        `json:"routing_strategies"`  // see apiKeyEntryRequest
+	ScopeMax          string          `json:"scope_max"`           // see apiKeyEntryRequest
+	HomeCountry       string          `json:"home_country"`        // see apiKeyEntryRequest
+	Reservation       string          `json:"reservation"`         // see apiKeyEntryRequest
+	ExternalFallback  *apiKeyFallback `json:"external_fallback"`   // see apiKeyEntryRequest
+}
+
+// apiKeyFallback is the wire form of a key's external fallback.
+type apiKeyFallback struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key"`
+}
+
+// toAuth converts the wire form; nil stays nil.
+func (f *apiKeyFallback) toAuth() *auth.ExternalFallback {
+	if f == nil {
+		return nil
+	}
+	return &auth.ExternalFallback{Provider: f.Provider, Model: f.Model, APIKey: auth.NewSecret(f.APIKey)}
 }
 
 // replaceAPIKeysRequest is the JSON body for POST /admin/api-keys/replace.
@@ -264,6 +302,9 @@ func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 	if err != nil {
 		return auth.DynamicKeyEntry{}, err
 	}
+	if err := policy.ValidateKeyStrategies(k.RoutingStrategies); err != nil {
+		return auth.DynamicKeyEntry{}, fmt.Errorf("key %q: %w", k.ID, err)
+	}
 	// The share sits at the key level, like the static auth.yaml field; the
 	// registry validates its (0,1] range on every mutation.
 	quota.MaxOccupancyShare = k.MaxOccupancyShare
@@ -277,6 +318,12 @@ func (k apiKeyEntryRequest) toEntry() (auth.DynamicKeyEntry, error) {
 		ExpiresAt:     expiresAt,
 		AllowedModels: k.AllowedModels,
 		Quota:         quota,
+
+		RoutingStrategies: k.RoutingStrategies,
+		ScopeMax:          k.ScopeMax,
+		HomeCountry:       k.HomeCountry,
+		Reservation:       k.Reservation,
+		ExternalFallback:  k.ExternalFallback.toAuth(),
 	}, nil
 }
 
@@ -394,8 +441,14 @@ func (h *Handlers) UpsertAPIKey(c *gin.Context) {
 		AllowedModels:     req.AllowedModels,
 		Quota:             req.Quota,
 		MaxOccupancyShare: req.MaxOccupancyShare,
+		RoutingStrategies: req.RoutingStrategies,
+		ScopeMax:          req.ScopeMax,
+		HomeCountry:       req.HomeCountry,
+		Reservation:       req.Reservation,
+		ExternalFallback:  req.ExternalFallback,
 	}.toEntry()
 	if err == nil {
+		h.keyRegistry.KeepStoredCredential(&entry)
 		err = h.checkPushedEntry(entry)
 	}
 	if err != nil {
@@ -458,6 +511,7 @@ func (h *Handlers) ReplaceAPIKeys(c *gin.Context) {
 	for i, k := range req.Keys {
 		entry, err := k.toEntry()
 		if err == nil {
+			h.keyRegistry.KeepStoredCredential(&entry)
 			err = h.checkPushedEntry(entry)
 		}
 		if err != nil {

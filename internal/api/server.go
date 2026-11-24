@@ -165,6 +165,14 @@ func (s *Server) registerRoutes() {
 	// exact body the token was issued for (refused before quota is spent), and
 	// is routed on the token's model. No-op for other requests.
 	inference.Use(s.handlers.RedirectTarget())
+	// Resolve the routing strategy from the key and X-Hivenet-Routing-Strategy:
+	// a strategy the key does not allow is refused before quota is spent, and
+	// a redirect below carries the client's choice in its token.
+	inference.Use(s.handlers.RoutingStrategy())
+	// Resolve the scope from X-Hivenet-Scope and the key's scope_max /
+	// home_country: a scope wider than the key allows is refused before
+	// quota; the redirect decision and the agent choice stay inside it.
+	inference.Use(s.handlers.Scope())
 	// Resolve semantic aliases (model: "auto") to a concrete model before quota,
 	// so quota, authorization, admission and routing all see the resolved model.
 	// A no-op map lookup for concrete model names.

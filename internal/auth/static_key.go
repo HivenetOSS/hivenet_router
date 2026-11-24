@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -83,13 +84,37 @@ func NewStaticKeyProvider(entries []APIKeyEntry) (*StaticKeyProvider, error) {
 			return nil, err
 		}
 		quota.MaxOccupancyShare = e.MaxOccupancyShare
+		if err := validateKeyScope(label, e.ScopeMax, e.HomeCountry); err != nil {
+			return nil, err
+		}
+		if err := validateReservation(label, e.Reservation); err != nil {
+			return nil, err
+		}
+		var fb *ExternalFallback
+		if s := e.ExternalFallback; s != nil {
+			if s.APIKeyEnv == "" {
+				return nil, fmt.Errorf("auth: %s: external_fallback.api_key_env is required (the variable holding the client's provider key)", label)
+			}
+			fb = &ExternalFallback{Provider: s.Provider, Model: s.Model, APIKey: NewSecret(os.Getenv(s.APIKeyEnv))}
+			if fb.APIKey.Empty() {
+				return nil, fmt.Errorf("auth: %s: external_fallback.api_key_env %q is not set", label, s.APIKeyEnv)
+			}
+		}
+		if err := validateExternalFallback(label, fb, e.ScopeMax); err != nil {
+			return nil, err
+		}
 		keys[hash] = keyEntry{
 			result: AuthResult{
-				TenantID:      e.Metadata.Owner,
-				KeyID:         keyID,
-				KeyPreview:    e.KeyPreview,
-				AllowedModels: e.Models,
-				QuotaLimits:   quota,
+				TenantID:          e.Metadata.Owner,
+				KeyID:             keyID,
+				KeyPreview:        e.KeyPreview,
+				AllowedModels:     e.Models,
+				RoutingStrategies: e.RoutingStrategies,
+				ScopeMax:          e.ScopeMax,
+				HomeCountry:       e.HomeCountry,
+				Reservation:       e.Reservation,
+				ExternalFallback:  fb,
+				QuotaLimits:       quota,
 			},
 			expiresAt: expiresAt,
 		}

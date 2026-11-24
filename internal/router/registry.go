@@ -125,6 +125,56 @@ func (r *AgentRegistry) CountHealthyByModel(model string) int {
 	return n
 }
 
+// CountHealthyByModelInScope counts the healthy shared agents (reserved for
+// no one) serving model whose declared country is inside scope: the agents
+// here a request with that scope and no reservation may use.
+func (r *AgentRegistry) CountHealthyByModelInScope(model string, scope domain.Scope) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, agent := range r.byModel[model] {
+		if agent.IsHealthy() && agent.Metadata.ReservedFor == domain.SharedPool && scope.AllowsCountry(agent.Metadata.Country) {
+			n++
+		}
+	}
+	return n
+}
+
+// HealthyByPool counts the healthy agents of every pool, keyed by pool key
+// (domain.PoolKey).
+func (r *AgentRegistry) HealthyByPool() map[string]int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]int)
+	for model, agents := range r.byModel {
+		for _, agent := range agents {
+			key := domain.PoolKey(model, agent.Metadata.ReservedFor)
+			if _, ok := out[key]; !ok {
+				out[key] = 0
+			}
+			if agent.IsHealthy() {
+				out[key]++
+			}
+		}
+	}
+	return out
+}
+
+// CountHealthyInPool counts the healthy agents serving model in pool: the
+// agents reserved for that reservation, or, for domain.SharedPool, the ones
+// reserved for no one.
+func (r *AgentRegistry) CountHealthyInPool(model, pool string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, agent := range r.byModel[model] {
+		if agent.IsHealthy() && agent.Metadata.ReservedFor == pool {
+			n++
+		}
+	}
+	return n
+}
+
 // ForEach executes a function for each agent across all models.
 func (r *AgentRegistry) ForEach(fn func(peer.ID, *domain.Agent)) {
 	r.mu.RLock()

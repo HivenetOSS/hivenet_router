@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -121,7 +122,8 @@ func TestBadgerKeyStore_IntegrityPerRecord(t *testing.T) {
 	gen := ks.gen
 
 	// 1. Injected record with a forged MAC.
-	payload, _ := json.Marshal(entryToWire(ksEntry("evil")))
+	w, _ := entryToWire(ksEntry("evil"), ks.sealKey)
+	payload, _ := json.Marshal(w)
 	rawSet(t, ks, recordKey(gen, "evil"), append(make([]byte, sha256.Size), payload...))
 	// 2. Valid record for "a" copied under id "copy".
 	var aVal []byte
@@ -299,4 +301,70 @@ func FuzzBadgerKeyStoreLoad(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A key's routing strategies (in order: the first is the key's default),
+// scope and reservation survive a restart.
+func TestBadgerKeyStore_RoutingStrategiesRoundTrip(t *testing.T) {
+	ks := openTestStore(t, t.TempDir())
+	e := ksEntry("a")
+	e.RoutingStrategies = []string{"prefix-aware", "least-loaded"}
+	e.ScopeMax, e.HomeCountry, e.Reservation = "EU", "FR", "acme"
+	now := time.Now()
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{e, ksEntry("b")}, now, now); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	snap, err := ks.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := map[string][]string{}
+	for _, k := range snap.Keys {
+		got[k.ID] = k.Entry.RoutingStrategies
+		if k.ID == "a" && (k.Entry.ScopeMax != "EU" || k.Entry.HomeCountry != "FR" || k.Entry.Reservation != "acme") {
+			t.Errorf("key a scope %q home %q reservation %q, want EU / FR / acme", k.Entry.ScopeMax, k.Entry.HomeCountry, k.Entry.Reservation)
+		}
+	}
+	if s := got["a"]; len(s) != 2 || s[0] != "prefix-aware" || s[1] != "least-loaded" {
+		t.Errorf("key a strategies %v, want [prefix-aware least-loaded]", s)
+	}
+	if s := got["b"]; len(s) != 0 {
+		t.Errorf("key b strategies %v, want none", s)
+	}
+}
+
+// A key's BYOK credential is stored encrypted: it round-trips, is never in
+// clear in the database, and a sealed credential copied to another key does
+// not open.
+func TestBadgerKeyStore_ExternalFallbackSealed(t *testing.T) {
+	const cred = "sk-client-secret-0123456789"
+	ks := openTestStore(t, t.TempDir())
+	e := ksEntry("a")
+	e.ExternalFallback = &ExternalFallback{Provider: "openai", Model: "gpt", APIKey: NewSecret(cred)}
+	now := time.Now()
+	if err := ks.ReplaceAll("v1", []DynamicKeyEntry{e}, now, now); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	_ = ks.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			v, _ := it.Item().ValueCopy(nil)
+			if bytes.Contains(v, []byte("secret-0123456789")) {
+				t.Errorf("credential stored in clear under %q", it.Item().Key())
+			}
+		}
+		return nil
+	})
+	snap, err := ks.Load()
+	if err != nil || len(snap.Keys) != 1 || snap.Keys[0].Err != nil {
+		t.Fatalf("Load: %v %+v", err, snap)
+	}
+	if fb := snap.Keys[0].Entry.ExternalFallback; fb == nil || fb.APIKey.Reveal() != cred || fb.Provider != "openai" || fb.Model != "gpt" {
+		t.Fatalf("restored %+v", fb)
+	}
+	w, _ := entryToWire(e, ks.sealKey)
+	if _, err := openCredential(ks.sealKey, "other", w.ExternalFallback.APIKeySealed); err == nil {
+		t.Error("a sealed credential opened under another key ID")
+	}
 }

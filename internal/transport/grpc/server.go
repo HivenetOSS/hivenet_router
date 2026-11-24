@@ -11,6 +11,7 @@ import (
 
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/config"
+	"hivenet_router/internal/domain"
 	"hivenet_router/internal/transport/p2p"
 
 	logging "github.com/ipfs/go-log/v2"
@@ -145,6 +146,12 @@ func (s *AuthServer) validateMetadata(meta *pb.AgentMetadata) error {
 	}
 	if meta.Organization == "" {
 		return fmt.Errorf("organization is required")
+	}
+	if meta.Country != "" && !domain.ValidCountry(meta.Country) {
+		return fmt.Errorf("country %q must be an upper-case ISO 3166-1 alpha-2 code such as FR", meta.Country)
+	}
+	if meta.ReservedFor != "" && !domain.ValidReservation(meta.ReservedFor) {
+		return fmt.Errorf("reserved_for %q must be 1-64 letters, digits, '.', '_' or '-'", meta.ReservedFor)
 	}
 	return nil
 }

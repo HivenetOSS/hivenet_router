@@ -29,6 +29,29 @@ type PendingRequest struct {
 	KeyID        string // API key identifier; "anonymous" when auth mode is none
 	DeploymentID string // model_deployment UUID; "unset" until the processor stamps it from the selected agent's metadata
 
+	// RoutingStrategy is the ranking strategy this request's API key chose
+	// (its default, or the X-Hivenet-Routing-Strategy header within the key's
+	// list); empty means the model's policy decides. It replaces the strategy
+	// of every policy step; nothing else of the policy changes.
+	RoutingStrategy string
+	// RoutingStrategySource says where RoutingStrategy came from: "header",
+	// "key", or "" when the model's policy decides.
+	RoutingStrategySource string
+
+	// Scope bounds the agents that may serve this request by the country
+	// they declare ("all", "EU" or "country:XX"); empty means no bound. Set
+	// from X-Hivenet-Scope, the key's home_country or its scope_max.
+	Scope Scope
+
+	// Pool is the pool this request may use: its key's reservation, served
+	// only by the agents reserved for it (dedicated replicas), or
+	// SharedPool ("") for the agents reserved for no one.
+	Pool string
+
+	// ExternalFallback is the key's own provider account (BYOK), used when
+	// every local policy step is exhausted; nil = none.
+	ExternalFallback *ExternalFallback
+
 	// Capability is the inference type required by this request: "llm", "embedding",
 	// or "reranker". The policy executor uses it to filter agents — only agents whose
 	// Metadata.Capability matches this value are considered. Defaults to "llm".

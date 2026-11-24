@@ -38,7 +38,8 @@ The selected backend validates the query, documents, result count, and any optio
 | `Content-Type: application/json` | Yes | Identifies the JSON request |
 | `Authorization: Bearer <api-key>` | When API auth is enabled | Authenticates the client |
 | `X-Client-Request-ID: <uuid>` | No | Your own ID for the request, returned in the response and stored in the audit log. `X-Request-ID` is also accepted |
-| `X-Hivenet-Scope: <scope>` | No | Where the request may be [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`. Default: the country of the site the request reached ([details](/routing/cross-site-redirect#scope)) |
+| `X-Hivenet-Scope: <scope>` | No | Where the request may be served and [redirected](/routing/cross-site-redirect#scope): `country:XX`, `EU` or `all`, no wider than the API key's `scope_max` (else `403` `scope_forbidden`). Default: the key's `home_country`, else its `scope_max` ([details](/routing/cross-site-redirect#scope)) |
+| `X-Hivenet-Routing-Strategy: <strategy>` | No | Ranking strategy for this request, one of the API key's `routing_strategies`; another value is a `403` `routing_strategy_forbidden`. Default: the key's first strategy ([details](/routing/policy-yaml-reference#strategy-chosen-by-the-api-key)) |
 | `X-Session-ID: <id>` | No | Keeps a conversation on the same site when the request is [redirected](/routing/cross-site-redirect#choosing-the-site) |
 
 ## Request body

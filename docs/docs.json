@@ -70,6 +70,7 @@
           "routing/fallback-chains",
           "routing/provider-fallback",
           "routing/cross-site-redirect",
+          "routing/dedicated-replicas",
           "routing/hold-at-zero",
           "routing/policy-gates",
           "routing/admission-control",
@@ -114,6 +115,13 @@
           "integrations/pi",
           "integrations/open-web-ui",
           "integrations/use-from-code"
+        ]
+      },
+      {
+        "group": "Technical reports",
+        "icon": "flask",
+        "pages": [
+          "reports/prefix-aware-routing"
         ]
       },
       {

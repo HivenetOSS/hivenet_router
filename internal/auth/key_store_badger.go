@@ -5,8 +5,12 @@ package auth
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +62,11 @@ const keyStoreSchema = 3
 const (
 	keyStoreHMACSalt = "hivenet-router-keystore-hmac-v1"
 	keyStoreHMACInfo = "hmac-sha256"
+	// keyStoreSealInfo derives, from the same secret, the AES-256-GCM key
+	// that encrypts the credentials a record holds (a key's BYOK provider
+	// key): the MAC proves a record was written by a router, the encryption
+	// keeps the credential unreadable on disk.
+	keyStoreSealInfo = "aes-256-gcm credentials"
 )
 
 // keyStoreMeta is the on-disk shape of the meta record.
@@ -87,6 +96,25 @@ type keyStoreEntry struct {
 	ExpiresAt     *time.Time    `json:"expires_at"` // RFC3339; null = never
 	AllowedModels []string      `json:"allowed_models"`
 	Quota         keyStoreQuota `json:"quota"`
+	// RoutingStrategies is omitted when empty, so a snapshot written before
+	// the field existed reads back the same.
+	RoutingStrategies []string `json:"routing_strategies,omitempty"`
+	ScopeMax          string   `json:"scope_max,omitempty"`
+	HomeCountry       string   `json:"home_country,omitempty"`
+	Reservation       string   `json:"reservation,omitempty"`
+	// ExternalFallback holds the key's BYOK provider account, its credential
+	// encrypted (never written in clear).
+	ExternalFallback *keyStoreFallback `json:"external_fallback,omitempty"`
+}
+
+// keyStoreFallback is ExternalFallback on disk: APIKeySealed is the
+// credential encrypted with AES-256-GCM (nonce || ciphertext, base64), the
+// record ID as additional data so a sealed credential cannot move to
+// another key.
+type keyStoreFallback struct {
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	APIKeySealed string `json:"api_key_sealed"`
 }
 
 // keyStoreQuota / keyStorePerModel mirror auth.QuotaLimits /
@@ -120,6 +148,8 @@ var errRecordIntegrity = errors.New("integrity check failed")
 type BadgerKeyStore struct {
 	db     *badger.DB
 	macKey []byte
+	// sealKey encrypts the credentials inside a record (AES-256-GCM).
+	sealKey []byte
 
 	mu          sync.Mutex // guards gen/confirmedAt; callers are already serialized, this is belt-and-braces
 	gen         uint64     // live generation (0 = nothing written yet)
@@ -158,7 +188,12 @@ func OpenBadgerKeyStore(path string, secret []byte) (*BadgerKeyStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("key store: open %s: %w", path, err)
 	}
-	return &BadgerKeyStore{db: db, macKey: macKey}, nil
+	sealKey := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, secret, []byte(keyStoreHMACSalt), []byte(keyStoreSealInfo)), sealKey); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, fmt.Errorf("key store: derive seal key: %w", err)
+	}
+	return &BadgerKeyStore{db: db, macKey: macKey, sealKey: sealKey}, nil
 }
 
 // Close implements KeyStore.
@@ -206,7 +241,11 @@ func (b *BadgerKeyStore) sealMeta(meta keyStoreMeta) ([]byte, error) {
 }
 
 func (b *BadgerKeyStore) sealEntry(gen uint64, e DynamicKeyEntry) ([]byte, []byte, error) {
-	raw, err := json.Marshal(entryToWire(e))
+	w, err := entryToWire(e, b.sealKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("key store: encode key %q: %w", e.ID, err)
+	}
+	raw, err := json.Marshal(w)
 	if err != nil {
 		return nil, nil, fmt.Errorf("key store: encode key %q: %w", e.ID, err)
 	}
@@ -303,7 +342,13 @@ func (b *BadgerKeyStore) Load() (*PersistedRegistry, error) {
 				out.Keys = append(out.Keys, pk)
 				continue
 			}
-			pk.Entry = wireToEntry(w)
+			entry, err := wireToEntry(w, b.sealKey)
+			if err != nil {
+				pk.Err = err
+				out.Keys = append(out.Keys, pk)
+				continue
+			}
+			pk.Entry = entry
 			out.Keys = append(out.Keys, pk)
 		}
 		return nil
@@ -524,7 +569,7 @@ func (b *BadgerKeyStore) deleteKeys(keys [][]byte) error {
 }
 
 // entryToWire maps a registry entry to its explicit on-disk shape.
-func entryToWire(e DynamicKeyEntry) keyStoreEntry {
+func entryToWire(e DynamicKeyEntry, sealKey []byte) (keyStoreEntry, error) {
 	q := e.Quota
 	wq := keyStoreQuota{
 		RequestsPerMinute:     q.RequestsPerMinute,
@@ -540,7 +585,7 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 			wq.PerModel[model] = keyStorePerModel(pm)
 		}
 	}
-	return keyStoreEntry{
+	w := keyStoreEntry{
 		ID:            e.ID,
 		KeyHash:       e.KeyHash,
 		KeyPreview:    e.KeyPreview,
@@ -550,11 +595,24 @@ func entryToWire(e DynamicKeyEntry) keyStoreEntry {
 		ExpiresAt:     e.ExpiresAt,
 		AllowedModels: e.AllowedModels,
 		Quota:         wq,
+
+		RoutingStrategies: e.RoutingStrategies,
+		ScopeMax:          e.ScopeMax,
+		HomeCountry:       e.HomeCountry,
+		Reservation:       e.Reservation,
 	}
+	if fb := e.ExternalFallback; fb != nil {
+		sealed, err := sealCredential(sealKey, e.ID, fb.APIKey.Reveal())
+		if err != nil {
+			return keyStoreEntry{}, err
+		}
+		w.ExternalFallback = &keyStoreFallback{Provider: fb.Provider, Model: fb.Model, APIKeySealed: sealed}
+	}
+	return w, nil
 }
 
 // wireToEntry maps the on-disk shape back to a registry entry.
-func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
+func wireToEntry(w keyStoreEntry, sealKey []byte) (DynamicKeyEntry, error) {
 	q := QuotaLimits{
 		RequestsPerMinute:     w.Quota.RequestsPerMinute,
 		TokensPerDay:          w.Quota.TokensPerDay,
@@ -569,7 +627,7 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 			q.PerModel[model] = PerModelQuotaLimits(pm)
 		}
 	}
-	return DynamicKeyEntry{
+	e := DynamicKeyEntry{
 		ID:            w.ID,
 		KeyHash:       w.KeyHash,
 		KeyPreview:    w.KeyPreview,
@@ -579,5 +637,60 @@ func wireToEntry(w keyStoreEntry) DynamicKeyEntry {
 		ExpiresAt:     w.ExpiresAt,
 		AllowedModels: w.AllowedModels,
 		Quota:         q,
+
+		RoutingStrategies: w.RoutingStrategies,
+		ScopeMax:          w.ScopeMax,
+		HomeCountry:       w.HomeCountry,
+		Reservation:       w.Reservation,
 	}
+	if fb := w.ExternalFallback; fb != nil {
+		key, err := openCredential(sealKey, w.ID, fb.APIKeySealed)
+		if err != nil {
+			return DynamicKeyEntry{}, err
+		}
+		e.ExternalFallback = &ExternalFallback{Provider: fb.Provider, Model: fb.Model, APIKey: NewSecret(key)}
+	}
+	return e, nil
+}
+
+// sealCredential encrypts a credential with AES-256-GCM; the record ID is
+// the additional data.
+func sealCredential(key []byte, id, plain string) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("key store: seal credential: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("key store: seal credential: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("key store: seal credential: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(plain), []byte(id))), nil
+}
+
+// openCredential decrypts a credential sealed by sealCredential for id.
+func openCredential(key []byte, id, sealed string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return "", fmt.Errorf("sealed credential: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("sealed credential: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("sealed credential: %w", err)
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", fmt.Errorf("sealed credential: too short")
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], []byte(id))
+	if err != nil {
+		return "", fmt.Errorf("sealed credential does not open: %w", err)
+	}
+	return string(plain), nil
 }

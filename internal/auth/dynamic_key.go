@@ -37,6 +37,18 @@ type DynamicKeyEntry struct {
 	ExpiresAt     *time.Time // nil = never
 	AllowedModels []string   // empty = unrestricted
 	Quota         QuotaLimits
+	// RoutingStrategies: the ranking strategies the key may use, the first
+	// its default; empty = the models' policies decide. See AuthResult.
+	RoutingStrategies []string
+	// ScopeMax and HomeCountry bound where the key's requests may be served;
+	// see AuthResult.
+	ScopeMax    string
+	HomeCountry string
+	// Reservation names the dedicated replicas the key uses; see AuthResult.
+	Reservation string
+	// ExternalFallback is the client's own provider account (BYOK); nil =
+	// no external fallback. See AuthResult.
+	ExternalFallback *ExternalFallback
 }
 
 // DynamicKeyProvider is a mutable in-memory API key registry.
@@ -99,6 +111,7 @@ func (r *DynamicKeyProvider) Snapshot() (string, []DynamicKeyEntry) {
 	for _, e := range r.byID {
 		cp := *e
 		cp.AllowedModels = append([]string(nil), e.AllowedModels...)
+		cp.RoutingStrategies = append([]string(nil), e.RoutingStrategies...)
 		if e.Quota.PerModel != nil {
 			cp.Quota.PerModel = make(map[string]PerModelQuotaLimits, len(e.Quota.PerModel))
 			for model, lim := range e.Quota.PerModel {
@@ -215,11 +228,16 @@ func resultFor(entry *DynamicKeyEntry, ok bool, tenantBudget int) (*AuthResult, 
 	quota := entry.Quota
 	quota.TenantTokensPerDay = tenantBudget
 	return &AuthResult{
-		TenantID:      entry.Owner,
-		KeyID:         entry.ID,
-		KeyPreview:    entry.KeyPreview,
-		AllowedModels: entry.AllowedModels,
-		QuotaLimits:   quota,
+		TenantID:          entry.Owner,
+		KeyID:             entry.ID,
+		KeyPreview:        entry.KeyPreview,
+		AllowedModels:     entry.AllowedModels,
+		RoutingStrategies: entry.RoutingStrategies,
+		ScopeMax:          entry.ScopeMax,
+		HomeCountry:       entry.HomeCountry,
+		Reservation:       entry.Reservation,
+		ExternalFallback:  entry.ExternalFallback,
+		QuotaLimits:       quota,
 	}, nil
 }
 
@@ -264,6 +282,15 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 	if err := validateOccupancyShare(fmt.Sprintf("key entry %q", e.ID), e.Quota.MaxOccupancyShare); err != nil {
 		return err
 	}
+	if err := validateKeyScope(fmt.Sprintf("key entry %q", e.ID), e.ScopeMax, e.HomeCountry); err != nil {
+		return err
+	}
+	if err := validateReservation(fmt.Sprintf("key entry %q", e.ID), e.Reservation); err != nil {
+		return err
+	}
+	if err := validateExternalFallback(fmt.Sprintf("key entry %q", e.ID), e.ExternalFallback, e.ScopeMax); err != nil {
+		return err
+	}
 	if e.Quota.InputTokensPerMinute < 0 || e.Quota.OutputTokensPerMinute < 0 {
 		return fmt.Errorf("auth: key entry %q: input_tokens_per_minute and output_tokens_per_minute must be >= 0", e.ID)
 	}
@@ -283,6 +310,7 @@ func normalizeAndValidateKeyEntry(e *DynamicKeyEntry) error {
 // With a key store wired, a failed write returns an error wrapping
 // ErrNotDurable; the change is nevertheless in effect in memory.
 func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
+	r.KeepStoredCredential(&e)
 	if err := normalizeAndValidateKeyEntry(&e); err != nil {
 		return err
 	}
@@ -314,6 +342,12 @@ func (r *DynamicKeyProvider) Upsert(version string, e DynamicKeyEntry) error {
 		ExpiresAt:     e.ExpiresAt,
 		AllowedModels: e.AllowedModels,
 		Quota:         e.Quota,
+
+		RoutingStrategies: e.RoutingStrategies,
+		ScopeMax:          e.ScopeMax,
+		HomeCountry:       e.HomeCountry,
+		Reservation:       e.Reservation,
+		ExternalFallback:  e.ExternalFallback,
 	}
 
 	// Rotation: same ID, new hash — drop the previous hash mapping so it
@@ -406,6 +440,9 @@ func checkDuplicates(entries []DynamicKeyEntry) error {
 // returns an error wrapping ErrNotDurable (the replace is still in effect).
 func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntry) error {
 	for i := range entries {
+		r.KeepStoredCredential(&entries[i])
+	}
+	for i := range entries {
 		if err := normalizeAndValidateKeyEntry(&entries[i]); err != nil {
 			return fmt.Errorf("auth: key[%d]: %w", i, err)
 		}
@@ -426,6 +463,12 @@ func (r *DynamicKeyProvider) ReplaceAll(version string, entries []DynamicKeyEntr
 			ExpiresAt:     entries[i].ExpiresAt,
 			AllowedModels: entries[i].AllowedModels,
 			Quota:         entries[i].Quota,
+
+			RoutingStrategies: entries[i].RoutingStrategies,
+			ScopeMax:          entries[i].ScopeMax,
+			HomeCountry:       entries[i].HomeCountry,
+			Reservation:       entries[i].Reservation,
+			ExternalFallback:  entries[i].ExternalFallback,
 		}
 		byHash[entry.KeyHash] = entry
 		byID[entry.ID] = entry
@@ -534,4 +577,16 @@ func (r *DynamicKeyProvider) Tenants() map[string]QuotaLimits {
 		out[tenant] = tenantCeilings(keys)
 	}
 	return out
+}
+
+// KeepStoredCredential gives e the provider credential stored for its key ID
+// when e's external fallback names the same provider and leaves api_key out,
+// or sends back the preview a read returned: a read-modify-write of a key
+// keeps the credential reads never show. Upsert and ReplaceAll apply it; the
+// admin API applies it before its own validation.
+func (r *DynamicKeyProvider) KeepStoredCredential(e *DynamicKeyEntry) {
+	r.mu.RLock()
+	stored := r.byID[e.ID]
+	r.mu.RUnlock()
+	keepStoredCredential(e, stored)
 }

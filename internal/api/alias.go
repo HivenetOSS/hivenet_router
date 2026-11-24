@@ -148,7 +148,7 @@ func (h *Handlers) resolveAlias(c *gin.Context, alias string) bool {
 		CountOnly:  path == "/v1/messages/count_tokens",
 	}
 	if h.healthyAgentCount != nil {
-		env.Healthy = func(m string) bool { return h.healthyAgentCount(m) > 0 }
+		env.Healthy = func(m string) bool { return h.healthyForRequest(c, m) > 0 }
 	}
 	if h.estimator != nil {
 		// EstimatorBytes is the unit the estimator's per-model ratio is learned

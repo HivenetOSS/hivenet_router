@@ -29,7 +29,7 @@ import (
 // Implemented by *metrics.RouterMetrics; may be nil (e.g. in unit tests).
 type QueueMetrics interface {
 	QueueDepthUpdated(model string, depth int)
-	QueueWaitObserved(model string, durationSeconds float64)
+	QueueWaitObserved(poolKey string, durationSeconds float64) // poolKey: domain.PoolKey(model, reservation)
 }
 
 var log = logging.Logger("policy")
@@ -382,21 +382,37 @@ func (e *Executor) SetNamedPoliciesFromSnapshot(named map[string]*Policy) {
 // capability filters agent selection to only agents whose Metadata.Capability
 // matches. Pass domain.CapabilityLLM ("llm") for chat completions.
 func (e *Executor) NewSession(model, capability string) *Session {
+	return e.NewSessionWithStrategy(model, "", capability)
+}
+
+// NewSessionWithStrategy is NewSession with the ranking strategy of every step
+// (the primary step and each fallback_chain step) replaced by strategy, the
+// one the request's API key chose. Only the ranking changes: each step's match
+// filter, exclude_if gates and max_tries, and the model's admission limits,
+// stay the policy's. An empty strategy keeps the policy's own. The caller
+// passes an implemented strategy (policy.KnownStrategy).
+func (e *Executor) NewSessionWithStrategy(model, strategy, capability string) *Session {
 	s := e.state.Load() // single atomic load — global and per-model are always consistent
 	pol := s.global
 	if mp, ok := s.modelPolicies[model]; ok {
 		pol = mp
 	}
+	withStrategy := func(step PolicyStep) PolicyStep {
+		if strategy != "" {
+			step.Strategy = strategy
+		}
+		return step
+	}
 
 	// Flatten primary step + fallback chain into a single linear slice.
 	steps := make([]resolvedStep, 0, 1+len(pol.FallbackChain))
-	steps = append(steps, e.resolve("routing_policy", pol.RoutingPolicy))
+	steps = append(steps, e.resolve("routing_policy", withStrategy(pol.RoutingPolicy)))
 	for i, fb := range pol.FallbackChain {
 		name := fb.Name
 		if name == "" {
 			name = fmt.Sprintf("fallback_chain[%d]", i)
 		}
-		steps = append(steps, e.resolve(name, fb.PolicyStep))
+		steps = append(steps, e.resolve(name, withStrategy(fb.PolicyStep)))
 	}
 
 	return &Session{
@@ -479,7 +495,25 @@ type Session struct {
 	lastGates []gateDiag
 	// prefix holds the request's prefix anchors (SetPrefix), nil if none.
 	prefix *PrefixRequest
+
+	// scope bounds the candidates by the country they declare (SetScope);
+	// empty means no bound.
+	scope domain.Scope
+
+	// reservation is the pool the request may use (SetReservation): the
+	// agents reserved for it, or the shared agents when empty.
+	reservation string
 }
+
+// SetReservation sends the session to one pool: the agents whose
+// reserved_for is reservation, or, when empty, the agents reserved for no one.
+// A hard filter on every step, like the scope.
+func (s *Session) SetReservation(reservation string) { s.reservation = reservation }
+
+// SetScope bounds the session's candidates to agents whose declared country
+// is inside scope, on every step: a hard filter no policy step can widen. An
+// empty scope sets no bound.
+func (s *Session) SetScope(scope domain.Scope) { s.scope = scope }
 
 // WantsPrefix reports whether a step of this session routes on the request's
 // prefix anchors, so the caller computes them only then.
@@ -551,7 +585,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 			// per-model wait queue instead of immediately escalating to a fallback
 			// step. The goroutine wakes when a slot is freed or new capacity joins.
 			if s.lastReason == ErrNoCapacity && s.executor.defaultQueueDepth > 0 {
-				queue := s.executor.getOrCreateQueue(s.model)
+				queue := s.executor.getOrCreateQueue(domain.PoolKey(s.model, s.reservation))
 				_, queueSpan := otel.Tracer("hivenet-router").Start(ctx, "queue_wait",
 					trace.WithAttributes(attribute.String("model", s.model)),
 				)
@@ -565,7 +599,7 @@ func (s *Session) Select(ctx context.Context) (*domain.Agent, error) {
 				// the metric useless for observing actual dispatch latency.
 				if waitErr == nil {
 					if s.executor.queueMetrics != nil {
-						s.executor.queueMetrics.QueueWaitObserved(s.model, elapsed.Seconds())
+						s.executor.queueMetrics.QueueWaitObserved(domain.PoolKey(s.model, s.reservation), elapsed.Seconds())
 					}
 					queueSpan.SetAttributes(attribute.Float64("queue.wait_ms", float64(elapsed.Milliseconds())))
 				} else {
@@ -758,6 +792,18 @@ func (s *Session) buildCandidates(step *resolvedStep) []ScoredCandidate {
 		// Capability filter: only route to agents that serve the requested type.
 		if s.capability != "" && agent.Metadata.Capability != s.capability {
 			filterMiss["capability"]++
+			continue
+		}
+		// Scope (sovereignty): only agents in a country the request may be
+		// served in. Applied before the policy, so no step can widen it.
+		if s.scope != "" && !s.scope.AllowsCountry(agent.Metadata.Country) {
+			filterMiss["scope"]++
+			continue
+		}
+		// Pool (dedicated replicas): a reserved agent serves only its
+		// reservation's keys, a shared one only keys without a reservation.
+		if agent.Metadata.ReservedFor != s.reservation {
+			filterMiss["reservation"]++
 			continue
 		}
 		// Layer 1: static match filter.
