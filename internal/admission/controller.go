@@ -105,6 +105,7 @@ type modelState struct {
 	queueMu     sync.Mutex                // orders the changes of waiting and their reports
 	bigWaiting  atomic.Int32              // parked requests larger than the whole budget
 	parked      atomic.Int32              // requests waiting for room (parked or queued), for Saturated
+	limitsAt    atomic.Int64              // unix ns when budget and maxInflight were last set by an admission attempt
 	lastPoll    atomic.Int64              // unix ns of the last re-check of the pool (see takePoll)
 
 	// lastActive is the unix-nano time of the last stateFor lookup, read by
@@ -142,7 +143,7 @@ func (c *Controller) SweepIdle(ttl time.Duration) int {
 	defer c.mu.Unlock()
 	for model, s := range c.models {
 		s.mu.Lock()
-		idle := s.sumW == 0 && s.count == 0 && s.lastActive.Load() < cutoff
+		idle := s.sumW == 0 && s.count == 0 && s.parked.Load() == 0 && s.lastActive.Load() < cutoff
 		s.mu.Unlock()
 		if idle {
 			delete(c.models, model)
@@ -336,13 +337,22 @@ func (c *Controller) Occupancy(model string) (sumW int64, count int) {
 	return s.sumW, s.count
 }
 
+// saturationFresh is how long the budget and in-flight limit an admission
+// attempt saw are trusted by Saturated. Requests redirected because the model
+// looked full never reach admission, so without this bound a limit seen
+// before new replicas joined would keep the model looking full: past it, the
+// next request tries admission again with the current limits.
+const saturationFresh = time.Second
+
 // Saturated reports whether model is full on this router: a request is
 // already waiting for room, or the in-flight sum or count has reached the
-// last budget or in-flight limit an admission saw. A new request would have
-// to wait, so the router may send it to a sibling site that still has room
-// (the overload spill, contract 3 §3). With a site-wide pool the local sums
-// are only this router's share, so there the waiting requests are the signal.
-// A model never seen is not saturated. It never creates state.
+// budget or in-flight limit an admission attempt saw within the last
+// saturationFresh. A new request would have to wait, so the router may send
+// it to a sibling site that still has room (the overload spill). With a
+// site-wide pool the local sums are only this router's share, so there the
+// waiting requests are the signal; the request that finds the pool empty is
+// redirected at admission instead (see the api package). A model never seen
+// is not saturated. It never creates state.
 func (c *Controller) Saturated(model string) bool {
 	c.mu.Lock()
 	s := c.models[model]
@@ -352,6 +362,9 @@ func (c *Controller) Saturated(model string) bool {
 	}
 	if s.parked.Load() > 0 {
 		return true
+	}
+	if time.Since(time.Unix(0, s.limitsAt.Load())) > saturationFresh {
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -364,6 +377,7 @@ func (s *modelState) tryReserve(weight, budget int64, maxInflight int) bool {
 	s.mu.Lock()
 	s.budget = budget
 	s.maxInflight = maxInflight
+	s.limitsAt.Store(time.Now().UnixNano())
 	if budget > 0 && s.sumW+weight > budget {
 		s.mu.Unlock()
 		return false

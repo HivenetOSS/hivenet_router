@@ -337,21 +337,40 @@ func TestTarget_Hints(t *testing.T) {
 	}
 }
 
-// TestSpillTarget: the overload spill only goes to a warm sibling that is
-// not full, by fresh hints; ok before busy; ties in session order; never
-// without fresh hints; the reason says why there is no target.
+// homeKey returns a key whose home set (top 2 by H(key, model, site) over
+// sites) is exactly want, in any order.
+func homeKey(t *testing.T, model string, sites []string, want ...string) string {
+	t.Helper()
+	for k := 0; k < 10000; k++ {
+		key := fmt.Sprintf("key-%d", k)
+		cands := append([]string(nil), sites...)
+		sort.Slice(cands, func(i, j int) bool { return h(key, model, cands[i]) > h(key, model, cands[j]) })
+		got := cands[:2]
+		sort.Strings(got)
+		w := append([]string(nil), want...)
+		sort.Strings(w)
+		if fmt.Sprint(got) == fmt.Sprint(w) {
+			return key
+		}
+	}
+	t.Fatalf("no key with home set %v", want)
+	return ""
+}
+
+// TestSpillTarget: the overload spill only goes to one of the key's two home
+// sites, counted with this site included; only to a warm one that is not
+// full, by fresh hints; ok before busy; ties in session order; a placement
+// without a hint counts as busy. The reason says why there is no target.
 func TestSpillTarget(t *testing.T) {
-	key, session := "key-1", "s"
-	order := expected(key, session, "m", []string{"a", "b"})
-	first, second := order[0], order[1]
-	build := func(hFirst, hSecond *redirect.Hint, expire time.Time) *redirect.Map {
+	sites := []string{"self", "a", "b"}
+	build := func(ha, hb *redirect.Hint, expire time.Time) *redirect.Map {
 		d := redirect.MapDoc{
 			Schema: 3, Version: u64(1), Region: "eu",
 			Sites: []redirect.Site{mkSite("self", "FR", yes), mkSite("a", "FR", yes), mkSite("b", "FR", yes)},
 			Placements: []redirect.Placement{
-				place("m", redirect.KindChat, "self", yes, nil),
-				place("m", redirect.KindChat, first, yes, hFirst),
-				place("m", redirect.KindChat, second, yes, hSecond),
+				place("m", redirect.KindChat, "self", yes, &redirect.Hint{Load: redirect.LoadFull}),
+				place("m", redirect.KindChat, "a", yes, ha),
+				place("m", redirect.KindChat, "b", yes, hb),
 			},
 			HintsExpireAt: expire.UTC().Format(time.RFC3339),
 		}
@@ -361,79 +380,117 @@ func TestSpillTarget(t *testing.T) {
 		}
 		return m
 	}
+	spill := func(m *redirect.Map, key, session, from string) (string, string) {
+		site, reason, ok := m.SpillTarget(redirect.TargetRequest{
+			Model: "m", Kind: redirect.KindChat, Self: "self", From: from,
+			KeyID: key, Session: session, Scope: redirect.ScopeAll, Now: time.Now(),
+		})
+		if ok != (site.ID != "") {
+			t.Fatalf("ok %v with site %q", ok, site.ID)
+		}
+		return site.ID, reason
+	}
 	fresh, stale := time.Now().Add(time.Hour), time.Now().Add(-time.Hour)
+	ok := &redirect.Hint{Load: redirect.LoadOK}
 	busy, full, cold := &redirect.Hint{Load: redirect.LoadBusy}, &redirect.Hint{Load: redirect.LoadFull}, &redirect.Hint{Warm: no}
-	cases := []struct {
+
+	// Landing on a home site: the other home is the only target, whatever
+	// the load of the third site.
+	keyA := homeKey(t, "m", sites, "self", "a")
+	for _, tc := range []struct {
+		name         string
+		ha, hb       *redirect.Hint
+		want, reason string
+	}{
+		{"other home ok", ok, ok, "a", ""},
+		{"other home busy, third site ok: still the other home", busy, ok, "a", ""},
+		{"other home without a hint: sent anyway", nil, ok, "a", ""},
+		{"other home full: no spill, never the third site", full, ok, "", redirect.SpillAllFull},
+		{"other home cold: no spill", cold, ok, "", redirect.SpillAllFull},
+	} {
+		t.Run("home site/"+tc.name, func(t *testing.T) {
+			if got, reason := spill(build(tc.ha, tc.hb, fresh), keyA, "s", "self"); got != tc.want || reason != tc.reason {
+				t.Fatalf("got (%q, %q), want (%q, %q)", got, reason, tc.want, tc.reason)
+			}
+		})
+	}
+
+	// Landing outside the home set: power of two choices over the two homes.
+	keyAB := homeKey(t, "m", sites, "a", "b")
+	order := expected(keyAB, "s", "m", []string{"a", "b"})
+	first, second := order[0], order[1]
+	hints := func(hFirst, hSecond *redirect.Hint) (ha, hb *redirect.Hint) {
+		if first == "a" {
+			return hFirst, hSecond
+		}
+		return hSecond, hFirst
+	}
+	for _, tc := range []struct {
 		name            string
 		hFirst, hSecond *redirect.Hint
 		expire          time.Time
 		want, reason    string
 	}{
-		{"both ok: session order", nil, nil, fresh, first, ""},
+		{"both ok: session order", ok, ok, fresh, first, ""},
 		{"both busy: session order", busy, busy, fresh, first, ""},
-		{"first busy, second ok: the less loaded", busy, nil, fresh, second, ""},
-		{"first ok, second busy", nil, busy, fresh, first, ""},
+		{"first busy, second ok: the less loaded", busy, ok, fresh, second, ""},
+		{"first without a hint (busy), second ok", nil, ok, fresh, second, ""},
+		{"both without a hint: session order", nil, nil, fresh, first, ""},
 		{"first full: second", full, busy, fresh, second, ""},
-		{"first cold: never spill to a cold site", cold, nil, fresh, second, ""},
+		{"first cold: never a cold site", cold, ok, fresh, second, ""},
 		{"all full", full, full, fresh, "", redirect.SpillAllFull},
-		{"full and cold", full, cold, fresh, "", redirect.SpillAllFull},
-		{"hints expired: no spill", nil, nil, stale, "", redirect.SpillHintsExpired},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := build(tc.hFirst, tc.hSecond, tc.expire)
-			site, reason, ok := m.SpillTarget(redirect.TargetRequest{
-				Model: "m", Kind: redirect.KindChat, Self: "self", From: "self",
-				KeyID: key, Session: session, Scope: redirect.ScopeAll, Now: time.Now(),
-			})
-			if site.ID != tc.want || reason != tc.reason || ok != (tc.want != "") {
-				t.Fatalf("got (%q, %q, %v), want (%q, %q)", site.ID, reason, ok, tc.want, tc.reason)
+		{"hints expired: no spill", ok, ok, stale, "", redirect.SpillHintsExpired},
+	} {
+		t.Run("outside home/"+tc.name, func(t *testing.T) {
+			ha, hb := hints(tc.hFirst, tc.hSecond)
+			if got, reason := spill(build(ha, hb, tc.expire), keyAB, "s", "self"); got != tc.want || reason != tc.reason {
+				t.Fatalf("got (%q, %q), want (%q, %q)", got, reason, tc.want, tc.reason)
 			}
 		})
 	}
 
-	t.Run("scope, origin and kind filter like the miss", func(t *testing.T) {
+	t.Run("one site in scope: no candidate, before the hints are read", func(t *testing.T) {
 		m := redirect.NewMap(domains)
-		d := doc(1)
-		d.HintsExpireAt = fresh.UTC().Format(time.RFC3339)
-		if err := m.Replace(d); err != nil {
+		d := redirect.MapDoc{Schema: 3, Version: u64(1), Region: "eu",
+			Sites:      []redirect.Site{mkSite("self", "FR", yes), mkSite("de", "DE", yes)},
+			Placements: []redirect.Placement{place("m", redirect.KindChat, "self", yes, nil), place("m", redirect.KindChat, "de", yes, nil)}}
+		if err := m.Replace(d); err != nil { // no hints at all: hints_expired would be wrong here
 			t.Fatal(err)
 		}
-		for _, tc := range []struct {
-			req    redirect.TargetRequest
-			want   string
-			reason string
-		}{
-			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:FR"}, "fr-2", ""},
-			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-2", Scope: "country:FR"}, "", redirect.SpillNoCandidate},
-			{redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", Scope: "country:IT"}, "", redirect.SpillNoCandidate},
-			{redirect.TargetRequest{Model: "m", Kind: redirect.KindEmbedding, Self: "fr-1", From: "fr-1", Scope: redirect.ScopeAll}, "", redirect.SpillNoCandidate},
-		} {
-			tc.req.Now = time.Now()
-			site, reason, _ := m.SpillTarget(tc.req)
-			if site.ID != tc.want || reason != tc.reason {
-				t.Errorf("%+v: got (%q, %q), want (%q, %q)", tc.req, site.ID, reason, tc.want, tc.reason)
-			}
+		site, reason, _ := m.SpillTarget(redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "self", From: "self", Scope: "country:FR", Now: time.Now()})
+		if site.ID != "" || reason != redirect.SpillNoCandidate {
+			t.Fatalf("got (%q, %q), want no target, no_candidate", site.ID, reason)
 		}
 	})
 
-	t.Run("home set is two, as for the miss", func(t *testing.T) {
+	t.Run("the origin is never a target", func(t *testing.T) {
+		if got, reason := spill(build(ok, ok, fresh), keyAB, "s", first); got != second || reason != "" {
+			t.Fatalf("from %s: got (%q, %q), want %s", first, got, reason, second)
+		}
+	})
+
+	t.Run("one key is only ever served by its two home sites", func(t *testing.T) {
 		m := redirect.NewMap(domains)
-		d := doc(1)
+		d := doc(1) // m on fr-2, de-1, us-1; fr-1 is the entry and not placed
+		d.Placements = append(d.Placements, place("m", redirect.KindChat, "fr-1", yes, nil))
 		d.HintsExpireAt = fresh.UTC().Format(time.RFC3339)
 		if err := m.Replace(d); err != nil {
 			t.Fatal(err)
 		}
-		used := map[string]bool{}
-		for s := 0; s < 500; s++ {
-			site, _, ok := m.SpillTarget(redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: "fr-1", From: "fr-1", KeyID: "key-1", Session: fmt.Sprint(s), Scope: redirect.ScopeAll, Now: time.Now()})
-			if !ok {
-				t.Fatal("no target")
+		all := []string{"fr-1", "fr-2", "de-1", "us-1"}
+		for k := 0; k < 200; k++ {
+			key := fmt.Sprint("key-", k)
+			home := append([]string(nil), all...)
+			sort.Slice(home, func(i, j int) bool { return h(key, "m", home[i]) > h(key, "m", home[j]) })
+			home = home[:2]
+			for _, self := range all {
+				for s := 0; s < 5; s++ {
+					site, _, ok := m.SpillTarget(redirect.TargetRequest{Model: "m", Kind: redirect.KindChat, Self: self, From: self, KeyID: key, Session: fmt.Sprint(s), Scope: redirect.ScopeAll, Now: time.Now()})
+					if ok && site.ID != home[0] && site.ID != home[1] {
+						t.Fatalf("key %s landing on %s spilled to %s, outside its home set %v", key, self, site.ID, home)
+					}
+				}
 			}
-			used[site.ID] = true
-		}
-		if len(used) != 2 {
-			t.Fatalf("one key reached %d sites (%v), want 2", len(used), used)
 		}
 	})
 }

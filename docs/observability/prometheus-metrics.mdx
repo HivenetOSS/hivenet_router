@@ -1599,7 +1599,7 @@ These series exist only when [cross-site redirect](/routing/cross-site-redirect)
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `hivenet_redirects_total` | Counter | `model`, `site`, `hop`, `reason` | `307` responses to a sibling site; `hop="2"` means the sibling map was stale or the model was full there too; `reason` is `miss` or `overload` |
+| `hivenet_redirects_total` | Counter | `model`, `site`, `hop`, `reason` | `307` responses to a sibling site; `hop="2"` means the sibling map was stale; `reason` is `miss` or `overload` |
 | `hivenet_overload_spill_skipped_total` | Counter | `model`, `reason` | Requests for a model full on this router that the overload spill did not redirect: `hints_expired`, `no_candidate` or `all_full` |
 | `hivenet_redirect_rejections_total` | Counter | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key`, `body` |
 | `hivenet_sibling_map_version` | Gauge | None | Version of the sibling map this router holds; `0` before the first push |

@@ -812,3 +812,55 @@ func TestSaturated(t *testing.T) {
 		r2.Release()
 	})
 }
+
+// TestSaturated_LimitGoesStale: the budget an admission saw is trusted for a
+// second only, so replicas that joined since are tried again instead of
+// spilling forever on an old limit. A waiting request always counts.
+func TestSaturated_LimitGoesStale(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	r := c.Admit(context.Background(), model, 1, false, 0, 1)
+	if r == nil || !c.Saturated(model) {
+		t.Fatal("1 of 1 in flight: saturated")
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if c.Saturated(model) {
+		t.Fatal("a limit seen over a second ago must not mark the model full")
+	}
+	if c.Admit(context.Background(), model, 1, false, 0, 1) != nil {
+		t.Fatal("still 1 of 1: refused")
+	}
+	if !c.Saturated(model) {
+		t.Fatal("the refused attempt refreshed the limit: saturated again")
+	}
+	r.Release()
+}
+
+// refusingPool is a site-wide pool with no room at all.
+type refusingPool struct{}
+
+func (refusingPool) Take(context.Context, string, int64, int64, int) bool { return false }
+func (refusingPool) Adjust(string, int64, int)                            {}
+func (refusingPool) Ceiling(string, int64) int64                          { return 0 }
+
+// TestSweepIdle_KeepsParked: a model with a request waiting for room is not
+// idle, even when nothing of it is in flight on this router (site-wide pool).
+func TestSweepIdle_KeepsParked(t *testing.T) {
+	c := admission.NewController(1.0, 0)
+	c.SetPool(refusingPool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.AdmitWithin(ctx, model, 1, false, 10, 0, 5*time.Second); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for !c.Saturated(model) {
+		if time.Now().After(deadline) {
+			t.Fatal("parked request not seen")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if n := c.SweepIdle(time.Millisecond); n != 0 || !c.Saturated(model) {
+		t.Fatalf("swept %d, saturated %v: a parked request must keep the state", n, c.Saturated(model))
+	}
+	cancel()
+	<-done
+}

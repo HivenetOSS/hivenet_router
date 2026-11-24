@@ -808,7 +808,20 @@ func (h *Handlers) enforceOccupancyBudget(c *gin.Context, req *domain.ChatReques
 	if h.admission != nil && (poolBudget > 0 || poolInflight > 0) {
 		// Each pool has its own budget: a reserved pool's load never fills the
 		// shared one, and the reverse.
-		res := admitOccupancy(c, h.admission, domain.PoolKey(req.Model, requestPool(c)), footprint, grows, pool)
+		key := domain.PoolKey(req.Model, requestPool(c))
+		var res *admission.Reservation
+		// A request the overload spill may redirect waits only briefly for
+		// room: with none, it goes to a sibling that has room instead of
+		// waiting here. With no such sibling it waits as before.
+		if h.mayOverloadSpill(c) {
+			budget, inflight := pool()
+			if res = h.admission.AdmitWithin(c.Request.Context(), key, footprint, grows, budget, inflight, spillProbe); res == nil && h.spillAtAdmission(c, req.Model) {
+				return nil, false
+			}
+		}
+		if res == nil {
+			res = admitOccupancy(c, h.admission, key, footprint, grows, pool)
+		}
 		if res == nil {
 			h.fireAdmissionReject("b2", req.Model)
 			if !rejectReleased(c, req.Model) {

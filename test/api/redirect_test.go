@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/domain"
 	"hivenet_router/internal/metrics"
+	"hivenet_router/internal/policy"
 	"hivenet_router/internal/redirect"
 
 	"github.com/gin-gonic/gin"
@@ -98,6 +101,17 @@ func newSiteWith(t *testing.T, id string, healthy map[string]int, keys *auth.Dyn
 // (nil = none), the state the overload spill reads.
 func newSiteAdmission(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider, iso api.Isolation, ctrl *admission.Controller) *testSite {
 	t.Helper()
+	return newSitePolicy(t, id, healthy, keys, iso, ctrl, nil)
+}
+
+// newSitePolicy is newSiteAdmission with a policy for every model (nil =
+// none), so the handler's occupancy gate runs.
+func newSitePolicy(t *testing.T, id string, healthy map[string]int, keys *auth.DynamicKeyProvider, iso api.Isolation, ctrl *admission.Controller, pol *policy.Policy) *testSite {
+	t.Helper()
+	var exec *policy.Executor
+	if pol != nil {
+		exec = policy.NewExecutor(nil, nil, pol, 0, 0)
+	}
 	s := &testSite{queue: make(chan *domain.PendingRequest, 4)}
 	s.rd = &redirect.Redirector{
 		Self: id, Map: redirect.NewMap(testDomains), Signer: testSigner(t), Replay: redirect.NewReplayGuard(),
@@ -117,7 +131,7 @@ func newSiteAdmission(t *testing.T, id string, healthy map[string]int, keys *aut
 	healthyCount := func(model string) int { return healthy[model] }
 	h := api.NewHandlers(
 		nil, nil, s.queue, 2*time.Second,
-		nil, nil, nil, lim,
+		exec, nil, nil, lim,
 		nil, nil, nil, nil, keys, nil,
 		healthyCount,
 		nil, ctrl, nil, nil, nil, nil, nil,
@@ -137,6 +151,7 @@ func inferenceEngine(h *api.Handlers, provider auth.Provider, lim *countingLimit
 			h.RedirectDecision(), api.QuotaMiddleware(lim, metrics.NewRouterMetrics(), healthy))
 	inference.POST("/chat/completions", h.Passthrough)
 	inference.POST("/messages", h.Passthrough)
+	inference.POST("/messages/count_tokens", h.Passthrough)
 	inference.POST("/embeddings", h.Embeddings)
 	inference.POST("/rerank", h.Rerank)
 	return e
@@ -445,19 +460,143 @@ func TestRedirect_OverloadSpill(t *testing.T) {
 		})
 	}
 
-	t.Run("scope EU: the less loaded of the two homes", func(t *testing.T) {
+	t.Run("scope EU, landing outside the key's homes: the less loaded of the two", func(t *testing.T) {
+		if got := homes("key-1", "m", []string{"a", "b", "c"}); !reflect.DeepEqual(got, []string{"b", "c"}) {
+			t.Fatalf("test assumes key-1's homes over a, b, c are b and c, got %v", got)
+		}
+		other := "c" // ok, while b is busy
 		ctrl := admission.NewController(1, 0)
 		a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
-		push(t, spillDoc(&redirect.Hint{Load: redirect.LoadBusy}, fresh), a) // b busy, c ok
+		d := spillDoc(&redirect.Hint{Load: redirect.LoadBusy}, fresh) // b busy
+		for i := range d.Placements {
+			if d.Placements[i].Model == "m" && d.Placements[i].Site == "c" {
+				d.Placements[i].Hint = &redirect.Hint{Load: redirect.LoadOK} // without a hint c would count as busy too
+			}
+		}
+		push(t, d, a)
 		saturate(t, ctrl)
 		for i := 0; i < 20; i++ {
 			h := scoped("EU")
 			h["X-Session-ID"] = fmt.Sprint(i)
-			if loc, _ := locationToken(t, send(a, chatPath, chatBody, h)); loc.Host != "c.example.com" {
-				t.Fatalf("session %d: Location %s, want c (ok) over b (busy)", i, loc)
+			if loc, _ := locationToken(t, send(a, chatPath, chatBody, h)); loc.Host != other+".example.com" {
+				t.Fatalf("session %d: Location %s, want the other home %s", i, loc, other)
 			}
 		}
 	})
+
+	t.Run("one site in the scope: no 307", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+		d := spillDoc(nil, fresh)
+		var kept []redirect.Placement
+		for _, p := range d.Placements {
+			if p.Model != "m" || p.Site != "b" { // FR: only a is left
+				kept = append(kept, p)
+			}
+		}
+		d.Placements = kept
+		push(t, d, a)
+		saturate(t, ctrl)
+		done := sendAsync(a, chatPath, chatBody, bearer())
+		serveOne(t, a)
+		if w := <-done; w.Code != http.StatusOK || len(a.redirs) != 0 || !reflect.DeepEqual(a.skipped, []string{"m/no_candidate"}) {
+			t.Fatalf("status %d redirects %v skipped %v, want 200, none, no_candidate", w.Code, a.redirs, a.skipped)
+		}
+	})
+
+	t.Run("count_tokens is never spilled", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		a := newSiteAdmission(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+		push(t, spillDoc(nil, fresh), a)
+		saturate(t, ctrl)
+		w := send(a, "/v1/messages/count_tokens", []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), bearer())
+		if w.Header().Get("Location") != "" || len(a.redirs) != 0 {
+			t.Fatalf("status %d Location %q redirects %v, want no redirect", w.Code, w.Header().Get("Location"), a.redirs)
+		}
+	})
+
+	t.Run("a redirected request is not spilled again", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		b := newSiteAdmission(t, "b", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl)
+		push(t, spillDoc(nil, fresh), b)
+		saturate(t, ctrl)
+		tok := testSigner(t).Sign(redirect.Claims{KeyID: "key-1", RequestID: "11111111-2222-3333-4444-555555555555", Model: "m",
+			Scope: redirect.ScopeAll, From: "a", Site: "b", Path: chatPath, Hop: 1, BodySHA: redirect.BodySHA(chatBody)}, time.Now())
+		done := sendAsync(b, chatPath+"?rt="+tok, chatBody, nil)
+		serveOne(t, b)
+		if w := <-done; w.Code != http.StatusOK || len(b.redirs) != 0 {
+			t.Fatalf("status %d redirects %v, want 200 at b and no redirect", w.Code, b.redirs)
+		}
+	})
+
+	t.Run("full found only at admission: that request spills too", func(t *testing.T) {
+		// Park 0, one request in flight per replica: the first request takes
+		// the slot. After the limit seen is older than a second the check
+		// before quota no longer trusts it, so the next request reaches
+		// admission (one per-minute charge), finds no room and is spilled
+		// there. The one after it is spilled before quota (no charge).
+		ctrl := admission.NewController(1, 0)
+		a := newSitePolicy(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl, &policy.Policy{MaxInflight: 1})
+		push(t, spillDoc(nil, fresh), a)
+		first := sendAsync(a, chatPath, chatBody, bearer())
+		var p *domain.PendingRequest
+		select {
+		case p = <-a.queue:
+		case <-time.After(2 * time.Second):
+			t.Fatal("first request not queued")
+		}
+		time.Sleep(1100 * time.Millisecond)
+		before := *a.charges
+		if loc, c := locationToken(t, send(a, chatPath, chatBody, bearer())); loc.Host != "b.example.com" || c.Hop != 1 {
+			t.Fatalf("at admission: Location %s, want b", loc)
+		}
+		if got := *a.charges - before; got != 1 {
+			t.Errorf("spilled at admission: %d per-minute charge(s) here, want 1", got)
+		}
+		before = *a.charges
+		if loc, _ := locationToken(t, send(a, chatPath, chatBody, bearer())); loc.Host != "b.example.com" {
+			t.Fatalf("before quota: Location %s, want b", loc)
+		}
+		if got := *a.charges - before; got != 0 {
+			t.Errorf("spilled before quota: %d charge(s) here, want 0", got)
+		}
+		if !reflect.DeepEqual(a.redirs, []string{"m→b@1/overload", "m→b@1/overload"}) {
+			t.Errorf("redirects %v", a.redirs)
+		}
+		p.Response <- &domain.ChatResponse{RawBytes: []byte(`{"served":true}`)}
+		<-first
+	})
+
+	t.Run("full at admission, no sibling with room: refused here as before", func(t *testing.T) {
+		ctrl := admission.NewController(1, 0)
+		a := newSitePolicy(t, "a", map[string]int{"m": 1}, testKeys(t), api.Isolation{}, ctrl, &policy.Policy{MaxInflight: 1})
+		push(t, spillDoc(&redirect.Hint{Load: redirect.LoadFull}, fresh), a)
+		first := sendAsync(a, chatPath, chatBody, bearer())
+		p := <-a.queue
+		w := send(a, chatPath, chatBody, bearer())
+		if w.Code != http.StatusTooManyRequests || w.Header().Get("Location") != "" {
+			t.Fatalf("status %d Location %q, want 429 here", w.Code, w.Header().Get("Location"))
+		}
+		if !reflect.DeepEqual(a.skipped, []string{"m/all_full"}) {
+			t.Errorf("skipped %v, want one all_full (counted once per request)", a.skipped)
+		}
+		p.Response <- &domain.ChatResponse{RawBytes: []byte(`{"served":true}`)}
+		<-first
+	})
+}
+
+// homes returns key's two home sites for model over sites (top 2 by
+// H(key, model, site)), sorted by name.
+func homes(key, model string, sites []string) []string {
+	hh := func(site string) uint64 {
+		sum := sha256.Sum256([]byte(key + "\x00" + model + "\x00" + site))
+		return binary.BigEndian.Uint64(sum[:8])
+	}
+	cands := append([]string(nil), sites...)
+	sort.Slice(cands, func(i, j int) bool { return hh(cands[i]) > hh(cands[j]) })
+	out := cands[:2]
+	sort.Strings(out)
+	return out
 }
 
 // disable rewires s with redirect disabled: SetRedirect never called and the

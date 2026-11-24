@@ -143,12 +143,16 @@ func (h *Handlers) RedirectTarget() gin.HandlerFunc {
 // landed in. A redirected request keeps the scope of its token. A request
 // with a scope is served here only if a healthy agent here is inside it.
 //
-// Overload spill: when a healthy agent here serves the model but the model is
-// full here (admission.Controller.Saturated on the shared pool), the request
-// goes to a sibling the map's fresh hints show warm and not full
+// Overload spill (contract 3 §7): when a healthy agent here serves the model
+// but the model is already full here (admission.Controller.Saturated on the
+// shared pool), a request at its first site goes to the other home site of
+// its key if the map's fresh hints show it warm and not full
 // (redirect.Map.SpillTarget), so it runs on capacity that already exists
-// instead of waiting here. Scaling stays the fleet controller's: with no
-// such sibling the request is handled here as before (queue, then 429).
+// instead of waiting here. Scaling stays the fleet controller's: with no such
+// sibling the request is handled here as before (queue, then 429). A request
+// that finds the model full only at admission is spilled there
+// (spillAtAdmission). count_tokens, redirected requests and requests held
+// while their model woke are never spilled.
 //
 // A request is served here as before when: redirect is disabled, the key may
 // not use the model (the handler answers 403), a healthy agent here serves
@@ -170,86 +174,141 @@ func (h *Handlers) RedirectDecision() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		info := redirectInfo(c)
-		hop, from := 0, h.redirect.Self
-		if info != nil {
-			hop, from = info.Hop, info.From
-		}
-		reqScope := requestScope(c)
-		if hop >= redirect.MaxHops {
+		if info := redirectInfo(c); info != nil && info.Hop >= redirect.MaxHops {
 			c.Next()
 			return
 		}
-		// Served here: redirected only by the overload spill, when the model
-		// is full here and a sibling has room.
-		reason := redirect.ReasonMiss
 		if h.healthyForRequest(c, model) > 0 {
-			if !h.redirect.Spill || h.admission == nil || !h.admission.Saturated(domain.PoolKey(model, domain.SharedPool)) {
-				c.Next()
+			// Served here: only the overload spill redirects it, when the
+			// model is already full here. A request that finds it full only
+			// at admission is redirected there (spillAtAdmission).
+			if h.mayOverloadSpill(c) && h.admission.Saturated(domain.PoolKey(model, domain.SharedPool)) &&
+				h.redirectRequest(c, model, kind, redirect.ReasonOverload) {
 				return
 			}
-			reason = redirect.ReasonOverload
-		}
-		// A scope from the client or its key bounds both the sites and, at
-		// the target, the agents. Without one the request may go only to
-		// sites in this site's country (or the first router's, after a
-		// redirect), and the target's agents are not filtered.
-		scope := redirect.Scope(reqScope)
-		scopeAgents := scope != ""
-		switch {
-		case scope != "":
-		case info != nil:
-			scope = redirect.Scope(info.Scope)
-		default:
-			scope = h.defaultRedirectScope()
-		}
-		now := time.Now()
-		keyID := c.GetString("key_id")
-		treq := redirect.TargetRequest{
-			Model: model, Kind: kind, Self: h.redirect.Self, From: from,
-			KeyID: keyID, Session: c.GetHeader("X-Session-ID"), Scope: scope, Now: now,
-		}
-		var target redirect.Site
-		var ok bool
-		if reason == redirect.ReasonOverload {
-			var skipped string
-			if target, skipped, ok = h.redirect.Map.SpillTarget(treq); !ok {
-				h.redirect.SpillSkipped(model, skipped)
-			}
-		} else {
-			target, ok = h.redirect.Map.Target(treq)
-		}
-		if !ok {
 			c.Next()
 			return
 		}
-		token := h.redirect.Signer.Sign(redirect.Claims{
-			KeyID:           keyID,
-			RequestID:       c.GetString("request_id"),
-			ClientRequestID: c.GetString(ctxKeyClientRequestID),
-			Model:           model,
-			Scope:           scope,
-			ScopeAgents:     scopeAgents,
-			Strategy:        requestedRoutingStrategy(c),
-			From:            from,
-			Site:            target.ID,
-			Path:            c.Request.URL.Path,
-			Hop:             hop + 1,
-			BodySHA:         redirect.BodySHA(clientBody(c)),
-		}, now)
-		c.Header("Location", redirect.Location(target.URL, c.Request.URL, token))
-		c.Header("Cache-Control", "no-store")
-		// Not abortWithRouterError: a redirect is normal routing, not a failure
-		// for the audit log or the trace. The body explains it to clients that
-		// do not follow redirects (for example plain httpx).
-		msg := fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID)
-		if reason == redirect.ReasonOverload {
-			msg = fmt.Sprintf("model %s is at capacity on site %s and has room on site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, h.redirect.Self, target.ID)
+		if h.redirectRequest(c, model, kind, redirect.ReasonMiss) {
+			return
 		}
-		c.AbortWithStatusJSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
-			domain.ErrCodeModelRedirected, msg, domain.SourceRouter)})
-		h.redirect.Redirected(model, target.ID, hop+1, reason)
+		c.Next()
 	}
+}
+
+// ctxKeySpillTried marks a request the overload spill already looked at and
+// found no target for, so admission does not look (and count) again.
+const ctxKeySpillTried = "spill_tried"
+
+// countTokensPath never uses admission capacity, so it is never spilled.
+const countTokensPath = "/v1/messages/count_tokens"
+
+// spillProbe is how long a request that may be spilled waits for room in
+// admission before it is redirected instead: long enough to ride out a
+// site-wide pool refill by another request, short enough not to be a wait.
+const spillProbe = 50 * time.Millisecond
+
+// mayOverloadSpill reports whether the overload spill may redirect this
+// request: the spill is on and there is an admission gate; it uses capacity
+// (not count_tokens); it arrived at its first site (a redirected request is
+// served where it was sent: a key stays on its two home sites); it is for the
+// shared pool; it was not held while its model woke (the siblings were cold);
+// and the spill has not already found no target for it.
+func (h *Handlers) mayOverloadSpill(c *gin.Context) bool {
+	if h.redirect == nil || !h.redirect.Spill || h.admission == nil {
+		return false
+	}
+	if _, released := c.Get(ctxKeyHoldDeadline); released {
+		return false
+	}
+	return c.Request.URL.Path != countTokensPath && redirectInfo(c) == nil &&
+		requestPool(c) == domain.SharedPool && !c.GetBool(ctxKeySpillTried)
+}
+
+// spillAtAdmission redirects a request that found no room in admission to a
+// sibling with room, instead of waiting here (or being refused). This covers
+// the request that discovers the model is full, which the check before quota
+// cannot see: with a site-wide pool a router's own sums are only its share.
+// The request has already been counted against the key's per-minute request
+// limit here. It reports whether it wrote the 307.
+func (h *Handlers) spillAtAdmission(c *gin.Context, model string) bool {
+	kind := endpointKinds[c.Request.URL.Path]
+	if kind == "" || !h.mayOverloadSpill(c) {
+		return false
+	}
+	return h.redirectRequest(c, model, kind, redirect.ReasonOverload)
+}
+
+// redirectRequest answers 307 to the sibling the map picks for this request
+// (Map.Target for a miss, Map.SpillTarget for an overload) and reports
+// whether it did; with no target it writes nothing.
+func (h *Handlers) redirectRequest(c *gin.Context, model, kind, reason string) bool {
+	info := redirectInfo(c)
+	hop, from := 0, h.redirect.Self
+	if info != nil {
+		hop, from = info.Hop, info.From
+	}
+	// A scope from the client or its key bounds both the sites and, at
+	// the target, the agents. Without one the request may go only to
+	// sites in this site's country (or the first router's, after a
+	// redirect), and the target's agents are not filtered.
+	scope := redirect.Scope(requestScope(c))
+	scopeAgents := scope != ""
+	switch {
+	case scope != "":
+	case info != nil:
+		scope = redirect.Scope(info.Scope)
+	default:
+		scope = h.defaultRedirectScope()
+	}
+	now := time.Now()
+	keyID := c.GetString("key_id")
+	treq := redirect.TargetRequest{
+		Model: model, Kind: kind, Self: h.redirect.Self, From: from,
+		KeyID: keyID, Session: c.GetHeader("X-Session-ID"), Scope: scope, Now: now,
+	}
+	var target redirect.Site
+	var ok bool
+	if reason == redirect.ReasonOverload {
+		var skipped string
+		if target, skipped, ok = h.redirect.Map.SpillTarget(treq); !ok {
+			c.Set(ctxKeySpillTried, true)
+			h.redirect.SpillSkipped(model, skipped)
+		}
+	} else {
+		target, ok = h.redirect.Map.Target(treq)
+	}
+	if !ok {
+		return false
+	}
+	token := h.redirect.Signer.Sign(redirect.Claims{
+		KeyID:           keyID,
+		RequestID:       c.GetString("request_id"),
+		ClientRequestID: c.GetString(ctxKeyClientRequestID),
+		Model:           model,
+		Scope:           scope,
+		ScopeAgents:     scopeAgents,
+		Strategy:        requestedRoutingStrategy(c),
+		From:            from,
+		Site:            target.ID,
+		Path:            c.Request.URL.Path,
+		Hop:             hop + 1,
+		BodySHA:         redirect.BodySHA(clientBody(c)),
+	}, now)
+	c.Header("Location", redirect.Location(target.URL, c.Request.URL, token))
+	c.Header("Cache-Control", "no-store")
+	// Not abortWithRouterError: a redirect is normal routing, not a failure
+	// for the audit log or the trace. The body explains it to clients that
+	// do not follow redirects (for example plain httpx).
+	msg := fmt.Sprintf("model %s is served by site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, target.ID)
+	if reason == redirect.ReasonOverload {
+		msg = fmt.Sprintf("model %s is at capacity on site %s and has room on site %s: repeat this request at the Location URL (enable redirect following in your HTTP client)", model, h.redirect.Self, target.ID)
+		log.Debugf("overload spill: model %s full on site %s, request %s redirected to site %s", model, h.redirect.Self, c.GetString("request_id"), target.ID)
+	}
+	c.AbortWithStatusJSON(http.StatusTemporaryRedirect, domain.RouterErrorResponse{Error: domain.NewRouterError(
+		domain.ErrCodeModelRedirected, msg, domain.SourceRouter)})
+	h.redirect.Redirected(model, target.ID, hop+1, reason)
+	return true
 }
 
 // defaultRedirectScope is the redirect scope of a request that has none

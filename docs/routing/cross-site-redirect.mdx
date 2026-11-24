@@ -39,17 +39,28 @@ Send `X-Session-ID` with a stable value per conversation to spread one key’s c
 
 When healthy agents here serve the model but the model is full here, a new request would only wait in the admission queue or get `429`. The overload spill sends it instead to a sibling that runs the model and has room. It moves requests to capacity that already exists; it never starts replicas. Scaling stays with whatever drives your replica counts.
 
-The model is full here when a request for it already waits for room in the [admission queue](/routing/admission-control), or when its in-flight requests have reached the occupancy budget or the in-flight limit. Only the shared pool counts: a request for [dedicated replicas](/routing/dedicated-replicas) is never redirected.
+The router looks at two moments:
 
-The target is chosen from the same candidates and home set as a redirect for a missing model (steps 1 to 3 above), then:
+- **Before quota.** The model is already full here: a request for it waits for room in the [admission queue](/routing/admission-control), or its in-flight requests reached the occupancy budget or the in-flight limit at the last admission, less than a second ago. The request is redirected before anything is charged to the key.
+- **At admission.** The request itself finds no room (within 50 ms). This is how the first request that meets a full model is redirected too, and the only way to see a full model when several routers of a site share one [occupancy budget](/deploy/multiple-routers). The key's per-minute request limit has already counted it here.
 
-- only while the map's hints are fresh. Without fresh hints the router cannot know who has room, so the request stays here;
-- only a site whose hint is warm and not `load: full`;
-- the less loaded of the two home sites: `ok` before `busy`. Between two equal sites, the session order decides, so a session keeps going to the same site.
+Only these requests are spilled: chat requests (`/v1/chat/completions`, `/v1/messages`) for the shared pool, at the first site they reach. Never `/v1/messages/count_tokens` (it uses no capacity), never embeddings or rerank (they have no occupancy budget), never a request for [dedicated replicas](/routing/dedicated-replicas), never a request that was already redirected, and never a request held while its model [woke from zero](/routing/hold-at-zero).
 
-When no site qualifies, the request is handled here as before, and `hivenet_overload_spill_skipped_total` counts it. The target serves the redirected request like any other; if it is full too, it may spill once more, never back to the site where the request first arrived.
+The target is one of the key's two **home sites** for the model: the two sites in the request's [scope](#scope) that rank highest by a hash of the key ID, the model and the site ID, counting this site too. So:
+
+- landing on one of its home sites, the request can only go to the other one;
+- landing elsewhere, it goes to the less loaded of the two;
+- with a single site serving the model in the scope, nothing is redirected.
+
+One key and model is thus only ever served by its two home sites, under overload too. Among the candidates the router takes, while the map's hints are fresh, only a site whose hint is warm and not `load: full`, `ok` before `busy`; between equal sites the session order decides, so a session keeps going to the same site. A placement without a hint counts as `busy`. Without fresh hints the router cannot know who has room, and nothing is spilled.
+
+When no site qualifies, the request is handled here as before, and `hivenet_overload_spill_skipped_total` counts it. The target serves the redirected request like any other, waiting or refusing there if it is full too; it never redirects it again.
 
 The overload spill is on whenever cross-site redirect is on. It does nothing until the map places the same model on another site in scope. Turn it off with `--redirect-overload-spill=false`.
+
+<Note>
+  **Upgrading.** A multi-site deployment whose map writer sends hints starts spilling on upgrade. `hivenet_redirects_total` gains a `reason` label (`miss` or `overload`): queries that match its full label set need it.
+</Note>
 
 ### Scope
 
@@ -194,8 +205,8 @@ Read the current map with `GET /admin/sibling-map`. Both endpoints return `501` 
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `hivenet_redirects_total` | `model`, `site`, `hop`, `reason` | `307` responses written. `hop="2"` means a site in the map no longer served the model, or the model was full there too. `reason` is `miss` (no healthy agent here serves the model) or `overload` (the [overload spill](#overload-spill)) |
-| `hivenet_overload_spill_skipped_total` | `model`, `reason` | Requests for a model full here that the overload spill did not redirect: `hints_expired`, `no_candidate` (no sibling serves the model in scope) or `all_full` (every sibling is full or cold) |
+| `hivenet_redirects_total` | `model`, `site`, `hop`, `reason` | `307` responses written. `hop="2"` means a site in the map no longer served the model (a spilled request is never redirected again). `reason` is `miss` (no healthy agent here serves the model) or `overload` (the [overload spill](#overload-spill)) |
+| `hivenet_overload_spill_skipped_total` | `model`, `reason` | Requests for a model full here that the overload spill did not redirect: `hints_expired`, `no_candidate` (no other home site serves the model in scope) or `all_full` (every candidate is full or cold) |
 | `hivenet_redirect_rejections_total` | `reason` | Refused redirect tokens: `malformed`, `signature`, `expired`, `clock`, `site`, `path`, `scope`, `replay`, `key` or `body` |
 | `hivenet_sibling_map_version` | None | Version of the map this router holds, `0` before the first push |
 | `hivenet_sibling_map_hints_expired` | None | `1` while the map’s hints are expired or absent and every hint is ignored, else `0` |
@@ -204,7 +215,8 @@ A rising `reason="expired"` count means clients take longer than the token lifet
 
 ## Limitations
 
-- The overload spill acts on this router's own view: the first request that finds the model full waits here; the next ones are redirected. It relies on the map's hints to know which sibling has room, so its choices are as fresh as the last push.
+- The overload spill relies on the map's hints to know which sibling has room, so its choices are as fresh as the last push. Between two pushes, every router of a site may send its overflow to the same sibling.
+- A request spilled at admission counts against the key's per-minute request limit on both sites.
 - A token works once on each router, not once per site: each router remembers used token IDs in its own memory.
 - A client that repeats an already served request at the same redirect URL without its API key is refused with `401`, because that token was used. Repeating the request at the original URL gets a new token, and a client that also sends its API key is served on it as a new request.
 - API keys have no home country or maximum scope yet: the default scope is the country of the site the request landed in, and any request may ask for `EU` or `all`.
