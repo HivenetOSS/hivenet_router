@@ -166,7 +166,7 @@ When a request does not fit, it waits in the model's wait queue:
 
 | Waiting requests | How long a request waits |
 | --- | --- |
-| Up to `--admission-queue-depth` per model (by default `--queue-depth`, `30`) | Until room frees, up to half the request timeout (`--request-timeout`) |
+| Up to `--admission-queue-depth` per model and [pool](/routing/dedicated-replicas#pools) (by default `--queue-depth`, `30`) | Until room frees, up to half the request timeout (`--request-timeout`) |
 | Beyond `--admission-queue-depth` | Up to `HIVENET_ROUTER_ADMIT_PARK_TIMEOUT` (default `250ms`) |
 
 The wait counts toward the request timeout: a request that waited 20 s has 40 s left with the default `60s`. It stops at half the timeout, so an admitted request always has at least the other half to run; a request still waiting then gets `429`.
