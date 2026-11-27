@@ -818,7 +818,7 @@ func (r *Router) Start() error {
 	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
 	r.keysChanged()
 	go r.startGRPCServer()
-	go r.healthMonitor()
+	go r.healthMonitor(processorCtx)
 	go r.processor.Start(processorCtx)
 	go r.runPrefixIndex(processorCtx)
 	go r.startHTTPServer()
@@ -2180,14 +2180,20 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 }
 
 // healthMonitor periodically checks agent heartbeat timestamps and removes dead agents.
-func (r *Router) healthMonitor() {
+func (r *Router) healthMonitor(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.HealthCheckInterval)
 	defer ticker.Stop()
 
 	log.Infof("Health monitor started (check every %v, unhealthy after %v, remove after %v)",
 		r.cfg.HealthCheckInterval, r.cfg.UnhealthyAfter, r.cfg.RemoveAfter)
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		var toRemove []peer.ID
 
 		// Read-only pass: mark unhealthy and collect dead agents.
@@ -2206,6 +2212,24 @@ func (r *Router) healthMonitor() {
 				if agent.IsHealthy() {
 					log.Warnf("Agent %s missed heartbeat, marking unhealthy", id.String()[:8])
 					r.counters.RecordAgentFailure(id)
+					// Fan out the "unregistered" event on the healthy→unhealthy
+					// transition: this is the silent-disconnect case (node crash,
+					// half-open TCP) where the libp2p disconnect notifier never
+					// fires. Without this, the watcher would only learn from the
+					// next 30s snapshot tick or the reaper's later removal, and
+					// the replica would keep billing while nothing can serve it.
+					// Same event shape as the disconnect handler's and the
+					// reaper's; the watcher's debounce collapses the duplicates
+					// a clean disconnect produces when several emitters fire.
+					if r.registrationNotifier != nil {
+						r.registrationNotifier.Publish(domain.RegistrationEvent{
+							EventType:    domain.RegistrationUnregistered,
+							DeploymentID: agent.Metadata.DeploymentID,
+							ReplicaID:    agent.Metadata.ReplicaID,
+							AgentID:      id.String(),
+							Timestamp:    time.Now().UTC(),
+						})
+					}
 				}
 				agent.SetHealthy(false)
 				if err := r.storage.UpdateAgentStatus(id, false, lastSeen); err != nil {
