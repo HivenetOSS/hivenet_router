@@ -127,6 +127,8 @@ Response:
 
 It returns HTTP `200` while the router process is running. It does not report whether agents or inference backends are available.
 
+`/health` runs none of the router's HTTP middleware, so a stalled log output cannot delay its response. Its responses carry no `X-Request-ID` or CORS headers, and the probe does not appear in the HTTP server metrics, traces, access log or audit log.
+
 Use it for load balancers, process monitoring, and liveness probes.
 
 ## Router health
