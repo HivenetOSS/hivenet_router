@@ -395,6 +395,60 @@ type TargetRequest struct {
 	Now         time.Time
 }
 
+// candidate is a placement of the requested model that a redirect may go
+// to, with its site and session score.
+type candidate struct {
+	pl   Placement
+	site Site
+	by   uint64 // session score: H(keyID + "\x00" + session, model, site)
+}
+
+// ranked returns the sibling sites a request may be redirected to: placements
+// of the model and kind inside the scope; the key's home set, the top 2 by
+// H(keyID, model, site); ordered by the session; never this site or the
+// origin. For a miss (contract 3 v3 §3 steps 3–5) this site and the origin are
+// removed before the home set is taken: the model is not served here. For the
+// overload spill (homeIncludesSelf) the home set is taken over every placement
+// in scope, this site included, and only then this site and the origin are
+// removed, so a key is only ever served by its two home sites: landing on one
+// of them leaves the other as the only target, and with a single site in
+// scope there is none. Caller holds m.mu.
+func (m *Map) ranked(req TargetRequest, homeIncludesSelf bool) []candidate {
+	type scored struct {
+		candidate
+		home uint64
+	}
+	var cands []scored
+	for _, pl := range m.byModel[req.Model] {
+		if pl.Kind != req.Kind {
+			continue
+		}
+		if !homeIncludesSelf && (pl.Site == req.Self || pl.Site == req.From) {
+			continue
+		}
+		site := m.sites[pl.Site]
+		if !req.Scope.Contains(site) {
+			continue
+		}
+		cands = append(cands, scored{candidate: candidate{pl: pl, site: site}, home: score(req.KeyID, req.Model, site.ID)})
+	}
+	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].site.ID, cands[j].site.ID) })
+	if len(cands) > homeSize {
+		cands = cands[:homeSize]
+	}
+	session := req.KeyID + "\x00" + req.Session
+	out := make([]candidate, 0, len(cands))
+	for _, c := range cands {
+		if c.site.ID == req.Self || c.site.ID == req.From {
+			continue
+		}
+		c.by = score(session, req.Model, c.site.ID)
+		out = append(out, c.candidate)
+	}
+	sort.Slice(out, func(i, j int) bool { return better(out[i].by, out[j].by, out[i].site.ID, out[j].site.ID) })
+	return out
+}
+
 // Target picks the sibling site for a request (contract 3 v3 §3 steps
 // 3–7): placements of the model and kind, inside the scope, minus this
 // site and the origin; the key's home set (top 2 by H(keyID, model,
@@ -407,40 +461,14 @@ func (m *Map) Target(req TargetRequest) (Site, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	type cand struct {
-		pl       Placement
-		site     Site
-		home, by uint64
-	}
-	var cands []cand
-	for _, pl := range m.byModel[req.Model] {
-		if pl.Kind != req.Kind || pl.Site == req.Self || pl.Site == req.From {
-			continue
-		}
-		site := m.sites[pl.Site]
-		if !req.Scope.Contains(site) {
-			continue
-		}
-		cands = append(cands, cand{pl: pl, site: site, home: score(req.KeyID, req.Model, site.ID)})
-	}
+	cands := m.ranked(req, false)
 	if len(cands) == 0 {
 		return Site{}, false
 	}
-
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].home, cands[j].home, cands[i].site.ID, cands[j].site.ID) })
-	if len(cands) > homeSize {
-		cands = cands[:homeSize]
-	}
-	session := req.KeyID + "\x00" + req.Session
-	for i := range cands {
-		cands[i].by = score(session, req.Model, cands[i].site.ID)
-	}
-	sort.Slice(cands, func(i, j int) bool { return better(cands[i].by, cands[j].by, cands[i].site.ID, cands[j].site.ID) })
-
 	if !req.Now.Before(m.hintsExpire) {
 		return cands[0].site, true // no fresh hints: the session order alone
 	}
-	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c cand) bool { return c.pl.Hint.warm() }) {
+	if _, here := m.wakeable(req.Model, req.Kind, req.Self); here && !slices.ContainsFunc(cands, func(c candidate) bool { return c.pl.Hint.warm() }) {
 		return Site{}, false // every sibling is cold and the model may be woken here: wake it here
 	}
 	firstEligible := -1
@@ -459,6 +487,58 @@ func (m *Map) Target(req TargetRequest) (Site, bool) {
 		return cands[firstEligible].site, true // only cold, wakeable targets
 	}
 	return cands[0].site, true // every target skipped: a stale hint must not block service
+}
+
+// Spill outcomes, for SpillTarget's reason when it finds no target.
+const (
+	SpillHintsExpired = "hints_expired" // no fresh hints: nobody is known to have room
+	SpillNoCandidate  = "no_candidate"  // no other home site of the key serves the model inside the scope
+	SpillAllFull      = "all_full"      // every candidate is full or cold
+)
+
+// SpillTarget picks the sibling site for a request whose model is served
+// here but full (the overload spill, contract 3 §7). The candidates are the
+// key's two home sites over every placement in scope, this site included,
+// minus this site and the origin (see ranked): landing on a home site, the
+// other one is the only target. Then, while the hints are fresh, only a
+// candidate that is warm and not full; ok before busy (power of two choices
+// over the home set), ties in session order so a session keeps going to the
+// same site. A placement without a hint is not known to be full or cold: it is
+// treated as warm and busy, so a candidate known to be ok wins over it. It
+// only routes to capacity that already exists: with no candidate, without
+// fresh hints, or when every candidate is full or cold, it returns no target
+// and reason says why; the request then waits or is refused here and the
+// fleet controller sees the saturation.
+func (m *Map) SpillTarget(req TargetRequest) (site Site, reason string, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cands := m.ranked(req, true)
+	if len(cands) == 0 {
+		return Site{}, SpillNoCandidate, false
+	}
+	if !req.Now.Before(m.hintsExpire) {
+		return Site{}, SpillHintsExpired, false
+	}
+	load := func(c candidate) string {
+		if c.pl.Hint == nil {
+			return LoadBusy
+		}
+		return c.pl.Hint.load()
+	}
+	best := -1
+	for i, c := range cands {
+		if !c.pl.Hint.warm() || load(c) == LoadFull {
+			continue
+		}
+		if best < 0 || (load(c) == LoadOK && load(cands[best]) != LoadOK) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return Site{}, SpillAllFull, false
+	}
+	return cands[best].site, "", true
 }
 
 // Wakeable reports whether a request for model, as kind, may be held on

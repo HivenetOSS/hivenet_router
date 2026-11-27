@@ -1324,12 +1324,14 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 		return nil, fmt.Errorf("cross-site redirect: %w", err)
 	}
 	rd := &redirect.Redirector{
-		Self:       cfg.SiteID,
-		Map:        redirect.NewMap(domains),
-		Signer:     signer,
-		Replay:     redirect.NewReplayGuard(),
-		OnRedirect: m.Redirect,
-		OnReject:   m.RedirectRejected,
+		Self:           cfg.SiteID,
+		Map:            redirect.NewMap(domains),
+		Signer:         signer,
+		Replay:         redirect.NewReplayGuard(),
+		Spill:          cfg.RedirectOverloadSpill,
+		OnRedirect:     m.Redirect,
+		OnReject:       m.RedirectRejected,
+		OnSpillSkipped: m.OverloadSpillSkipped,
 	}
 	m.RegisterSiblingMap(
 		func() float64 { return float64(rd.Map.Version()) },

@@ -57,6 +57,7 @@ func (c *Controller) tryAdmit(ctx context.Context, s *modelState, w, budget int6
 	if c.pool == nil {
 		return s.tryReserve(w, budget, maxInflight)
 	}
+	s.limitsAt.Store(time.Now().UnixNano())
 	if !c.pool.Take(ctx, s.model, w, budget, maxInflight) {
 		return false
 	}
