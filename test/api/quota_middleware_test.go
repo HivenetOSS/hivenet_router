@@ -56,7 +56,10 @@ func (l *recLimiter) AllowOutputTokens(auth.DailyBudget, int) (bool, int, error)
 	return true, -1, nil
 }
 func (l *recLimiter) RemainingTokens(auth.DailyBudget) (int, error) { return -1, nil }
-func (l *recLimiter) Reset()                                        {}
+func (l *recLimiter) HoldTokens(auth.DailyBudget, int) (auth.DailyHold, bool, int, error) {
+	return nil, true, -1, nil
+}
+func (l *recLimiter) Reset() {}
 
 // stamp injects the auth context the QuotaMiddleware reads (so tests don't
 // need to spin up a real Provider). label identifies the key for clearer

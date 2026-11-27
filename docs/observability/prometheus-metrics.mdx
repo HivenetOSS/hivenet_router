@@ -1480,7 +1480,7 @@ Label:
 tenant_id
 ```
 
-The value is the tenant's tokens used today on chat completions, `/v1/messages`, embeddings and reranking, summed over all its keys and models, whether or not a key has a daily budget: the prompt estimate charged at admission, then the completion tokens and any prompt tokens the backend reports beyond the estimate, charged after the response. It counts only tokens that were charged: a request refused for a daily budget adds nothing, and when a response overflows a budget only what fitted is counted. Embeddings and reranking are charged their input tokens after the response. It resets at midnight UTC. This is the counter a tenant's daily budget (`tenant_tokens_per_day`) is checked against.
+The value is the tenant's tokens used today on chat completions, `/v1/messages`, embeddings and reranking, summed over all its keys and models, whether or not a key has a daily budget: the tokens the backend reports, charged after the response (the estimate held at admission is not counted). It counts only tokens that were charged: a request refused for a daily budget adds nothing, and when a response overflows a budget only what fitted is counted. It resets at midnight UTC. This is the counter a tenant's daily budget (`tenant_tokens_per_day`) is checked against.
 
 The router refreshes it for every tenant on each `--sync-interval`. With [shared counters](/deploy/multiple-routers) the value is the site total, so every router of the site exports the same value. Aggregate it with `max`, not `sum`, which would count it once per router. While a router cannot read a tenant's site total from the store, it keeps that tenant's last value instead of reporting `0`.
 

@@ -634,3 +634,36 @@ func TestTenantUsageSiteWide(t *testing.T) {
 		}
 	}
 }
+
+// Holds stay on the router that set them; the site total counts only what
+// the requests settled, so every router sees the exact usage. An estimate
+// above usage never reaches the other routers.
+func TestDailyHoldSettlesSiteWide(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rs := newFleet(t, mr, 3)
+	b := auth.DailyBudget{TenantID: "t", KeyID: "key", Model: "", KeyTokensPerDay: 3000}
+	for i, r := range rs {
+		h, ok, _, _ := r.rate.HoldTokens(b, 500)
+		if !ok {
+			t.Fatalf("router %d: hold refused", i)
+		}
+		h.Settle(100) //nolint:errcheck
+	}
+	// A hold still in flight on router 0 only.
+	if _, ok, _, _ := rs[0].rate.HoldTokens(b, 200); !ok {
+		t.Fatal("hold in flight refused")
+	}
+	waitFor(t, 5*time.Second, "every router to see the 300 settled", func() bool {
+		for i, r := range rs {
+			rem, _ := r.rate.RemainingTokens(b)
+			want := 2700
+			if i == 0 {
+				want = 2500 // its own hold counts on it, and only on it
+			}
+			if rem != want {
+				return false
+			}
+		}
+		return true
+	})
+}

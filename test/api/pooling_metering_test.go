@@ -47,12 +47,12 @@ func servePooling(t *testing.T, lim auth.RateLimiter, path, body string, inspect
 	return c, w.Code, w.Header()
 }
 
-// TestPooling_ChecksEstimateBeforeSending: an embedding or rerank request is
-// checked against the daily budgets with its estimated input tokens before it
-// is queued, but not charged: the processor charges the exact tokens after
-// the response, and gets the estimate for a backend that reports none. A
-// rerank counts the query once per document, and token IDs count as given.
-func TestPooling_ChecksEstimateBeforeSending(t *testing.T) {
+// TestPooling_HoldsEstimateBeforeSending: an embedding or rerank request
+// holds its estimated input tokens on the daily budgets before it is queued;
+// the processor settles the hold with the exact tokens after the response (or
+// the estimate for a backend that reports none). A rerank counts the query
+// once per document, and token IDs count as given.
+func TestPooling_HoldsEstimateBeforeSending(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, body string
 		want             int
@@ -64,24 +64,28 @@ func TestPooling_ChecksEstimateBeforeSending(t *testing.T) {
 		// (8+8) + (8+8) bytes for 2 pairs at 4 bytes per token, plus 4 special tokens per pair.
 		{"rerank", "/v1/rerank", `{"model":"r","query":"12345678","documents":["abcdefgh","ijklmnop"]}`, 32/4 + 2*4},
 	} {
-		lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true}
+		lim := &fakeLimiter{remaining: 1_000_000, inAllowed: true, inRemaining: 999_000}
 		var pending *domain.PendingRequest
 		_, code, hdr := servePooling(t, lim, tc.path, tc.body, func(p *domain.PendingRequest) { pending = p },
 			&domain.ChatResponse{RawBytes: []byte(`{}`), Usage: domain.Usage{PromptTokens: 7, TotalTokens: 7}})
 		if code != http.StatusOK {
 			t.Fatalf("%s: status %d", tc.name, code)
 		}
-		if lim.inputCalls != 0 {
-			t.Errorf("%s: charged at admission (%d calls), want only a check", tc.name, lim.inputCalls)
+		if lim.inputCalls != 1 || lim.chargedInput != tc.want {
+			t.Errorf("%s: held %d in %d calls, want the estimate %d once", tc.name, lim.chargedInput, lim.inputCalls, tc.want)
 		}
-		if pending.EstimatedInputTokens != tc.want || pending.ChargedInputTokens != 0 {
-			t.Errorf("%s: pending estimate %d charged %d, want %d and 0", tc.name, pending.EstimatedInputTokens, pending.ChargedInputTokens, tc.want)
+		if pending.EstimatedInputTokens != tc.want || pending.HeldInputTokens != tc.want || pending.DailyHold == nil {
+			t.Errorf("%s: pending estimate %d held %d (hold %v), want %d", tc.name, pending.EstimatedInputTokens, pending.HeldInputTokens, pending.DailyHold, tc.want)
 		}
 		if pending.TokensPerDay != 1_000_000 {
-			t.Errorf("%s: pending TokensPerDay %d, want the key's 1000000 (for the true-up)", tc.name, pending.TokensPerDay)
+			t.Errorf("%s: pending TokensPerDay %d, want the key's 1000000 (for the settle)", tc.name, pending.TokensPerDay)
 		}
-		if got := hdr.Get("X-RateLimit-Remaining-Tokens"); got != "" {
-			t.Errorf("%s: X-RateLimit-Remaining-Tokens %q, want none (the processor set none)", tc.name, got)
+		if got := hdr.Get("X-RateLimit-Remaining-Tokens"); got != "999000" {
+			t.Errorf("%s: X-RateLimit-Remaining-Tokens %q, want 999000 left after the hold", tc.name, got)
+		}
+		// No processor settled it here, so the handler frees it on its way out.
+		if lim.released != 1 || len(lim.settled) != 0 {
+			t.Errorf("%s: released %d settled %v, want the unsettled hold released", tc.name, lim.released, lim.settled)
 		}
 	}
 }

@@ -77,3 +77,19 @@ func TestChargePoolingTokens(t *testing.T) {
 		}
 	}
 }
+
+// TestChargePoolingTokens_SettlesHold: with a daily hold the request is
+// settled with the input tokens the backend read, not the held estimate plus
+// them; a response with no tokens releases the hold.
+func TestChargePoolingTokens_SettlesHold(t *testing.T) {
+	p := &RequestProcessor{limiter: &outputLimiter{allowed: true}}
+	h := &recHold{}
+	pending := &domain.PendingRequest{ID: "r", RemainingTokens: -1, DailyHold: h, HeldInputTokens: 40}
+	p.chargePoolingTokens(pending, 26)
+	if len(h.settled) != 1 || h.settled[0] != 26 || pending.RemainingTokens != 7 {
+		t.Errorf("settled %v, remaining %d; want [26] and 7", h.settled, pending.RemainingTokens)
+	}
+	if lim := p.limiter.(*outputLimiter); len(lim.charged) != 0 {
+		t.Errorf("charged %v besides the settle", lim.charged)
+	}
+}

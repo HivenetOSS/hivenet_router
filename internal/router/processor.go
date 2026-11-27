@@ -857,18 +857,12 @@ func (p *RequestProcessor) forwardToAgent(parentCtx context.Context, agent *doma
 		return nil, rttMs, fmt.Errorf("invalid response format: %w", err)
 	}
 
-	// Output token enforcement: deduct actual completion tokens from the daily budget.
-	// This check happens after the agent has already processed the request.
-	// If denied: discard the response and return 429.
-	// Note: the estimated prompt tokens were already deducted by AllowInputTokens in
-	// the handler (before the request was queued) and are NOT rolled back here.
-	// Only the completion tokens (n) are withheld — AllowOutputTokens does not add n
-	// to b.used when it returns allowed=false, but the prompt deduction stands.
-	// The prompt tokens the backend reported beyond the admission estimate are
-	// charged with the completion: the budgets count the prompt it processed.
-	shortfall := pending.InputShortfall(chatResp.Usage.PromptTokens)
-	if p.limiter != nil && chatResp.Usage.CompletionTokens+shortfall > 0 {
-		allowed, remaining, limErr := p.limiter.AllowOutputTokens(dailyBudget(pending), chatResp.Usage.CompletionTokens+shortfall)
+	// Daily budget: settle the hold set at admission with the tokens the
+	// backend reports (its prompt and completion; the held estimate for a
+	// prompt it did not report), after the agent processed the request. If
+	// they do not fit, the budgets take what they have left and the response
+	// is discarded with 429.
+	if settled, allowed, remaining, limErr := p.settleDaily(pending, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens); settled {
 		if limErr != nil {
 			// Redis error — fail-open: treat as allowed and proceed.
 			log.Warnf("Output token check error for request %s: %v (fail-open)", pending.ID, limErr)
@@ -1008,12 +1002,11 @@ func (p *RequestProcessor) drainStream(
 	pending.StreamedPromptTokens.Store(int64(prompt))
 	pending.StreamedCompletionTokens.Store(int64(completion))
 	pending.StreamedPromptExact.Store(meter.HaveUsage())
-	shortfall := 0
+	exactPrompt := 0
 	if meter.HaveUsage() {
-		shortfall = pending.InputShortfall(prompt)
+		exactPrompt = prompt
 	}
-	if p.limiter != nil && completion+shortfall > 0 {
-		allowed, _, err := p.limiter.AllowOutputTokens(dailyBudget(pending), completion+shortfall)
+	if settled, allowed, _, err := p.settleDaily(pending, exactPrompt, completion); settled {
 		if err != nil {
 			log.Warnf("Streaming output token accounting for %s: %v (fail-open)", pending.ID, err)
 		} else if !allowed {
@@ -1052,6 +1045,21 @@ func NotSent(err error) error { return &unsentError{err: err} }
 // to: the same buckets its prompt estimate was charged to at admission. A
 // request with neither budget is still charged, so it counts in its tenant's
 // usage today.
+// settleDaily charges the daily budgets the tokens a request used: through
+// its hold when the handler set one, else (no prompt estimate was held) the
+// completion alone, as an output charge. settled is false when there was
+// nothing to charge.
+func (p *RequestProcessor) settleDaily(pending *domain.PendingRequest, prompt, completion int) (settled, allowed bool, remaining int, err error) {
+	if ok, allowed, remaining, err := pending.SettleDaily(prompt, completion); ok {
+		return true, allowed, remaining, err
+	}
+	if p.limiter == nil || completion <= 0 {
+		return false, true, -1, nil
+	}
+	allowed, remaining, err = p.limiter.AllowOutputTokens(dailyBudget(pending), completion)
+	return true, allowed, remaining, err
+}
+
 func dailyBudget(p *domain.PendingRequest) auth.DailyBudget {
 	return auth.DailyBudget{TenantID: p.TenantID, KeyID: p.KeyID, Model: p.QuotaModel,
 		KeyTokensPerDay: p.TokensPerDay, TenantTokensPerDay: p.TenantTokensPerDay}
@@ -1074,18 +1082,23 @@ func poolingTokens(engine string, body []byte, pending *domain.PendingRequest) (
 	return pending.EstimatedInputTokens, true
 }
 
-// chargePoolingTokens charges the daily budgets the input tokens of an
-// embedding or rerank response. Admission only checked the estimate against
-// them, so the budgets count exactly what the backend read. The answer is
-// computed, so it is returned even when this charge runs a budget out (the
-// charge takes what is left, and the next request is refused at admission);
-// RemainingTokens then reads 0.
+// chargePoolingTokens settles the daily budgets' hold of an embedding or
+// rerank request with its input tokens, so the budgets count exactly what the
+// backend read. The answer is computed, so it is returned even when the
+// settle runs a budget out (it takes what is left, and the next request is
+// refused at admission); RemainingTokens then reads 0.
 func (p *RequestProcessor) chargePoolingTokens(pending *domain.PendingRequest, tokens int) {
-	if p.limiter == nil || tokens <= 0 {
+	if tokens <= 0 {
+		pending.ReleaseDaily()
 		return
 	}
-	allowed, remaining, err := p.limiter.AllowOutputTokens(dailyBudget(pending), tokens)
+	settled, allowed, remaining, err := pending.SettleDaily(tokens, 0)
+	if !settled && p.limiter != nil {
+		settled = true
+		allowed, remaining, err = p.limiter.AllowOutputTokens(dailyBudget(pending), tokens)
+	}
 	switch {
+	case !settled:
 	case err != nil:
 		log.Warnf("Input token charge error for request %s: %v (fail-open)", pending.ID, err)
 	case !allowed:
@@ -1262,6 +1275,10 @@ func (p *RequestProcessor) serveExternally(pending *domain.PendingRequest, t *ex
 			p.metrics.PolicyProviderFallbackRouted(pending.Request.Model)
 		}
 		p.metrics.TenantRequestSucceeded(pending.TenantID, pending.KeyID, pending.DeploymentID, pending.Request.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		// The daily budgets count an externally served request at its held
+		// prompt estimate, as before holds: the provider's usage is not
+		// local GPU work.
+		_, _, _, _ = pending.SettleDaily(0, 0)
 		pending.Response <- resp
 		return
 	}

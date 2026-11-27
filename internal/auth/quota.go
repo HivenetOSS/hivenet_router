@@ -67,9 +67,31 @@ type RateLimiter interface {
 	// request can be rejected without being charged.
 	RemainingTokens(b DailyBudget) (remaining int, err error)
 
+	// HoldTokens is AllowInputTokens that holds the count instead of
+	// charging it: when both budgets fit it, count is set aside, so that
+	// concurrent requests see it, until the returned hold is settled with
+	// the tokens actually used, or released. A refused hold holds nothing
+	// and is nil.
+	HoldTokens(b DailyBudget, count int) (hold DailyHold, allowed bool, remaining int, err error)
+
 	// Reset clears all cached limiter state. Call on SIGHUP after auth config reload
 	// so updated quota limits take effect immediately.
 	Reset()
+}
+
+// DailyHold is tokens set aside on a request's daily budgets when it is
+// admitted (RateLimiter.HoldTokens), until it is known how many it used.
+// Both methods are safe to call more than once, in any order, and on a nil
+// hold.
+type DailyHold interface {
+	// Settle frees the hold and charges actual tokens, which the request
+	// used, as AllowOutputTokens does: each budget is charged what it has
+	// left of them, and allowed is false when either ran out. Called once
+	// the response's usage is known; a second call charges nothing.
+	Settle(actual int) (allowed bool, remaining int, err error)
+	// Release frees the hold without charging anything: the request was
+	// refused or failed before it used tokens. After Settle it does nothing.
+	Release()
 }
 
 // DailyBudget names the daily token budgets one charge counts against: the
@@ -152,6 +174,10 @@ type dailyBucket struct {
 	mu   sync.Mutex
 	used int
 	day  int // UTC days since Unix epoch
+	// held is what this router's admitted requests have set aside and not
+	// settled yet (HoldTokens). It is never published or persisted: it is
+	// this router's, and a restart drops the requests that held it.
+	held int
 
 	// Shared counters only. loadedDay is the day the site total was read
 	// from the fleet; epoch/base snapshot the usage when an outage began, so
@@ -394,7 +420,7 @@ func (l *InMemoryLimiter) DailyRefusal(b DailyBudget, need int) Refusal {
 		}
 		t.b.mu.Lock()
 		rollDay(t.b, utcDayIndex())
-		over := t.b.used+need > t.tpd
+		over := t.b.used+t.b.held+need > t.tpd
 		t.b.mu.Unlock()
 		if over {
 			return t.r
@@ -407,7 +433,7 @@ func (l *InMemoryLimiter) DailyRefusal(b DailyBudget, need int) Refusal {
 // holds b.mu.
 func rollDay(b *dailyBucket, today int) {
 	if b.day != today {
-		b.day, b.used, b.base = today, 0, 0
+		b.day, b.used, b.base, b.held = today, 0, 0, 0
 	}
 }
 
@@ -451,6 +477,111 @@ func (l *InMemoryLimiter) AllowOutputTokens(b DailyBudget, n int) (bool, int, er
 	return l.allowTokens(b, n, false)
 }
 
+// HoldTokens admits n tokens on b like AllowInputTokens, but holds them
+// instead of charging them: they count in this router's admission checks
+// (and its per-sync lease) until the hold is settled or released. Nothing is
+// published to the other routers until Settle charges what was used.
+func (l *InMemoryLimiter) HoldTokens(b DailyBudget, n int) (DailyHold, bool, int, error) {
+	return l.holdTokens(b, n, l)
+}
+
+// holdTokens is HoldTokens settling through settler, so a BadgerLimiter's
+// settle charges through its own AllowOutputTokens.
+func (l *InMemoryLimiter) holdTokens(bud DailyBudget, n int, settler RateLimiter) (DailyHold, bool, int, error) {
+	h := &dailyHold{settler: settler, budget: bud, day: utcDayIndex()}
+	if n <= 0 || (bud.KeyTokensPerDay <= 0 && bud.TenantTokensPerDay <= 0) {
+		return h, true, -1, nil // nothing to hold: Settle counts the usage
+	}
+	key, ten, known := l.dailyTargets(bud)
+	if !known {
+		return nil, false, 0, nil // site total unknown: refuse until the store answers
+	}
+	limited := make([]dailyTarget, 0, 2)
+	for _, t := range []dailyTarget{key, ten} {
+		if t.tpd > 0 {
+			t.b.mu.Lock()
+			defer t.b.mu.Unlock()
+			rollDay(t.b, h.day)
+			limited = append(limited, t)
+		}
+	}
+	for _, t := range limited {
+		if !l.admits(t, n) {
+			// As AllowInputTokens: a key whose own budget is too small for
+			// the request is left full, so its next checks fail at once. Not
+			// when only holds are in the way: they free up when settled.
+			if key.tpd > 0 && key.b.used+n > key.tpd && key.b.used < key.tpd {
+				key.b.used = key.tpd
+			}
+			return nil, false, 0, nil
+		}
+	}
+	rem := -1
+	for _, t := range limited {
+		t.b.held += n
+		t.b.leaseSpent += n
+		h.buckets = append(h.buckets, t.b)
+		if r := max(0, t.tpd-t.b.used-t.b.held); rem < 0 || r < rem {
+			rem = r
+		}
+	}
+	h.n = n
+	return h, true, rem, nil
+}
+
+// dailyHold is InMemoryLimiter's DailyHold.
+type dailyHold struct {
+	settler RateLimiter
+	budget  DailyBudget
+	day     int            // the UTC day it was held on
+	n       int            // tokens held on each bucket
+	buckets []*dailyBucket // the limited buckets it is held on
+
+	mu       sync.Mutex
+	released bool
+	settled  bool
+}
+
+func (h *dailyHold) Release() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.free()
+}
+
+// free drops the hold from its buckets, once. A bucket that has rolled over
+// to another day since dropped it already. Caller holds h.mu.
+func (h *dailyHold) free() {
+	if h.released {
+		return
+	}
+	h.released = true
+	for _, b := range h.buckets {
+		b.mu.Lock()
+		if b.day == h.day {
+			b.held = max(0, b.held-h.n)
+		}
+		b.mu.Unlock()
+	}
+}
+
+func (h *dailyHold) Settle(actual int) (bool, int, error) {
+	if h == nil {
+		return true, -1, nil
+	}
+	h.mu.Lock()
+	h.free()
+	if h.settled {
+		h.mu.Unlock()
+		return true, -1, nil
+	}
+	h.settled = true
+	h.mu.Unlock()
+	return h.settler.AllowOutputTokens(h.budget, actual)
+}
+
 // RemainingTokens reports what is left of the tighter of the key's and the
 // tenant's daily budgets without deducting; -1 when neither is limited. It
 // rolls the counters over at the UTC day boundary, like the charging paths,
@@ -470,7 +601,7 @@ func (l *InMemoryLimiter) RemainingTokens(b DailyBudget) (int, error) {
 		}
 		t.b.mu.Lock()
 		rollDay(t.b, utcDayIndex())
-		r := max(0, l.dailyAllowance(t.b, t.tpd)-t.b.used)
+		r := max(0, l.dailyAllowance(t.b, t.tpd)-t.b.used-t.b.held)
 		t.b.mu.Unlock()
 		if rem < 0 || r < rem {
 			rem = r
@@ -575,7 +706,7 @@ func (l *InMemoryLimiter) allowTokens(bud DailyBudget, n int, admission bool) (b
 	}
 	rem := -1
 	for _, t := range limited {
-		if r := max(0, t.tpd-t.b.used); rem < 0 || r < rem {
+		if r := max(0, t.tpd-t.b.used-t.b.held); rem < 0 || r < rem {
 			rem = r
 		}
 	}
@@ -595,13 +726,13 @@ func (l *InMemoryLimiter) allowTokens(bud DailyBudget, n int, admission bool) (b
 // admission: the site budget, this router's share of it while the shared
 // store is down, and its per-sync lease. Caller holds t.b.mu.
 func (l *InMemoryLimiter) admits(t dailyTarget, n int) bool {
-	if allowance := l.dailyAllowance(t.b, t.tpd); allowance < t.tpd && t.b.used+n > allowance {
+	if allowance := l.dailyAllowance(t.b, t.tpd); allowance < t.tpd && t.b.used+t.b.held+n > allowance {
 		return false // outage: this router's share of the rest is spent
 	}
 	if !l.dailyLease(t.b, t.tpd, n) {
 		return false // this router's share since the last sync is spent
 	}
-	return t.b.used+n <= t.tpd
+	return t.b.used+t.b.held+n <= t.tpd
 }
 
 // charge adds n tokens to a limited daily bucket and publishes them to the
@@ -721,7 +852,7 @@ func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
 	if nr <= 1 && silent == 0 {
 		return true
 	}
-	if b.used+n > tpd-b.silentReserve {
+	if b.used+b.held+n > tpd-b.silentReserve {
 		return false
 	}
 	if seq := l.fleet.SyncSeq(); b.leaseSeq != seq {
@@ -732,7 +863,7 @@ func (l *InMemoryLimiter) dailyLease(b *dailyBucket, tpd, n int) bool {
 			inFlight = b.peerLast
 		}
 		b.leaseSeq, b.leaseSpent = seq, 0
-		b.leaseCap = max(1, (tpd-b.used-inFlight-b.silentReserve)/max(nr, 1))
+		b.leaseCap = max(1, (tpd-b.used-b.held-inFlight-b.silentReserve)/max(nr, 1))
 	}
 	return b.leaseSpent == 0 || b.leaseSpent+n <= b.leaseCap
 }
@@ -932,6 +1063,14 @@ func (l *BadgerLimiter) AllowInputTokens(b DailyBudget, n int) (bool, int, error
 func (l *BadgerLimiter) AllowOutputTokens(b DailyBudget, n int) (bool, int, error) {
 	l.preloadBudget(b)
 	return l.InMemoryLimiter.AllowOutputTokens(b, n)
+}
+
+// HoldTokens is InMemoryLimiter.HoldTokens with the counters first read
+// back from BadgerDB after a restart; its Settle persists like
+// AllowOutputTokens.
+func (l *BadgerLimiter) HoldTokens(b DailyBudget, n int) (DailyHold, bool, int, error) {
+	l.preloadBudget(b)
+	return l.holdTokens(b, n, l)
 }
 
 func (l *BadgerLimiter) RemainingTokens(b DailyBudget) (int, error) {

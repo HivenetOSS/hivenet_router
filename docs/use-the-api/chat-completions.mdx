@@ -438,7 +438,7 @@ estimated input tokens + requested maximum output tokens
 
 `max_completion_tokens` is used when present. Otherwise Hivenet Router uses `max_tokens`.
 
-The estimated input tokens are charged at admission. Actual completion tokens from local responses are charged after the backend responds.
+The estimated input tokens and the requested maximum output are held at admission. After the backend responds, the hold is freed and the prompt and completion tokens it reports are charged, so the daily budget counts what the request used.
 
 <Note>
   Hivenet Router uses one per-model learned estimate for request caps, occupancy, serverless input rates, and daily input admission. It includes message text, the Anthropic top-level `system` prompt, and tool-definition JSON. Exact OpenAI or Anthropic backend usage corrects the active reservation and trains the model-specific ratio. Images are estimated separately, from a per-model cost the router learns, for occupancy and the token quotas; see [Images](/routing/admission-control#images). The request cap counts them through `images_max`.
