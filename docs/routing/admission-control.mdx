@@ -14,7 +14,7 @@ Admission control applies to:
 <Info>
   `POST /v1/messages/count_tokens` is deliberately exempt. It runs no model and consumes no KV cache, so it skips the input and image caps, pressure shed, occupancy budgets, per-key token rates, and daily token budget. It remains protected by the request-per-minute limiter.
 
-  Embedding and reranking requests are also exempt because these gates model KV-cache-bound generation. Their request-rate and body-size protections still apply.
+  Embedding and reranking requests are also exempt from the per-request token caps and the occupancy budget, because these gates model KV-cache-bound generation. On a serverless model they are charged against the per-minute input-token cap (`input_tokens_per_minute`). Their request-rate, daily token budget and body-size protections still apply.
 </Info>
 
 ## Gate order

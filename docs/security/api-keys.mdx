@@ -451,7 +451,7 @@ If the completion and that difference no longer fit in the remaining budget, Hiv
 For streaming responses, the bytes may already have reached the client before the final completion-token total is known. Hivenet Router records the output usage after the stream finishes, but it cannot retract an already delivered stream.
 
 <Note>
-  Embedding and reranking requests currently participate in request-rate quotas but do not charge their input against `tokens_per_day`.
+  Embedding and reranking requests charge their input tokens against `tokens_per_day` too, after the response, with the count the backend reports. A response is never discarded for its tokens: the request after the one that spends the budget is refused. See [Embeddings quotas](/use-the-api/embeddings#quotas).
 </Note>
 
 A key may also carry `quota.tenant_tokens_per_day`, a budget its whole owner spends together, in auth.yaml and in the dynamic registry alike. A request must fit both budgets; see [Tenant daily budget](/security/auth-yaml-reference#tenant-daily-budget).

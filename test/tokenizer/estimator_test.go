@@ -241,3 +241,17 @@ func TestObserveIgnoresShortPrompts(t *testing.T) {
 		t.Error("a sample at MinLearnBytes must be learned")
 	}
 }
+
+// TestLearnedOnlyAfterASample: Learned reports no ratio before the model's
+// first sample (not the cold start) and the learned one after it.
+func TestLearnedOnlyAfterASample(t *testing.T) {
+	e := tokenizer.NewEstimator()
+	if _, ok := e.Learned("m"); ok {
+		t.Fatal("Learned reports a ratio before any sample")
+	}
+	e.Observe("m", tokenizer.MinLearnBytes, tokenizer.MinLearnBytes/4)
+	r, ok := e.Learned("m")
+	if !ok || r != e.RatioFor("m") {
+		t.Errorf("Learned = (%v, %v), want (%v, true)", r, ok, e.RatioFor("m"))
+	}
+}

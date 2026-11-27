@@ -1180,9 +1180,7 @@ Choose a realistic output limit rather than always sending the backend maximum.
 
 ### Embeddings and reranking
 
-Embedding and reranking requests currently participate in request-rate quotas.
-
-They do not currently charge their input against the chat token-per-day budget.
+Embedding and reranking requests participate in request-rate quotas, and charge their input tokens against the same daily token budget as chat. See [Embeddings quotas](/use-the-api/embeddings#quotas).
 
 ## Headers and trust boundaries
 

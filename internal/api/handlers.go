@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -456,6 +457,9 @@ func (h *Handlers) Passthrough(c *gin.Context) {
 	// It skips the admission gates and the token quotas and is guarded by the
 	// per-key RPM flood limit alone.
 	countOnly := path == "/v1/messages/count_tokens"
+	if !countOnly {
+		c.Set(auditKeyKind, kindChat)
+	}
 	var reservation admission.Reservations
 	// The request timeout counts from here, so a wait for room in the
 	// occupancy budget is part of it. A request released by a wake already
@@ -1114,6 +1118,12 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	if h.limiter == nil {
 		return true, 0
 	}
+	// Worst-case output. max_completion_tokens is the 2026 field; fall back to
+	// max_tokens (also the Anthropic field name).
+	reservedOutput := req.MaxCompletionTokens
+	if reservedOutput == 0 {
+		reservedOutput = req.MaxTokens
+	}
 	// EstimateTokens only sees text content; estimatePromptTokens floors a
 	// multimodal or tool-only message at a per-message overhead so it is charged
 	// (and passes through this gate) rather than bypassing it with a 0 estimate.
@@ -1121,35 +1131,14 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 	if promptTokens == 0 {
 		return true, 0 // genuinely empty body — nothing to budget
 	}
-	budget := m.budget()
-	if budget.KeyTokensPerDay > 0 || budget.TenantTokensPerDay > 0 {
-		// Worst-case output. max_completion_tokens is the 2026 field; fall back to
-		// max_tokens (also the Anthropic field name).
-		reservedOutput := req.MaxCompletionTokens
-		if reservedOutput == 0 {
-			reservedOutput = req.MaxTokens
-		}
-		// Admission check — peek, do not charge. If we cannot read the budget, fail open.
-		remaining, err := h.limiter.RemainingTokens(budget)
-		if err != nil {
-			log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
-			return true, 0
-		}
-		if need := promptTokens + reservedOutput; remaining >= 0 && need > remaining {
-			h.fireTokenLimited(m, req.Model)
-			c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
-			msg := "daily token budget exceeded"
-			if reservedOutput > 0 {
-				msg = "insufficient daily token budget for requested max_tokens"
-			}
-			h.refuseBudget(c, budget, need, msg)
-			return false, 0
-		}
+	if !h.admitDailyTokens(c, m, req.Model, promptTokens, reservedOutput) {
+		return false, 0
 	}
 
 	// Admitted — charge the prompt estimate now (the processor charges the actual
 	// completion after the response). A concurrent request may have consumed the
 	// budget between the peek and here, so honour a late deduction failure.
+	budget := m.budget()
 	allowed, remainingAfter, err := h.limiter.AllowInputTokens(budget, promptTokens)
 	if err != nil {
 		log.Warnf("Input token check error for request %s: %v (fail-open)", m.requestID, err)
@@ -1164,6 +1153,34 @@ func (h *Handlers) reserveInputBudget(c *gin.Context, req *domain.ChatRequest, m
 		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remainingAfter))
 	}
 	return true, promptTokens
+}
+
+// admitDailyTokens is the daily budgets' admission check, a peek that charges
+// nothing: a request of promptTokens estimated input tokens that may generate
+// up to reservedOutput tokens is refused with 429 when both cannot fit what is
+// left of the key's or the tenant's budget. It fails open when the budget
+// cannot be read. Returns false after writing the 429.
+func (h *Handlers) admitDailyTokens(c *gin.Context, m reqMeta, model string, promptTokens, reservedOutput int) bool {
+	budget := m.budget()
+	if h.limiter == nil || (budget.KeyTokensPerDay <= 0 && budget.TenantTokensPerDay <= 0) {
+		return true
+	}
+	remaining, err := h.limiter.RemainingTokens(budget)
+	if err != nil {
+		log.Warnf("Remaining-budget check error for request %s: %v (fail-open)", m.requestID, err)
+		return true
+	}
+	if need := promptTokens + reservedOutput; remaining >= 0 && need > remaining {
+		h.fireTokenLimited(m, model)
+		c.Header(headerRateLimitRemainingTokens, strconv.Itoa(remaining))
+		msg := "daily token budget exceeded"
+		if reservedOutput > 0 {
+			msg = "insufficient daily token budget for requested max_tokens"
+		}
+		h.refuseBudget(c, budget, need, msg)
+		return false
+	}
+	return true
 }
 
 // refuseBudget answers 429 token_limit_exceeded for a request whose need
@@ -1291,6 +1308,9 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
 	c.Set(auditKeyOutputTokens, int64(resp.Usage.CompletionTokens))
 	c.Set(auditKeyAgentID, resp.ProcessedBy)
+	if resp.Body == nil {
+		c.Set(auditKeyUsageSource, usageSource(usageExact))
+	}
 	h.copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 	c.Status(http.StatusOK)
 
@@ -1327,6 +1347,7 @@ func (h *Handlers) writeSuccessResponse(c *gin.Context, pending *domain.PendingR
 	if ct := pending.StreamedCompletionTokens.Load(); ct > 0 {
 		c.Set(auditKeyOutputTokens, ct)
 	}
+	c.Set(auditKeyUsageSource, usageSource(pending.StreamedPromptExact.Load()))
 	h.chargeOutputRate(c, req, m, int(pending.StreamedCompletionTokens.Load()))
 	h.chargeInputShortfall(c, req, m, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
 	h.learnInputTokens(req, pending, int(pending.StreamedPromptTokens.Load()), pending.StreamedPromptExact.Load())
@@ -1605,8 +1626,10 @@ func (h *Handlers) Rerank(c *gin.Context) {
 }
 
 // enqueueInferenceRequest is the shared handler for embedding and reranking requests.
-// It parses the model field, enqueues a PendingRequest with the given capability,
-// and waits for the processor to return the raw response bytes from the agent.
+// It parses the model field, charges the estimated input tokens to the key's
+// per-minute and daily token limits, enqueues a PendingRequest with the given
+// capability, and waits for the processor to return the raw response bytes
+// from the agent.
 func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	// Parse the model field — QuotaMiddleware already cached the body via ShouldBindBodyWith.
 	var req struct {
@@ -1623,6 +1646,7 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 
 	// Set audit model key now so all subsequent early returns carry the model in the audit log.
 	c.Set(auditKeyModel, req.Model)
+	c.Set(auditKeyKind, poolingKind(capability))
 
 	// Check model access with the same rule as chat: the key's allowlist, or
 	// its per_model quota entries, or none at all (unless an allowlist is
@@ -1635,28 +1659,51 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	rawBody, _ := c.Get(gin.BodyBytesKey)
 	rawBytes, _ := rawBody.([]byte)
 
-	tenantID, keyID, deploymentID := callerIDs(c)
+	m := reqMeta{start: time.Now(), requestID: requestIDFrom(c)}
+	m.tenantID, m.keyID, m.deploymentID = callerIDs(c)
+	m.tpd, m.quotaModel = quotaBudgetFromContext(c)
+	m.tenantTPD = quotaLimitsFromContext(c).TenantTokensPerDay
 
 	if h.onRequestReceived != nil {
-		h.onRequestReceived(MetricContext{TenantID: tenantID, KeyID: keyID, DeploymentID: deploymentID})
+		h.onRequestReceived(MetricContext{TenantID: m.tenantID, KeyID: m.keyID, DeploymentID: m.deploymentID})
 	}
 
-	requestID := requestIDFrom(c)
 	chatReq := &domain.ChatRequest{
 		Model:       req.Model,
 		RawBytes:    rawBytes,
 		HttpHeaders: forwardHeaders(c, false),
 	}
-	pending := domain.NewPendingRequest(requestID, chatReq, h.timeout)
+
+	// The input tokens, estimated from the body. The per-minute input cap is
+	// charged the estimate; the daily budgets are only checked against it
+	// (429 when it does not fit) and charged after the response the exact
+	// tokens the backend reports, or the estimate when it reports none. An
+	// answer is never discarded for its tokens: the request after the one that
+	// spends the budget is refused. A pooling model generates nothing, so
+	// nothing is reserved for output.
+	input := domain.ParsePoolingInput(capability, rawBytes)
+	estimate := h.estimatePoolingTokens(req.Model, capability, input)
+	if !h.enforcePerKeyRates(c, chatReq, m, estimate) {
+		return
+	}
+	if !h.admitDailyTokens(c, m, req.Model, estimate, 0) {
+		return
+	}
+
+	pending := domain.NewPendingRequest(m.requestID, chatReq, h.timeout)
 	pending.Ctx = c.Request.Context()
-	pending.TenantID = tenantID
-	pending.KeyID = keyID
-	pending.DeploymentID = deploymentID
+	pending.TenantID = m.tenantID
+	pending.KeyID = m.keyID
+	pending.DeploymentID = m.deploymentID
+	pending.TokensPerDay = m.tpd
+	pending.TenantTokensPerDay = m.tenantTPD
+	pending.QuotaModel = m.quotaModel
 	pending.Capability = capability
 	setRoutingStrategy(c, pending)
 	pending.Scope = requestScope(c)
 	pending.Pool = requestPool(c)
 	pending.ExternalFallback = requestExternalFallback(c)
+	pending.EstimatedInputTokens = estimate
 
 	select {
 	case h.requestQueue <- pending:
@@ -1668,7 +1715,16 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	select {
 	case resp := <-pending.Response:
 		c.Set(auditKeyAgentID, resp.ProcessedBy)
-		h.copyBackendHeaders(c, resp.HttpHeaders, requestID)
+		c.Set(auditKeyInputTokens, int64(resp.Usage.PromptTokens))
+		c.Set(auditKeyOutputTokens, int64(0))
+		c.Set(auditKeyUsageSource, usageSource(!resp.UsageEstimated))
+		if pending.RemainingTokens >= 0 {
+			c.Header(headerRateLimitRemainingTokens, strconv.Itoa(pending.RemainingTokens))
+		}
+		if !resp.UsageEstimated && input.TokenIDs == 0 && h.estimator != nil {
+			h.estimator.Observe(req.Model, input.TextBytes, resp.Usage.PromptTokens)
+		}
+		h.copyBackendHeaders(c, resp.HttpHeaders, m.requestID)
 		c.Data(http.StatusOK, "application/json", resp.RawBytes)
 
 	case err := <-pending.Error:
@@ -1684,6 +1740,48 @@ func (h *Handlers) enqueueInferenceRequest(c *gin.Context, capability string) {
 	case <-time.After(h.timeout):
 		writeRouterError(c, http.StatusGatewayTimeout, domain.ErrCodeRequestTimeout, "Request timeout", domain.SourceRouter)
 	}
+}
+
+// poolingKind is the audit kind of an embedding or rerank capability.
+func poolingKind(capability string) string {
+	if capability == domain.CapabilityReranker {
+		return kindRerank
+	}
+	return kindEmbedding
+}
+
+// poolingBytesPerToken is the bytes per token of a pooling model's input
+// before the estimator has learned the model: embedding and rerank models
+// (BERT and XLM-RoBERTa tokenizers) read natural-language text at 4 to 5 bytes
+// per token in English, where the chat cold start assumes code-dense 3.2. The
+// lower end keeps the estimate on the side of more tokens.
+const poolingBytesPerToken = 4
+
+// The special tokens a pooling model adds to every sequence it reads: [CLS]
+// and [SEP] around an embedding input; up to four around a rerank's
+// query-document pair (XLM-RoBERTa: <s> query </s></s> document </s>).
+const (
+	embeddingSpecialTokens = 2
+	rerankSpecialTokens    = 4
+)
+
+// estimatePoolingTokens estimates the input tokens of an embedding or rerank
+// request: token IDs as given; the text at the model's learned
+// tokens-per-byte ratio, else at poolingBytesPerToken; and the special tokens
+// of every sequence. It is what Infinity, whose usage counts characters, is
+// charged.
+func (h *Handlers) estimatePoolingTokens(model, capability string, in domain.PoolingInput) int {
+	text := (in.TextBytes + poolingBytesPerToken - 1) / poolingBytesPerToken
+	if h.estimator != nil {
+		if ratio, ok := h.estimator.Learned(model); ok {
+			text = int(math.Ceil(float64(in.TextBytes) * ratio))
+		}
+	}
+	special := embeddingSpecialTokens
+	if capability == domain.CapabilityReranker {
+		special = rerankSpecialTokens
+	}
+	return in.TokenIDs + text + in.Segments*special
 }
 
 // passthroughAllowlist is the set of HTTP paths the router forwards to a backend

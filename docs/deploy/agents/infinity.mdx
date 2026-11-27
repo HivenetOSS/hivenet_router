@@ -378,6 +378,10 @@ Do not leave the default capability of `llm` on an Infinity agent. Infinity reje
 
 Embedding and reranking requests are exempt from the occupancy budget. Infinity's own batching and scheduler bound the work, and the request-rate and body-size limits still apply.
 
+## Token metering
+
+Infinity's `usage` counts characters, not tokens. Hivenet Router therefore never charges it: an Infinity request spends the daily token budget by the router's own token estimate, and the [audit log](/observability/audit-logging) marks it `"usage_source": "estimated"`. See [Embeddings quotas](/use-the-api/embeddings#quotas).
+
 <Note>
   `--capacity` is deprecated and ignored by routers. The agent still sends it so older routers accept the registration.
 </Note>
