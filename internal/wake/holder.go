@@ -54,10 +54,11 @@ type Limits struct {
 
 // Holder holds requests per model. It is safe for concurrent use.
 type Holder struct {
-	limits  Limits
-	healthy func(model string) int
-	poll    time.Duration
-	onDone  func(model string, outcome Outcome, held time.Duration)
+	limits   Limits
+	healthy  func(model string) int
+	poll     time.Duration
+	onDone   func(model string, outcome Outcome, held time.Duration)
+	onChange func(model string)
 
 	mu     sync.Mutex
 	total  int // requests held now, all models
@@ -92,6 +93,17 @@ func NewHolder(limits Limits, healthy func(model string) int, onDone func(model 
 // has held requests, not one per request. Call it before the first Hold. For tests.
 func (h *Holder) SetPollInterval(d time.Duration) { h.poll = d }
 
+// SetOnChange sets fn to be called, outside the Holder's lock, each time a
+// model's pending demand may have changed: a request entered it or left it.
+// Call it before the first Hold.
+func (h *Holder) SetOnChange(fn func(model string)) { h.onChange = fn }
+
+func (h *Holder) changed(model string) {
+	if h.onChange != nil {
+		h.onChange(model)
+	}
+}
+
 // Hold holds the calling request until the model has a healthy agent
 // (Woken), the budget runs out (Expired), ctx ends (Gone), or OnKeepAlive
 // fails (Gone). It returns Full at once when a limit is reached.
@@ -116,15 +128,22 @@ func (h *Holder) Hold(ctx context.Context, model, caller, requestID string, opts
 		h.done(model, Full, 0)
 		return Full, func() {}
 	}
+	h.changed(model)
 	outcome := h.wait(ctx, model, wake, opts)
 	h.leave(model, caller)
 	h.done(model, outcome, time.Since(start))
 	if outcome != Woken {
 		h.leaveDemand(model, key)
+		h.changed(model)
 		return outcome, func() {}
 	}
 	var once sync.Once
-	return Woken, func() { once.Do(func() { h.leaveDemand(model, key) }) }
+	return Woken, func() {
+		once.Do(func() {
+			h.leaveDemand(model, key)
+			h.changed(model)
+		})
+	}
 }
 
 func (h *Holder) wait(ctx context.Context, model string, wake <-chan struct{}, opts Options) Outcome {

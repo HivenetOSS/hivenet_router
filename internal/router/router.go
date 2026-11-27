@@ -232,6 +232,9 @@ type Router struct {
 	// (internal/wake); nil when redirect is disabled, since the sibling map
 	// says which models may be held.
 	wake *wake.Holder
+	// demandFeed publishes every change of the pending demand
+	// (GET /admin/demand-stream); nil when hold at zero is disabled.
+	demandFeed *wake.Feed
 	// salter salts forwarded bodies per tenant; nil when --cache-salt is off.
 	salter *cachesalt.Salter
 }
@@ -571,9 +574,9 @@ func New(cfg *config.Config) (*Router, error) {
 		keyAdmission: admission.NewController(1.0, 0),
 		keyRegistry:  keyRegistry,
 		redirect:     rd,
-		wake:         newWakeHolder(cfg, rd, agents, routerMetrics),
 		salter:       salter,
 	}
+	r.wake, r.demandFeed = newWakeHolder(cfg, rd, agents, routerMetrics)
 	// Over-budget requests wait in a per-model queue (--admission-queue-depth,
 	// by default --queue-depth) for room before a 429: half the request timeout
 	// at most, so an admitted request keeps at least the other half to run
@@ -768,6 +771,11 @@ func (r *Router) Start() error {
 	// Create request processor now that httpHost is ready
 	r.processor = NewRequestProcessor(r.requestQueue, r.executor, r.httpHost, r.metrics, r.counters, r.cfg.MaxConcurrentForwards, r.providers, r.rateLimiter,
 		WithCacheSalter(r.salter),
+		WithOnAgentRouted(func(model string) {
+			if r.demandFeed != nil {
+				r.demandFeed.MarkRouted(model)
+			}
+		}),
 		WithPrefixKeys(prefixKeys(r.cfg, r.salter)),
 		WithPrefixScope(prefixScope(r.salter)),
 		WithProviderBaseURLs(r.cfg.ProviderBaseURLs),
@@ -821,6 +829,9 @@ func (r *Router) Start() error {
 	go r.healthMonitor()
 	go r.processor.Start(processorCtx)
 	go r.runPrefixIndex(processorCtx)
+	if r.demandFeed != nil {
+		go r.demandFeed.Run(processorCtx)
+	}
 	go r.startHTTPServer()
 
 	go func() {
@@ -984,6 +995,7 @@ func (r *Router) startHTTPServer() {
 	handlers.SetDefaultMaxInflight(r.cfg.DefaultMaxInflightPerReplica)
 	if r.wake != nil { // nil = hold at zero disabled
 		handlers.SetWake(r.wake, api.WakeConfig{Budget: r.cfg.WakeHoldBudget, KeepAlive: r.cfg.WakeKeepAlive})
+		handlers.SetDemandFeed(r)
 	}
 	handlers.SetIsolation(api.Isolation{
 		RequireModelAllowlist: r.cfg.RequireModelAllowlist,
@@ -1343,13 +1355,18 @@ func newRedirector(cfg *config.Config, apiProv auth.Provider, m *metrics.RouterM
 	return rd, nil
 }
 
+// demandFeedInterval is how often the demand feed rechecks the demand on its
+// own, to catch changes nothing notifies (an agent turning unhealthy, a model
+// leaving the sibling map).
+const demandFeedInterval = time.Second
+
 // newWakeHolder returns the holder for requests to models scaled to zero
-// here, or nil when cross-site redirect is disabled. It publishes the
-// pending demand of every model the sibling map lets this site hold, 0
-// when none of its requests is held.
-func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentRegistry, m *metrics.RouterMetrics) *wake.Holder {
+// here and the feed of its demand, or nils when cross-site redirect is
+// disabled. Both publish the pending demand of every model the sibling map
+// lets this site hold, 0 when none of its requests is held.
+func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentRegistry, m *metrics.RouterMetrics) (*wake.Holder, *wake.Feed) {
 	if rd == nil {
-		return nil
+		return nil, nil
 	}
 	limits := wake.Limits{PerModel: cfg.WakeHoldMax, PerCaller: cfg.WakeHoldMaxPerKey, Total: cfg.WakeHoldMaxTotal}
 	// Only requests for the shared pool are held (dedicated replicas never
@@ -1369,7 +1386,7 @@ func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentReg
 			log.Debugf("hold at zero: a hold limit is reached for %s; answered 503 model_waking", model)
 		}
 	})
-	m.RegisterPendingDemand(func() map[string]int {
+	pending := func() map[string]int {
 		demand := holder.Demand()
 		for _, model := range rd.Map.WakeableModels(rd.Self) {
 			if _, ok := demand[model]; !ok {
@@ -1377,8 +1394,22 @@ func newWakeHolder(cfg *config.Config, rd *redirect.Redirector, agents *AgentReg
 			}
 		}
 		return demand
-	})
-	return holder
+	}
+	m.RegisterPendingDemand(pending)
+	feed := wake.NewFeed(func() map[string]wake.DemandEntry {
+		out := make(map[string]wake.DemandEntry)
+		for model, n := range pending() {
+			out[model] = wake.DemandEntry{Pending: n, Active: sharedHealthy(model)}
+		}
+		return out
+	}, demandFeedInterval)
+	holder.SetOnChange(func(string) { feed.Notify() })
+	return holder, feed
+}
+
+// SubscribeDemand implements api.DemandFeed.
+func (r *Router) SubscribeDemand() ([]wake.DemandEntry, <-chan wake.DemandEntry, func()) {
+	return r.demandFeed.Subscribe()
 }
 
 // reloadPolicyModelDir reloads all per-model policy files from cfg.PolicyModelDir.
@@ -1880,6 +1911,7 @@ func (r *Router) handleAgentRegister(w http.ResponseWriter, req *http.Request) {
 		r.executor.BroadcastCapacity(domain.PoolKey(metadata.Model, metadata.ReservedFor))
 		if r.wake != nil && metadata.ReservedFor == domain.SharedPool {
 			r.wake.Wake(metadata.Model) // held requests are the shared pool's only
+			r.demandFeed.Notify()
 		}
 	}
 
@@ -1981,6 +2013,7 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 			r.executor.BroadcastCapacity(domain.PoolKey(model, session.Metadata.ReservedFor))
 			if r.wake != nil && session.Metadata.ReservedFor == domain.SharedPool {
 				r.wake.Wake(model) // held requests are the shared pool's only
+				r.demandFeed.Notify()
 			}
 		}
 	} else if prevBackendHealthy {

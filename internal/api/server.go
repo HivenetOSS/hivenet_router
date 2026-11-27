@@ -235,6 +235,11 @@ func (s *Server) registerRoutes() {
 		// arriving or leaving faster than polling the routing table allows.
 		admin.GET("/registration-stream", s.handlers.RegistrationStream)
 
+		// GET /admin/demand-stream — long-lived SSE feed of the pending
+		// demand per model, for an autoscaler that wakes a model scaled to
+		// zero as soon as a request is held for it.
+		admin.GET("/demand-stream", s.handlers.DemandStream)
+
 		// GET /admin/storage — BadgerDB key counts, disk size, GC status
 		admin.GET("/storage", s.handlers.StorageInfo)
 
