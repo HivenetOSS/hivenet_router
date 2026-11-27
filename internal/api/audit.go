@@ -5,6 +5,7 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"hivenet_router/internal/auth"
 	"hivenet_router/internal/logger"
+	"hivenet_router/internal/logging"
 )
 
 // cetLocation is loaded once at startup. Falls back to UTC if the zone is somehow absent.
@@ -103,32 +105,45 @@ func newAuditLogger() *zap.Logger {
 // Retained so SyncAuditLog can flush pending kernel buffers and release the file descriptor.
 var auditLogFile *os.File
 
+// auditBounded is the bounded, non-blocking writer the audit logger writes
+// to: when the container's stdout stops draining (a storage hang
+// can stall the drain, and operator deployments point AUDIT_LOG_PATH at
+// /dev/stdout), audit lines are dropped (counted via DroppedLines) instead
+// of blocking the request goroutine that wrote them.
+var auditBounded *logging.BoundedWriter
+
 // openAuditFile opens (or creates) the audit log file for append, owner-only
 // (logger.OpenOwnerOnly). Path is read from HIVENET_ROUTER_AUDIT_LOG_PATH;
 // defaults to /var/log/hivenet-router/audit.jsonl. Falls back to stdout on any
 // error, recorded in auditOpenErr (OpenAuditLog reports it at startup).
+//
+// The sink is wrapped in a bounded, non-blocking writer: a stalled
+// drain must never hold a request goroutine on a log write.
 func openAuditFile() zapcore.WriteSyncer {
 	path := os.Getenv("HIVENET_ROUTER_AUDIT_LOG_PATH")
 	if path == "" {
 		path = "/var/log/hivenet-router/audit.jsonl"
 	}
+	var sink io.Writer
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		auditOpenErr = fmt.Errorf("audit: cannot create the directory of %s: %w", path, err)
 		fmt.Fprintf(os.Stderr, "%v — falling back to stdout\n", auditOpenErr)
-		return zapcore.AddSync(os.Stdout)
-	}
-	f, err := logger.OpenOwnerOnly(path)
-	if f == nil {
+		sink = os.Stdout
+	} else if f, err := logger.OpenOwnerOnly(path); f == nil {
 		auditOpenErr = fmt.Errorf("audit: cannot open %s: %w", path, err)
 		fmt.Fprintf(os.Stderr, "%v — falling back to stdout\n", auditOpenErr)
-		return zapcore.AddSync(os.Stdout)
+		sink = os.Stdout
+	} else {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "audit: %v\n", err)
+		}
+		auditLogFile = f
+		sink = f
 	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit: %v\n", err)
-	}
-	auditLogFile = f
-	// zapcore.Lock wraps the file with a mutex so concurrent goroutines don't interleave lines.
-	return zapcore.Lock(zapcore.AddSync(f))
+	auditBounded = logging.NewBounded(sink, logging.DefaultQueueSize)
+	// zapcore.Lock wraps the bounded writer with a mutex so concurrent
+	// goroutines don't interleave lines.
+	return zapcore.Lock(zapcore.AddSync(auditBounded))
 }
 
 // SyncAuditLog flushes any pending audit log entries and closes the underlying file.
@@ -141,9 +156,25 @@ func SyncAuditLog() {
 	if !auditOpened.Load() {
 		return
 	}
+	// Drain the bounded audit queue first, bounded by closeFlushTimeout:
+	// a stalled drain must not hang shutdown.
+	if auditBounded != nil {
+		_ = auditBounded.Close()
+	}
 	_ = auditLogger().Sync()
 	if auditLogFile != nil {
 		_ = auditLogFile.Close()
+	}
+}
+
+// SyncAuditQueue waits (bounded) until the audit queue is fully drained to
+// the underlying file — a NON-terminal flush: the logger keeps writing
+// afterwards (contrast SyncAuditLog, the shutdown path that closes it).
+// Call it after a batch of requests and before reading the audit file
+// (the e2e log-isolation tests do).
+func SyncAuditQueue() {
+	if auditBounded != nil {
+		auditBounded.Sync()
 	}
 }
 

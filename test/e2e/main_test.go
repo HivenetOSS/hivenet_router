@@ -12,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	logging "github.com/ipfs/go-log/v2"
+
+	"hivenet_router/internal/api"
 )
 
 // logDir holds every log the router and agents in this test binary write:
@@ -22,6 +24,14 @@ var logDir string
 func auditLogPath() string  { return filepath.Join(logDir, "audit.jsonl") }
 func appLogPath() string    { return filepath.Join(logDir, "app.log") }
 func accessLogPath() string { return filepath.Join(logDir, "access.log") }
+
+// flushLogQueues drains the router's bounded log queues (access + audit) to
+// the log files before a test scans them (the queues are asynchronous, so
+// a file could otherwise be momentarily empty or missing its last lines).
+func flushLogQueues() {
+	api.SyncAccessLog()
+	api.SyncAuditQueue()
+}
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "hivenet-e2e-logs-")

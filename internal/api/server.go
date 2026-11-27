@@ -5,9 +5,12 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"sync/atomic"
 
 	"hivenet_router/internal/auth"
+	bounded "hivenet_router/internal/logging"
 	"hivenet_router/internal/metrics"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +19,38 @@ import (
 )
 
 var log = logging.Logger("api")
+
+// lastAccessWriter is the bounded writer the most recent NewServer built
+// its access logger with, so SyncAccessLog can drain it before a test
+// reads the access log.
+var lastAccessWriter atomic.Pointer[bounded.BoundedWriter]
+
+// accessLogSink returns the io.Writer the gin access logger writes to.
+// It is a bounded, non-blocking writer around gin.DefaultWriter:
+// when the container's stdout stops draining (a storage hang can stall the
+// drain), access-log lines are dropped (counted via DroppedLines) instead
+// of blocking the request goroutine. The v0.1.8 fix protected the /health
+// probe (registered before the middleware); this protects every other
+// endpoint that goes through the logging middleware. It wraps
+// gin.DefaultWriter rather than os.Stdout so tests that redirect it
+// (the e2e log-isolation suite writes access.log through it) keep working.
+// Tests may also swap the sink itself to install a stalled underlying.
+var accessLogSink = func() io.Writer {
+	w := bounded.NewBounded(gin.DefaultWriter, bounded.DefaultQueueSize)
+	lastAccessWriter.Store(w)
+	return w
+}
+
+// SyncAccessLog waits (bounded) until the access log queue is fully
+// drained to the underlying writer, so the access log holds every line
+// written so far when it returns. Returns promptly for a healthy writer;
+// call it after a batch of requests and before reading the access log
+// (the e2e log-isolation tests do).
+func SyncAccessLog() {
+	if w := lastAccessWriter.Load(); w != nil {
+		w.Sync()
+	}
+}
 
 // Server represents the HTTP API server
 type Server struct {
@@ -97,7 +132,13 @@ func NewServer(handlers *Handlers, port string, apiAuth, adminAuth auth.Provider
 		TraceResponseMiddleware(),
 		RequestIDMiddleware(),
 		AuditMiddleware(),
-		gin.LoggerWithFormatter(AccessLogFormatter),
+		// The access logger writes to a bounded non-blocking writer
+		// (accessLogSink) over stdout, never directly to the pipe: a stalled
+		// drain drops lines instead of blocking the request that produced them.
+		gin.LoggerWithConfig(gin.LoggerConfig{
+			Formatter: AccessLogFormatter,
+			Output:    accessLogSink(),
+		}),
 		RecoveryMiddleware(),
 		CORSMiddleware(),
 	)

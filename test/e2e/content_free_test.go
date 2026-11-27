@@ -166,6 +166,7 @@ func TestIsolation_BackendErrorsContentFree(t *testing.T) {
 	if !strings.Contains(strings.Join(bodies, "\n"), errCanary) {
 		t.Error("no client got the backend's error message; the router must still return it")
 	}
+	flushLogQueues() // drain the async access/audit queues before scanning
 	for _, path := range []string{auditLogPath(), appLogPath(), accessLogPath()} {
 		b, err := os.ReadFile(path)
 		if err != nil {
