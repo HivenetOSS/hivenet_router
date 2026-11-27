@@ -793,6 +793,7 @@ func postFull(t *testing.T, base, key, path, body string) (int, string) {
 // auditLines returns the audit log's records keyed by request_id.
 func auditLines(t *testing.T) map[string]map[string]any {
 	t.Helper()
+	flushLogQueues() // drain the async audit queue before reading
 	b, err := os.ReadFile(auditLogPath())
 	if err != nil {
 		t.Fatal(err)
@@ -916,6 +917,7 @@ func TestIsolation_LogsContentFree(t *testing.T) {
 		"prompt": promptCanary, "completion": "PONG", "API key": isoKeyA, "rejected key": badKey,
 		"client salt": clientSalt, "salt secret": saltSecret, "derived salt": salt,
 	}
+	flushLogQueues() // drain the async access/audit queues before scanning
 	for _, path := range []string{auditLogPath(), appLogPath(), accessLogPath()} {
 		b, err := os.ReadFile(path)
 		if err != nil {

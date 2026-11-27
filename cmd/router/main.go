@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"flag"
+	stdlog "log"
 	"os"
 	"os/signal"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"hivenet_router/internal/api"
 	"hivenet_router/internal/config"
 	"hivenet_router/internal/logger"
+	bounded "hivenet_router/internal/logging"
 	"hivenet_router/internal/redirect"
 	"hivenet_router/internal/router"
 	"hivenet_router/internal/tracing"
@@ -44,6 +46,11 @@ func main() {
 	}
 
 	logger.Setup(nil)
+
+	// Third-party log output (the otel exporter's error lines and
+	// any stdlib log call) writes to stderr through the default writer.
+	// Bound it so a stalled container log drain can never block a log call.
+	stdlog.SetOutput(bounded.NewBounded(os.Stderr, bounded.DefaultQueueSize))
 
 	// Load configuration: env vars first (via LoadFromEnv), then CLI flags override below.
 	// This establishes the precedence chain: CLI flag > env var > built-in default.
