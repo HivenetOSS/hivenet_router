@@ -1082,18 +1082,23 @@ func poolingTokens(engine string, body []byte, pending *domain.PendingRequest) (
 	return pending.EstimatedInputTokens, true
 }
 
-// chargePoolingTokens charges the daily budgets the input tokens of an
-// embedding or rerank response. Admission only checked the estimate against
-// them, so the budgets count exactly what the backend read. The answer is
-// computed, so it is returned even when this charge runs a budget out (the
-// charge takes what is left, and the next request is refused at admission);
-// RemainingTokens then reads 0.
+// chargePoolingTokens settles the daily budgets' hold of an embedding or
+// rerank request with its input tokens, so the budgets count exactly what the
+// backend read. The answer is computed, so it is returned even when the
+// settle runs a budget out (it takes what is left, and the next request is
+// refused at admission); RemainingTokens then reads 0.
 func (p *RequestProcessor) chargePoolingTokens(pending *domain.PendingRequest, tokens int) {
-	if p.limiter == nil || tokens <= 0 {
+	if tokens <= 0 {
+		pending.ReleaseDaily()
 		return
 	}
-	allowed, remaining, err := p.limiter.AllowOutputTokens(dailyBudget(pending), tokens)
+	settled, allowed, remaining, err := pending.SettleDaily(tokens, 0)
+	if !settled && p.limiter != nil {
+		settled = true
+		allowed, remaining, err = p.limiter.AllowOutputTokens(dailyBudget(pending), tokens)
+	}
 	switch {
+	case !settled:
 	case err != nil:
 		log.Warnf("Input token charge error for request %s: %v (fail-open)", pending.ID, err)
 	case !allowed:

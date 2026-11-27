@@ -72,9 +72,9 @@ func TestPassthrough_ImageEstimateLearned(t *testing.T) {
 	if first.EstimatedImageTokens != 1000 {
 		t.Errorf("first request: image estimate %d, want the default 1000", first.EstimatedImageTokens)
 	}
-	if lim.chargedInput != first.EstimatedInputTokens || first.ChargedInputTokens != first.EstimatedInputTokens {
-		t.Errorf("daily budget charged %d (pending %d), want the estimate with the image, %d",
-			lim.chargedInput, first.ChargedInputTokens, first.EstimatedInputTokens)
+	if lim.chargedInput != first.EstimatedInputTokens+5 || first.HeldInputTokens != first.EstimatedInputTokens {
+		t.Errorf("daily budget held %d (prompt %d), want the estimate with the image, %d, plus max_tokens 5",
+			lim.chargedInput, first.HeldInputTokens, first.EstimatedInputTokens)
 	}
 	if first.ReservedInputTokens != first.EstimatedInputTokens {
 		t.Errorf("reserved %d, want %d (nothing learned: upper = point)", first.ReservedInputTokens, first.EstimatedInputTokens)

@@ -268,7 +268,7 @@ Embedding requests count against the key's quotas:
 - the daily token budget (`tokens_per_day` and `tenant_tokens_per_day`), the same budget as chat
 - on a serverless model, the per-minute input-token cap (`input_tokens_per_minute`)
 
-An embedding is charged **input tokens only**: the `usage.prompt_tokens` the backend reports, after the response. Before sending the request, Hivenet Router estimates its tokens from the body. When the estimate does not fit what is left of the daily budget, it returns HTTP `429` `token_limit_exceeded` and charges nothing. A response is never discarded for its tokens: the request that spends the budget is answered, and the next one is refused.
+An embedding is charged **input tokens only**: the `usage.prompt_tokens` the backend reports, after the response. Before sending the request, Hivenet Router estimates its tokens from the body and holds that estimate on the daily budget, so concurrent requests cannot together spend more than is left. When the estimate does not fit, it returns HTTP `429` `token_limit_exceeded` and charges nothing. After the response the hold is replaced by the exact count; a request that fails is charged nothing. A response is never discarded for its tokens: the request that spends the budget is answered, and the next one is refused.
 
 When the backend reports no token count, Hivenet Router charges its estimate instead. Infinity reports characters, not tokens, in `usage`, so a model served by Infinity is always charged the estimate. The [audit log](/observability/audit-logging) marks such a request `"usage_source": "estimated"`. Inputs given as token IDs are counted exactly.
 
