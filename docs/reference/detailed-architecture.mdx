@@ -266,6 +266,8 @@ The current high-level order is:
 7. panic recovery
 8. CORS handling (not applied to `/admin/*`)
 
+`GET /health` is registered before the global middleware and runs none of it.
+
 Route groups then add their own controls.
 
 | Route | Client auth | Admin auth | Quota middleware |

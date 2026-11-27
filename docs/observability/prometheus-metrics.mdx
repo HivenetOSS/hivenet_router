@@ -1648,6 +1648,8 @@ histogram_quantile(
 
 ## HTTP server metrics
 
+`GET /health` liveness probes are not counted in these metrics, so there is no `route="/health"` series. A dashboard or alert built on that series from an earlier version stops receiving data.
+
 ### Request duration
 
 ```promql
