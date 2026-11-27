@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Hive Computing Services SA
 
-// server_health_test pins the HAI-404 contract: the public /health liveness
-// probe must stay independent of the request pipeline — in particular of the
-// logging pipeline. On staging a storage hang stalled the container's stdout
-// pipe; the deferred access-log write (which runs for every request that goes
-// through the global middleware) then blocked the probe's response and
-// liveness killed a router that was otherwise serving fine. Registering
-// /health before engine.Use means a stalled log writer can never hold the
-// probe's response.
+// server_health_test pins the liveness contract: the public /health probe
+// must stay independent of the request pipeline — in particular of the
+// logging pipeline. When the container's stdout stops draining (the audit
+// log is the main volume on it, and a storage hang can stall the drain), the
+// deferred access-log write (which runs for every request that goes through
+// the global middleware) blocks the probe's response and liveness kills a
+// router that is otherwise serving fine. Registering /health before
+// engine.Use means a stalled log writer can never hold the probe's response.
 package api
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,18 +37,6 @@ func (w *stalledLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// newProbeTestHandlers builds a Handlers for the probe-path tests. Liveness
-// touches none of the dependencies, so every argument may be nil.
-func newProbeTestHandlers() *Handlers {
-	return NewHandlers(
-		nil, nil, nil, 0,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil,
-	)
-}
-
 // TestHealthSurvivesStalledLogWriter proves the probe does not share the
 // logging pipeline: with gin's log writer stalled, a request that goes
 // through the middleware blocks (control), while /health still answers.
@@ -61,7 +50,15 @@ func TestHealthSurvivesStalledLogWriter(t *testing.T) {
 	gin.DefaultWriter = w
 	defer func() { gin.DefaultWriter = origWriter }()
 
-	srv := NewServer(newProbeTestHandlers(), "0", nil, nil, nil, metrics.NewRouterMetrics(), nil, 0)
+	// Release the stalled writer no matter how the test exits: if a t.Fatal
+	// fired before the normal release, the control goroutine would otherwise
+	// stay blocked for the rest of the test binary.
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(w.unblock) }) }
+	t.Cleanup(unblock)
+
+	// Liveness reads no Handlers fields, so an empty Handlers suffices here.
+	srv := NewServer(&Handlers{}, "0", nil, nil, nil, metrics.NewRouterMetrics(), nil, 0)
 
 	// Control: a route that goes through the global middleware must block on
 	// the stalled writer (the deferred access-log write).
@@ -103,11 +100,11 @@ func TestHealthSurvivesStalledLogWriter(t *testing.T) {
 			t.Fatalf("GET /health body = %q, want status ok", rr.Body.String())
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("GET /health did not answer within 3s while the log pipeline was stalled — the probe still depends on logging (HAI-404)")
+		t.Fatal("GET /health did not answer within 3s while the log pipeline was stalled — the probe still depends on logging")
 	}
 
 	// Release the control request and let it finish before the test ends.
-	close(w.unblock)
+	unblock()
 	select {
 	case <-controlDone:
 	case <-time.After(2 * time.Second):

@@ -920,10 +920,10 @@ func TestIsolation_DecisionLogAttributable(t *testing.T) {
 // web page on another origin cannot read them, and an admin preflight is not
 // answered. /v1 keeps Access-Control-Allow-Origin: *.
 //
-// Note: /health deliberately carries NO CORS header since HAI-404 — the
-// liveness probe is registered before the global middleware so it cannot be
-// taken down by a stalled log pipeline, and CORS on a machine probe is an
-// accidental byproduct, not a contract.
+// Note: /health deliberately carries NO CORS header — the liveness probe is
+// registered before the global middleware so it cannot be taken down by a
+// stalled log pipeline, and CORS on a machine probe is an accidental
+// byproduct, not a contract.
 func TestIsolation_CORSNotOnAdmin(t *testing.T) {
 	s := newIsoServer(t)
 	acao := func(w *httptest.ResponseRecorder) string { return w.Header().Get("Access-Control-Allow-Origin") }
@@ -932,7 +932,7 @@ func TestIsolation_CORSNotOnAdmin(t *testing.T) {
 		t.Errorf("/v1 preflight: status %d ACAO %q, want 204 and *", w.Code, acao(w))
 	}
 	if w := s.do(http.MethodGet, "/health", nil, nil); acao(w) != "" {
-		t.Errorf("/health ACAO %q, want none (probe path is middleware-free, HAI-404)", acao(w))
+		t.Errorf("/health ACAO %q, want none (probe path is middleware-free)", acao(w))
 	}
 	// No /admin route takes OPTIONS, so a preflight is a 404 with no CORS
 	// header: a change to the admin routing shows here.

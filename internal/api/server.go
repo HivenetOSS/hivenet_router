@@ -74,14 +74,14 @@ func NewServer(handlers *Handlers, port string, apiAuth, adminAuth auth.Provider
 
 	// Register /health BEFORE the global middleware so the liveness probe is
 	// independent of the request pipeline, and in particular of the logging
-	// pipeline. The access logger (and the audit writer) run for every request
-	// that goes through the middleware; if the log drain stalls — observed on
-	// staging, where a storage hang stalled the container's stdout pipe and
-	// every deferred log write blocked the request's goroutines (HAI-404) — a
-	// probe that shares the pipeline times out and liveness kills a router
-	// that is otherwise serving fine. The handler itself is a pure
+	// pipeline. The access logger writes a line for every request that goes
+	// through the middleware; when the container's stdout stops draining (the
+	// audit log is the main volume on it — a storage hang can stall the
+	// drain), that write blocks the request's goroutine, and a probe that
+	// shares the pipeline times out while liveness kills a router that is
+	// otherwise serving fine. The handler itself is a pure
 	// 200 {"status":"ok"}; registering it first means it does no log writes
-	// at all.
+	// at all, so a stalled drain can never hold the probe's response.
 	engine.GET("/health", handlers.Liveness)
 
 	// Attach global middleware. Order matters:
@@ -141,8 +141,8 @@ func AccessLogFormatter(param gin.LogFormatterParams) string {
 // registerRoutes defines all HTTP routes for the API.
 //
 // Note: GET /health (the public liveness probe) is registered in NewServer
-// BEFORE the global middleware so it never depends on the logging pipeline —
-// see HAI-404. Everything else registered here goes through it.
+// BEFORE the global middleware so it never depends on the logging pipeline.
+// Everything else registered here goes through it.
 func (s *Server) registerRoutes() {
 
 	// /v1/* — OpenAI-compatible API, protected by apiAuth.
