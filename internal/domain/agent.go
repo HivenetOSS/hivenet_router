@@ -280,6 +280,23 @@ func (a *Agent) SetHealthy(healthy bool) {
 	a.Healthy = healthy
 }
 
+// MarkUnhealthyIfStale atomically re-checks LastSeen and, when the agent is
+// still older than maxAge, reports stale=true (with the previous health and
+// the current LastSeen) and marks the agent unhealthy. It reports stale=false
+// and leaves health untouched when a heartbeat refreshed LastSeen past maxAge
+// between the caller's snapshot and this call — so a heartbeat that lands
+// during a health scan is never clobbered back to unhealthy.
+func (a *Agent) MarkUnhealthyIfStale(maxAge time.Duration) (stale, wasHealthy bool, lastSeen time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if time.Since(a.LastSeen) <= maxAge {
+		return false, a.Healthy, a.LastSeen
+	}
+	wasHealthy = a.Healthy
+	a.Healthy = false
+	return true, wasHealthy, a.LastSeen
+}
+
 // IsBackendHealthy returns the last reported backend health status.
 func (a *Agent) IsBackendHealthy() bool {
 	a.mu.RLock()
