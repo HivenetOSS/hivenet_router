@@ -72,6 +72,18 @@ func NewServer(handlers *Handlers, port string, apiAuth, adminAuth auth.Provider
 	// Create a new Gin engine *without* any default middleware.
 	engine := gin.New()
 
+	// Register /health BEFORE the global middleware so the liveness probe is
+	// independent of the request pipeline, and in particular of the logging
+	// pipeline. The access logger (and the audit writer) run for every request
+	// that goes through the middleware; if the log drain stalls — observed on
+	// staging, where a storage hang stalled the container's stdout pipe and
+	// every deferred log write blocked the request's goroutines (HAI-404) — a
+	// probe that shares the pipeline times out and liveness kills a router
+	// that is otherwise serving fine. The handler itself is a pure
+	// 200 {"status":"ok"}; registering it first means it does no log writes
+	// at all.
+	engine.GET("/health", handlers.Liveness)
+
 	// Attach global middleware. Order matters:
 	//   1. RequestIDMiddleware  — assigns X-Request-ID before anything else reads it
 	//   2. AuditMiddleware      — must run after RequestIDMiddleware (reads request_id)
@@ -127,11 +139,11 @@ func AccessLogFormatter(param gin.LogFormatterParams) string {
 }
 
 // registerRoutes defines all HTTP routes for the API.
+//
+// Note: GET /health (the public liveness probe) is registered in NewServer
+// BEFORE the global middleware so it never depends on the logging pipeline —
+// see HAI-404. Everything else registered here goes through it.
 func (s *Server) registerRoutes() {
-
-	// GET /health — public liveness probe (load balancers, k8s probes).
-	// Returns {"status":"ok"} only — no operational data exposed.
-	s.engine.GET("/health", s.handlers.Liveness)
 
 	// /v1/* — OpenAI-compatible API, protected by apiAuth.
 	//
