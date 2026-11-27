@@ -818,7 +818,7 @@ func (r *Router) Start() error {
 	r.metrics.ServeMetrics(r.cfg.MetricsPort, r.cfg.MetricsBearerToken)
 	r.keysChanged()
 	go r.startGRPCServer()
-	go r.healthMonitor()
+	go r.healthMonitor(processorCtx)
 	go r.processor.Start(processorCtx)
 	go r.runPrefixIndex(processorCtx)
 	go r.startHTTPServer()
@@ -1978,6 +1978,24 @@ func (r *Router) handleAgentHeartbeat(w http.ResponseWriter, req *http.Request) 
 			// The agent is usable again without registering again: its slots
 			// are new capacity, and a model held at zero may now be awake.
 			r.agentJoined()
+			// When the agent was out of the pool (wasHealthy false), a
+			// recovery that does not go through /register — a stalled agent
+			// resuming on the same connection, or a reconnect that heartbeats
+			// on the old session — produces no "registered" event otherwise.
+			// A watcher that stamped the replica lost on the healthMonitor's
+			// "unregistered" would stay wrong until the next snapshot, so
+			// publish the symmetric event here. Payload matches /register's;
+			// a redundant "registered" for a backend flap is collapsed by the
+			// watcher's debounce, the same way duplicate "unregistered" is.
+			if !wasHealthy && r.registrationNotifier != nil {
+				r.registrationNotifier.Publish(domain.RegistrationEvent{
+					EventType:    domain.RegistrationRegistered,
+					DeploymentID: a.Metadata.DeploymentID,
+					ReplicaID:    a.Metadata.ReplicaID,
+					AgentID:      peerIDStr,
+					Timestamp:    time.Now().UTC(),
+				})
+			}
 			r.executor.BroadcastCapacity(domain.PoolKey(model, session.Metadata.ReservedFor))
 			if r.wake != nil && session.Metadata.ReservedFor == domain.SharedPool {
 				r.wake.Wake(model) // held requests are the shared pool's only
@@ -2180,14 +2198,20 @@ func (r *Router) handleRoutingSignals(w http.ResponseWriter, req *http.Request) 
 }
 
 // healthMonitor periodically checks agent heartbeat timestamps and removes dead agents.
-func (r *Router) healthMonitor() {
+func (r *Router) healthMonitor(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.HealthCheckInterval)
 	defer ticker.Stop()
 
 	log.Infof("Health monitor started (check every %v, unhealthy after %v, remove after %v)",
 		r.cfg.HealthCheckInterval, r.cfg.UnhealthyAfter, r.cfg.RemoveAfter)
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		var toRemove []peer.ID
 
 		// Read-only pass: mark unhealthy and collect dead agents.
@@ -2195,30 +2219,49 @@ func (r *Router) healthMonitor() {
 		// Unregister acquires write Lock, which deadlocks the same goroutine
 		// and causes Go's RWMutex to block all subsequent readers too.
 		r.agents.ForEach(func(id peer.ID, agent *domain.Agent) {
-			lastSeen := func() time.Time {
-				agent.RLock()
-				defer agent.RUnlock()
-				return agent.LastSeen
-			}()
+			// Flip to unhealthy atomically and re-check LastSeen under the
+			// agent's own lock: a heartbeat may have refreshed LastSeen (and
+			// re-marked the agent healthy) after this scan began. Acting on the
+			// stale snapshot would clobber that heartbeat and publish an
+			// "unregistered" for a live agent. MarkUnhealthyIfStale reports
+			// stale=false in that case, so we leave the agent alone.
+			stale, wasHealthy, lastSeen := agent.MarkUnhealthyIfStale(r.cfg.UnhealthyAfter)
+			if !stale {
+				return
+			}
+			// Only count and log on the healthy→unhealthy transition.
+			if wasHealthy {
+				log.Warnf("Agent %s missed heartbeat, marking unhealthy", id.String()[:8])
+				r.counters.RecordAgentFailure(id)
+				// Fan out the "unregistered" event on the healthy→unhealthy
+				// transition: this is the silent-disconnect case (node crash,
+				// half-open TCP) where the libp2p disconnect notifier never
+				// fires. Without this, the watcher would only learn from the
+				// next 30s snapshot tick or the reaper's later removal, and
+				// the replica would keep billing while nothing can serve it.
+				// Same event shape as the disconnect handler's and the
+				// reaper's; the watcher's debounce collapses the duplicates
+				// a clean disconnect produces when several emitters fire.
+				if r.registrationNotifier != nil {
+					r.registrationNotifier.Publish(domain.RegistrationEvent{
+						EventType:    domain.RegistrationUnregistered,
+						DeploymentID: agent.Metadata.DeploymentID,
+						ReplicaID:    agent.Metadata.ReplicaID,
+						AgentID:      id.String(),
+						Timestamp:    time.Now().UTC(),
+					})
+				}
+			}
+			if err := r.storage.UpdateAgentStatus(id, false, lastSeen); err != nil {
+				log.Warnf("healthMonitor: storage update failed for %s: %v", id, err)
+			}
+			r.metrics.AgentHealthUpdated(
+				id.String(), agent.Metadata.Region, agent.Metadata.Engine, agent.Metadata.Model,
+				strconv.Itoa(agent.Metadata.Capacity), agent.Metadata.Organization, agent.Metadata.Machine, false,
+			)
 
-			if time.Since(lastSeen) > r.cfg.UnhealthyAfter {
-				// Only count and log on the healthy→unhealthy transition.
-				if agent.IsHealthy() {
-					log.Warnf("Agent %s missed heartbeat, marking unhealthy", id.String()[:8])
-					r.counters.RecordAgentFailure(id)
-				}
-				agent.SetHealthy(false)
-				if err := r.storage.UpdateAgentStatus(id, false, lastSeen); err != nil {
-					log.Warnf("healthMonitor: storage update failed for %s: %v", id, err)
-				}
-				r.metrics.AgentHealthUpdated(
-					id.String(), agent.Metadata.Region, agent.Metadata.Engine, agent.Metadata.Model,
-					strconv.Itoa(agent.Metadata.Capacity), agent.Metadata.Organization, agent.Metadata.Machine, false,
-				)
-
-				if time.Since(lastSeen) > r.cfg.RemoveAfter {
-					toRemove = append(toRemove, id)
-				}
+			if time.Since(lastSeen) > r.cfg.RemoveAfter {
+				toRemove = append(toRemove, id)
 			}
 		})
 
@@ -2264,13 +2307,15 @@ func (r *Router) healthMonitor() {
 			// metadata. Likely duplicates the libp2p Notifier (which fires on
 			// connection drop ~15-30s earlier); the watcher's debounce
 			// collapses near-duplicates.
-			r.registrationNotifier.Publish(domain.RegistrationEvent{
-				EventType:    domain.RegistrationUnregistered,
-				DeploymentID: agent.Metadata.DeploymentID,
-				ReplicaID:    agent.Metadata.ReplicaID,
-				AgentID:      id.String(),
-				Timestamp:    time.Now().UTC(),
-			})
+			if r.registrationNotifier != nil {
+				r.registrationNotifier.Publish(domain.RegistrationEvent{
+					EventType:    domain.RegistrationUnregistered,
+					DeploymentID: agent.Metadata.DeploymentID,
+					ReplicaID:    agent.Metadata.ReplicaID,
+					AgentID:      id.String(),
+					Timestamp:    time.Now().UTC(),
+				})
+			}
 			r.prefixIndex.RemoveAgent(id)
 			r.kvCursors.forget(id)
 			r.prefixLimits.forget(id)
