@@ -107,7 +107,7 @@ All numeric limits default to `0`, which disables the corresponding check. The e
 
 ### `max_input_tokens` and `images_max`
 
-These are the B1 hard caps. The token check uses the same learned estimate used by occupancy and token quotas. It includes message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON. The image check counts OpenAI `image_url` parts and Anthropic `image` blocks. The token check rejects only when the estimate exceeds 1.5× `max_input_tokens`; closer prompts are left to the backend, which counts exactly. Either breach returns HTTP `400 input_too_long`.
+These are the B1 hard caps. The token check uses the learned text estimate also used by occupancy and token quotas, without the images' estimate. It includes message text, the Anthropic top-level `system` prompt, and raw tool-definition JSON. The image check counts OpenAI `image_url` parts and Anthropic `image` blocks. The token check rejects only when the estimate exceeds 1.5× `max_input_tokens`; closer prompts are left to the backend, which counts exactly. Either breach returns HTTP `400 input_too_long`.
 
 ### `admit_budget_tokens` and `max_inflight`
 

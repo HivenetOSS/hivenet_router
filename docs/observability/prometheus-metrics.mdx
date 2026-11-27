@@ -1363,6 +1363,20 @@ sum by (tenant_id, model) (
 )
 ```
 
+### Image token estimate
+
+```promql
+hivenet_image_token_estimate_ratio
+```
+
+A histogram, by `model`, of each answered request with images: the image tokens the backend counted divided by the router's estimate before sending ([Images](/routing/admission-control#images)). `1` is exact; above `1` the estimate was low. The first requests to a model use the default and land far from `1`; a model that stays away from `1` sends images whose sizes the router cannot read (URLs) and that vary a lot.
+
+Median ratio per model:
+
+```promql
+histogram_quantile(0.5, sum by (le, model) (rate(hivenet_image_token_estimate_ratio_bucket[1h])))
+```
+
 ### Request-rate rejection
 
 ```promql

@@ -963,6 +963,7 @@ func (r *Router) startHTTPServer() {
 		tokenizer.NewEstimator(),
 	)
 	handlers.SetHealthyInScope(r.agents.CountHealthyByModelInScope)
+	handlers.SetImageEstimator(tokenizer.NewImageEstimator(r.cfg.ImageTokensDefault), r.metrics.ImageTokenEstimate)
 	// Admission, wake and quota are sized per pool: a reserved pool's
 	// replicas never count for the shared pool, and the reverse.
 	r.metrics.RegisterPoolReplicas(r.agents.HealthyByPool)

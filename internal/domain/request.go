@@ -137,6 +137,16 @@ type PendingRequest struct {
 	// together with the completion (InputShortfall): the daily budgets count
 	// the prompt the backend processed, not only the router's estimate of it.
 	ChargedInputTokens int
+
+	// ReservedInputTokens is the input estimate the occupancy reservation was
+	// charged: EstimatedInputTokens with the images' upper bound instead of
+	// their point estimate. 0 means EstimatedInputTokens.
+	ReservedInputTokens int
+
+	// EstimatedImageTokens is the images' point estimate within
+	// EstimatedInputTokens, compared after the response with what the backend
+	// counted for them.
+	EstimatedImageTokens int
 }
 
 // Reservation is the occupancy-budget slot a request holds for its lifetime.

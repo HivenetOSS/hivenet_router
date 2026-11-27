@@ -89,11 +89,21 @@ The estimator starts at one token per 3.2 bytes and learns a separate tokens-per
 
 OpenAI usage fields (`prompt_tokens`, `completion_tokens`) and Anthropic fields (`input_tokens`, `output_tokens`) are normalized to the same internal totals. Streaming Anthropic `message_start` and `message_delta` usage is also recognized.
 
-Image content is not byte-estimable. The router counts OpenAI `image_url` parts and Anthropic `image` blocks separately through `images_max`. Image-bearing requests still receive an exact occupancy true-up, but they are not used to train the text ratio.
+### Images
+
+Images are estimated separately from the text, per model, with no knowledge of how the model or the engine turns pixels into tokens. The router learns it from the backend's exact usage:
+
+- **Size.** For an image sent inline as base64 (an OpenAI `image_url` data URL or an Anthropic `image` block), the router reads its width and height from the image header (PNG, JPEG, GIF or WebP) without decoding the pixels. An image given by URL is never fetched, so its size is unknown.
+- **Learning.** After a response with exact usage, what the backend counted beyond the text's estimate is the images' cost. It is shared among the request's images in proportion to their estimates, and learned per model in buckets of megapixels and shape (square, 4:3, 3:2, 16:9, wider), because tiling models choose their tiles by aspect ratio.
+- **Images already seen.** The router remembers what each image cost on each model (a hash of its URL, or of an inline image's length and edges; at most 100,000 images, least recently used dropped first). A chat sends its earlier images again with every turn, so from the second turn they are estimated exactly, URLs included. In a request mixing them with new images, the new ones get what remains.
+- **Estimate.** An image of a learned size and shape is estimated at the learned value. A size not seen yet is scaled from the learned tokens per pixel, within the fewest and most tokens seen for one image. An image of unknown size (a new URL) is estimated at the typical image of the API key that sends it, once the key has sent three, else at the model's. A model with no answered image request yet uses `--image-tokens-default` (`1024`) per image.
+- **Where it counts.** The token quotas (daily budget and the per-minute input cap) are charged the estimate. The occupancy budget reserves 1.5× the estimate for an image whose cost is a guess (at most the most tokens seen for one image), and the exact cost for one already learned. The B1 token check ignores images: an image estimate is not exact, so the backend decides; `images_max` bounds them there.
+
+The learned values reset when the router restarts. `hivenet_image_token_estimate_ratio` shows how close the estimates are. Image-bearing requests still receive an exact occupancy true-up, and they never train the text ratio.
 
 ## B1: request caps
 
-The router checks the learned input estimate and image count independently. The token check rejects only when the estimate exceeds `1.5 × max_input_tokens`, so an estimation error never blocks a prompt the model would accept. Prompts between the limit and that margin are forwarded, and the backend enforces its exact context limit with `context_length_exceeded`. A breach returns HTTP `400` with `input_too_long`:
+The router checks the learned text estimate (images excluded) and the image count independently. The token check rejects only when the estimate exceeds `1.5 × max_input_tokens`, so an estimation error never blocks a prompt the model would accept. Prompts between the limit and that margin are forwarded, and the backend enforces its exact context limit with `context_length_exceeded`. A breach returns HTTP `400` with `input_too_long`:
 
 ```json
 {

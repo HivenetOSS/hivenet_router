@@ -59,6 +59,10 @@ type ChatRequest struct {
 	HttpHeaders http.Header `json:"-"`
 	// RawBytes holds the original request body bytes for seamless forwarding to the backend engine.
 	RawBytes []byte `json:"-"`
+
+	// images caches ImageInfos: the sizes of the request's images, read once.
+	images     []ImageInfo
+	imagesRead bool
 }
 
 type ChatCompletionMessage struct {
@@ -102,6 +106,7 @@ type ContentPart struct {
 	Text       string            `json:"text,omitempty"`        // If type is "text"
 	ImageURL   *ImageURLConfig   `json:"image_url,omitempty"`   // If type is "image_url"
 	InputAudio *InputAudioConfig `json:"input_audio,omitempty"` // If type is "input_audio"
+	Source     *ImageSource      `json:"source,omitempty"`      // If type is "image" (Anthropic): base64 data or a URL
 }
 
 type ImageURLConfig struct {

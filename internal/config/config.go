@@ -127,6 +127,11 @@ type Config struct {
 	// Flag: --semantic-pin-max / --semantic-pin-max-per-key
 	SemanticPinMax       int
 	SemanticPinMaxPerKey int
+	// ImageTokensDefault is the token estimate for one image of a model the
+	// router has not yet seen answer a request with images; from then on it
+	// learns the model's cost per image from the backend's usage.
+	// Env: HIVENET_ROUTER_IMAGE_TOKENS_DEFAULT · Flag: --image-tokens-default
+	ImageTokensDefault int
 	// SemanticDecisionLog is the path of the JSONL log that records every semantic
 	// alias decision. Empty = disabled.
 	// Env: HIVENET_ROUTER_SEMANTIC_DECISION_LOG  Flag: --semantic-decision-log
@@ -377,6 +382,7 @@ func DefaultConfig() *Config {
 		MaxTriesPerStep:              3,
 		SemanticPinMax:               100_000,
 		SemanticPinMaxPerKey:         10_000,
+		ImageTokensDefault:           1024,
 		QueueDepth:                   30,
 		AdmissionQueueDepth:          -1,
 		MaxRequestBytes:              10 << 20, // 10 MB
@@ -444,6 +450,7 @@ func LoadFromEnv() *Config {
 	for env, dst := range map[string]*int{
 		"HIVENET_ROUTER_SEMANTIC_PIN_MAX":             &cfg.SemanticPinMax,
 		"HIVENET_ROUTER_SEMANTIC_PIN_MAX_PER_KEY":     &cfg.SemanticPinMaxPerKey,
+		"HIVENET_ROUTER_IMAGE_TOKENS_DEFAULT":         &cfg.ImageTokensDefault,
 		"HIVENET_ROUTER_SEMANTIC_DECISION_LOG_BUFFER": &cfg.SemanticDecisionLogBuffer,
 	} {
 		if v := os.Getenv(env); v != "" {
